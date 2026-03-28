@@ -15,8 +15,6 @@
       type: vefaas
       command: curl -fsSL https://pjw-test-empty.tos-cn-beijing.ivolces.com/bin/tos_swe_rex.sh | bash -s -- {token}
       timeout: 600
-      function_id: xxxxxx
-      function_route: xxxxxx
     env_variables:
       PIP_PROGRESS_BAR: "off"
       PIP_CACHE_DIR: "~/.cache/pip"

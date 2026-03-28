@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Uni-Agent Dashboard</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <header class="hero card">
+        <div class="hero-copy">
+          <h1>Uni-Agent Dashboard</h1>
+        </div>
+        <div class="hero-logdir">
+          <span>Log dir</span>
+          <strong id="logDir">-</strong>
+        </div>
+      </header>
+
+      <section class="stats" id="stats"></section>
+
+      <section class="toolbar card">
+        <label class="field">
+          <span>Search</span>
+          <input id="searchInput" type="search" placeholder="Keywords: run id / status / file / log..." />
+        </label>
+        <label class="field field-compact">
+          <span>In</span>
+          <select id="searchMode">
+            <option value="all">All</option>
+            <option value="run_id">Run ID</option>
+            <option value="status">Status</option>
+            <option value="files">Files</option>
+            <option value="logs">Logs</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>Status</span>
+          <select id="statusFilter">
+            <option value="all">All</option>
+            <option value="queued">Queued</option>
+            <option value="running">Running</option>
+            <option value="verify">Verify</option>
+            <option value="completed">Completed</option>
+          </select>
+        </label>
+        <label class="field field-compact">
+          <span>View</span>
+          <select id="layoutModeSelect">
+            <option value="1">1 pane</option>
+            <option value="2">2 panes</option>
+            <option value="4">4 panes</option>
+          </select>
+        </label>
+        <div class="toolbar-note">
+          <span class="pulse"></span>
+          Live stream enabled
+        </div>
+      </section>
+
+      <main class="layout">
+        <section class="run-list card">
+          <div class="section-head">
+            <h2>Runs</h2>
+            <span id="runCount">0 runs</span>
+          </div>
+          <div id="runs" class="runs"></div>
+          <div id="emptyState" class="empty hidden">No runs match the current filter.</div>
+        </section>
+
+        <section class="detail card">
+          <div class="detail-header detail-overview-head">
+            <h2>Logs</h2>
+            <span id="paneSummary" class="detail-meta">1 pane</span>
+          </div>
+          <div id="logSearch" class="log-search hidden">
+            <input id="logSearchInput" type="search" placeholder="Search in active pane..." />
+            <span id="logSearchCount" class="log-search-count">0 matches</span>
+            <button id="logSearchPrev" type="button" class="log-search-btn" aria-label="Previous match">Prev</button>
+            <button id="logSearchNext" type="button" class="log-search-btn" aria-label="Next match">Next</button>
+            <button id="logSearchClose" type="button" class="log-search-btn" aria-label="Close log search">Close</button>
+          </div>
+          <div id="paneGrid" class="pane-grid" data-layout="1"></div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/app.js" defer></script>
+  </body>
+</html>

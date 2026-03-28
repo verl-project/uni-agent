@@ -18,7 +18,57 @@ The first step is to start a sandbox. You can do this either locally or on a rem
 
 ### Local deployment
 
-*Coming soon. You will be able to run the sandbox on your machine or on your own cluster.*
+Comming soon.
+<!-- Local deployment starts a sandbox as a Docker container on your machine, then connects to the `swerex` server inside that container. This is the easiest way to debug environment behavior before moving to a remote platform.
+
+**Dependencies.** Install the runtime package and make sure a container runtime is available:
+
+```bash
+pip install swerex
+docker version
+```
+
+If you are already running this repo inside a container, make sure that inner process can talk to Docker too, for example by mounting `/var/run/docker.sock` or by using a Docker-in-Docker setup. If the sandbox should join a specific Docker network, set `network` in the config shown below.
+
+**Config and start.** Build the config, create the environment, and start it:
+
+```python
+import os
+import uuid
+from uni_agent.interaction import AgentEnv, AgentEnvConfig
+
+run_id = str(uuid.uuid4())
+env_config = {
+    "deployment": {
+        "type": "local",
+        "image": os.getenv("LOCAL_DEPLOYMENT_IMAGE", "python:3.12"),
+        "command": (
+            "python3 -m pip install -q swerex && "
+            "python3 -m swerex.server --auth-token {token}"
+        ),
+        "timeout": 300.0,
+        "startup_timeout": 180.0,
+    },
+    "env_variables": {
+        "PIP_PROGRESS_BAR": "off",
+    }
+}
+env_config = AgentEnvConfig(**env_config)
+env = AgentEnv(run_id=run_id, env_config=env_config)
+env.start()
+```
+
+- **`type`** must be `"local"`.
+- **`image`** is the local container image used for the sandbox.
+- **`command`** runs inside the container and should start `swerex.server`.
+- **`container_runtime`** can be set to `docker` or `podman` if you need to override the default.
+- **`network`** is optional and useful when the current process is itself running inside Docker.
+
+You can run the full demo from the repo root with:
+
+```bash
+DEPLOYMENT=local python examples/agent_env/demo.py
+``` -->
 
 ### Remote deployment (VEFAAS)
 

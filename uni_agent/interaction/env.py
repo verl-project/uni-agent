@@ -13,7 +13,7 @@ from swerex.runtime.abstract import (
 )
 
 from uni_agent.async_logging import get_logger
-from uni_agent.deployment import VefaasDeploymentConfig
+from uni_agent.deployment import DeployConfig
 from uni_agent.tools.base import AbstractTool
 from uni_agent.utils import auto_await
 
@@ -31,7 +31,7 @@ class TerminalNotAliveError(Exception):
 
 
 class AgentEnvConfig(BaseModel):
-    deployment: VefaasDeploymentConfig = Field(description="Vefaas deployment configuration")
+    deployment: DeployConfig = Field(description="Deployment configuration")
     env_variables: dict[str, str] | None = Field(
         default=None, description="Optional environment variables to set after start"
     )
@@ -65,7 +65,7 @@ class AgentEnv:
         self.logger.info("Beginning environment startup...")
 
         await self.deployment.start(max_retries=max_retries)
-        self.logger.info("Remote Runtime Initialized")
+        self.logger.info("Runtime initialized")
         if self.env_variables:
             await self.set_env_variables(self.env_variables)
         if self.post_setup_cmd:
