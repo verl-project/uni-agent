@@ -21,7 +21,7 @@ from verl.experimental.agent_loop.agent_loop import AgentLoopBase, AgentLoopOutp
 from verl.experimental.agent_loop.utils import resolve_config_path
 
 
-class AgentLoop(AgentLoopBase):
+class UniAgentLoop(AgentLoopBase):
     _semaphore: asyncio.Semaphore | None = None
 
     async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentLoopOutput:
@@ -30,8 +30,8 @@ class AgentLoop(AgentLoopBase):
         global_concurrent = config_dict.get("concurrency", 512)
         num_workers = self.config.actor_rollout_ref.rollout.agent.num_workers
         worker_concurrent = max(global_concurrent // num_workers, 1)
-        if AgentLoop._semaphore is None:
-            AgentLoop._semaphore = asyncio.Semaphore(worker_concurrent)
+        if UniAgentLoop._semaphore is None:
+            UniAgentLoop._semaphore = asyncio.Semaphore(worker_concurrent)
 
         self.run_id = str(uuid.uuid4())
         self.logger = get_logger("agent-loop", run_id=self.run_id)
@@ -216,3 +216,7 @@ class AgentLoop(AgentLoopBase):
             metrics=metrics,
             extra_fields=extra_fields,
         )
+
+
+# Backward-compatible alias for existing configs/imports.
+AgentLoop = UniAgentLoop

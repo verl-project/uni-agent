@@ -1,6 +1,6 @@
 - name: swe_agent
 
-  _target_: uni_agent.agent_loop.AgentLoop
+  _target_: uni_agent.agent_loop.UniAgentLoop
 
   concurrency: 512
   log_dir: /tmp/swebench_qwen3_coder

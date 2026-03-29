@@ -117,7 +117,7 @@ Below is the default config used by the training scripts, with explanations for 
   # Agent name. This should match the `agent_name` field in the dataset.
   # Each sample uses this name to select the corresponding agent config.
 
-  _target_: uni_agent.agent_loop.AgentLoop
+  _target_: uni_agent.agent_loop.UniAgentLoop
   # Agent loop class. Keep this value unless you are replacing the rollout logic.
 
   concurrency: 512

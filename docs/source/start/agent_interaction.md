@@ -103,7 +103,7 @@ Below is an annotated version. Each comment explains the corresponding key and t
 - name: swe_agent
   # Agent name for logs and output paths.
 
-  _target_: uni_agent.agent_loop.AgentLoop
+  _target_: uni_agent.agent_loop.UniAgentLoop
   # Class to instantiate (Hydra-style). Keep as is for the standard agent loop.
 
   concurrency: 512
