@@ -1,7 +1,7 @@
 # Uni-Agent: Build, Run, and Train Agents at Scale
 
-[Docs](https://uni-agent.readthedocs.io/en/latest/index.html)
-[License](./LICENSE)
+[![Docs](https://img.shields.io/badge/docs-Read%20the%20Docs-8A2BE2)](https://uni-agent.readthedocs.io/en/latest/index.html)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](./LICENSE)
 
 Uni-Agent is a unified framework for general agents at scale.
 
