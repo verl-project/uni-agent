@@ -31,7 +31,7 @@ Start with the docs below:
 
 <img src="./assets/uni-agent.png" width="80%" alt="Uni-Agent architecture overview">
 
-At the core of Uni-Agent is a unified interaction loop built around three parts: `model`, `tool`, and `env`. We define them as follows:
+Uni-Agent is built around a unified interaction loop with three parts: `model`, `tool`, and `env`.
 
 - `model` is the reasoning backend that decides what to do next,
 - `tool` is how the `model` perceives and acts on the `env`
