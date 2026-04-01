@@ -106,11 +106,14 @@ class RemoteRuntime(AbstractRuntime):
     def _api_url(self) -> str:
         # Prioritize base_url if provided (for VEFAAS deployments)
         if hasattr(self._config, "base_url") and self._config.base_url:
-            return self._config.base_url
+            return self._config.base_url.rstrip("/")
         # Fall back to host/port combination for direct connections
         if self._config.port is None:
-            return self._config.host
-        return f"{self._config.host}:{self._config.port}"
+            return self._config.host.rstrip("/")
+        return f"{self._config.host.rstrip('/')}:{self._config.port}"
+
+    def _build_url(self, endpoint: str) -> str:
+        return f"{self._api_url}/{endpoint.lstrip('/')}"
 
     def _handle_transfer_exception(self, exc_transfer: _ExceptionTransfer) -> None:
         """Reraise exceptions that were thrown on the remote."""
@@ -167,7 +170,7 @@ class RemoteRuntime(AbstractRuntime):
             ) as session:
                 timeout = self._get_timeout(timeout)
                 async with session.get(
-                    f"{self._api_url}/is_alive",
+                    self._build_url("is_alive"),
                     headers=self._headers,
                     timeout=aiohttp.ClientTimeout(total=timeout),
                 ) as response:
@@ -180,7 +183,7 @@ class RemoteRuntime(AbstractRuntime):
                         self._handle_transfer_exception(exc_transfer)
 
                     data = await response.json()
-                    msg = f"Status code {response.status} from {self._api_url}/is_alive. Message: {data.get('detail')}"
+                    msg = f"Status code {response.status} from {self._build_url('is_alive')}. Message: {data.get('detail')}"
                     return IsAliveResponse(is_alive=False, message=msg)
         except aiohttp.ClientError:
             msg = f"Failed to connect to {self._config.host}\n"
@@ -203,7 +206,7 @@ class RemoteRuntime(AbstractRuntime):
         client_error_retries: int = 2,
     ):
         """Small helper to make requests to the server and handle errors and output."""
-        request_url = f"{self._api_url}/{endpoint}"
+        request_url = self._build_url(endpoint)
         request_id = str(uuid.uuid4())
         headers = self._headers.copy()
         headers["X-Request-ID"] = request_id  # idempotency key for the request
@@ -301,7 +304,7 @@ class RemoteRuntime(AbstractRuntime):
                         data.add_field("unzip", "true")
 
                         async with session.post(
-                            f"{self._api_url}/upload", data=data, headers=self._headers
+                            self._build_url("upload"), data=data, headers=self._headers
                         ) as response:
                             await self._handle_response_errors(response)
                             return UploadResponse(**(await response.json()))
@@ -320,7 +323,7 @@ class RemoteRuntime(AbstractRuntime):
 
                     self.logger.debug(f"FormData contains {len(data._fields)} fields: {[f[0] for f in data._fields]}")
 
-                    async with session.post(f"{self._api_url}/upload", data=data, headers=self._headers) as response:
+                    async with session.post(self._build_url("upload"), data=data, headers=self._headers) as response:
                         await self._handle_response_errors(response)
                         return UploadResponse(**(await response.json()))
             else:

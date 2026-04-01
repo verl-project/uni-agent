@@ -1,4 +1,5 @@
 import asyncio
+from contextlib import contextmanager
 import logging
 import os
 import time
@@ -39,6 +40,15 @@ PUB_VOLCES_IMG_URL_TEMPLATE = {
     "r2e-gym-subset": "enterprise-public-cn-beijing.cr.volces.com/r2e-gym-subset/{instance_number}:latest",
 }
 
+_PROXY_ENV_KEYS = (
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+)
+
 
 def get_vefaas_image_name(dataset_id: str, instance_id: str) -> str:
     assert dataset_id in PUB_VOLCES_IMG_URL_TEMPLATE, (
@@ -60,6 +70,15 @@ def get_vefaas_image_name(dataset_id: str, instance_id: str) -> str:
         assert dataset_id in PUB_VOLCES_IMG_URL_TEMPLATE, (
             f"only support {list(PUB_VOLCES_IMG_URL_TEMPLATE.keys())}, got {dataset_id}"
         )
+
+
+@contextmanager
+def _without_proxy_env_vars():
+    old_env = {key: os.environ.pop(key) for key in _PROXY_ENV_KEYS if key in os.environ}
+    try:
+        yield
+    finally:
+        os.environ.update(old_env)
 
 
 class VefaasDeploymentConfig(BaseModel):
@@ -102,9 +121,10 @@ class VefaasDeployment(AbstractDeployment):
         access_key = os.getenv("VOLCE_ACCESS_KEY") or os.getenv("VOLCENGINE_ACCESS_KEY")
         secret_key = os.getenv("VOLCE_SECRET_KEY") or os.getenv("VOLCENGINE_SECRET_KEY")
         region = os.getenv("VEFAAS_REGION", "cn-beijing")
+        proxy = self._config.proxy or os.getenv("VEFAAS_PROXY")
         if not all([access_key, secret_key, region]):
             raise ValueError("VOLCE_ACCESS_KEY, VOLCE_SECRET_KEY, and VEFAAS_REGION must be set")
-        self._vefaas_client = get_vefaas_client(access_key, secret_key, region)
+        self._vefaas_client = get_vefaas_client(access_key, secret_key, region, proxy=proxy)
 
     def add_hook(self, hook: DeploymentHook):
         self._hooks.add_hook(hook)
@@ -274,7 +294,12 @@ class VefaasDeployment(AbstractDeployment):
         self._stopped = True
 
 
-def get_vefaas_client(access_key: str, secret_key: str, region: str) -> volcenginesdkvefaas.VEFAASApi:
+def get_vefaas_client(
+    access_key: str,
+    secret_key: str,
+    region: str,
+    proxy: str | None = None,
+) -> volcenginesdkvefaas.VEFAASApi:
     configuration = volcenginesdkcore.Configuration()
     configuration.ak = access_key
     configuration.sk = secret_key
@@ -283,8 +308,12 @@ def get_vefaas_client(access_key: str, secret_key: str, region: str) -> volcengi
     configuration.auto_retry = False
     configuration.region = region
     configuration.client_side_validation = True
-    configuration.proxy = "http://[fdbd:dc02:fe:20a2::1]:8118"
-    api_client = volcenginesdkcore.ApiClient(configuration)
+    if proxy:
+        configuration.proxy = proxy
+        api_client = volcenginesdkcore.ApiClient(configuration)
+    else:
+        with _without_proxy_env_vars():
+            api_client = volcenginesdkcore.ApiClient(configuration)
     return volcenginesdkvefaas.VEFAASApi(api_client)
 
 
