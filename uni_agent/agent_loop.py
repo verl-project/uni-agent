@@ -69,22 +69,24 @@ class UniAgentLoop(AgentLoopBase):
         self.logger.info(f"output_dir: {self.output_dir}")
 
         async with self._semaphore:
-            await self.env.start()
-            interaction_result = await self._run_interaction()
-            # interaction environment should be visible to the reward spec
-            if self.reward_spec is not None:
-                reward_score, _ = await self.reward_spec.compute_reward(
-                    interaction_result=interaction_result,
-                )
-                interaction_result["reward_score"] = reward_score
-            else:
-                self.logger.warning("No reward spec is provided, reward score will be set to -100")
-                interaction_result["reward_score"] = -100
+            try:
+                await self.env.start()
+                interaction_result = await self._run_interaction()
+                # interaction environment should be visible to the reward spec
+                if self.reward_spec is not None:
+                    reward_score, _ = await self.reward_spec.compute_reward(
+                        interaction_result=interaction_result,
+                    )
+                    interaction_result["reward_score"] = reward_score
+                else:
+                    self.logger.warning("No reward spec is provided, reward score will be set to -100")
+                    interaction_result["reward_score"] = -100
 
-            await self.env.close()
-            self._save_interaction_result(interaction_result)
-            output = self.convert_to_agent_output(interaction_result)
-            return output
+                self._save_interaction_result(interaction_result)
+                output = self.convert_to_agent_output(interaction_result)
+                return output
+            finally:
+                await self.env.close()
 
     async def _run_interaction(self) -> dict:
         # tools schemas should be visible to the model
