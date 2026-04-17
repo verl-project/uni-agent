@@ -8,11 +8,12 @@ pip:
     - swe-rex
     - loguru
     - pydantic
-    - pydantic_settings
+    - pydantic-settings
     - orjson
     - requests
     - volcengine-python-sdk
     - python-dotenv
+    - swebench
   pip_check: false
 env_vars:
   VLLM_USE_V1: "1"
