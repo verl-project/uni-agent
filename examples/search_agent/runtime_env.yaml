@@ -3,6 +3,15 @@ excludes: ["/.git/"]
 py_modules:
   - ./uni_agent
   - ./verl/verl
+pip:
+  packages:
+    - swe-rex
+    - loguru
+    - pydantic
+    - pydantic_settings
+    - orjson
+    - requests
+  pip_check: false
 env_vars:
   VLLM_USE_V1: "1"
   TORCH_DISTRIBUTED_BACKEND: "nccl"
