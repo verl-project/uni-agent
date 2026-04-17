@@ -113,7 +113,7 @@ require_batches=1
 partial_rollout=True
 
 # ================= inference =================
-rollout_name=sglang
+rollout_name=vllm
 if [ "$rollout_name" = "vllm" ]; then
     export VLLM_USE_V1=1
 fi
