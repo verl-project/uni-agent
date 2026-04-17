@@ -59,7 +59,7 @@ else
     ray_host_for_url="${RAY_HEAD_IP}"
 fi
 
-tmp_agent_config_path=/tmp/agent_config_${experiment_datetime}.yaml
+tmp_agent_config_path="${WORKING_DIR}/examples/search_agent/agent_config_${experiment_datetime}.yaml"
 sed -e "s|\${RAY_HEAD_IP}|${ray_host_for_url}|g" \
     "${AGENT_CONFIG_PATH}" > "${tmp_agent_config_path}"
 
