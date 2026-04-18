@@ -205,18 +205,16 @@ class UniAgentLoop(AgentLoopBase):
         if routed_experts is not None:
             routed_experts = routed_experts[: len(prompt_ids) + len(response_ids)]
 
+        multi_modal_data = {}
         return AgentLoopOutput(
             prompt_ids=prompt_ids,
             response_ids=response_ids,
             response_mask=response_mask,
             response_logprobs=response_logprobs,
             routed_experts=routed_experts,
+            multi_modal_data=multi_modal_data,
             reward_score=reward_score,
             num_turns=num_turns,
             metrics=metrics,
             extra_fields=extra_fields,
         )
-
-
-# Backward-compatible alias for existing configs/imports.
-AgentLoop = UniAgentLoop

@@ -4,6 +4,7 @@ from typing import Any
 
 from uni_agent.utils import get_event_loop
 from verl.utils.profiler import simple_timer
+from verl.utils.tokenizer import normalize_token_ids
 
 try:
     from openai import AsyncOpenAI
@@ -48,6 +49,7 @@ class AgentChatModel:
                 tools=self.tools_schemas,
             ),
         )
+        prompt_ids = normalize_token_ids(prompt_ids)
         return {
             "request_id": str(uuid.uuid4()),
             "prompt_ids": prompt_ids,
@@ -135,17 +137,48 @@ class AgentChatModel:
         return response_str, rollout_cache, generation_info
 
     async def _get_new_message_ids(self, new_messages: list[dict[str, str]]) -> list[int]:
-        messages = [{"role": "system", "content": "mock message"}]
-        system_prompt_ids = await self.loop.run_in_executor(
-            None, lambda: self.tokenizer.apply_chat_template(messages, tokenize=True)
+        messages = [
+            {"role": "system", "content": "mock system"},
+            {"role": "user", "content": "mock user"},
+            {"role": "assistant", "content": "mock assistant"},
+        ]
+        base_ids = await self.loop.run_in_executor(
+            None,
+            lambda: self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=True,
+                tools=self.tools_schemas,
+            ),
         )
-        eos_index = system_prompt_ids.index(self.tokenizer.eos_token_id)
+        base_ids = normalize_token_ids(base_ids)
+
         messages.extend(new_messages)
-        full_prompt_ids = await self.loop.run_in_executor(
-            None, lambda: self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=True)
+        full_ids = await self.loop.run_in_executor(
+            None,
+            lambda: self.tokenizer.apply_chat_template(
+                messages,
+                add_generation_prompt=True,
+                tokenize=True,
+                tools=self.tools_schemas,
+            ),
         )
-        tool_response_ids = full_prompt_ids[eos_index + 1 :]
-        return tool_response_ids
+        full_ids = normalize_token_ids(full_ids)
+
+        # Drop trailing whitespace ("\n") the template appends after the
+        # assistant's eos, so base_ids ends exactly where real generation stops.
+        eos_id = self.tokenizer.eos_token_id
+        cut = 0
+        for i in range(len(base_ids) - 1, -1, -1):
+            if base_ids[i] == eos_id:
+                cut = i + 1
+                break
+        base_ids = base_ids[:cut]
+
+        assert full_ids[: len(base_ids)] == base_ids, (
+            "base_ids must be an exact prefix of full_ids; "
+            "chat template produced inconsistent rendering between baseline and full."
+        )
+        return full_ids[len(base_ids) :]
 
 
 # this class is only used for Inference-Only Scenario
