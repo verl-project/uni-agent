@@ -1,0 +1,77 @@
+name: "Feature request"
+description: Propose an improvement or new capability for Uni-Agent
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for sharing a feature request.
+
+        The most useful requests clearly describe the user problem, why the current workflow is insufficient, and how the change fits Uni-Agent's model-tool-env runtime or training workflow.
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Feature proposal
+      description: Describe the feature or change you want to see.
+      placeholder: Add a built-in tool for ... / support a new deployment backend for ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Motivation and use case
+      description: Explain the problem this solves and who benefits from it.
+      placeholder: This is needed because ...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Related area
+      options:
+        - core agent loop
+        - interaction
+        - tools
+        - environment
+        - deployment
+        - reward / verification
+        - training
+        - dashboard
+        - docs / examples
+        - installation / dependencies
+        - other
+    validations:
+      required: true
+
+  - type: textarea
+    id: design
+    attributes:
+      label: Proposed design or API
+      description: If you already have an API shape, config schema, or UX flow in mind, describe it here.
+      placeholder: |
+        Proposed CLI / config:
+        Proposed Python API:
+        Backward compatibility considerations:
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Describe current workarounds or alternative approaches you evaluated.
+
+  - type: textarea
+    id: references
+    attributes:
+      label: Additional context
+      description: Link related papers, repos, issues, PRs, benchmarks, or docs if relevant.
+
+  - type: checkboxes
+    id: contribution
+    attributes:
+      label: Contribution
+      options:
+        - label: I am willing to help implement this feature.
+        - label: I am willing to help test or validate this feature.

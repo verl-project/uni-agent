@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Uni-Agent documentation
+    url: https://uni-agent.readthedocs.io/en/latest/index.html
+    about: Check the docs for installation, agent environment setup, interaction, and training guides.

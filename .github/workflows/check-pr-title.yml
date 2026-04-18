@@ -1,0 +1,27 @@
+name: check-pr-title
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+jobs:
+  check-title:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run PR title checker
+        run: python3 tests/special_sanity/check_pr_title.py
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+
+      - name: Run PR description checker
+        run: python3 tests/special_sanity/check_pr_description.py
+        env:
+          GITHUB_EVENT_PATH: ${{ github.event_path }}
