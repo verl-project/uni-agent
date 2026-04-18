@@ -1,7 +1,6 @@
 import os
 import re
 
-
 pr_title = os.environ.get("PR_TITLE", "").strip()
 
 allowed_modules = [

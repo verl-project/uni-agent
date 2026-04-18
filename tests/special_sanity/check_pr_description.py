@@ -2,7 +2,6 @@
 import json
 import os
 
-
 NUM_LINES = 5
 template_file = os.path.join(os.getenv("GITHUB_WORKSPACE", "."), ".github", "PULL_REQUEST_TEMPLATE.md")
 
