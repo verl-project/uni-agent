@@ -63,7 +63,8 @@ class HostRuntime(AbstractRuntime):
         marker = f"__UNIAGENT_READY_{uuid.uuid4().hex[:12]}__"
         self._process.stdin.write(f"echo '{marker}'\n".encode())
         await self._process.stdin.drain()
-        await self._read_until_marker(marker, timeout=10)
+        startup_timeout = request.startup_timeout or 10
+        await self._read_until_marker(marker, timeout=startup_timeout)
         self.logger.info("Host bash session created")
         return CreateSessionResponse()
 
@@ -83,6 +84,12 @@ class HostRuntime(AbstractRuntime):
                         return "".join(lines), exit_code
                     lines.append(line)
         except (asyncio.TimeoutError, TimeoutError):
+            partial = "".join(lines)
+            rc = self._process.returncode if self._process is not None else "no_process"
+            self.logger.error(
+                f"_read_until_marker timed out after {timeout}s "
+                f"(bash returncode={rc}, partial stdout repr, first 500 chars)={partial[:500]!r}"
+            )
             raise CommandTimeoutError(f"Command timed out after {timeout}s")
         return "".join(lines), 1
 
@@ -175,6 +182,12 @@ class HostDeploymentConfig(BaseModel):
     """Discriminator for (de)serialization. Do not change."""
     timeout: float = 60.0
     """Default timeout for runtime operations."""
+    startup_timeout: float = 120.0
+    """Timeout for the initial bash session handshake.
+
+    During parameter-sync weight reloads, fork()/exec() and even the asyncio event loop can be
+    starved for tens of seconds.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
@@ -217,7 +230,7 @@ class HostDeployment(AbstractDeployment):
 
         self._runtime = HostRuntime(run_id=self.run_id, env=env)
         await self._runtime.create_session(
-            CreateSessionRequest(startup_source=[], startup_timeout=10)
+            CreateSessionRequest(startup_source=[], startup_timeout=self._config.startup_timeout)
         )
         self._stopped = False
         self.logger.info("Host deployment started")
