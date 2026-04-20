@@ -120,7 +120,7 @@ fi
 infer_tp=4
 infer_dp=1
 infer_ep=1
-gpu_memory_utilization=0.7
+gpu_memory_utilization=0.8
 
 
 # ================= Main command =================
