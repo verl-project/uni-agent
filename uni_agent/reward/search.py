@@ -43,7 +43,14 @@ def _extract_answer_from_trajectory(trajectory: list, messages: list[dict]) -> s
             try:
                 tc_data = json.loads(tc_match.group(1).strip())
                 args = tc_data.get("arguments") or tc_data.get("parameters") or {}
-                if "answer" in args:
+                # Some models emit `arguments` as a JSON-encoded string instead
+                # of a nested object; tolerate both shapes.
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except json.JSONDecodeError:
+                        args = {}
+                if isinstance(args, dict) and "answer" in args:
                     return str(args["answer"])
             except (json.JSONDecodeError, AttributeError):
                 pass
