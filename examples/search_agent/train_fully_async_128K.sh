@@ -14,6 +14,7 @@ rollout_n=8
 # ================= path =================
 WORKING_DIR=${PWD}
 DATA_ROOT=${DATA_ROOT:-/mnt/hdfs/went}
+PROMETHEUS_FILE=${PROMETHEUS_FILE:-/opt/tiger/ray/session_latest/metrics/prometheus/prometheus.yml}
 
 RUNTIME_ENV=$WORKING_DIR/examples/search_agent/runtime_env.yaml
 
@@ -32,7 +33,8 @@ test_files="['$asearcher_test']"
 val_before_train=True
 
 # ================= ckpt =================
-model_path=$DATA_ROOT/model/Qwen3-30B-A3B-Thinking-2507
+model_name=Qwen3-30B-A3B-Thinking-2507
+model_path=$DATA_ROOT/model/${model_name}
 #model_path=$DATA_ROOT/model/Qwen3-30B-A3B-Instruct-2507
 save_path=$DATA_ROOT/ckpts/$experiment_name
 
@@ -73,6 +75,9 @@ use_kl_in_reward=False
 kl_coef=0.0
 use_kl_loss=False
 kl_loss_coef=0.0
+
+bypass_mode=False
+rollout_is=token
 
 clip_ratio_low=0.2
 clip_ratio_high=0.28
@@ -134,6 +139,8 @@ ray job submit --no-wait \
     algorithm.adv_estimator=$adv_estimator \
     algorithm.use_kl_in_reward=$use_kl_in_reward \
     algorithm.kl_ctrl.kl_coef=$kl_coef \
+    algorithm.rollout_correction.bypass_mode=$bypass_mode \
+    algorithm.rollout_correction.rollout_is=$rollout_is \
     data.train_files="$train_files" \
     data.val_files="$test_files" \
     data.return_raw_chat=True \
@@ -199,6 +206,9 @@ ray job submit --no-wait \
     actor_rollout_ref.rollout.multi_turn.max_parallel_calls=1 \
     actor_rollout_ref.rollout.agent.num_workers=8 \
     actor_rollout_ref.rollout.agent.agent_loop_config_path=$AGENT_CONFIG_PATH \
+    actor_rollout_ref.rollout.prometheus.enable=True \
+    actor_rollout_ref.rollout.prometheus.port=9090 \
+    actor_rollout_ref.rollout.prometheus.file=$PROMETHEUS_FILE \
     actor_rollout_ref.rollout.free_cache_engine=True \
     actor_rollout_ref.hybrid_engine=False \
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=$log_prob_max_token_len_per_gpu \
