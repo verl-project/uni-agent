@@ -22,22 +22,22 @@ cd wiki24
 cat wiki24_faiss.index.part* > wiki24_faiss.index
 
 # 3. Preprocess the JSONL corpus into pickle format for faster loading
-DATA_ROOT=... python preprocess.py
+DATA_ROOT=... python scripts/preprocess.py
 ```
 
 ### Method 2: Start from Scratch
 ```bash
 # 1. Download raw Wikipedia 2024 parquet files with bge-m3 embeddings
-./download.sh
+./scripts/download.sh
 
 # 2. Build the FAISS IVF index and generate the JSONL corpus file
-python ivf.py  # or python ivf_cpu.py for CPU-only environments
+python scripts/ivf.py  # or python scripts/ivf_cpu.py for CPU-only environments
 
 # 3. Preprocess the JSONL corpus into pickle format for faster loading
-DATA_ROOT=... python preprocess.py
+DATA_ROOT=... python scripts/preprocess.py
 ```
 
-**Note**: The program loads the entire dataset into memory, requiring substantial RAM. Modify `ivf.py` if memory constraints exist. The `preprocess.py` step converts the JSONL corpus into `corpus.pkl` and `url_to_ids.pkl`, which are required by the retrieval server for efficient startup and URL-based lookup.
+**Note**: The program loads the entire dataset into memory, requiring substantial RAM. Modify `scripts/ivf.py` if memory constraints exist. The `scripts/preprocess.py` step converts the JSONL corpus into `corpus.pkl` and `url_to_ids.pkl`, which are required by the retrieval server for efficient startup and URL-based lookup.
 
 ## Model for Retrieval
 

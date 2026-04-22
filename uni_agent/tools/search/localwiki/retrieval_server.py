@@ -429,17 +429,17 @@ def load_shared_resources():
     
     logger.info("Master: Starting to load shared CPU resources...")
     
-    # 1. 加载配置
+    # 1. Load config
     if SHARED_CONFIG is None:
         SHARED_CONFIG = Config()
         logger.info("Master: Configuration loaded.")
 
-    # 2. 初始化全局 corpus lines
+    # 2. Initialize global corpus lines
     if GLOBAL_CORPUS_LINES is None:
         GLOBAL_CORPUS_LINES = load_all_corpus_lines(SHARED_CONFIG.corpus_path)
         logger.info(f"Master: Corpus lines loaded. Total documents: {GLOBAL_CORPUS_LINES:,}.")
 
-    # 3. 读取 FAISS index 到 CPU
+    # 3. Load FAISS index into CPU memory
     index_path = SHARED_CONFIG.index_path
     if SHARED_FAISS_INDEX is None:
         if not os.path.exists(index_path):

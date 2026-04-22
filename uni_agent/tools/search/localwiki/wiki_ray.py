@@ -10,7 +10,7 @@ from shared_encoder import SharedEncoderActor, ensure_ray_initialized
 
 NUM_RESERVED_CPUS = int(os.getenv("NUM_RESERVED_CPUS", "16"))
 NUM_ENCODER_GPUS = int(os.getenv("NUM_ENCODER_GPUS", "1"))
-data_root = os.getenv("DATA_ROOT", "/mnt/hdfs/wdl")
+data_root = os.getenv("DATA_ROOT", "/mnt/hdfs/went")
 
 
 @ray.remote(num_cpus=NUM_RESERVED_CPUS)
