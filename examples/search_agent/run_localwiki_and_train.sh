@@ -12,7 +12,7 @@ LOCALWIKI_SCRIPT="${REPO_ROOT}/uni_agent/tools/search/localwiki/run_localwiki.sh
 TRAIN_SCRIPT="${SCRIPT_DIR}/train_fully_async_128K.sh"
 
 LOCALWIKI_PORT="${LOCALWIKI_PORT:-8001}"
-LOCALWIKI_READY_TIMEOUT="${LOCALWIKI_READY_TIMEOUT:-1800}"  # seconds
+LOCALWIKI_READY_TIMEOUT="${LOCALWIKI_READY_TIMEOUT:-300}"  # seconds. Expect 1-3 minutes.
 LOG_DIR="${LOG_DIR:-${REPO_ROOT}/logs}"
 mkdir -p "${LOG_DIR}"
 LOCALWIKI_LOG="${LOG_DIR}/localwiki_$(date +%Y%m%d_%H%M%S).log"
