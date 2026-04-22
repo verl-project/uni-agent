@@ -86,7 +86,7 @@ curl -X POST "http://localhost:8001/retrieve" \
 
 ### Example 2: Get Content by URL
 ```bash
-curl -X POST "http://localhost:8001/search_by_url" \
+curl -X POST "http://localhost:8001/crawl" \
      -H "Content-Type: application/json" \
      -d '{"url": "https://en.wikipedia.org/wiki/Outline%20of%20France"}'
 ```
@@ -103,7 +103,7 @@ curl -X POST "http://localhost:8001/search_by_url" \
   - Summary text (chunks of the document from the wiki database, where a single URL's content may be split into multiple chunks)
   - Optional relevance scores
 
-#### 2. `/search_by_url` (Crawler API)
+#### 2. `/crawl` (Crawler API)
 - **Purpose**: Simulates a crawler API that retrieves full content for a specific URL
 - **Input**: JSON object with `url` parameter
 - **Output**: All text passages/chunks associated with the specified URL, effectively providing the full content -->
