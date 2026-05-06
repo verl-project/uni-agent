@@ -9,14 +9,18 @@ import pyarrow.parquet as pq
 import sys
 from typing import List, Tuple, Optional
 
-LOCAL_DATA_DIR = "/mnt/hdfs/went/wiki24-raw/data/en"
+# Override DATA_ROOT (or any of the three paths individually) at the env
+# level if your filesystem layout differs. Keep download.sh, ivf.py,
+# ivf_cpu.py, preprocess.py and wiki_ray.py all pointing at the same root.
+DATA_ROOT = os.environ.get("DATA_ROOT", "/mnt/hdfs/went")
+LOCAL_DATA_DIR = os.environ.get("WIKI_RAW_DIR", os.path.join(DATA_ROOT, "wiki24-raw", "data", "en"))
 VECTOR_DIMENSION = 1024
-INDEX_PATH = "/mnt/hdfs/went/wiki24/wiki24_faiss.index"
-TEXT_DATA_PATH = "/mnt/hdfs/went/wiki24/wiki24_data.jsonl"
+INDEX_PATH = os.environ.get("INDEX_PATH", os.path.join(DATA_ROOT, "wiki24", "wiki24_faiss.index"))
+TEXT_DATA_PATH = os.environ.get("TEXT_DATA_PATH", os.path.join(DATA_ROOT, "wiki24", "wiki24_data.jsonl"))
 
-NLIST = 4096                # Number of inverted lists (cluster centroids)
-TRAINING_SAMPLES = 2000000  # Vectors used to train the centroids
-FAISS_METRIC = faiss.METRIC_L2
+NLIST = 16384
+TRAINING_SAMPLES = 4000000
+FAISS_METRIC = faiss.METRIC_INNER_PRODUCT
 
 USE_GPU = True
 NUM_GPUS = 8
@@ -83,16 +87,25 @@ def setup_gpu_resources():
         print(f"GPU initialization failed: {e}. Falling back to CPU mode.")
         return None
 
+def _make_quantizer(dimension, metric):
+    """Quantizer must match the IVF metric; mismatch silently produces
+    incorrect cluster assignment without raising.
+    """
+    if metric == faiss.METRIC_INNER_PRODUCT:
+        return faiss.IndexFlatIP(dimension)
+    return faiss.IndexFlatL2(dimension)
+
+
 def create_gpu_index(gpu_id, gpu_resources, dimension, nlist, metric):
     """Create an IVF index on the given GPU."""
-    quantizer = faiss.IndexFlatL2(dimension)
+    quantizer = _make_quantizer(dimension, metric)
     index = faiss.IndexIVFFlat(quantizer, dimension, nlist, metric)
     gpu_index = faiss.index_cpu_to_gpu(gpu_resources, gpu_id, index)
     return gpu_index
 
 def merge_gpu_indices(gpu_indices):
     """Merge multiple GPU indices into a single CPU index."""
-    quantizer = faiss.IndexFlatL2(VECTOR_DIMENSION)
+    quantizer = _make_quantizer(VECTOR_DIMENSION, FAISS_METRIC)
     merged_index = faiss.IndexIVFFlat(quantizer, VECTOR_DIMENSION, NLIST, FAISS_METRIC)
     
     for gpu_index in gpu_indices:
@@ -186,7 +199,7 @@ def build_faiss_index_ivf_parallel():
         print("GPU Index Training Complete.")
         final_index = gpu_indices
     else:
-        quantizer = faiss.IndexFlatL2(VECTOR_DIMENSION)
+        quantizer = _make_quantizer(VECTOR_DIMENSION, FAISS_METRIC)
         final_index = faiss.IndexIVFFlat(quantizer, VECTOR_DIMENSION, NLIST, FAISS_METRIC)
 
         # Use all CPU cores during K-Means training, then restore to 1 for the add stage.
@@ -234,6 +247,24 @@ def build_faiss_index_ivf_parallel():
         print(f"Vectors processed so far: {final_index.ntotal}")
 
     if final_index.ntotal > 0:
+        # Sanity check: a vector queried against the index it was just
+        # added to MUST return itself as top-1 (or near-top with high
+        # similarity). If this fails, the metric/quantizer/normalization
+        # is mis-configured and we'd ship a silently-broken index.
+        print("\nSanity check: self-retrieval on first 5 vectors...")
+        final_index.nprobe = 32
+        sample_vecs = all_results[0][0][:5]
+        D, I = final_index.search(sample_vecs, k=3)
+        ok = sum(int(I[i][0] == i) for i in range(len(sample_vecs)))
+        print(f"  self-hit @top-1: {ok}/{len(sample_vecs)}")
+        print(f"  scores @top-1: {D[:, 0].tolist()}")
+        if FAISS_METRIC == faiss.METRIC_INNER_PRODUCT and (D[:, 0] < 0.99).any():
+            print("  WARNING: top-1 IP score < 0.99 for self-retrieval, "
+                  "embeddings may not be L2-normalised. Check corpus.")
+        if ok < len(sample_vecs):
+            print("  WARNING: self-retrieval failed for some vectors. "
+                  "Bump nprobe or check NLIST/training data.")
+
         print(f"\nFinalizing and saving FAISS index to {INDEX_PATH}...")
         faiss.write_index(final_index, INDEX_PATH)
         print(f"Index successfully saved with {final_index.ntotal:,} vectors.")

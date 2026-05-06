@@ -445,8 +445,11 @@ def load_shared_resources():
         if not os.path.exists(index_path):
              raise FileNotFoundError(f"FAISS index file not found at: {index_path}") 
         SHARED_FAISS_INDEX = faiss.read_index(index_path, faiss.IO_FLAG_MMAP)
-        SHARED_FAISS_INDEX.nprobe = 32
-        logger.info(f"Master: FAISS index loaded (CPU). NTotal: {SHARED_FAISS_INDEX.ntotal:,}.")
+        SHARED_FAISS_INDEX.nprobe = int(os.getenv("FAISS_NPROBE", 256))
+        logger.info(
+            f"Master: FAISS index loaded (CPU). NTotal: {SHARED_FAISS_INDEX.ntotal:,}, "
+            f"nprobe={SHARED_FAISS_INDEX.nprobe}."
+        )
     
     logger.info("Master: Shared CPU resources initialization complete.")
 

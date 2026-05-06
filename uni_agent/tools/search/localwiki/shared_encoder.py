@@ -78,6 +78,13 @@ class Encoder:
                 query_list = [f"query: {query}" for query in query_list]
             else:
                 query_list = [f"passage: {query}" for query in query_list]
+        elif "bge-m3" in self.model_name.lower():
+            # BGE-M3 does NOT use an instruction prefix on either side
+            # (per BAAI/bge-m3 model card). Our corpus
+            # (Upstash/wikipedia-2024-06-bge-m3) was encoded as
+            # f"{title}\n{paragraph}" with raw BGE-M3, so the query side
+            # must also avoid any instruction prefix to stay aligned.
+            pass
         elif "bge" in self.model_name.lower() and is_query:
             query_list = [f"Represent this sentence for searching relevant passages: {query}" for query in query_list]
 

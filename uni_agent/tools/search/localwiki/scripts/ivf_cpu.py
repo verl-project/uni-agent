@@ -9,14 +9,14 @@ import pyarrow.parquet as pq
 import sys
 from typing import List, Tuple, Optional
 
-LOCAL_DATA_DIR = "/mnt/hdfs/went/wiki24-raw/data/en"
+DATA_ROOT = os.environ.get("DATA_ROOT", "/mnt/hdfs/went")
+LOCAL_DATA_DIR = os.environ.get("WIKI_RAW_DIR", os.path.join(DATA_ROOT, "wiki24-raw", "data", "en"))
 VECTOR_DIMENSION = 1024
-INDEX_PATH = "/mnt/hdfs/went/wiki24/wiki24_faiss.index"
-TEXT_DATA_PATH = "/mnt/hdfs/went/wiki24/wiki24_data.jsonl"
-
-NLIST = 4096                # Number of inverted lists (cluster centroids)
-TRAINING_SAMPLES = 2000000  # Vectors used to train the centroids
-FAISS_METRIC = faiss.METRIC_L2
+INDEX_PATH = os.environ.get("INDEX_PATH", os.path.join(DATA_ROOT, "wiki24", "wiki24_faiss.index"))
+TEXT_DATA_PATH = os.environ.get("TEXT_DATA_PATH", os.path.join(DATA_ROOT, "wiki24", "wiki24_data.jsonl"))
+NLIST = 16384
+TRAINING_SAMPLES = 4000000
+FAISS_METRIC = faiss.METRIC_INNER_PRODUCT
 
 NUM_PROCESSES = mp.cpu_count()
 if NUM_PROCESSES > 64:
@@ -110,7 +110,10 @@ def build_faiss_index_ivf_parallel():
 
     training_matrix = np.concatenate(training_vectors_list, axis=0)
 
-    quantizer = faiss.IndexFlatL2(VECTOR_DIMENSION)
+    if FAISS_METRIC == faiss.METRIC_INNER_PRODUCT:
+        quantizer = faiss.IndexFlatIP(VECTOR_DIMENSION)
+    else:
+        quantizer = faiss.IndexFlatL2(VECTOR_DIMENSION)
     final_index = faiss.IndexIVFFlat(quantizer, VECTOR_DIMENSION, NLIST, FAISS_METRIC)
 
     # Use all CPU cores during K-Means training, then restore to 1 for the add stage.
@@ -139,6 +142,24 @@ def build_faiss_index_ivf_parallel():
         print(f"Vectors processed so far: {final_index.ntotal}")
 
     if final_index.ntotal > 0:
+        # Sanity check: a vector queried against the index it was just
+        # added to MUST return itself as top-1 (or near-top with high
+        # similarity). If this fails, the metric/quantizer/normalization
+        # is mis-configured and we'd ship a silently-broken index.
+        print("\nSanity check: self-retrieval on first 5 vectors...")
+        final_index.nprobe = 32
+        sample_vecs = all_results[0][0][:5]
+        D, I = final_index.search(sample_vecs, k=3)
+        ok = sum(int(I[i][0] == i) for i in range(len(sample_vecs)))
+        print(f"  self-hit @top-1: {ok}/{len(sample_vecs)}")
+        print(f"  scores @top-1: {D[:, 0].tolist()}")
+        if FAISS_METRIC == faiss.METRIC_INNER_PRODUCT and (D[:, 0] < 0.99).any():
+            print("  WARNING: top-1 IP score < 0.99 for self-retrieval, "
+                  "embeddings may not be L2-normalised. Check corpus.")
+        if ok < len(sample_vecs):
+            print("  WARNING: self-retrieval failed for some vectors. "
+                  "Bump nprobe or check NLIST/training data.")
+
         print(f"\nFinalizing and saving FAISS index to {INDEX_PATH}...")
         faiss.write_index(final_index, INDEX_PATH)
         print(f"Index successfully saved with {final_index.ntotal:,} vectors.")
