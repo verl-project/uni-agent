@@ -49,6 +49,8 @@ class ModalDeploymentConfig(BaseModel):
     """Timeout for the Modal sandbox."""
     modal_sandbox_kwargs: dict[str, Any] = Field(default_factory=dict)
     """Additional keyword arguments passed to `modal.Sandbox.create`."""
+    proxy: str | None = None
+    """Proxy to use for runtime HTTP requests."""
     type: Literal["modal"] = "modal"
     """Discriminator for (de)serialization/CLI. Do not change."""
     install_pipx: bool = True

@@ -121,6 +121,7 @@ class ModalDeployment(AbstractDeployment):
         modal_sandbox_kwargs: dict[str, Any] | None = None,
         install_pipx: bool = True,
         deployment_timeout: float = 3600.0,
+        proxy: str | None = None,
     ):
         """Deployment for modal.com. The deployment starts when `start` is called."""
         self.run_id = run_id
@@ -134,6 +135,7 @@ class ModalDeployment(AbstractDeployment):
         self._user = _get_modal_user()
         self._runtime_timeout = runtime_timeout
         self._deployment_timeout = deployment_timeout
+        self._proxy = proxy
         if modal_sandbox_kwargs is None:
             modal_sandbox_kwargs = {}
         self._modal_kwargs = modal_sandbox_kwargs
@@ -154,6 +156,7 @@ class ModalDeployment(AbstractDeployment):
             runtime_timeout=config.runtime_timeout,
             deployment_timeout=config.deployment_timeout,
             modal_sandbox_kwargs=config.modal_sandbox_kwargs,
+            proxy=config.proxy,
         )
 
     def _get_token(self) -> str:
@@ -219,7 +222,12 @@ class ModalDeployment(AbstractDeployment):
         await asyncio.sleep(1)
         self.logger.info(f"Starting runtime at {tunnel.url}")
         self._hooks.on_custom_step("Starting runtime")
-        runtime_config = RemoteRuntimeConfig(host=tunnel.url, timeout=self._runtime_timeout, auth_token=token)
+        runtime_config = RemoteRuntimeConfig(
+            host=tunnel.url,
+            timeout=self._runtime_timeout,
+            auth_token=token,
+            proxy=self._proxy,
+        )
         self._runtime = RemoteRuntime.from_config(runtime_config, run_id=self.run_id)
         remaining_startup_timeout = max(0, self._startup_timeout - elapsed_sandbox_creation)
         t1 = time.time()
