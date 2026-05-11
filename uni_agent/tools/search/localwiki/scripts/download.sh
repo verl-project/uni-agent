@@ -3,7 +3,7 @@
 # Override DATA_ROOT (or WIKI_RAW_DIR for finer control) to write elsewhere.
 set -euo pipefail
 
-DATA_ROOT="${DATA_ROOT:-/mnt/hdfs/went}"
+DATA_ROOT="${DATA_ROOT:-${HOME}/uni_agent_data}"
 RAW_DIR="${WIKI_RAW_DIR:-${DATA_ROOT}/wiki24-raw}"
 
 mkdir -p "${RAW_DIR}"

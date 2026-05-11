@@ -37,7 +37,7 @@ def preprocess_corpus(jsonl_path: str, output_dir: str) -> None:
 
 
 if __name__ == "__main__":
-    data_root = os.environ.get("DATA_ROOT", "/mnt/hdfs/went")
+    data_root = os.environ.get("DATA_ROOT", os.path.expanduser("~/uni_agent_data"))
     parser = argparse.ArgumentParser(description="Preprocess wiki JSONL into pickled corpus.")
     parser.add_argument(
         "--jsonl",

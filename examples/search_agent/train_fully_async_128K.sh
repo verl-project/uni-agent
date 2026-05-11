@@ -13,8 +13,8 @@ rollout_n=8
 
 # ================= path =================
 WORKING_DIR=${PWD}
-DATA_ROOT=${DATA_ROOT:-/mnt/hdfs/went}
-PROMETHEUS_FILE=${PROMETHEUS_FILE:-/opt/tiger/ray/session_latest/metrics/prometheus/prometheus.yml}
+DATA_ROOT=${DATA_ROOT:-${HOME}/uni_agent_data}
+PROMETHEUS_FILE=${PROMETHEUS_FILE:-/tmp/ray/session_latest/metrics/prometheus/prometheus.yml}
 
 RUNTIME_ENV=$WORKING_DIR/examples/search_agent/runtime_env.yaml
 

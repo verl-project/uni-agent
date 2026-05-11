@@ -21,8 +21,8 @@ passage was encoded as `f"{title}\n{paragraph}"` with raw BGE-M3 (no
 instruction prefix). Our query encoder (`shared_encoder.py`) is configured
 to match: it uses raw BGE-M3 with no instruction prefix on the query side.
 
-All paths default to `$DATA_ROOT` (default `/mnt/hdfs/went`). Override the
-root by exporting `DATA_ROOT=/your/path` before running any of the scripts
+All paths default to `$DATA_ROOT` (default `~/uni_agent_data`). Override
+the root by exporting `DATA_ROOT=/your/path` before running any of the scripts
 below; all of `download.sh`, `ivf.py`, `ivf_cpu.py`, `preprocess.py`,
 `wiki_ray.py` and `retrieval_server.py` honour it. Layout produced by these
 scripts:
@@ -59,7 +59,7 @@ encoding with **no instruction prefix**. Recommended runtime:
 `FAISS_NPROBE=256`.
 
 ```bash
-export DATA_ROOT=/mnt/hdfs/went
+export DATA_ROOT=${HOME}/uni_agent_data
 
 # 1. Download everything into $DATA_ROOT/wiki24/.
 hf download begunner/wikipedia-2024-06-bge-m3-faiss-ivf \
@@ -84,7 +84,7 @@ started directly (see "Server Setup" below) — no need to run `ivf.py` or
 ### Option 2: Build from Scratch
 
 ```bash
-export DATA_ROOT=/mnt/hdfs/went
+export DATA_ROOT=${HOME}/uni_agent_data
 
 # 1. Download raw Wikipedia 2024 parquet files with bge-m3 embeddings.
 #    Output goes to $DATA_ROOT/wiki24-raw/data/en/.
@@ -132,7 +132,7 @@ The script will:
 
 | Environment Variable | Description | Default Value |
 |----------------------|-------------|---------------|
-| `DATA_ROOT` | Root directory for all wiki artefacts. Used by `download.sh`, `ivf.py`, `ivf_cpu.py`, `preprocess.py`, `wiki_ray.py`, and `retrieval_server.py` as the default parent for raw downloads / `INDEX_PATH` / `CORPUS_PATH`. | `/mnt/hdfs/went` |
+| `DATA_ROOT` | Root directory for all wiki artefacts. Used by `download.sh`, `ivf.py`, `ivf_cpu.py`, `preprocess.py`, `wiki_ray.py`, and `retrieval_server.py` as the default parent for raw downloads / `INDEX_PATH` / `CORPUS_PATH`. | `~/uni_agent_data` |
 | `INDEX_PATH` | Path to the FAISS index file. | `${DATA_ROOT}/wiki24/wiki24_faiss.index` |
 | `CORPUS_PATH` | Path to the preprocessed corpus directory (containing `corpus.pkl` and `url_to_ids.pkl`). | `${DATA_ROOT}/wiki24/wiki24_preprocessed/` |
 | `RETRIEVER_MODEL` | Hugging Face model path for embedding generation | `BAAI/bge-m3` |

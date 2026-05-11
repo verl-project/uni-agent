@@ -13,7 +13,7 @@ from tqdm import tqdm
 # Override DATA_ROOT (or any of the three paths individually) at the env
 # level if your filesystem layout differs. Keep download.sh, ivf.py,
 # ivf_cpu.py, preprocess.py and wiki_ray.py all pointing at the same root.
-DATA_ROOT = os.environ.get("DATA_ROOT", "/mnt/hdfs/went")
+DATA_ROOT = os.environ.get("DATA_ROOT", os.path.expanduser("~/uni_agent_data"))
 LOCAL_DATA_DIR = os.environ.get("WIKI_RAW_DIR", os.path.join(DATA_ROOT, "wiki24-raw", "data", "en"))
 VECTOR_DIMENSION = 1024
 INDEX_PATH = os.environ.get("INDEX_PATH", os.path.join(DATA_ROOT, "wiki24", "wiki24_faiss.index"))

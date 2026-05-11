@@ -13,7 +13,7 @@ from shared_encoder import SharedEncoderActor, ensure_ray_initialized
 
 NUM_RESERVED_CPUS = int(os.getenv("NUM_RESERVED_CPUS", "16"))
 NUM_ENCODER_GPUS = int(os.getenv("NUM_ENCODER_GPUS", "1"))
-data_root = os.getenv("DATA_ROOT", "/mnt/hdfs/went")
+data_root = os.getenv("DATA_ROOT", os.path.expanduser("~/uni_agent_data"))
 
 
 def _preexec_die_with_parent():
