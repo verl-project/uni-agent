@@ -101,9 +101,7 @@ async def test_interrupt_kills_entire_pipeline(runtime: HostRuntime) -> None:
     result: dict[str, object] = {}
 
     async def long_pipeline() -> None:
-        result["obs"] = await runtime.run_in_session(
-            BashAction(command="sleep 30 | cat | cat", timeout=15)
-        )
+        result["obs"] = await runtime.run_in_session(BashAction(command="sleep 30 | cat | cat", timeout=15))
 
     task = asyncio.create_task(long_pipeline())
     await asyncio.sleep(0.3)
