@@ -18,19 +18,23 @@ The first step is to start a sandbox. You can do this either locally or on a rem
 
 ### Local deployment
 
-**This implementation has not been completed and tested now.**
+Local deployment starts a sandbox on the current machine, then connects to the `swerex` server inside that sandbox. This is the easiest way to debug environment behavior before moving to a remote platform.
 
-Local deployment uses SWE-ReX's built-in local runtime. It runs commands on the current machine while preserving shell session state through `AgentEnv`.
+The local backend prefers Apptainer or Singularity when available. Docker and Podman are also supported and can be selected explicitly with `container_runtime` or discovered from `PATH` when Apptainer/Singularity are not installed.
 
-**Dependencies.** Install the runtime package:
+**Dependencies.** Install the runtime package and make sure a supported runtime is available. For Apptainer:
 
 ```bash
-pip install swerex
+pip install swe-rex
+apptainer --version
 ```
+
+If your runtime is not on `PATH`, set `LOCAL_CONTAINER_RUNTIME` or `UNI_AGENT_CONTAINER_RUNTIME` to the binary path. When no explicit `container_runtime` is provided, the local backend checks these environment variables, then discovers `apptainer`, `singularity`, `docker`, or `podman` from `PATH`.
 
 **Config and start.** Build the config, create the environment, and start it:
 
 ```python
+import os
 import uuid
 from uni_agent.interaction import AgentEnv, AgentEnvConfig
 
@@ -38,6 +42,13 @@ run_id = str(uuid.uuid4())
 env_config = {
     "deployment": {
         "type": "local",
+        "image": os.getenv("LOCAL_DEPLOYMENT_IMAGE", "python:3.12"),
+        "command": (
+            "python3 -m pip install -q swe-rex && "
+            "python3 -m swerex.server --host 0.0.0.0 --port {port} --auth-token {token}"
+        ),
+        "timeout": 300.0,
+        "startup_timeout": 180.0,
     },
     "env_variables": {
         "PIP_PROGRESS_BAR": "off",
@@ -49,11 +60,27 @@ env.start()
 ```
 
 - **`type`** must be `"local"`.
+- **`image`** is the sandbox image. For Apptainer, plain image names such as `python:3.12` are treated as Docker/OCI images and run as `docker://python:3.12`.
+- **`command`** runs inside the sandbox and should start `swerex.server`. It can use `{token}` and `{port}` placeholders.
+- **`container_runtime`** can be set to an Apptainer/Singularity binary path, `docker`, or `podman`.
+- **`published_port`** optionally pins the localhost port used by the `swerex` server.
+- **`extra_run_args`** can pass additional runtime flags. For example, Apptainer bind mounts or GPU flags must appear before the image argument.
+- **`network`** is Docker/Podman-specific and useful when the current process is itself running inside Docker.
+
+Apptainer launches the server with host networking, so the selected port is passed directly to `swerex.server`. Docker and Podman keep using port publishing.
 
 You can run the full demo from the repo root with:
 
 ```bash
-DEPLOYMENT=local python examples/agent_env/demo.py
+DEPLOYMENT=local DEBUG_MODE=1 python examples/agent_env/demo.py
+```
+
+Useful local overrides:
+
+```bash
+export LOCAL_CONTAINER_RUNTIME=/opt/apptainer/bin/apptainer
+export LOCAL_DEPLOYMENT_IMAGE=python:3.12
+export LOCAL_DEPLOYMENT_EXTRA_ARGS="--bind /data:/data"
 ```
 
 ### Remote deployment (VEFAAS)
