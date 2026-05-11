@@ -139,8 +139,12 @@ class AgentEnv:
                 # check current terminal is still alive
                 terminal_alive = False
                 for _ in range(5):
-                    terminal_alive = await self.communicate("echo 'terminal still alive'", check="ignore")
-                    if isinstance(terminal_alive, str) and terminal_alive.strip() == "terminal still alive":
+                    probe_output = await self.communicate("echo 'terminal still alive'", check="ignore")
+                    # Use substring match on stripped lines so residual marker
+                    # noise from a recovering session does not fail the probe.
+                    if isinstance(probe_output, str) and any(
+                        line.strip() == "terminal still alive" for line in probe_output.splitlines()
+                    ):
                         terminal_alive = True
                         break
                 if not terminal_alive:
