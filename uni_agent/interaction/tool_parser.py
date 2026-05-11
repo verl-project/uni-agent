@@ -236,9 +236,7 @@ class HermesToolParser:
 
         name = obj["name"]
         if not isinstance(name, str):
-            raise FunctionCallFormatError(
-                f"Invalid tool_call: 'name' must be a string, got {type(name).__name__}."
-            )
+            raise FunctionCallFormatError(f"Invalid tool_call: 'name' must be a string, got {type(name).__name__}.")
         if name not in valid_names:
             raise FunctionCallFormatError(
                 f"Invalid action: function '{name}' is not defined in the tools list.\n"
@@ -274,7 +272,5 @@ _PARSER_REGISTRY: dict[str, type] = {
 def get_tool_parser(name: str):
     """Instantiate a tool-call parser by registered name."""
     if name not in _PARSER_REGISTRY:
-        raise ValueError(
-            f"Unknown tool parser: {name!r}. Available parsers: {sorted(_PARSER_REGISTRY.keys())}."
-        )
+        raise ValueError(f"Unknown tool parser: {name!r}. Available parsers: {sorted(_PARSER_REGISTRY.keys())}.")
     return _PARSER_REGISTRY[name]()

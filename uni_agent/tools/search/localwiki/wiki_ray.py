@@ -40,27 +40,34 @@ class WikiRetrievalManager:
         env = os.environ.copy()
 
         cmd = [
-            "python", "-m", "uvicorn",
+            "python",
+            "-m",
+            "uvicorn",
             "retrieval_server:app",
-            "--host", "::",
-            "--port", str(self.config['port']),
-            "--timeout-keep-alive", "600",
+            "--host",
+            "::",
+            "--port",
+            str(self.config["port"]),
+            "--timeout-keep-alive",
+            "600",
         ]
 
-        env.update({
-            "INDEX_PATH": self.config['index_file'],
-            "CORPUS_PATH": self.config['corpus_file'],
-            "RETRIEVER_NAME": self.config['retriever_name'],
-            "RETRIEVER_MODEL": self.config['retriever_path'],
-            "TOPK": str(self.config['topk']),
-            "BATCH_SIZE": str(self.config['batch_size']),
-            "HTTP_MAX_REQUEST_BATCH_SIZE": str(self.config["http_max_request_batch_size"]),
-            "HTTP_BATCH_TIMEOUT": str(self.config["http_batch_timeout_s"]),
-            "RAY_ADDRESS": self.config["ray_address"],
-            "RAY_NAMESPACE": self.config["ray_namespace"],
-            "SHARED_ENCODER_ACTOR_NAME": self.config["shared_encoder_actor_name"],
-            "NUM_ENCODER_GPUS": str(self.config["num_encoder_gpus"]),
-        })
+        env.update(
+            {
+                "INDEX_PATH": self.config["index_file"],
+                "CORPUS_PATH": self.config["corpus_file"],
+                "RETRIEVER_NAME": self.config["retriever_name"],
+                "RETRIEVER_MODEL": self.config["retriever_path"],
+                "TOPK": str(self.config["topk"]),
+                "BATCH_SIZE": str(self.config["batch_size"]),
+                "HTTP_MAX_REQUEST_BATCH_SIZE": str(self.config["http_max_request_batch_size"]),
+                "HTTP_BATCH_TIMEOUT": str(self.config["http_batch_timeout_s"]),
+                "RAY_ADDRESS": self.config["ray_address"],
+                "RAY_NAMESPACE": self.config["ray_namespace"],
+                "SHARED_ENCODER_ACTOR_NAME": self.config["shared_encoder_actor_name"],
+                "NUM_ENCODER_GPUS": str(self.config["num_encoder_gpus"]),
+            }
+        )
 
         print(f"Starting Wiki Retrieval HTTP service on port {self.config['port']}")
         self.process = subprocess.Popen(

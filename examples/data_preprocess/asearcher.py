@@ -110,9 +110,7 @@ def _read_input_as_dataframe(json_path: str) -> pd.DataFrame:
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Preprocess ASearcher JSON/JSONL dataset for uni-agent training."
-    )
+    parser = argparse.ArgumentParser(description="Preprocess ASearcher JSON/JSONL dataset for uni-agent training.")
     parser.add_argument(
         "--input_json",
         required=True,
@@ -146,9 +144,7 @@ def main():
 
     total_needed = args.train_rows + args.test_rows
     if len(df_raw) < total_needed:
-        raise ValueError(
-            f"Not enough rows: len={len(df_raw)}, but train_rows+test_rows={total_needed}"
-        )
+        raise ValueError(f"Not enough rows: len={len(df_raw)}, but train_rows+test_rows={total_needed}")
 
     system_content = DEFAULT_SYSTEM_CONTENT
     user_content_prefix = DEFAULT_USER_CONTENT_PREFIX
