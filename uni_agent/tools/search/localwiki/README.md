@@ -38,7 +38,50 @@ $DATA_ROOT/
         └── url_to_ids.pkl           # preprocess.py output
 ```
 
-### Build from Scratch
+### Option 1: Download Pre-built Artifacts from HuggingFace (recommended)
+
+A pre-built FAISS index and the matching corpus are mirrored at
+[`begunner/wikipedia-2024-06-bge-m3-faiss-ivf`](https://huggingface.co/datasets/begunner/wikipedia-2024-06-bge-m3-faiss-ivf).
+The repo contains:
+
+- `wiki24_data.jsonl` (~25 GB) — text corpus, one passage per line.
+- `wiki24_faiss.index.part00` .. `wiki24_faiss.index.part08` (9 × ~20 GB) —
+  the FAISS IVF index, split because HF LFS caps single files at 50 GB.
+  `cat` them back together to recover the original ~180 GB index.
+- `preprocessed/corpus.pkl` (~24 GB) and `preprocessed/url_to_ids.pkl`
+  (~615 MB) — preprocessed corpus used by the retrieval server for fast
+  startup and URL-based lookup.
+
+Build parameters baked into the index (must match the server / encoder
+configuration in this repo): `METRIC_INNER_PRODUCT` (cosine), `NLIST=16384`,
+`TRAINING_SAMPLES=4_000_000`, vector dim 1024 fp32, raw BGE-M3 query
+encoding with **no instruction prefix**. Recommended runtime:
+`FAISS_NPROBE=256`.
+
+```bash
+export DATA_ROOT=/mnt/hdfs/went
+
+# 1. Download everything into $DATA_ROOT/wiki24/.
+hf download begunner/wikipedia-2024-06-bge-m3-faiss-ivf \
+    --repo-type dataset \
+    --local-dir "$DATA_ROOT/wiki24"
+
+# 2. Reassemble the split FAISS index (~180 GB single file).
+cd "$DATA_ROOT/wiki24"
+cat wiki24_faiss.index.part?? > wiki24_faiss.index
+# Optional: free ~180 GB of disk by deleting the parts once the join is verified.
+# rm wiki24_faiss.index.part??
+cd -
+
+# 3. Rename the preprocessed directory to match the layout this repo expects.
+mv "$DATA_ROOT/wiki24/preprocessed" "$DATA_ROOT/wiki24/wiki24_preprocessed"
+```
+
+After step 3 the layout matches the diagram above and the server can be
+started directly (see "Server Setup" below) — no need to run `ivf.py` or
+`preprocess.py`.
+
+### Option 2: Build from Scratch
 
 ```bash
 export DATA_ROOT=/mnt/hdfs/went
