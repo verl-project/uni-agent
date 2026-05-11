@@ -90,7 +90,7 @@ class HostRuntime(AbstractRuntime):
                 f"_read_until_marker timed out after {timeout}s "
                 f"(bash returncode={rc}, partial stdout repr, first 500 chars)={partial[:500]!r}"
             )
-            raise CommandTimeoutError(f"Command timed out after {timeout}s")
+            raise CommandTimeoutError(f"Command timed out after {timeout}s") from None
         return "".join(lines), 1
 
     async def run_in_session(self, action: Action) -> Observation:

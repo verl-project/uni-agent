@@ -256,11 +256,11 @@ def build_faiss_index_ivf_parallel():
         print("\nSanity check: self-retrieval on first 5 vectors...")
         final_index.nprobe = 32
         sample_vecs = all_results[0][0][:5]
-        D, I = final_index.search(sample_vecs, k=3)
-        ok = sum(int(I[i][0] == i) for i in range(len(sample_vecs)))
+        scores, idx_mat = final_index.search(sample_vecs, k=3)
+        ok = sum(int(idx_mat[i][0] == i) for i in range(len(sample_vecs)))
         print(f"  self-hit @top-1: {ok}/{len(sample_vecs)}")
-        print(f"  scores @top-1: {D[:, 0].tolist()}")
-        if FAISS_METRIC == faiss.METRIC_INNER_PRODUCT and (D[:, 0] < 0.99).any():
+        print(f"  scores @top-1: {scores[:, 0].tolist()}")
+        if FAISS_METRIC == faiss.METRIC_INNER_PRODUCT and (scores[:, 0] < 0.99).any():
             print(
                 "  WARNING: top-1 IP score < 0.99 for self-retrieval, "
                 "embeddings may not be L2-normalised. Check corpus."

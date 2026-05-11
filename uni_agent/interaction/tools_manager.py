@@ -104,7 +104,7 @@ class ToolsManager:
                 continue
 
             # Use JSON for structured types so the script can json.loads them
-            if isinstance(param_value, (list, dict)):
+            if isinstance(param_value, list | dict):
                 param_str = json.dumps(param_value, ensure_ascii=False)
             else:
                 param_str = str(param_value)

@@ -30,16 +30,23 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 
 DEFAULT_SYSTEM_CONTENT = (
-    "You are an expert research assistant. Your goal is to answer the user's question by thoroughly researching it. You must follow a structured process of reasoning and tool use.\n\n"
+    "You are an expert research assistant. Your goal is to answer the user's question by thoroughly "
+    "researching it. You must follow a structured process of reasoning and tool use.\n\n"
     "# Core Instructions\n"
-    "Reasoning First: Before any action, you must analyze the request, break down the problem, and plan your next steps.\n"
-    "Iterative Research: The research process is iterative. You may need to use the tools multiple times to gather sufficient information.\n"
+    "Reasoning First: Before any action, you must analyze the request, break down the problem, "
+    "and plan your next steps.\n"
+    "Iterative Research: The research process is iterative. You may need to use the tools multiple "
+    "times to gather sufficient information.\n"
     "# Workflow\n"
     "1. Plan: Understand the user's question and formulate initial search queries.\n"
     "2. Search: Search to get a list of potential sources.\n"
-    "3. Evaluate & Plan Next Step: Review the search results. If the summaries from search are sufficient to answer the question, proceed to generate the final answer. If the summaries are insufficient but some URLs look promising, use the crawler to extract in-depth information.\n"
+    "3. Evaluate & Plan Next Step: Review the search results. If the summaries from search are "
+    "sufficient to answer the question, proceed to generate the final answer. If the summaries "
+    "are insufficient but some URLs look promising, use the crawler to extract in-depth "
+    "information.\n"
     "4. Crawl (if necessary): Crawl the whole pages of the selected URLs.\n"
-    "5. Repeat or Answer: If you still lack information, repeat the process. Otherwise, call `finish` with your final answer.\n\n"
+    "5. Repeat or Answer: If you still lack information, repeat the process. Otherwise, call "
+    "`finish` with your final answer.\n\n"
 )
 
 DEFAULT_USER_CONTENT_PREFIX = "Question: "

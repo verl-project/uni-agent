@@ -18,10 +18,7 @@ log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
     level=log_level,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[
-        # logging.FileHandler(f'{os.environ["HDFS_LOG_DIR"]}/{os.environ["MERLIN_JOB_ID"]}/localwiki-server-{time.strftime("%Y-%m-%d-%H:%M:%S")}.log'),
-        logging.StreamHandler()
-    ],
+    handlers=[logging.StreamHandler()],
 )
 logger = logging.getLogger(__name__)
 
@@ -169,7 +166,8 @@ def load_all_corpus_lines(corpus_path: str):
     corpus_file_path = os.path.join(os.path.dirname(corpus_path), "corpus.pkl")
     url_to_ids_file_path = os.path.join(os.path.dirname(corpus_path), "url_to_ids.pkl")
     logger.info(
-        f"Loading ALL JSONL lines from {corpus_file_path} ({os.path.getsize(corpus_file_path) / (1024**3):.2f} GB) into RAM..."
+        f"Loading ALL JSONL lines from {corpus_file_path} "
+        f"({os.path.getsize(corpus_file_path) / (1024**3):.2f} GB) into RAM..."
     )
     with open(corpus_file_path, "rb") as f:
         parsed_data = pickle.load(f)
@@ -199,10 +197,14 @@ def load_docs(doc_idxs: list[int]) -> list[dict[str, Any]]:
             if doc_data is not None:
                 results.append(doc_data)
             else:
-                warnings.warn(f"Document index {idx} was skipped during loading due to JSON error.", RuntimeWarning)
+                warnings.warn(
+                    f"Document index {idx} was skipped during loading due to JSON error.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
                 results.append({"error": f"JSON decode error at index {idx}"})
         else:
-            warnings.warn(f"Invalid document index: {idx}", RuntimeWarning)
+            warnings.warn(f"Invalid document index: {idx}", RuntimeWarning, stacklevel=2)
             results.append({"error": f"Invalid doc index {idx}"})
     return results
 
@@ -386,7 +388,7 @@ async def retrieve_endpoint(request: QueryRequest):
         result = await future
         return result
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app.post("/crawl")
