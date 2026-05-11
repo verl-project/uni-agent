@@ -12,7 +12,7 @@ import pytest_asyncio
 
 pytest.importorskip("swerex")
 
-from swerex.exceptions import CommandTimeoutError  # noqa: E402
+from swerex.exceptions import CommandTimeoutError, SessionNotInitializedError  # noqa: E402
 from swerex.runtime.abstract import (  # noqa: E402
     BashAction,
     BashInterruptAction,
@@ -72,32 +72,41 @@ async def test_timeout_does_not_pollute_next_command(runtime: HostRuntime) -> No
 
 @pytest.mark.asyncio
 async def test_interrupt_unblocks_running_command(runtime: HostRuntime) -> None:
-    """BashInterruptAction must be deliverable while another command holds the
-    IO lock, and the next command must still work."""
+    """BashInterruptAction must be deliverable while another command holds
+    the IO lock. The interrupted run_in_session should return cleanly with
+    a non-zero exit code (SIGINT → 130), not hang or pollute the next call."""
+    result: dict[str, object] = {}
 
     async def long_running() -> None:
-        with pytest.raises(CommandTimeoutError):
-            await runtime.run_in_session(BashAction(command="sleep 30", timeout=2))
+        # Use a generous timeout: we expect the interrupt to finish this
+        # well before the deadline.
+        result["obs"] = await runtime.run_in_session(BashAction(command="sleep 30", timeout=15))
 
     task = asyncio.create_task(long_running())
     await asyncio.sleep(0.3)
-    # Interrupt while `sleep` is blocking inside the lock holder.
     await runtime.run_in_session(BashInterruptAction(timeout=5))
-    await task
+    await asyncio.wait_for(task, timeout=5)
+
+    obs = result["obs"]
+    assert obs.exit_code == 130, f"expected SIGINT exit code, got {obs.exit_code}"
 
     r = await runtime.run_in_session(BashAction(command="echo after_interrupt", timeout=10))
+    assert r.exit_code == 0
     assert r.output.strip() == "after_interrupt"
 
 
 @pytest.mark.asyncio
-async def test_session_rebuilds_after_bash_dies(runtime: HostRuntime) -> None:
-    """If the bash process exits, the next call should transparently rebuild."""
+async def test_dead_session_raises_instead_of_silent_rebuild(runtime: HostRuntime) -> None:
+    """If the bash process exits, the next call must surface the failure so
+    the upper layer can fail the episode, rather than silently respawning a
+    fresh shell with lost state."""
     proc = runtime._process
     assert proc is not None
     proc.kill()
     await proc.wait()
 
-    r = await runtime.run_in_session(BashAction(command="echo alive_again", timeout=10))
-    assert r.exit_code == 0
-    assert r.output.strip() == "alive_again"
-    assert runtime._process is not None and runtime._process.returncode is None
+    with pytest.raises(SessionNotInitializedError):
+        await runtime.run_in_session(BashAction(command="echo never_runs", timeout=10))
+
+    alive = await runtime.is_alive()
+    assert not alive.is_alive

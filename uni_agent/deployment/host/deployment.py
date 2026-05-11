@@ -4,13 +4,19 @@ import asyncio
 import os
 import shutil
 import signal
+import subprocess
+import sys
 import uuid
 from pathlib import Path
 from typing import Any, Self
 
 from swerex.deployment.abstract import AbstractDeployment
 from swerex.deployment.hooks.abstract import CombinedDeploymentHook, DeploymentHook
-from swerex.exceptions import CommandTimeoutError, DeploymentNotStartedError
+from swerex.exceptions import (
+    CommandTimeoutError,
+    DeploymentNotStartedError,
+    SessionNotInitializedError,
+)
 from swerex.runtime.abstract import (
     AbstractRuntime,
     Action,
@@ -37,6 +43,27 @@ from uni_agent.async_logging import get_logger
 from uni_agent.deployment.config import HostDeploymentConfig
 
 
+def _list_child_pids(parent_pid: int) -> list[int]:
+    """Return direct child PIDs of `parent_pid`.
+
+    On Linux we read /proc/PID/task/PID/children, which is cheap and exact.
+    Elsewhere (macOS, etc.) we fall back to `pgrep -P`.
+    """
+    if sys.platform.startswith("linux"):
+        try:
+            with open(f"/proc/{parent_pid}/task/{parent_pid}/children") as f:
+                return [int(p) for p in f.read().split() if p]
+        except (FileNotFoundError, PermissionError, ValueError):
+            pass
+    try:
+        out = subprocess.check_output(
+            ["pgrep", "-P", str(parent_pid)], stderr=subprocess.DEVNULL
+        )
+        return [int(p) for p in out.decode().split() if p]
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return []
+
+
 class HostRuntime(AbstractRuntime):
     """Runtime that executes commands in a persistent local bash session."""
 
@@ -49,17 +76,14 @@ class HostRuntime(AbstractRuntime):
         # of the lock (a blocked `_read_until_marker`) gets unblocked when bash
         # finishes the interrupted command and prints the trailing marker.
         self._io_lock = asyncio.Lock()
-        # Session start time + a generation counter so a stale rebuild does
-        # not clobber a fresh session created by a concurrent path.
-        self._session_startup_timeout: float = 10.0
-        self._broken = False
+        # Once the session is unusable (bash died, or stdout cannot be drained
+        # after a timeout), we don't try to rebuild it: state would be lost
+        # silently. Instead we mark it dead and surface errors so the upper
+        # layer can fail the episode, matching the sandbox-based deployments.
+        self._dead = False
 
     async def create_session(self, request: CreateSessionRequest) -> CreateSessionResponse:
-        self._session_startup_timeout = request.startup_timeout or 10
-        await self._spawn_bash(self._session_startup_timeout)
-        return CreateSessionResponse()
-
-    async def _spawn_bash(self, startup_timeout: float) -> None:
+        startup_timeout = request.startup_timeout or 10
         self._process = await asyncio.create_subprocess_exec(
             "bash",
             "--norc",
@@ -68,28 +92,37 @@ class HostRuntime(AbstractRuntime):
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             env=self._env,
+            # Job control (`set -m` below) puts each foreground command in
+            # its own process group, so we can SIGINT just the user command
+            # without killing the bash shell itself.
+            start_new_session=True,
         )
-        setup = "export PS1='' PS2='' PROMPT_COMMAND=''\n"
+        # `set -m` enables job control; PS1/PS2/PROMPT_COMMAND are zeroed so
+        # nothing accidentally injects bytes between commands.
+        setup = "set -m\nexport PS1='' PS2='' PROMPT_COMMAND=''\n"
         self._process.stdin.write(setup.encode())
         await self._process.stdin.drain()
         marker = f"__UNIAGENT_READY_{uuid.uuid4().hex[:12]}__"
         self._process.stdin.write(f"echo '{marker}'\n".encode())
         await self._process.stdin.drain()
         await self._read_until_marker(marker, timeout=startup_timeout)
-        self._broken = False
+        self._dead = False
         self.logger.info("Host bash session created")
+        return CreateSessionResponse()
 
-    async def _ensure_session(self) -> None:
-        """Rebuild bash if the previous one died or was marked broken."""
-        if self._process is None or self._process.returncode is not None or self._broken:
-            if self._process is not None and self._process.returncode is None:
-                try:
-                    self._process.kill()
-                    await asyncio.wait_for(self._process.wait(), timeout=2)
-                except Exception:
-                    pass
-            self.logger.warning("Rebuilding host bash session")
-            await self._spawn_bash(self._session_startup_timeout)
+    def _check_session_alive(self) -> None:
+        """Raise if the session is unusable. Callers are expected to surface
+        this so the upper layer can fail the episode instead of silently
+        running on a partially-recovered or fresh session with lost state."""
+        if self._dead:
+            raise SessionNotInitializedError("Host bash session is no longer usable")
+        if self._process is None:
+            raise SessionNotInitializedError("Host bash session has not been started")
+        if self._process.returncode is not None:
+            self._dead = True
+            raise SessionNotInitializedError(
+                f"Host bash session exited (returncode={self._process.returncode})"
+            )
 
     async def _read_until_marker(self, marker: str, timeout: float) -> tuple[str, int]:
         """Read stdout until the marker line appears. Returns (output, exit_code)."""
@@ -118,20 +151,21 @@ class HostRuntime(AbstractRuntime):
 
     async def run_in_session(self, action: Action) -> Observation:
         if isinstance(action, BashInterruptAction):
-            # Fire SIGINT WITHOUT taking the IO lock so we can interrupt a
-            # command whose run_in_session is currently waiting on stdout.
-            # bash will abort the foreground command and resume reading stdin,
-            # so the original `_read_until_marker` call will eventually see
-            # its marker (with exit_code != 0) and return cleanly.
-            if self._process and self._process.returncode is None:
-                self._process.send_signal(signal.SIGINT)
+            # SIGINT the foreground child of bash, NOT bash itself. With
+            # `set -m`, bash puts each command in its own process group, so
+            # this kills only the user command. bash then resumes reading
+            # stdin, the trailing marker line gets printed, and the original
+            # `_read_until_marker` call returns cleanly with exit_code=130.
+            # We do this outside the IO lock so we can interrupt a command
+            # whose run_in_session is currently waiting on stdout.
+            self._signal_foreground_child(signal.SIGINT)
             return Observation(output="", exit_code=130)
 
         if not isinstance(action, BashAction):
             raise TypeError(f"Unsupported action type: {type(action)}")
 
         async with self._io_lock:
-            await self._ensure_session()
+            self._check_session_alive()
 
             marker = f"__UNIAGENT_{uuid.uuid4().hex[:16]}__"
             wrapped = f"{action.command}\n__ua_ec=$?\necho '{marker}'\"$__ua_ec\"\n"
@@ -143,11 +177,12 @@ class HostRuntime(AbstractRuntime):
             try:
                 output, exit_code = await self._read_until_marker(marker, timeout)
             except CommandTimeoutError:
-                # The user's command is still running inside bash. Try to
-                # interrupt it and drain stdout up to the original marker so
-                # the next command starts on a clean stream. If that fails,
-                # mark the session broken so the next call rebuilds it.
-                await self._recover_after_timeout(marker)
+                # User command is still running. Try to interrupt it and drain
+                # stdout up to the original marker so the next command sees a
+                # clean stream. If draining fails, mark the session dead so
+                # subsequent calls raise SessionNotInitializedError and the
+                # upper layer fails the episode.
+                await self._drain_after_timeout(marker)
                 raise
 
             if output.endswith("\n"):
@@ -155,27 +190,37 @@ class HostRuntime(AbstractRuntime):
 
             return Observation(output=output, exit_code=exit_code)
 
-    async def _recover_after_timeout(self, pending_marker: str) -> None:
-        """Best-effort: SIGINT the running command and consume residual output
-        up to its marker. Marks the session broken on failure."""
+    async def _drain_after_timeout(self, pending_marker: str) -> None:
+        """SIGINT the running user command and consume residual output up to
+        its marker so the next command starts on a clean stream. If we
+        cannot drain, mark the session as dead."""
         if self._process is None or self._process.returncode is not None:
-            self._broken = True
+            self._dead = True
             return
+        # No child to signal is fine (race: command may have just finished).
+        # Either way, try to drain whatever the marker is following.
+        self._signal_foreground_child(signal.SIGINT)
         try:
-            self._process.send_signal(signal.SIGINT)
-        except ProcessLookupError:
-            self._broken = True
-            return
-        try:
-            # Short timeout: bash should produce the trailing marker quickly
-            # once the foreground command stops. If not, the shell is wedged.
             await self._read_until_marker(pending_marker, timeout=5)
             self.logger.info("Drained residual output after command timeout")
         except CommandTimeoutError:
-            self.logger.warning(
-                "Failed to drain stdout after SIGINT; marking session as broken"
-            )
-            self._broken = True
+            self.logger.warning("Failed to drain stdout after SIGINT; session is dead")
+            self._dead = True
+
+    def _signal_foreground_child(self, sig: int) -> bool:
+        """Send `sig` to bash's direct child processes (its foreground
+        command). With `set -m`, signaling bash itself would either be
+        ignored or kill the shell; we want to kill only the user command.
+        Returns True if at least one signal was delivered."""
+        if self._process is None or self._process.returncode is not None:
+            return False
+        for pid in _list_child_pids(self._process.pid):
+            try:
+                os.kill(pid, sig)
+                return True
+            except ProcessLookupError:
+                continue
+        return False
 
     async def execute(self, command: Command) -> CommandResponse:
         proc = await asyncio.create_subprocess_exec(
@@ -216,7 +261,11 @@ class HostRuntime(AbstractRuntime):
         return UploadResponse()
 
     async def is_alive(self, *, timeout: float | None = None) -> IsAliveResponse:
-        alive = self._process is not None and self._process.returncode is None
+        alive = (
+            not self._dead
+            and self._process is not None
+            and self._process.returncode is None
+        )
         return IsAliveResponse(is_alive=alive)
 
     async def close_session(self, request: CloseSessionRequest) -> CloseSessionResponse:
