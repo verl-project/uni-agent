@@ -47,9 +47,7 @@ async def test_sequential_commands_keep_session_state(runtime: HostRuntime) -> N
 async def test_concurrent_commands_are_serialized(runtime: HostRuntime) -> None:
     """Concurrent run_in_session calls must not interleave their stdout/stdin."""
     commands = [f"echo line_{i}" for i in range(8)]
-    results = await asyncio.gather(
-        *(runtime.run_in_session(BashAction(command=c, timeout=10)) for c in commands)
-    )
+    results = await asyncio.gather(*(runtime.run_in_session(BashAction(command=c, timeout=10)) for c in commands))
     outputs = [r.output.strip() for r in results]
     # Each result must match exactly one input, with no cross-contamination.
     assert sorted(outputs) == sorted(f"line_{i}" for i in range(8))

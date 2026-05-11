@@ -56,9 +56,7 @@ def _list_child_pids(parent_pid: int) -> list[int]:
         except (FileNotFoundError, PermissionError, ValueError):
             pass
     try:
-        out = subprocess.check_output(
-            ["pgrep", "-P", str(parent_pid)], stderr=subprocess.DEVNULL
-        )
+        out = subprocess.check_output(["pgrep", "-P", str(parent_pid)], stderr=subprocess.DEVNULL)
         return [int(p) for p in out.decode().split() if p]
     except (FileNotFoundError, subprocess.CalledProcessError):
         return []
@@ -120,9 +118,7 @@ class HostRuntime(AbstractRuntime):
             raise SessionNotInitializedError("Host bash session has not been started")
         if self._process.returncode is not None:
             self._dead = True
-            raise SessionNotInitializedError(
-                f"Host bash session exited (returncode={self._process.returncode})"
-            )
+            raise SessionNotInitializedError(f"Host bash session exited (returncode={self._process.returncode})")
 
     async def _read_until_marker(self, marker: str, timeout: float) -> tuple[str, int]:
         """Read stdout until the marker line appears. Returns (output, exit_code)."""
@@ -261,11 +257,7 @@ class HostRuntime(AbstractRuntime):
         return UploadResponse()
 
     async def is_alive(self, *, timeout: float | None = None) -> IsAliveResponse:
-        alive = (
-            not self._dead
-            and self._process is not None
-            and self._process.returncode is None
-        )
+        alive = not self._dead and self._process is not None and self._process.returncode is None
         return IsAliveResponse(is_alive=alive)
 
     async def close_session(self, request: CloseSessionRequest) -> CloseSessionResponse:
