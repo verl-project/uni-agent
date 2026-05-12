@@ -97,6 +97,7 @@ class UniAgentLoop(AgentLoopBase):
         await self.env.install_tools(self.tools_manager.tools)
 
         interaction_result = await self.interaction.run()
+        interaction_result["metrics"] = dict(interaction_result.get("rollout_cache", {}).get("metrics", {}))
         return interaction_result
 
     def _save_interaction_result(self, interaction_result: dict):
@@ -109,6 +110,7 @@ class UniAgentLoop(AgentLoopBase):
             "trajectory": [s.model_dump() for s in interaction_result["trajectory"]],
             "execution_time": interaction_result["execution_time"],
             "messages": interaction_result["messages"],
+            "metrics": interaction_result.get("metrics", {}),
         }
         (self.output_dir / "interaction_result.json").write_text(
             json.dumps(save_content, ensure_ascii=False, indent=2, default=str),
@@ -177,7 +179,7 @@ class UniAgentLoop(AgentLoopBase):
             response_mask = rollout_cache["response_mask"]
         response_logprobs = rollout_cache.get("response_logprobs") or []
         routed_experts = rollout_cache.get("routed_experts")
-        metrics = rollout_cache.get("metrics", {})
+        metrics = interaction_result.get("metrics", rollout_cache.get("metrics", {}))
         extra_fields = dict(rollout_cache.get("extra_fields") or {})
         extra_fields["traj_masked"] = traj_masked
         extra_fields["traj_exit_reason"] = traj_exit_reason

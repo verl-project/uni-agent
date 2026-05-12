@@ -126,6 +126,7 @@ class ModalDeployment(AbstractDeployment):
         """Deployment for modal.com. The deployment starts when `start` is called."""
         self.run_id = run_id
         self.logger = logger or get_logger("deployment", run_id)
+        self._image_name = str(image)
         self._image = _ImageBuilder(install_pipx=install_pipx, logger=self.logger).auto(image)
         self._runtime: RemoteRuntime | None = None
         self._startup_timeout = startup_timeout
@@ -198,7 +199,7 @@ class ModalDeployment(AbstractDeployment):
         if self._app is None:
             self._app = await modal.App.lookup.aio("swe-rex", create_if_missing=True)
 
-        self.logger.info("Starting modal sandbox")
+        self.logger.info("Starting modal sandbox with image {self._image_name}")
         self._hooks.on_custom_step("Starting modal sandbox")
         t0 = time.time()
         token = self._get_token()

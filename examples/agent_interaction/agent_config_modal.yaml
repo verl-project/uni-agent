@@ -2,7 +2,7 @@
 
   _target_: uni_agent.agent_loop.UniAgentLoop
 
-  concurrency: 512
+  concurrency: 64
   log_dir: /tmp/swebench_qwen3_coder
   mask_abnormal_exit_traj: false
 
@@ -16,7 +16,6 @@
       startup_timeout: 600
       runtime_timeout: 300
       deployment_timeout: 3600
-      proxy: "xxx"
     env_variables:
       PIP_PROGRESS_BAR: "off"
       PIP_CACHE_DIR: "~/.cache/pip"
