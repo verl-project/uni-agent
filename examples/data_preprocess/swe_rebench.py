@@ -10,6 +10,7 @@ if impl == "local":
 elif impl == "vefaas":
     from uni_agent.deployment.vefaas.deployment import get_vefaas_image_name as get_image_name
 elif impl == "modal":
+
     def get_image_name(dataset_id, instance_id):
         parts = instance_id.split("__")
         assert len(parts) == 2
