@@ -1,39 +1,36 @@
+import asyncio
+import functools
+import logging
 import os
 import pickle
 import time
-import logging
 import warnings
-import functools
-import orjson as json
-from typing import List, Dict, Any, Optional
+from contextlib import asynccontextmanager
+from typing import Any, Optional
+
 import faiss
 import ray
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-import asyncio
-from contextlib import asynccontextmanager
-
 from shared_encoder import get_shared_encoder_actors
 
-log_level = os.environ.get('LOG_LEVEL', 'INFO').upper()
+log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
     level=log_level,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        # logging.FileHandler(f'{os.environ["HDFS_LOG_DIR"]}/{os.environ["MERLIN_JOB_ID"]}/localwiki-server-{time.strftime("%Y-%m-%d-%H:%M:%S")}.log'),
-        logging.StreamHandler()
-    ]
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[logging.StreamHandler()],
 )
 logger = logging.getLogger(__name__)
 
-GLOBAL_CORPUS_LINES = None 
-GLOBAL_CORPUS_DATA: List[Dict[str, Any]] = None
-GLOBAL_URL_TO_IDS: Dict[str, List[int]] = {}
+GLOBAL_CORPUS_LINES = None
+GLOBAL_CORPUS_DATA: list[dict[str, Any]] = None
+GLOBAL_URL_TO_IDS: dict[str, list[int]] = {}
 SHARED_FAISS_INDEX = None
 SHARED_CONFIG = None
 retriever = None
 
 # app = FastAPI()
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -45,6 +42,7 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(batching_worker())
     yield
     logger.info("Retrieval server shutting down.")
+
 
 app = FastAPI(lifespan=lifespan)
 request_queue = asyncio.Queue()
@@ -101,7 +99,9 @@ async def batching_worker():
                 None,
                 functools.partial(
                     retriever.batch_search,
-                    query_list=all_queries, num=max_topk, return_score=True,
+                    query_list=all_queries,
+                    num=max_topk,
+                    return_score=True,
                 ),
             )
 
@@ -117,7 +117,10 @@ async def batching_worker():
                 if return_scores_flag:
                     resp = []
                     for i, single_result in enumerate(trimmed_results):
-                        combined = [{"document": doc, "score": score} for doc, score in zip(single_result, trimmed_scores[i])]
+                        combined = [
+                            {"document": doc, "score": score}
+                            for doc, score in zip(single_result, trimmed_scores[i], strict=False)
+                        ]
                         resp.append(combined)
                 else:
                     resp = trimmed_results
@@ -130,6 +133,7 @@ async def batching_worker():
             for future, _, _, _ in futures_info:
                 if not future.done():
                     future.set_exception(e)
+
 
 def load_all_corpus_lines(corpus_path: str):
     """load all corpus lines into memory and build URL to IDs index."""
@@ -144,37 +148,41 @@ def load_all_corpus_lines(corpus_path: str):
     doc_count = 0
 
     # with open(corpus_path, 'rb') as f:
-    #     for doc_index, line in enumerate(f): 
+    #     for doc_index, line in enumerate(f):
     #         doc_count += 1
     #         try:
     #             doc = json.loads(line)
     #             parsed_data.append(doc)
-                
+
     #             url = doc.get("url")
     #             if url:
     #                 if url not in url_to_ids_map:
     #                     url_to_ids_map[url] = []
     #                 url_to_ids_map[url].append(doc_index)
-                
+
     #         except json.JSONDecodeError:
     #             warnings.warn("JSONDecodeError encountered, skipping line.", RuntimeWarning)
     #             parsed_data.append(None)
     corpus_file_path = os.path.join(os.path.dirname(corpus_path), "corpus.pkl")
     url_to_ids_file_path = os.path.join(os.path.dirname(corpus_path), "url_to_ids.pkl")
-    logger.info(f"Loading ALL JSONL lines from {corpus_file_path} ({os.path.getsize(corpus_file_path) / (1024**3):.2f} GB) into RAM...")
-    with open(corpus_file_path, 'rb') as f:
+    logger.info(
+        f"Loading ALL JSONL lines from {corpus_file_path} "
+        f"({os.path.getsize(corpus_file_path) / (1024**3):.2f} GB) into RAM..."
+    )
+    with open(corpus_file_path, "rb") as f:
         parsed_data = pickle.load(f)
         doc_count = len(parsed_data)
-    with open(url_to_ids_file_path, 'rb') as f:
+    with open(url_to_ids_file_path, "rb") as f:
         url_to_ids_map = pickle.load(f)
 
     GLOBAL_CORPUS_DATA = parsed_data
     GLOBAL_URL_TO_IDS = url_to_ids_map
-    logger.info(f"Corpus loaded.")
+    logger.info("Corpus loaded.")
     logger.info(f"URL Index built. Total unique URLs: {len(GLOBAL_URL_TO_IDS):,}.")
     return doc_count
 
-def load_docs(doc_idxs: List[int]) -> List[Dict[str, Any]]:
+
+def load_docs(doc_idxs: list[int]) -> list[dict[str, Any]]:
     global GLOBAL_CORPUS_DATA
 
     if GLOBAL_CORPUS_DATA is None:
@@ -189,12 +197,17 @@ def load_docs(doc_idxs: List[int]) -> List[Dict[str, Any]]:
             if doc_data is not None:
                 results.append(doc_data)
             else:
-                warnings.warn(f"Document index {idx} was skipped during loading due to JSON error.", RuntimeWarning)
+                warnings.warn(
+                    f"Document index {idx} was skipped during loading due to JSON error.",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
                 results.append({"error": f"JSON decode error at index {idx}"})
         else:
-            warnings.warn(f"Invalid document index: {idx}", RuntimeWarning)
+            warnings.warn(f"Invalid document index: {idx}", RuntimeWarning, stacklevel=2)
             results.append({"error": f"Invalid doc index {idx}"})
     return results
+
 
 class BaseRetriever:
     def __init__(self, config):
@@ -207,14 +220,15 @@ class BaseRetriever:
     def _search(self, query: str, num: int, return_score: bool):
         raise NotImplementedError
 
-    def _batch_search(self, query_list: List[str], num: int, return_score: bool):
+    def _batch_search(self, query_list: list[str], num: int, return_score: bool):
         raise NotImplementedError
 
     def search(self, query: str, num: int = None, return_score: bool = False):
         return self._search(query, num, return_score)
-    
-    def batch_search(self, query_list: List[str], num: int = None, return_score: bool = False):
+
+    def batch_search(self, query_list: list[str], num: int = None, return_score: bool = False):
         return self._batch_search(query_list, num, return_score)
+
 
 class DenseRetriever(BaseRetriever):
     def __init__(self, config):
@@ -237,21 +251,21 @@ class DenseRetriever(BaseRetriever):
             len(self.encoder_actors),
         )
 
-    def _batch_search(self, query_list: List[str], num: int = None, return_score: bool = False):
+    def _batch_search(self, query_list: list[str], num: int = None, return_score: bool = False):
         if isinstance(query_list, str):
             query_list = [query_list]
         if num is None:
             num = self.topk
-        
+
         results = []
         scores = []
 
-        SEARCH_FACTOR = 2 
+        SEARCH_FACTOR = 2
         k_prime = max(num * SEARCH_FACTOR, 6)
-        
+
         for start_idx in range(0, len(query_list), self.batch_size):
             t_batch_start = time.time()
-            query_batch = query_list[start_idx:start_idx + self.batch_size]
+            query_batch = query_list[start_idx : start_idx + self.batch_size]
 
             # encode (round-robin across encoder actors)
             t_encode_start = time.time()
@@ -260,7 +274,7 @@ class DenseRetriever(BaseRetriever):
             batch_emb = ray.get(encoder_actor.encode.remote(query_batch))
             t_encode_end = time.time()
             encode_time = t_encode_end - t_encode_start
-            
+
             # FAISS search
             t_faiss_start = time.time()
             batch_scores, batch_idxs = self.index.search(batch_emb, k=k_prime)
@@ -278,27 +292,27 @@ class DenseRetriever(BaseRetriever):
 
             # post proccess
             t_post_start = time.time()
-            batch_results = [batch_results[i*k_prime : (i+1)*k_prime] for i in range(len(batch_idxs))]
+            batch_results = [batch_results[i * k_prime : (i + 1) * k_prime] for i in range(len(batch_idxs))]
 
             final_batch_results = []
             final_batch_scores = []
 
-            for docs_prime, scores_prime in zip(batch_results, batch_scores):
+            for docs_prime, scores_prime in zip(batch_results, batch_scores, strict=False):
                 unique_results_for_query = []
                 unique_scores_for_query = []
                 seen_urls = set()
-            
-                for doc, score in zip(docs_prime, scores_prime):
-                    doc_url = doc.get('url')
-                
+
+                for doc, score in zip(docs_prime, scores_prime, strict=False):
+                    doc_url = doc.get("url")
+
                     if doc_url and doc_url not in seen_urls:
                         unique_results_for_query.append(doc)
                         unique_scores_for_query.append(score)
                         seen_urls.add(doc_url)
-                    
+
                     if len(unique_results_for_query) >= num:
                         break
-            
+
                 final_batch_results.append(unique_results_for_query)
                 final_batch_scores.append(unique_scores_for_query)
 
@@ -317,23 +331,34 @@ class DenseRetriever(BaseRetriever):
                 f"Load Docs: {load_time:.4f}s | "
                 f"Post-Process: {post_process_time:.4f}s"
             )
-            
-            del batch_emb, batch_scores, batch_idxs, query_batch, flat_idxs, batch_results, final_batch_results, final_batch_scores
-            
+
+            del (
+                batch_emb,
+                batch_scores,
+                batch_idxs,
+                query_batch,
+                flat_idxs,
+                batch_results,
+                final_batch_results,
+                final_batch_scores,
+            )
+
         if return_score:
             return results, scores
         else:
             return results, None
 
+
 def get_retriever(config):
     return DenseRetriever(config)
+
 
 class Config:
     def __init__(self):
         self.index_path = os.getenv("INDEX_PATH", "wiki24_faiss.index")
         self.corpus_path = os.getenv("CORPUS_PATH", "wiki24_data.jsonl")
         self.retrieval_model_path = os.getenv("RETRIEVER_MODEL", "BAAI/bge-m3")
-        self.retrieval_method = os.getenv("RETRIEVER_NAME", "bge-m3") 
+        self.retrieval_method = os.getenv("RETRIEVER_NAME", "bge-m3")
         self.retrieval_topk = int(os.getenv("TOPK", 3))
         self.retrieval_batch_size = int(os.getenv("BATCH_SIZE", "512"))
         self.shared_encoder_actor_name = os.getenv("SHARED_ENCODER_ACTOR_NAME", "localwiki-shared-encoder")
@@ -342,18 +367,20 @@ class Config:
         self.retrieval_pooling_method = "mean"
         self.retrieval_query_max_length = 512
         self.retrieval_use_fp16 = True
-        
+
+
 class QueryRequest(BaseModel):
-    queries: List[str]
+    queries: list[str]
     topk: Optional[int] = None
     return_scores: bool = False
 
+
 class URLRequest(BaseModel):
-    urls: List[str]
+    urls: list[str]
+
 
 @app.post("/retrieve")
 async def retrieve_endpoint(request: QueryRequest):
-
     future = asyncio.Future()
 
     try:
@@ -361,7 +388,7 @@ async def retrieve_endpoint(request: QueryRequest):
         result = await future
         return result
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=str(e)) from e
 
 
 @app.post("/crawl")
@@ -374,7 +401,7 @@ def crawl_endpoint(request: URLRequest):
     global GLOBAL_URL_TO_IDS
 
     if GLOBAL_URL_TO_IDS is None:
-         raise HTTPException(status_code=500, detail="Corpus URL Index not built. Check server initialization.")
+        raise HTTPException(status_code=500, detail="Corpus URL Index not built. Check server initialization.")
 
     results = []
     for target_url in request.urls:
@@ -389,13 +416,16 @@ def crawl_endpoint(request: URLRequest):
             if doc:
                 matching_texts.append(doc.get("text", "Text field missing"))
 
-        results.append({
-            "url": target_url,
-            "result": f"Found {len(matching_texts)} passages for URL: {target_url}",
-            "texts": matching_texts,
-        })
+        results.append(
+            {
+                "url": target_url,
+                "result": f"Found {len(matching_texts)} passages for URL: {target_url}",
+                "texts": matching_texts,
+            }
+        )
 
     return {"results": results}
+
 
 def load_worker_resources():
     """
@@ -415,9 +445,10 @@ def load_worker_resources():
     retriever = get_retriever(config)
     logger.info("DenseRetriever fully initialized.")
 
+
 def load_shared_resources():
     """
-    MASTER PROCESS ONLY: 
+    MASTER PROCESS ONLY:
     1. Loads Config.
     2. Loads FAISS Index (CPU).
     3. Loads Corpus data (GLOBAL_CORPUS_LINES, GLOBAL_URL_TO_IDS).
@@ -426,9 +457,9 @@ def load_shared_resources():
     global SHARED_CONFIG
     global SHARED_FAISS_INDEX
     global GLOBAL_CORPUS_LINES
-    
+
     logger.info("Master: Starting to load shared CPU resources...")
-    
+
     # 1. Load config
     if SHARED_CONFIG is None:
         SHARED_CONFIG = Config()
@@ -443,11 +474,15 @@ def load_shared_resources():
     index_path = SHARED_CONFIG.index_path
     if SHARED_FAISS_INDEX is None:
         if not os.path.exists(index_path):
-             raise FileNotFoundError(f"FAISS index file not found at: {index_path}") 
+            raise FileNotFoundError(f"FAISS index file not found at: {index_path}")
         SHARED_FAISS_INDEX = faiss.read_index(index_path, faiss.IO_FLAG_MMAP)
-        SHARED_FAISS_INDEX.nprobe = 32
-        logger.info(f"Master: FAISS index loaded (CPU). NTotal: {SHARED_FAISS_INDEX.ntotal:,}.")
-    
+        SHARED_FAISS_INDEX.nprobe = int(os.getenv("FAISS_NPROBE", 256))
+        logger.info(
+            f"Master: FAISS index loaded (CPU). NTotal: {SHARED_FAISS_INDEX.ntotal:,}, "
+            f"nprobe={SHARED_FAISS_INDEX.nprobe}."
+        )
+
     logger.info("Master: Shared CPU resources initialization complete.")
+
 
 load_shared_resources()

@@ -3,13 +3,12 @@ import logging
 import os
 import time
 from collections import deque
-from typing import Deque, List, Optional, Tuple
+from typing import Optional
 
 import numpy as np
 import ray
 import torch
 from transformers import AutoConfig, AutoModel, AutoTokenizer
-
 
 DEFAULT_RAY_ADDRESS = os.getenv("RAY_ADDRESS", "auto")
 DEFAULT_RAY_NAMESPACE = os.getenv("RAY_NAMESPACE", "localwiki")
@@ -69,7 +68,7 @@ class Encoder:
         self.model.eval()
 
     @torch.no_grad()
-    def encode(self, query_list: List[str], is_query: bool = True) -> np.ndarray:
+    def encode(self, query_list: list[str], is_query: bool = True) -> np.ndarray:
         if isinstance(query_list, str):
             query_list = [query_list]
 
@@ -78,6 +77,13 @@ class Encoder:
                 query_list = [f"query: {query}" for query in query_list]
             else:
                 query_list = [f"passage: {query}" for query in query_list]
+        elif "bge-m3" in self.model_name.lower():
+            # BGE-M3 does NOT use an instruction prefix on either side
+            # (per BAAI/bge-m3 model card). Our corpus
+            # (Upstash/wikipedia-2024-06-bge-m3) was encoded as
+            # f"{title}\n{paragraph}" with raw BGE-M3, so the query side
+            # must also avoid any instruction prefix to stay aligned.
+            pass
         elif "bge" in self.model_name.lower() and is_query:
             query_list = [f"Represent this sentence for searching relevant passages: {query}" for query in query_list]
 
@@ -136,10 +142,10 @@ class SharedEncoderActor:
         self.max_batch_size = max_batch_size
         self.batch_timeout_s = batch_timeout_s
         self.request_queue: asyncio.Queue = asyncio.Queue()
-        self.pending_requests: Deque[Tuple[List[str], bool, asyncio.Future]] = deque()
+        self.pending_requests: deque[tuple[list[str], bool, asyncio.Future]] = deque()
         self.batching_task = asyncio.get_event_loop().create_task(self._batching_loop())
 
-    async def encode(self, query_list: List[str], is_query: bool = True) -> np.ndarray:
+    async def encode(self, query_list: list[str], is_query: bool = True) -> np.ndarray:
         if isinstance(query_list, str):
             query_list = [query_list]
 
@@ -177,9 +183,9 @@ class SharedEncoderActor:
                 self.pending_requests.appendleft((next_queries, next_is_query, next_future))
                 break
 
-            flat_queries: List[str] = []
-            request_sizes: List[int] = []
-            request_futures: List[asyncio.Future] = []
+            flat_queries: list[str] = []
+            request_sizes: list[int] = []
+            request_futures: list[asyncio.Future] = []
             for queries, req_future in batch:
                 flat_queries.extend(queries)
                 request_sizes.append(len(queries))
@@ -188,7 +194,7 @@ class SharedEncoderActor:
             try:
                 embeddings = self.encoder.encode(query_list=flat_queries, is_query=batch_mode)
                 start_idx = 0
-                for req_future, req_size in zip(request_futures, request_sizes):
+                for req_future, req_size in zip(request_futures, request_sizes, strict=False):
                     req_future.set_result(embeddings[start_idx : start_idx + req_size])
                     start_idx += req_size
             except Exception as exc:
@@ -213,7 +219,4 @@ def get_shared_encoder_actors(base_name: Optional[str] = None, num_replicas: int
     base = base_name or DEFAULT_ACTOR_NAME
     if num_replicas == 1:
         return [ray.get_actor(base, namespace=DEFAULT_RAY_NAMESPACE)]
-    return [
-        ray.get_actor(f"{base}-{i}", namespace=DEFAULT_RAY_NAMESPACE)
-        for i in range(num_replicas)
-    ]
+    return [ray.get_actor(f"{base}-{i}", namespace=DEFAULT_RAY_NAMESPACE) for i in range(num_replicas)]
