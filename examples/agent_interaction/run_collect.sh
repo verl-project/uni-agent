@@ -35,6 +35,8 @@ ENGINE=${ENGINE:-"vllm"}
 TRAIN_BATCH_SIZE=${TRAIN_BATCH_SIZE:-64}
 N_PER_PROMPT=${N_PER_PROMPT:-8}
 NUM_STEPS=${NUM_STEPS:-5}
+START_STEP=${START_STEP:-0}     # set to resume; with same SHUFFLE_SEED + dataset,
+                                # samples will match a continuous run starting at 0.
 MAX_TURNS=${MAX_TURNS:-100}
 PROMPT_LENGTH=${PROMPT_LENGTH:-4096}
 RESPONSE_LENGTH=${RESPONSE_LENGTH:-65536}
@@ -43,10 +45,11 @@ TOP_P=${TOP_P:-1.0}
 SHUFFLE_SEED=${SHUFFLE_SEED:-42}
 
 # ---- output layout ---------------------------------------------------------
-# agent_config.yaml controls where per-rollout JSONs land (log_dir field).
-# We DON'T override it here on purpose so it stays a single source of truth;
-# whatever is in agent_config.yaml is where step_000/, step_001/, ... appear.
-# If you need a custom dir, edit agent_config.yaml or template a copy.
+# agent_config.yaml's `log_dir` is the worker-local scratch path (typically /tmp).
+# After every step the driver pins a ray task on each live node that moves
+# <log_dir>/<run_id>/ into ${HDFS_ROOT}/step_<idx>/, so HDFS holds the final,
+# step-grouped collection. Local /tmp is drained as we go.
+HDFS_ROOT=${HDFS_ROOT:-"/mnt/hdfs/went/logs/swebench_qwen3_coder_infer/run_$(date +%Y%m%d_%H%M%S)"}
 
 ray job submit --no-wait \
     --runtime-env "${RUNTIME_ENV}" \
@@ -63,6 +66,7 @@ ray job submit --no-wait \
     --train-batch-size "${TRAIN_BATCH_SIZE}" \
     --n "${N_PER_PROMPT}" \
     --num-steps "${NUM_STEPS}" \
+    --start-step "${START_STEP}" \
     --shuffle \
     --seed "${SHUFFLE_SEED}" \
     --max-turns "${MAX_TURNS}" \
@@ -70,4 +74,5 @@ ray job submit --no-wait \
     --response-length "${RESPONSE_LENGTH}" \
     --temperature "${TEMPERATURE}" \
     --top-p "${TOP_P}" \
+    --hdfs-root "${HDFS_ROOT}" \
     --max-samples 0

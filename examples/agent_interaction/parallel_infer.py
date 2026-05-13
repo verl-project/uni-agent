@@ -1,6 +1,8 @@
 import argparse
 import logging
 import os
+import shutil
+import socket
 import time
 from pathlib import Path
 
@@ -8,6 +10,7 @@ import numpy as np
 import ray
 from datasets import load_dataset
 from omegaconf import DictConfig
+from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 import verl
 from verl import DataProto
@@ -105,6 +108,59 @@ def _select_step_samples(
     return [all_samples[int(i)] for i in idx]
 
 
+@ray.remote(num_cpus=1)
+def _move_local_to_hdfs(local_root: str, hdfs_dst: str) -> tuple[str, int, float]:
+    """Move all `<run_id>/` subdirs from `local_root` to `hdfs_dst` on the node this task lands on.
+
+    Returns `(host, num_moved, elapsed_secs)`. Idempotent: targets that already exist are skipped.
+    """
+    host = socket.gethostname()
+    t0 = time.time()
+    src = Path(local_root)
+    if not src.exists():
+        return (host, 0, 0.0)
+    dst = Path(hdfs_dst)
+    dst.mkdir(parents=True, exist_ok=True)
+    n = 0
+    for run_dir in src.iterdir():
+        if not run_dir.is_dir():
+            continue
+        target = dst / run_dir.name
+        if target.exists():
+            continue
+        try:
+            shutil.move(str(run_dir), str(target))
+            n += 1
+        except OSError:
+            # Best-effort; don't fail the whole drain on one bad dir.
+            continue
+    return (host, n, time.time() - t0)
+
+
+def _drain_workers_to_hdfs(local_root: str, hdfs_dst: str) -> None:
+    """Pin one upload task per live Ray node; wait for all to finish."""
+    nodes = [n for n in ray.nodes() if n.get("Alive")]
+    if not nodes:
+        logger.warning("No live Ray nodes found; skipping drain to %s", hdfs_dst)
+        return
+    futs = [
+        _move_local_to_hdfs.options(
+            scheduling_strategy=NodeAffinitySchedulingStrategy(node_id=n["NodeID"], soft=False)
+        ).remote(local_root, hdfs_dst)
+        for n in nodes
+    ]
+    results = ray.get(futs)
+    total = sum(c for _, c, _ in results)
+    logger.info(
+        "Drained %d trajectories to %s (from %d node(s))",
+        total,
+        hdfs_dst,
+        len(results),
+    )
+    for host, c, elapsed in results:
+        logger.info("  %s: %d moved in %.1fs", host, c, elapsed)
+
+
 def run_inference(args: argparse.Namespace):
     """Run the inference pipeline using the provided arguments."""
     # 1. Init Ray
@@ -135,6 +191,27 @@ def run_inference(args: argparse.Namespace):
     n_per_prompt = config.actor_rollout_ref.rollout.n
     size_divisor = config.actor_rollout_ref.rollout.agent.num_workers
     rng = np.random.default_rng(args.seed)
+    # Advance rng past the steps already done so the (seed, start_step) pair
+    # reproduces the same samples as a continuous run.
+    if args.shuffle:
+        for _ in range(args.start_step):
+            rng.permutation(len(all_samples))
+
+    # Per-step drain target: read worker-local log_dir from the agent config so we
+    # can move <log_dir>/<run_id>/ to HDFS at each step boundary.
+    local_log_dir: str | None = None
+    if args.hdfs_root:
+        import yaml
+
+        with open(os.path.expanduser(args.agent_config_path)) as f:
+            agents = yaml.safe_load(f)
+        agent_cfg = agents[0] if isinstance(agents, list) else agents
+        local_log_dir = agent_cfg.get("log_dir")
+        if not local_log_dir:
+            raise ValueError(
+                f"--hdfs-root requires `log_dir` to be set in {args.agent_config_path}"
+            )
+        logger.info("Will drain '%s' -> '%s' after each step", local_log_dir, args.hdfs_root)
 
     logger.info(
         "Running %d step(s): train_batch_size=%d prompts x n=%d responses = %d trajectories/step "
@@ -147,11 +224,9 @@ def run_inference(args: argparse.Namespace):
     )
 
     all_step_scores: list[float] = []
-    for step_idx in range(args.num_steps):
+    for offset in range(args.num_steps):
+        step_idx = args.start_step + offset
         batch_tag = f"step_{step_idx:03d}"
-        # Tell uni_agent.agent_loop where to place per-rollout artifacts so they
-        # are pre-grouped by batch on disk -- analyzer just globs step_*/*.
-        os.environ["UNI_AGENT_BATCH_TAG"] = batch_tag
 
         step_samples = _select_step_samples(
             all_samples=all_samples,
@@ -175,6 +250,10 @@ def run_inference(args: argparse.Namespace):
         all_step_scores.append(mean_score)
         logger.info("[%s] Done in %.1fs. Mean RM Score: %.4f", batch_tag, wall, mean_score)
         print(f"\n=> [{batch_tag}] wall={wall:.1f}s | Mean RM Score: {mean_score:.4f}\n")
+
+        if args.hdfs_root and local_log_dir:
+            hdfs_step_dir = f"{args.hdfs_root.rstrip('/')}/{batch_tag}"
+            _drain_workers_to_hdfs(local_root=local_log_dir, hdfs_dst=hdfs_step_dir)
 
     overall_mean = float(np.mean(all_step_scores)) if all_step_scores else 0.0
     logger.info("All %d steps completed. Overall mean RM Score: %.4f", args.num_steps, overall_mean)
@@ -243,6 +322,27 @@ def main():
         help="Reshuffle the dataset per step. Without this flag, sequential slices (wrapping if needed) are used.",
     )
     parser.add_argument("--seed", type=int, default=42, help="RNG seed for --shuffle sampling.")
+    parser.add_argument(
+        "--start-step",
+        type=int,
+        default=0,
+        help=(
+            "Skip the first N step draws so a subsequent run with the same --seed "
+            "produces steps [start, start+num_steps). On-disk batch tags are also "
+            "shifted by start-step so HDFS dirs continue from step_<start>."
+        ),
+    )
+    parser.add_argument(
+        "--hdfs-root",
+        type=str,
+        default="",
+        help=(
+            "If set, after each step the driver pins a ray task on every live node "
+            "that moves `<log_dir>/<run_id>/` (configured in agent_config.yaml) to "
+            "`<hdfs-root>/step_<idx>/`. Local /tmp is emptied per step. "
+            "Empty string disables drain."
+        ),
+    )
 
     # Execution / Engine configs
     parser.add_argument(
