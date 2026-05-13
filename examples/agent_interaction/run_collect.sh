@@ -24,8 +24,8 @@ DATA_FILE=${DATA_FILE:-"${RAY_DATA_HOME}/data/swe_agent/swe_rebench_filtered.par
 RUNTIME_ENV=${RUNTIME_ENV:-"/mnt/hdfs/went/data/swe_agent/runtime_env.yaml"}
 AGENT_CONFIG_PATH=${AGENT_CONFIG_PATH:-"examples/agent_interaction/agent_config.yaml"}
 
-# ---- cluster shape (4 nodes x 8 GPUs) --------------------------------------
-NNODES=${NNODES:-4}
+# ---- cluster shape (8 nodes x 8 GPUs) --------------------------------------
+NNODES=${NNODES:-8}
 NGPUS_PER_NODE=${NGPUS_PER_NODE:-8}
 TENSOR_PARALLEL_SIZE=${TENSOR_PARALLEL_SIZE:-4}
 NUM_WORKERS=${NUM_WORKERS:-8}
