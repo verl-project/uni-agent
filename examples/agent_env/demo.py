@@ -1,7 +1,11 @@
 # ruff: noqa: E501
 import os
 import shlex
+import sys
 import uuid
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from uni_agent.interaction import AgentEnv, AgentEnvConfig
 from uni_agent.tools import ToolConfig
@@ -11,7 +15,32 @@ run_id = str(uuid.uuid4())
 impl = os.getenv("DEPLOYMENT", "vefaas").lower()
 
 if impl == "local":
-    raise NotImplementedError("Local deployment is not implemented yet")
+    deployment_config = {
+        "type": "local",
+        "image": os.getenv("LOCAL_DEPLOYMENT_IMAGE", "python:3.12"),
+        "command": os.getenv(
+            "LOCAL_DEPLOYMENT_COMMAND",
+            "python3 -m pip install -q swe-rex && "
+            "python3 -m swerex.server --host 0.0.0.0 --port {port} --auth-token {token}",
+        ),
+        "timeout": 300.0,
+        "startup_timeout": 180.0,
+    }
+    local_runtime = os.getenv("LOCAL_CONTAINER_RUNTIME")
+    local_network = os.getenv("LOCAL_DEPLOYMENT_NETWORK")
+    local_host = os.getenv("LOCAL_DEPLOYMENT_HOST")
+    local_port = os.getenv("LOCAL_DEPLOYMENT_PORT")
+    local_extra_args = os.getenv("LOCAL_DEPLOYMENT_EXTRA_ARGS")
+    if local_runtime:
+        deployment_config["container_runtime"] = local_runtime
+    if local_network:
+        deployment_config["network"] = local_network
+    if local_host:
+        deployment_config["host"] = local_host
+    if local_port:
+        deployment_config["published_port"] = int(local_port)
+    if local_extra_args:
+        deployment_config["extra_run_args"] = shlex.split(local_extra_args)
 elif impl == "vefaas":
     assert os.getenv("VOLCE_ACCESS_KEY") is not None, "VOLCE_ACCESS_KEY must be set"
     assert os.getenv("VOLCE_SECRET_KEY") is not None, "VOLCE_SECRET_KEY must be set"
