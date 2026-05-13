@@ -82,8 +82,6 @@ class AgentEnv:
         self.logger.info("Runtime initialized")
         if self.env_variables:
             await self.set_env_variables(self.env_variables)
-        if self.post_setup_cmd:
-            await self.communicate(self.post_setup_cmd, check="raise")
 
     @auto_await
     async def install_tools(self, tools: list[AbstractTool]) -> None:
