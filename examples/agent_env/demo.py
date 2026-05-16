@@ -73,7 +73,6 @@ env_config = {
 }
 env_config = AgentEnvConfig(**env_config)
 env = AgentEnv(run_id=run_id, env_config=env_config)
-env.start()
 
 # install tools in the environment
 tools_config = [
@@ -81,7 +80,7 @@ tools_config = [
     {"name": "str_replace_editor"},
 ]
 tools = [ToolConfig(**tool_config).get_tool() for tool_config in tools_config]
-env.install_tools(tools)
+env.start(tools=tools)
 out = env.communicate("which str_replace_editor")
 print(f"[Tool check] which str_replace_editor\n  -> {out.strip()}\n")
 

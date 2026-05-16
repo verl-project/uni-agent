@@ -97,19 +97,16 @@ interaction = AgentInteraction(
 )
 
 
-print("\n[1/4] Starting environment...")
-env.start()
-
-print("[2/4] Installing tools...")
-env.install_tools(tools_manager.tools)
+print("\n[1/3] Starting environment and installing tools...")
+env.start(tools=tools_manager.tools)
 tool_check = env.communicate("which search_arxiv && which finish")
 print(tool_check.strip())
 
-print("\n[3/4] Running interaction...")
+print("\n[2/3] Running interaction...")
 result = interaction.run()
 last_step = result["trajectory"][-1] if result["trajectory"] else None
 
-print("\n[4/4] Final status:")
+print("\n[3/3] Final status:")
 if last_step is not None:
     print(f"exit_reason: {last_step.exit_reason}")
     print(f"done: {last_step.done}")

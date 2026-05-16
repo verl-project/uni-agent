@@ -72,7 +72,7 @@ class UniAgentLoop(AgentLoopBase):
         self.logger.info(f"output_dir: {self.output_dir}")
 
         async with self._semaphore:
-            await self.env.start()
+            await self.env.start(tools=self.tools_manager.tools)
             interaction_result = await self._run_interaction()
             # interaction environment should be visible to the reward spec
             if self.reward_spec is not None:
@@ -93,8 +93,6 @@ class UniAgentLoop(AgentLoopBase):
         # tools schemas should be visible to the model
         # to generate correct tool call format in response
         self.chat_model.set_tools_schemas(self.tools_manager.tools_schemas)
-        # tool should be runnable in the environment
-        await self.env.install_tools(self.tools_manager.tools)
 
         interaction_result = await self.interaction.run()
         interaction_result["metrics"] = dict(interaction_result.get("rollout_cache", {}).get("metrics", {}))

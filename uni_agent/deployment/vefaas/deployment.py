@@ -69,6 +69,7 @@ class VefaasDeployment(AbstractDeployment):
         self.logger = get_logger("deployment", run_id)
         self._hooks = CombinedDeploymentHook()
         self._sandbox_id: str | None = None
+        self._auth_token: str | None = None
         self._stopped: bool = False
 
         access_key = os.getenv("VOLCE_ACCESS_KEY") or os.getenv("VOLCENGINE_ACCESS_KEY")
@@ -104,8 +105,15 @@ class VefaasDeployment(AbstractDeployment):
     def _get_token(self) -> str:
         return str(uuid.uuid4())
 
-    async def start(self, max_retries: int = 5) -> None:
+    async def start(self) -> None:
         from uni_agent.deployment.remote_runtime import RemoteRuntime, RemoteRuntimeConfig
+
+        if self._runtime is not None and self._sandbox_id is not None:
+            if bool(await self.is_alive(timeout=10)):
+                self.logger.warning("Vefaas deployment is already started. Ignoring duplicate start() call.")
+                return
+            self.logger.warning("Existing vefaas deployment is not alive; restarting it before start")
+            await self.stop()
 
         self.logger.info(
             f"Starting vefaas deployment,function_id = {self._config.function_id},image = {self._config.image}."
@@ -118,36 +126,33 @@ class VefaasDeployment(AbstractDeployment):
         if not image:
             raise ValueError("No image specified and no image list provided")
 
-        token = self._get_token()
+        self._stopped = False
+        if self._sandbox_id is not None and self._auth_token is None:
+            self.logger.warning("Existing vefaas sandbox has no auth token; deleting it before restart")
+            await self.stop()
+            self._stopped = False
+
+        token = self._auth_token or self._get_token()
+        self._auth_token = token
         command = self._config.command.format(token=token)
 
-        self.logger.info(f"Creating sandbox with image {image}, command = {command}")
-        self._hooks.on_custom_step("Creating vefaas sandbox")
         loop = asyncio.get_running_loop()
-        create_sanbox_done = False
-
-        for retry in range(max_retries):
-            try:
-                self._sandbox_id = await loop.run_in_executor(
-                    None,
-                    create_sandbox,
-                    self._vefaas_client,
-                    function_id,
-                    image,
-                    command,
-                    self.logger,
-                )
-                if self._sandbox_id:
-                    create_sanbox_done = True
-                    break
-            except Exception as e:
-                self.logger.critical(f"Failed to create sandbox: {e}")
-                sleep_time = min(30, 2**retry)
-                self.logger.info(f"Retrying in {sleep_time} seconds...")
-                await asyncio.sleep(sleep_time)
-
-        if not create_sanbox_done:
-            raise RuntimeError(f"Failed to create sandbox after {max_retries} retries")
+        if self._sandbox_id is None:
+            self.logger.info(f"Creating sandbox with image {image}, command = {command}")
+            self._hooks.on_custom_step("Creating vefaas sandbox")
+            self._sandbox_id = await loop.run_in_executor(
+                None,
+                create_sandbox,
+                self._vefaas_client,
+                function_id,
+                image,
+                command,
+                self.logger,
+            )
+            if not self._sandbox_id:
+                raise RuntimeError("Failed to create sandbox")
+        else:
+            self.logger.warning(f"Reusing existing vefaas sandbox {self._sandbox_id}")
 
         self.logger.info(f"Sandbox {self._sandbox_id} created")
         self._hooks.on_custom_step("Starting runtime")
@@ -169,7 +174,6 @@ class VefaasDeployment(AbstractDeployment):
         await self.runtime.create_session(
             CreateBashSessionRequest(startup_source=["/root/.bashrc"], startup_timeout=60)
         )
-        # await self._post_setup()
 
     async def stop(self):
         # Prevent duplicate stops
@@ -205,6 +209,7 @@ class VefaasDeployment(AbstractDeployment):
                 self.logger.error(f"Failed to delete sandbox {self._sandbox_id}: {e}")
             finally:
                 self._sandbox_id = None
+                self._auth_token = None
 
         self._stopped = True
 

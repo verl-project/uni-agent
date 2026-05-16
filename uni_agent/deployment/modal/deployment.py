@@ -190,7 +190,7 @@ class ModalDeployment(AbstractDeployment):
         task_id = await self.sandbox._get_task_id.aio()
         return f"https://modal.com/apps/{self._user}/main/deployed/{self.app.name}?activeTab=logs&taskId={task_id}"
 
-    async def _start(self):
+    async def start(self):
         """Starts the runtime once."""
         if self._runtime is not None and self._sandbox is not None:
             self.logger.warning("Deployment is already started. Ignoring duplicate start() call.")
@@ -235,24 +235,6 @@ class ModalDeployment(AbstractDeployment):
         await self._wait_until_alive(timeout=remaining_startup_timeout)
         await self.runtime.create_session(CreateBashSessionRequest(startup_timeout=60))
         self.logger.info(f"Runtime started in {time.time() - t1:.2f}s")
-
-    async def start(self, max_retries: int = 5):
-        """Starts the runtime with retry."""
-        last_error: Exception | None = None
-        for retry in range(max_retries):
-            try:
-                await self._start()
-                return
-            except Exception as exc:
-                last_error = exc
-                self.logger.critical(f"Failed to create modal sandbox: {exc}")
-                await self.stop()
-                if retry < max_retries - 1:
-                    sleep_time = min(30, 2**retry)
-                    self.logger.info(f"Retrying modal deployment startup in {sleep_time} seconds...")
-                    await asyncio.sleep(sleep_time)
-
-        raise RuntimeError(f"Failed to create modal sandbox after {max_retries} retries") from last_error
 
     async def stop(self):
         """Stops the runtime."""

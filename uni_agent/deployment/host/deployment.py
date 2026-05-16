@@ -317,7 +317,14 @@ class HostDeployment(AbstractDeployment):
             return IsAliveResponse(is_alive=False)
         return await self._runtime.is_alive(timeout=timeout)
 
-    async def start(self, max_retries: int = 5):
+    async def start(self):
+        if self._runtime is not None:
+            if bool(await self.is_alive(timeout=30)):
+                self.logger.warning("Host deployment is already started. Ignoring duplicate start() call.")
+                return
+            self.logger.warning("Existing host deployment is not alive; restarting it before start")
+            await self.stop()
+
         env = dict(os.environ)
 
         self._runtime = HostRuntime(run_id=self.run_id, env=env)

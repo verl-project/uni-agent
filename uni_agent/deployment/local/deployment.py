@@ -290,47 +290,38 @@ class LocalDeployment(AbstractDeployment):
         )
         self._runtime = LocalRuntime.from_config(runtime_config, run_id=self.run_id)
 
-    async def start(self, max_retries: int = 5) -> None:
+    async def start(self) -> None:
+        if self._runtime is not None:
+            if bool(await self.is_alive(timeout=30)):
+                self.logger.warning("Local deployment is already started. Ignoring duplicate start() call.")
+                return
+            self.logger.warning("Existing local deployment is not alive; restarting it before start")
+            await self.stop()
+
         token = self._get_token()
         published_port = self._config.published_port or _pick_free_port()
         container_name = self._config.container_name or f"uni-agent-{_sanitize_name(self.run_id)}"
         self._stopped = False
-        last_error: Exception | None = None
-        for attempt in range(max_retries):
-            self._stopped = False
-            self.logger.info(
-                f"Starting local deployment with runtime={self._config.container_runtime}, image={self._config.image}."
+        self.logger.info(
+            f"Starting local deployment with runtime={self._config.container_runtime}, image={self._config.image}."
+        )
+        self._hooks.on_custom_step("Creating local sandbox")
+        self._container_name = container_name
+
+        if _is_apptainer_runtime(self._config.container_runtime):
+            await self._start_apptainer(token=token, published_port=published_port)
+        else:
+            await self._start_oci_container(
+                token=token,
+                container_name=container_name,
+                published_port=published_port,
             )
-            self._hooks.on_custom_step("Creating local sandbox")
-            self._container_name = container_name
 
-            try:
-                if _is_apptainer_runtime(self._config.container_runtime):
-                    await self._start_apptainer(token=token, published_port=published_port)
-                else:
-                    await self._start_oci_container(
-                        token=token,
-                        container_name=container_name,
-                        published_port=published_port,
-                    )
-
-                await self._wait_until_alive(timeout=self._config.startup_timeout)
-                await self.runtime.create_session(
-                    CreateBashSessionRequest(startup_source=["/root/.bashrc"], startup_timeout=60)
-                )
-                self._stopped = False
-                return
-            except Exception as exc:
-                last_error = exc
-                logs = self._get_container_logs(container_name)
-                self.logger.error(f"Failed to start local sandbox: {exc}\nContainer logs:\n{logs}")
-                await self.stop()
-                if attempt < max_retries - 1:
-                    sleep_time = min(30, 2**attempt)
-                    self.logger.info(f"Retrying local deployment startup in {sleep_time} seconds...")
-                    await asyncio.sleep(sleep_time)
-
-        raise RuntimeError(f"Failed to create local sandbox after {max_retries} retries") from last_error
+        await self._wait_until_alive(timeout=self._config.startup_timeout)
+        await self.runtime.create_session(
+            CreateBashSessionRequest(startup_source=["/root/.bashrc"], startup_timeout=60)
+        )
+        self._stopped = False
 
     async def copy_to_container(self, src: Path, tgt: Path):
         await self.runtime.execute(Command(command=["mkdir", "-p", str(tgt.parent)]))
