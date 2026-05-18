@@ -97,15 +97,12 @@ class UniAgentLoop(AgentLoopBase):
                 output = self.convert_to_agent_output(interaction_result)
             except Exception as e:
                 self.logger.critical(f"Agent loop failed before producing interaction result: {e}")
-                output = await self._build_empty_agent_output(
-                    exit_reason="agent_loop_failed",
-                    error=e,
-                )
+                output = await self._build_empty_agent_output(exit_reason="agent_loop_failed")
             finally:
                 await self.env.close()
             return output
 
-    async def _build_empty_agent_output(self, exit_reason: str, error: Exception | None = None) -> AgentLoopOutput:
+    async def _build_empty_agent_output(self, exit_reason: str) -> AgentLoopOutput:
         self.chat_model.set_tools_schemas(self.tools_manager.tools_schemas)
         rollout_cache = await self.chat_model.prepare_rollout_cache(self.interaction.messages)
         prompt_ids = rollout_cache["prompt_ids"]
@@ -203,9 +200,14 @@ class UniAgentLoop(AgentLoopBase):
         env_config = AgentEnvConfig(**config_dict)
         return AgentEnv(run_id=self.run_id, env_config=env_config)
 
-    def convert_to_agent_output(self, interaction_result: dict) -> AgentLoopOutput:
+    async def convert_to_agent_output(self, interaction_result: dict) -> AgentLoopOutput:
         rollout_cache = interaction_result["rollout_cache"]
         reward_score = interaction_result.get("reward_score", None)
+
+        if len(rollout_cache["response_mask"]) == 0:
+            return await self._build_empty_agent_output(
+                exit_reason="no_response",
+            )
 
         num_turns = len(interaction_result["trajectory"])
         self.logger.info(f"num_turns: {num_turns}")
