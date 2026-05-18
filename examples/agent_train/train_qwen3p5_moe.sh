@@ -56,16 +56,16 @@ val_top_p=0.95
 gen_tp=${GEN_TP:-8}
 train_tp=${TP:-4}
 train_pp=${PP:-2}
+train_cp=${CP:-1}
 EP=${EP:-4}
 ETP=1
-CP=1
 
 OPTIM_OFFLOAD=${OPTIM_OFFLOAD:-False}
 optimizer_offload_fraction=${OFFLOAD_FRACTION:-1.}
 
-use_dynamic_bsz=False
-actor_ppo_max_token_len=$((max_prompt_length + max_response_length))
-infer_ppo_max_token_len=$((max_prompt_length + max_response_length))
+use_dynamic_bsz=True
+actor_ppo_max_token_len=$(((max_prompt_length + max_response_length) / CP))
+infer_ppo_max_token_len=$(((max_prompt_length + max_response_length) / CP))
 
 # ================= async policy =================
 rollout_name="vllm"
@@ -137,8 +137,8 @@ ray job submit --no-wait --runtime-env $RUNTIME_ENV \
     actor_rollout_ref.actor.megatron.use_mbridge=True \
     actor_rollout_ref.actor.megatron.vanilla_mbridge=True \
     actor_rollout_ref.model.trust_remote_code=True \
-    actor_rollout_ref.actor.megatron.use_remove_padding=False \
-    actor_rollout_ref.model.use_remove_padding=False \
+    actor_rollout_ref.actor.megatron.use_remove_padding=True \
+    actor_rollout_ref.model.use_remove_padding=True \
     actor_rollout_ref.actor.use_kl_loss=${use_kl_loss} \
     actor_rollout_ref.actor.kl_loss_coef=${kl_loss_coef} \
     actor_rollout_ref.actor.clip_ratio_low=${clip_ratio_low} \
@@ -163,14 +163,14 @@ ray job submit --no-wait --runtime-env $RUNTIME_ENV \
     +actor_rollout_ref.actor.optim.override_optimizer_config.use_precision_aware_optimizer=True \
     +actor_rollout_ref.actor.optim.override_optimizer_config.optimizer_cpu_offload=True \
     actor_rollout_ref.actor.ppo_mini_batch_size=${ppo_mini_batch_size} \
-    actor_rollout_ref.actor.megatron.param_offload=False \
+    actor_rollout_ref.actor.megatron.param_offload=True \
     actor_rollout_ref.actor.megatron.optimizer_offload=${OPTIM_OFFLOAD} \
     actor_rollout_ref.actor.megatron.grad_offload=True \
     actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=${train_pp} \
     actor_rollout_ref.actor.megatron.tensor_model_parallel_size=${train_tp} \
     actor_rollout_ref.actor.megatron.expert_model_parallel_size=${EP} \
     actor_rollout_ref.actor.megatron.expert_tensor_parallel_size=${ETP} \
-    actor_rollout_ref.actor.megatron.context_parallel_size=${CP} \
+    actor_rollout_ref.actor.megatron.context_parallel_size=${train_cp} \
     actor_rollout_ref.actor.entropy_coeff=0 \
     actor_rollout_ref.actor.optim.clip_grad=1.0 \
     actor_rollout_ref.actor.loss_agg_mode=${loss_agg_mode} \
@@ -222,7 +222,7 @@ ray job submit --no-wait --runtime-env $RUNTIME_ENV \
     +actor_rollout_ref.rollout.engine_kwargs.sglang.enable_weights_cpu_backup=False \
     +actor_rollout_ref.rollout.engine_kwargs.sglang.enable_draft_weights_cpu_backup=False \
     +actor_rollout_ref.rollout.engine_kwargs.sglang.disable_overlap_schedule=True \
-    trainer.logger=['console','tensorboard'] \
+    trainer.logger=['console','wandb'] \
     trainer.project_name="${project_name}" \
     trainer.experiment_name="${exp_name}" \
     trainer.save_freq=10 \
