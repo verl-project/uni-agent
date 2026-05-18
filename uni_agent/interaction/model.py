@@ -1,8 +1,10 @@
 import asyncio
 import uuid
+from functools import cached_property
 from typing import Any
 
 from uni_agent.utils import get_event_loop
+from verl.utils.chat_template import apply_chat_template
 from verl.utils.profiler import simple_timer
 from verl.utils.tokenizer import normalize_token_ids
 
@@ -67,9 +69,9 @@ class AgentChatModel:
     ):
         """Append newly added user/tool messages to the rollout cache."""
 
-        assert new_messages[-1]["role"] in ["user", "tool"], (
-            f"Last message must be user or tool, but got {new_messages[-1]['role']}"
-        )
+        valid_roles = {"user", "tool"}
+        invalid_roles = [message["role"] for message in new_messages if message["role"] not in valid_roles]
+        assert not invalid_roles, f"New messages must be user or tool, but got invalid roles: {invalid_roles}"
 
         # encode tool response
         tool_response_ids = await self._get_new_message_ids(new_messages)
@@ -136,49 +138,59 @@ class AgentChatModel:
             )
         return response_str, rollout_cache, generation_info
 
-    async def _get_new_message_ids(self, new_messages: list[dict[str, str]]) -> list[int]:
-        messages = [
-            {"role": "system", "content": "mock system"},
-            {"role": "user", "content": "mock user"},
-            {"role": "assistant", "content": "mock assistant"},
-        ]
-        base_ids = await self.loop.run_in_executor(
+    async def _get_new_message_ids(self, new_messages: list[dict[str, Any]]) -> list[int]:
+        tokenized_prompt = await self.loop.run_in_executor(
             None,
-            lambda: self.tokenizer.apply_chat_template(
-                messages,
-                tokenize=True,
-                tools=self.tools_schemas,
-            ),
-        )
-        base_ids = normalize_token_ids(base_ids)
-
-        messages.extend(new_messages)
-        full_ids = await self.loop.run_in_executor(
-            None,
-            lambda: self.tokenizer.apply_chat_template(
-                messages,
+            lambda: apply_chat_template(
+                self.tokenizer,
+                new_messages,
                 add_generation_prompt=True,
                 tokenize=True,
-                tools=self.tools_schemas,
             ),
         )
-        full_ids = normalize_token_ids(full_ids)
+        return self.message_boundary_tokens + normalize_token_ids(tokenized_prompt)
 
-        # Drop trailing whitespace ("\n") the template appends after the
-        # assistant's eos, so base_ids ends exactly where real generation stops.
+    @cached_property
+    def message_boundary_tokens(self) -> list[int]:
+        dummy_history = [
+            {"role": "user", "content": "dummy user"},
+            {"role": "assistant", "content": "dummy assistant"},
+        ]
+        dummy_next_message = {"role": "user", "content": "dummy user"}
+
+        try:
+            standalone_ids = normalize_token_ids(
+                apply_chat_template(
+                    self.tokenizer,
+                    [dummy_next_message],
+                    add_generation_prompt=True,
+                    tokenize=True,
+                )
+            )
+            with_boundary_ids = normalize_token_ids(
+                apply_chat_template(
+                    self.tokenizer,
+                    dummy_history + [dummy_next_message],
+                    add_generation_prompt=True,
+                    tokenize=True,
+                )
+            )
+        except Exception:
+            return []
+
+        if not standalone_ids or with_boundary_ids[-len(standalone_ids) :] != standalone_ids:
+            return []
+
+        text_before_message_ids = with_boundary_ids[: -len(standalone_ids)]
         eos_id = self.tokenizer.eos_token_id
-        cut = 0
-        for i in range(len(base_ids) - 1, -1, -1):
-            if base_ids[i] == eos_id:
-                cut = i + 1
-                break
-        base_ids = base_ids[:cut]
+        if eos_id is None:
+            return []
 
-        assert full_ids[: len(base_ids)] == base_ids, (
-            "base_ids must be an exact prefix of full_ids; "
-            "chat template produced inconsistent rendering between baseline and full."
-        )
-        return full_ids[len(base_ids) :]
+        for i in range(len(text_before_message_ids) - 1, -1, -1):
+            if text_before_message_ids[i] == eos_id:
+                return text_before_message_ids[i + 1 :]
+
+        return []
 
 
 # this class is only used for Inference-Only Scenario
