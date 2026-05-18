@@ -101,13 +101,15 @@ The roadmap below highlights the next major directions for Uni-Agent.
 
 **Environment Support**
 
-- [ ] Local deployment support.
-- [ ] More cloud deployment backends.
+- [x] Local deployment support.
+- [x] Modal deployment support.
+- [ ] More cloud deploymeny backends
 
 **Tool and Task Support**
 
-- [ ] More built-in tools and task patterns.
 - [ ] GUI tool support.
+- [ ] Integration of Skills.
+- [ ] More built-in tools and task patterns.
 
 **Model Support**
 

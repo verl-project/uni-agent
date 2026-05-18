@@ -69,9 +69,9 @@ class AgentChatModel:
     ):
         """Append newly added user/tool messages to the rollout cache."""
 
-        assert new_messages[-1]["role"] in ["user", "tool"], (
-            f"Last message must be user or tool, but got {new_messages[-1]['role']}"
-        )
+        valid_roles = {"user", "tool"}
+        invalid_roles = [message["role"] for message in new_messages if message["role"] not in valid_roles]
+        assert not invalid_roles, f"New messages must be user or tool, but got invalid roles: {invalid_roles}"
 
         # encode tool response
         tool_response_ids = await self._get_new_message_ids(new_messages)
