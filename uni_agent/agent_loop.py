@@ -72,74 +72,33 @@ class UniAgentLoop(AgentLoopBase):
         self.logger.info(f"output_dir: {self.output_dir}")
 
         async with self._semaphore:
-            try:
-                await self.env.start()
-
-                # tools schemas should be visible to the model
-                # to generate correct tool call format in response
-                self.chat_model.set_tools_schemas(self.tools_manager.tools_schemas)
-                await self.env.install_tools(self.tools_manager.tools)
-
-                interaction_result = await self.interaction.run()
-                interaction_result["metrics"] = dict(interaction_result.get("rollout_cache", {}).get("metrics", {}))
-
-                # interaction environment should be visible to the reward spec
-                if self.reward_spec is not None:
-                    reward_score, _ = await self.reward_spec.compute_reward(
-                        interaction_result=interaction_result,
-                    )
-                    interaction_result["reward_score"] = reward_score
-                else:
-                    self.logger.warning("No reward spec is provided, reward score will be set to -100")
-                    interaction_result["reward_score"] = -100
-
-                self._save_interaction_result(interaction_result)
-                output = self.convert_to_agent_output(interaction_result)
-            except Exception as e:
-                self.logger.critical(f"Agent loop failed before producing interaction result: {e}")
-                output = await self._build_empty_agent_output(
-                    exit_reason="agent_loop_failed",
-                    error=e,
+            await self.env.start()
+            interaction_result = await self._run_interaction()
+            # interaction environment should be visible to the reward spec
+            if self.reward_spec is not None:
+                reward_score, _ = await self.reward_spec.compute_reward(
+                    interaction_result=interaction_result,
                 )
-            finally:
-                await self.env.close()
+                interaction_result["reward_score"] = reward_score
+            else:
+                self.logger.warning("No reward spec is provided, reward score will be set to -100")
+                interaction_result["reward_score"] = -100
+
+            await self.env.close()
+            self._save_interaction_result(interaction_result)
+            output = self.convert_to_agent_output(interaction_result)
             return output
 
-    async def _build_empty_agent_output(self, exit_reason: str, error: Exception | None = None) -> AgentLoopOutput:
+    async def _run_interaction(self) -> dict:
+        # tools schemas should be visible to the model
+        # to generate correct tool call format in response
         self.chat_model.set_tools_schemas(self.tools_manager.tools_schemas)
-        rollout_cache = await self.chat_model.prepare_rollout_cache(self.interaction.messages)
-        prompt_ids = rollout_cache["prompt_ids"]
-        max_prompt_length = self.config.actor_rollout_ref.rollout.prompt_length
-        if len(prompt_ids) > max_prompt_length:
-            prompt_ids = prompt_ids[:max_prompt_length]
+        # tool should be runnable in the environment
+        await self.env.install_tools(self.tools_manager.tools)
 
-        dummy_token_id = getattr(self.tokenizer, "pad_token_id", None)
-        if dummy_token_id is None:
-            dummy_token_id = getattr(self.tokenizer, "eos_token_id", None)
-        if isinstance(dummy_token_id, list):
-            dummy_token_id = dummy_token_id[0] if dummy_token_id else 0
-        if dummy_token_id is None:
-            dummy_token_id = 0
-
-        extra_fields = {
-            "traj_masked": 1,
-            "traj_exit_reason": exit_reason,
-        }
-        if error is not None:
-            extra_fields["error"] = str(error)
-
-        return AgentLoopOutput(
-            prompt_ids=prompt_ids,
-            response_ids=[dummy_token_id] * 512,
-            response_mask=[0] * 512,
-            response_logprobs=None,
-            routed_experts=None,
-            multi_modal_data={},
-            reward_score=0,
-            num_turns=0,
-            metrics={},
-            extra_fields=extra_fields,
-        )
+        interaction_result = await self.interaction.run()
+        interaction_result["metrics"] = dict(interaction_result.get("rollout_cache", {}).get("metrics", {}))
+        return interaction_result
 
     def _save_interaction_result(self, interaction_result: dict):
         self.output_dir.mkdir(parents=True, exist_ok=True)
