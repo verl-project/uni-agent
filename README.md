@@ -103,7 +103,7 @@ The roadmap below highlights the next major directions for Uni-Agent.
 
 - [x] Local deployment support.
 - [x] Modal deployment support.
-- [ ] More cloud deployment backends.
+- [ ] More cloud deployment backends (e.g., Yuanrong Sandbox Management System).
 
 **Tool and Task Support**
 
@@ -116,13 +116,21 @@ The roadmap below highlights the next major directions for Uni-Agent.
 - [ ] DeepSeek model support.
 - [ ] Multimodal model support.
 
+**Agent Integration**
+
+- [ ] Black-box integration of additional third-party agents (Ref: [RFC #5790](https://github.com/verl-project/verl/issues/5790)).
+
+**Performance Optimization**
+
+- [ ] Optimize Agentic RL rollout performance (Ref: [Issue #6383](https://github.com/verl-project/verl/issues/6383)).
+
 ## Citation 📚
 
 If you find the project helpful, please cite:
 
 ```
 @misc{uniagent_github,
-  author       = {Yuyang Ding and Bo Wen and Guangming Sheng and Xibin Wu and Juntao Li and Min Zhang and Uni-Agent Contributors},
+  author       = {Yuyang Ding and Bo Wen and Guangming Sheng and Xibin Wu and Juntao Li and Min Zhang and and Zhiqiang Zhai and Xubo Cao and Uni-Agent Contributors},
   title        = {Uni-Agent: Build, Run, and Train Agents at Scale},
   year         = {2026},
   howpublished = {\url{https://github.com/yyDing1/uni-agent}},
