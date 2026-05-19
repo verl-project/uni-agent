@@ -4,7 +4,7 @@ Suppose you want an agent that can search arXiv, read recent paper abstracts, an
 
 With Uni-Agent, this is a small customization task rather than a framework rewrite. In this example, we build an arXiv search agent from scratch and use it to search recent papers, read their abstracts, and produce a ranked paper list.
 
-The runnable code lives in `examples/search_agent/demo.py`.
+The runnable code lives in `examples/search_arxiv/demo.py`.
 
 We will go through the process in three simple steps:
 
@@ -99,7 +99,7 @@ export MODEL_NAME=Qwen/Qwen3-Coder-30B-A3B-Instruct
 Then run the demo from the repository root:
 
 ```bash
-DEBUG_MODE=1 python examples/search_agent/demo.py
+DEBUG_MODE=1 python examples/search_arxiv/demo.py
 ```
 
 Setting `DEBUG_MODE=1` is recommended while developing. It prints the full runtime information to the current terminal, which makes it much easier to inspect environment startup, tool installation, model interaction, and final execution results.

@@ -85,7 +85,7 @@ The training script automatically resolves the Ray head IP and patches the agent
 If you just want to run rollouts without training, point `parallel_infer.py` at the same dataset / agent config:
 
 ```bash
-python examples/parallel_infer/parallel_infer.py \
+python examples/agent_interaction/parallel_infer.py \
     --data-path ~/data/asearcher_uni_processed/test.parquet \
     --model-path /path/to/your/model \
     --agent-config-path examples/search_agent/agent_config.yaml \

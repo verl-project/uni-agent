@@ -29,7 +29,7 @@ Use the `parallel_infer.py` script to start the inference process. It can run **
 
 ```bash
 # From repo root
-python examples/parallel_infer/parallel_infer.py \
+python examples/agent_interaction/parallel_infer.py \
     --data-path ~/data/swe_agent/swe_bench_verified.parquet \
     --model-path /path/to/your/local/model \
     --engine vllm \
@@ -49,7 +49,7 @@ export RUNTIME_ENV=/path/to/runtime_env.yaml   # optional
 
 ray job submit --no-wait --runtime-env "$RUNTIME_ENV" \
   --working-dir "${WORKING_DIR}" \
-  -- python3 examples/parallel_infer/parallel_infer.py \
+  -- python3 examples/agent_interaction/parallel_infer.py \
   --data-path /path/to/swe_bench_verified.parquet \
   --model-path /path/to/model \
   --engine vllm \
@@ -75,7 +75,7 @@ ray job submit --no-wait --runtime-env "$RUNTIME_ENV" \
 
 For a complete list of parameters, run:
 ```bash
-python examples/parallel_infer/parallel_infer.py --help
+python examples/agent_interaction/parallel_infer.py --help
 ```
 
 ## Output
