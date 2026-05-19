@@ -24,6 +24,7 @@ Start with the docs below:
 
 - `Launch`: [Launch an agent environment](https://uni-agent.readthedocs.io/en/latest/start/agent_env.html) to run simple demo scripts.
 - `Build`: [Build a simple search agent](https://uni-agent.readthedocs.io/en/latest/start/arxiv_search_agent.html) with minimal customization for arXiv paper search and recommendation.
+- `Search`: [Train a search agent](https://uni-agent.readthedocs.io/en/latest/start/search_agent.html) on ASearcher with a LocalWiki retrieval service.
 - `Scale`: [Run parallel agent interaction](https://uni-agent.readthedocs.io/en/latest/start/agent_interaction.html) for large-scale interaction, inference, and verification workloads.
 - `Train`: [Train an agent with reinforcement learning](https://uni-agent.readthedocs.io/en/latest/start/agent_train.html) using state-of-the-art training techniques.
 
