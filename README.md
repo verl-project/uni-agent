@@ -77,23 +77,28 @@ See [`dashboard/README.md`](./dashboard/README.md) for more details.
 We compare Uni-Agent with existing agent systems on parallel inference and verification workloads.
 
 
-| Model            | Benchmark          | OpenHands | Uni-Agent (1-Attempt, Avg@4) |
-| ---------------- | ------------------ |:---------:|:----------------------------:|
-| Qwen3-Coder-30B  | SWE-Bench-Verified | -         | **48.8**                     |
-| Qwen3-Coder-480B | SWE-Bench-Verified | 62.4      | **64.2**                     |
-| Qwen3-Coder-Next | SWE-Bench-Verified | 66.6      | **67.7**                     |
+| Model            | Benchmark          | OpenHands | Uni-Agent | Setting |
+| ---------------- | ------------------ |:---------:|:---------:| ------- |
+| Qwen3-Coder-30B  | SWE-Bench Verified | -         | **49.2**  | Avg@4, 100 turns, 128K |
+| Qwen3-Coder-480B | SWE-Bench Verified | 62.4      | **64.2**  | Avg@4, 500 turns, 256K |
+| Qwen3-Coder-Next | SWE-Bench Verified | 66.6      | **67.6**  | Avg@4, 300 turns, 128K |
+| Qwen3.5-35B-A3B  | SWE-Bench Verified | 62.0      | **68.4**  | Avg@1, 300 turns, 128K |
 
 
 ### Agent Reinforcement Learning
 
-Uni-Agent supports agent RL training with the same interaction stack used at inference time. A representative recipe is to train [Qwen3-30B-A3B-Instruct](https://huggingface.co/Qwen/Qwen3-30B-A3B-Instruct-2507) on R2E-Gym using **Fully-Asynchronous RL, Partial Rollout, and GSPO**.
-Example training scripts are available in [examples/agent_train](examples/agent_train).
+Uni-Agent supports agent RL training with the same interaction stack used at inference time. We provide fully async training recipes across multiple tasks, models and datasets, with GRPO/GSPO-style objectives and partial rollout support.
+Example scripts are available in [examples/agent_train](examples/agent_train).
 
 
-| Model                        | Dataset | Train Setup                          | Base | RL       |
-| ---------------------------- | ------- | ------------------------------------ |:----:|:--------:|
-| Qwen3-30B-A3B-Instruct       | R2E-Gym | GSPO + Fully-Async + Partial Rollout | 22.2 | **36.8** |
-| Qwen3-Coder-30B-A3B-Instruct | R2E-Gym | GSPO + Fully-Async + Partial Rollout | 46.2 | **52.0** |
+| Model                        | Dataset      | Method | Setting | Base | RL |
+| ---------------------------- | ------------ | ------ | ------- |:----:|:--:|
+| Qwen3-30B-A3B-Instruct       | R2E-Gym      | GSPO   | Fully Async, 100 turns, 128K | 22.2 | **36.8** |
+| Qwen3-Coder-30B-A3B-Instruct | R2E-Gym      | GSPO   | Fully Async, 100 turns, 128K | 46.2 | **52.0** |
+| Qwen3.5-9B                   | SWE-reBench  | GRPO   | Fully Async, 100 turns, 128K | 53.8 | **59.2** |
+
+More training dynamics, including reward, validation score, and average-turn curves, are available in the [agent training guide](https://uni-agent.readthedocs.io/en/latest/start/agent_train.html).
+
 
 
 ## Roadmap 🗺️

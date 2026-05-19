@@ -8,14 +8,14 @@ The inference and verification scripts for this page live under `examples/agent_
 
 **Reference results on SWE-Bench Verified with Uni-Agent:**
 
-| **Model**                      | Inference Config                                   | **Results (Avg@N)** |
-| ------------------------------ | -------------------------------------------------- | ------------------- |
-| Qwen3-Coder-30B-A3B-Instruct   | temp=0.8, topp=0.9, tp=4, 100 turns, 64k context   | 49.2 (N=4)          |
-| Qwen3-Coder-480B-A35B-Instruct | temp=0.8, topp=0.9, tp=16, 500 turns, 128k context | 62.4 (N=4)          |
-| Qwen3-Coder-Next               | temp=0.8, topp=0.9, tp=16, 300 turns, 128k context | 66.6 (N=4)          |
-| Qwen3.5-4B                     | temp=0.8, topp=0.9, tp=4, 100 turns, 64k context   | 45.2 (N=1)          |
-| Qwen3.5-9B                     | temp=1.0, topp=0.7, tp=4, 100 turns, 64k context   | 53.8 (N=1)          |
-| Qwen3.5-35B-A3B                | temp=1.0, topp=0.7, tp=4, 300 turns, 128k context  | 68.4 (N=1)          |
+| **Model**                      | Inference Config                                   | **Uni-Agent** |
+| ------------------------------ | -------------------------------------------------- |:-------------:|
+| Qwen3-Coder-30B-A3B-Instruct   | temp=0.8, topp=0.9, tp=4, 100 turns, 128K context  | **49.2** (Avg@4) |
+| Qwen3-Coder-480B-A35B-Instruct | temp=0.8, topp=0.9, tp=16, 500 turns, 256K context | **64.2** (Avg@4) |
+| Qwen3-Coder-Next               | temp=0.8, topp=0.9, tp=16, 300 turns, 128K context | **67.6** (Avg@4) |
+| Qwen3.5-4B                     | temp=0.8, topp=0.9, tp=4, 100 turns, 64K context   | **45.2** (Avg@1) |
+| Qwen3.5-9B                     | temp=1.0, topp=0.7, tp=4, 100 turns, 64K context   | **53.8** (Avg@1) |
+| Qwen3.5-35B-A3B                | temp=1.0, topp=0.7, tp=4, 300 turns, 128K context  | **68.4** (Avg@1) |
 
 `Avg@N` reports the average pass rate over `N` rollouts per task.
 
