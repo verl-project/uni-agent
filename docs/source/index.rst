@@ -7,7 +7,8 @@ infrastructure needed to evaluate agent behavior across many tasks.
 
 The quickstart guides below walk through the core workflow: install Uni-Agent on
 top of a `verl` environment, launch an agent environment, customize a simple
-search agent, and then run larger-scale agent interaction examples.
+search agent, train a retrieval agent, and then run larger-scale agent
+interaction examples.
 
 .. raw:: html
 
@@ -24,5 +25,6 @@ search agent, and then run larger-scale agent interaction examples.
    start/installation.md
    start/agent_env.md
    start/arxiv_search_agent.md
+   start/search_agent.md
    start/agent_interaction.md
    start/agent_train.md

@@ -88,6 +88,7 @@ html_static_path = ["../_static"]
 html_extra_path = [
     "../../assets/uni-agent.png",
     "../../assets/async_comp.png",
+    "../../assets/results_qwen3_30b.png",
 ]
 
 # Add the JavaScript file

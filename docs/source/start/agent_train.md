@@ -5,7 +5,13 @@ After you can run parallel agent interaction, the next step is to train the poli
 For agent tasks, we recommend **fully asynchronous training**. Agent rollouts have uneven latency because different tasks take different numbers of turns, commands, tests, and sandbox operations. Fully async training keeps rollout workers and training workers running independently, which usually gives better utilization than waiting for every rollout in a synchronous batch.
 
 <div style="margin: 20px 0; text-align: center;">
-  <img src="../async_comp.png" alt="Fully asynchronous agent training comparison" style="width: 100%; max-width: 620px; height: auto;" />
+  <img src="../async_comp.png" alt="Fully asynchronous agent training comparison" style="width: 100%; max-width: 600px; height: auto;" />
+</div>
+
+The figure below shows an example **Qwen3-30B-A3B-Instruct** training run on veFaaS, using R2E-Gym-Subset for training and SWE-Bench Verified for evaluation.
+
+<div style="margin: 20px 0; text-align: center;">
+  <img src="../results_qwen3_30b.png" alt="Qwen3-Coder training results" style="width: 100%; max-width: 800px; height: auto;" />
 </div>
 
 
