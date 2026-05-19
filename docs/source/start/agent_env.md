@@ -1,24 +1,46 @@
 # Launch an Agent Environment
 
-Long-horizon agent tasks, such as software engineering, need a **persistent sandbox**: a place where the agent can run commands, modify the environment, and preserve state across many steps. This document shows how to start a sandbox, install tools, and run a simple script.
+Long-horizon agent tasks, such as software engineering, need a **persistent sandbox** where the agent can run commands, install packages, edit files, and preserve state across many steps. This document shows how to start an agent environment, install tools inside it, and run a simple persistence demo.
 
-The runnable code referenced in this document lives under `examples/agent_env`. You can run the example with:
-
-```bash
-DEPLOYMENT=<local|vefaas> DEBUG_MODE=1 python examples/agent_env/demo.py
-```
-
-Setting `DEBUG_MODE=1` prints all intermediate startup and runtime output to the current terminal.
+The runnable example lives under `examples/agent_env`; the final section shows how to run it end to end.
 
 ---
 
 ## Start a Sandbox
 
-The first step is to start a sandbox. You can do this either locally or on a remote FaaS platform.
+The first step is to start a sandbox. Uni-Agent supports local sandboxes and remote cloud sandbox backends.
+
+- Use **local deployment** for quick debugging on a machine with container runtime permissions.
+- Use **veFaaS deployment** when you run sandboxes on Volcengine FaaS (best for CN clusters).
+- Use **Modal deployment** when you run sandboxes on Modal (available globally).
+
+> **Note:** Some environments do not grant permission to start local containers or virtualized sandboxes. If these runtimes are restricted, use a cloud sandbox backend such as veFaaS or Modal.
+
+Each subsection below focuses only on the deployment config needed to start the sandbox. Tool installation and the end-to-end demo are covered later.
+
+Each deployment config is passed through `AgentEnvConfig` and then used to start an `AgentEnv`:
+
+```python
+import uuid
+from uni_agent.interaction import AgentEnv, AgentEnvConfig
+
+run_id = str(uuid.uuid4())
+env_config = AgentEnvConfig(**{
+    "deployment": {
+        "type": "<local|vefaas|modal>",
+        # backend-specific fields go here
+    },
+    "env_variables": {
+        "PIP_PROGRESS_BAR": "off",
+    },
+})
+env = AgentEnv(run_id=run_id, env_config=env_config)
+env.start()
+```
 
 ### Local deployment
 
-Local deployment starts a sandbox on the current machine, then connects to the `swerex` server inside that sandbox. This is the easiest way to debug environment behavior before moving to a remote platform.
+Local deployment starts a sandbox on the current machine, then connects to the `swerex` server inside that sandbox. This is the easiest way to debug environment behavior before moving to a remote backend.
 
 The local backend prefers Apptainer or Singularity when available. Docker and Podman are also supported and can be selected explicitly with `container_runtime` or discovered from `PATH` when Apptainer/Singularity are not installed.
 
@@ -31,15 +53,12 @@ apptainer --version
 
 If your runtime is not on `PATH`, set `LOCAL_CONTAINER_RUNTIME` or `UNI_AGENT_CONTAINER_RUNTIME` to the binary path. When no explicit `container_runtime` is provided, the local backend checks these environment variables, then discovers `apptainer`, `singularity`, `docker`, or `podman` from `PATH`.
 
-**Config and start.** Build the config, create the environment, and start it:
+**Config.** Use `type: "local"` and provide an image plus a command that starts `swerex.server` inside the sandbox:
 
 ```python
 import os
-import uuid
-from uni_agent.interaction import AgentEnv, AgentEnvConfig
 
-run_id = str(uuid.uuid4())
-env_config = {
+env_config = AgentEnvConfig(**{
     "deployment": {
         "type": "local",
         "image": os.getenv("LOCAL_DEPLOYMENT_IMAGE", "python:3.12"),
@@ -53,10 +72,7 @@ env_config = {
     "env_variables": {
         "PIP_PROGRESS_BAR": "off",
     }
-}
-env_config = AgentEnvConfig(**env_config)
-env = AgentEnv(run_id=run_id, env_config=env_config)
-env.start()
+})
 ```
 
 - **`type`** must be `"local"`.
@@ -69,12 +85,6 @@ env.start()
 
 Apptainer launches the server with host networking, so the selected port is passed directly to `swerex.server`. Docker and Podman keep using port publishing.
 
-You can run the full demo from the repo root with:
-
-```bash
-DEPLOYMENT=local DEBUG_MODE=1 python examples/agent_env/demo.py
-```
-
 Useful local overrides:
 
 ```bash
@@ -83,11 +93,11 @@ export LOCAL_DEPLOYMENT_IMAGE=python:3.12
 export LOCAL_DEPLOYMENT_EXTRA_ARGS="--bind /data:/data"
 ```
 
-### Remote deployment (VEFAAS)
+### veFaaS deployment
 
-VEFAAS is a Volcengine FaaS platform. For workloads with many concurrent runs, it is often more stable and scales better than self-hosted local instances.
+veFaaS is a Volcengine FaaS platform. For workloads with many concurrent runs, it is often more stable and scales better than self-hosted local instances.
 
-You can directly refer to [this tutorial](https://www.volcengine.com/docs/6662/2278468?lang=zh) to obtain the required configuration parameters for the integration with the veFaaS cloud sandbox, complete the environment setup, and verify connectivity.
+Follow the [Volcengine tutorial](https://www.volcengine.com/docs/6662/2278468?lang=zh) to obtain the required veFaaS configuration parameters, complete the cloud sandbox setup, and verify connectivity.
 
 **Dependencies.** Install the required packages:
 
@@ -104,21 +114,18 @@ export VEFAAS_FUNCTION_ID=xxxxxxxxxx
 export VEFAAS_FUNCTION_ROUTE=xxxxxxxxxx
 ```
 
-| Variable | Description |
-|----------|-------------|
-| `VOLCE_ACCESS_KEY` or `VOLCENGINE_ACCESS_KEY` | Volcengine access key |
-| `VOLCE_SECRET_KEY` or `VOLCENGINE_SECRET_KEY` | Volcengine secret key |
-| `VEFAAS_REGION` | Region (optional, default `cn-beijing`) |
+- `VOLCE_ACCESS_KEY` or `VOLCENGINE_ACCESS_KEY`: Volcengine access key.
+- `VOLCE_SECRET_KEY` or `VOLCENGINE_SECRET_KEY`: Volcengine secret key.
+- `VEFAAS_FUNCTION_ID`: veFaaS function ID.
+- `VEFAAS_FUNCTION_ROUTE`: veFaaS function route.
+- `VEFAAS_REGION`: optional region, defaulting to `cn-beijing`.
 
-**Config and start.** Build the config, create the environment, and start it:
+**Config.** Use `type: "vefaas"` and pass the veFaaS function settings:
 
 ```python
 import os
-import uuid
-from uni_agent.interaction import AgentEnv, AgentEnvConfig
 
-run_id = str(uuid.uuid4())
-env_config = {
+env_config = AgentEnvConfig(**{
     "deployment": {
         "type": "vefaas",
         "image": "enterprise-public-2-cn-beijing.cr.volces.com/vefaas-public/python:3.12",
@@ -131,19 +138,54 @@ env_config = {
     "env_variables": {
         "PIP_PROGRESS_BAR": "off",
     }
-}
-env_config = AgentEnvConfig(**env_config)
-env = AgentEnv(run_id=run_id, env_config=env_config)
-env.start()
+})
 ```
 
-- **`run_id`**: A unique identifier for the run, used in logging and deployment.
-- **`deployment`**: `type` must be `"vefaas"`.
-  - `image` is the sandbox Docker image.
-  - `command` is the startup command.
-  - `timeout` and `startup_timeout` are specified in seconds.
-  - `function_id` and `function_route` identify your VEFAAS function.
-- **`env_variables`**: Environment variables exported into the sandbox shell after startup.
+- **`image`** is the sandbox Docker image.
+- **`command`** is the startup command. It must start `swerex.server` or install and start it through the veFaaS bootstrap script.
+- **`function_id`** and **`function_route`** identify your veFaaS function.
+- **`timeout`** and **`startup_timeout`** are specified in seconds.
+
+### Modal deployment
+
+Modal deployment starts the sandbox on Modal and exposes the `swerex` runtime through a Modal encrypted port. It is useful when local container permissions are unavailable or when you want a managed remote sandbox without maintaining your own cluster.
+
+**Dependencies.** Install the Modal client and the runtime package:
+
+```bash
+pip install modal swe-rex boto3
+```
+
+**Environment variables.** Set your Modal credentials before starting the sandbox:
+
+```bash
+export MODAL_TOKEN_ID=xxxxxxxxxx
+export MODAL_TOKEN_SECRET=xxxxxxxxxx
+```
+
+**Config.** Use `type: "modal"`. Modal starts `swerex` automatically, so you only need to provide the image and timeout settings:
+
+```python
+env_config = AgentEnvConfig(**{
+    "deployment": {
+        "type": "modal",
+        "image": "python:3.12",
+        "startup_timeout": 600.0,
+        "runtime_timeout": 300.0,
+        "deployment_timeout": 3600.0,
+    },
+    "env_variables": {
+        "PIP_PROGRESS_BAR": "off",
+    }
+})
+```
+
+- **`image`** can be a public registry image such as `python:3.12` or a local Dockerfile path.
+- **`startup_timeout`** controls how long Uni-Agent waits for the `swerex` runtime to become reachable.
+- **`runtime_timeout`** controls per-operation runtime requests.
+- **`deployment_timeout`** controls the Modal sandbox lifetime.
+- **`modal_sandbox_kwargs`** can pass additional keyword arguments to `modal.Sandbox.create`.
+- **`install_pipx`** defaults to `true`, so Modal can start `swerex` with `pipx` if it is not already installed in the image.
 
 ---
 
@@ -162,7 +204,7 @@ tools = [ToolConfig(**tool_config).get_tool() for tool_config in tools_config]
 env.install_tools(tools)
 ```
 
-We provide common tool implementations for tasks such as running bash commands and editing files. You can also customize and integrate your own tools.
+Uni-Agent provides common tool implementations for tasks such as running bash commands and editing files. You can also customize and integrate your own tools.
 
 You can verify that the tools were installed successfully by running:
 
@@ -213,17 +255,10 @@ print(env.communicate("cat /tmp/demo_out.txt"))  # -> 6
 env.close()
 ```
 
-After setting your credentials, you can run the full demo from the repo root with:
+You can run the full demo from the repo root with the deployment backend you want to test:
 
 ```bash
-python examples/agent_env/demo.py
+DEPLOYMENT=<local|vefaas|modal> DEBUG_MODE=1 python examples/agent_env/demo.py
 ```
 
-## Agent Environment Quick Reference
-
-| Step | Code |
-|------|------|
-| Config & start | `AgentEnvConfig(**env_config)` → `AgentEnv(...)` → `env.start()` |
-| Tools | `env.install_tools(tools)` |
-| Run command | `env.communicate("...")` |
-| Close | `env.close()` |
+Set `DEBUG_MODE=1` when you want to print sandbox startup and runtime output in the current terminal.

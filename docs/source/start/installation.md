@@ -53,7 +53,7 @@ env_vars:
   CUDA_DEVICE_MAX_CONNECTIONS: "1"
   VLLM_DISABLE_COMPILE_CACHE: "1"
 
-  # If you use VEFAAS sandbox deployment
+  # If you use veFaaS sandbox deployment
   VEFAAS_FUNCTION_ID: "xxx"
   VEFAAS_FUNCTION_ROUTE: "xxx"
   VOLCE_ACCESS_KEY: "xxx"
@@ -82,7 +82,7 @@ Uni-Agent keeps the base setup minimal. Install additional packages only for the
 # If you use Modal as the sandbox backend:
 pip install modal
 
-# If you use VEFAAS as the sandbox backend:
+# If you use veFaaS as the sandbox backend:
 pip install volcengine-python-sdk
 ```
 

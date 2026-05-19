@@ -46,7 +46,7 @@ The keys under `tools_kwargs` are defined per sample and must match what the age
 ```
 
 - `**tools_kwargs.env**`: Per-sample environment setup:
-  - `image` is the Docker image for that instance, for example one provided by VEFAAS.
+  - `image` is the Docker image for that instance, for example one provided by veFaaS.
   - `post_setup_cmd` is the shell command run after the environment starts, for example `git checkout <base_commit>` followed by cleanup commands to restore the codebase to the correct state.
 - `**tools_kwargs.reward**`: Keys must match the selected `RewardSpec`'s constructor parameters (e.g. `name`, `metadata`).
 
@@ -157,7 +157,7 @@ Below is an annotated version. Each comment explains the corresponding key and t
 
 If you want to **re-run evaluation only**, for example to apply the gold patch and compute the reward again without running the model, use `parallel_verify_swe.py`. It loads the same Parquet dataset, starts Ray actors, and runs each sample in an agent environment to determine whether the instance is resolved, along with optional metrics such as execution time. This is useful for validating results or rescoring them with different reward settings.
 
-**Prerequisites:** Same as for inference: VEFAAS, or your chosen deployment, must be configured, and the required credentials must be set, for example `VEFAAS_FUNCTION_ID`, `VEFAAS_FUNCTION_ROUTE`, `VOLCE_ACCESS_KEY`, and `VOLCE_SECRET_KEY`.
+**Prerequisites:** Same as for inference: veFaaS, or your chosen deployment, must be configured, and the required credentials must be set, for example `VEFAAS_FUNCTION_ID`, `VEFAAS_FUNCTION_ROUTE`, `VOLCE_ACCESS_KEY`, and `VOLCE_SECRET_KEY`.
 
 **Run:**
 

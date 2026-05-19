@@ -11,6 +11,6 @@ DEPLOYMENT=<local|vefaas> DEBUG_MODE=1 python examples/agent_env/demo.py
 ```
 
 - `local`: run with a local sandbox backend.
-- `vefaas`: run with a remote VEFAAS deployment.
+- `vefaas`: run with a remote veFaaS deployment.
 
 See the main documentation for environment variables, dependencies, and deployment instructions.

@@ -97,7 +97,7 @@ or:
 bash examples/agent_train/train_fully_async.sh
 ```
 
-If you use VEFAAS or other remote environments, make sure the required credentials and deployment settings are already present in `runtime_env.yaml` or the job environment. See the environment setup document for the sandbox-side details.
+If you use veFaaS or other remote environments, make sure the required credentials and deployment settings are already present in `runtime_env.yaml` or the job environment. See the environment setup document for the sandbox-side details.
 
 
 Agent training uses `actor_rollout_ref.rollout.agent.agent_loop_config_path` to locate the YAML file that defines the agent loop. In the default scripts, this path is:

@@ -47,7 +47,7 @@ class RemoteRuntimeConfig(BaseModel):
     base_url: str | None = None
     """The base URL for remote runtime connection."""
     extra_params: dict[str, Any] | None = None
-    """Extra parameters for remote runtime connection (for VEFAAS)."""
+    """Extra parameters for remote runtime connection (for veFaaS)."""
     proxy: str | None = None
     """The proxy to use for the http/https connection."""
 
@@ -102,7 +102,7 @@ class RemoteRuntime(AbstractRuntime):
 
     @property
     def _api_url(self) -> str:
-        # Prioritize base_url if provided (for VEFAAS deployments)
+        # Prioritize base_url if provided (for veFaaS deployments)
         if hasattr(self._config, "base_url") and self._config.base_url:
             return self._config.base_url
         # Fall back to host/port combination for direct connections

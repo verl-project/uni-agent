@@ -96,7 +96,7 @@ class ModalDeploymentConfig(BaseModel):
 
 
 class VefaasDeploymentConfig(BaseModel):
-    """Configuration for VEFAAS deployment."""
+    """Configuration for veFaaS deployment."""
 
     image: str | None = None
     """Docker image to use for the sandbox."""
@@ -107,9 +107,9 @@ class VefaasDeploymentConfig(BaseModel):
     startup_timeout: float = 120.0
     """Timeout waiting for runtime to start."""
     function_id: str | None = None
-    """VEFAAS function ID."""
+    """veFaaS function ID."""
     function_route: str | None = None
-    """VEFAAS function Route."""
+    """veFaaS function route."""
     proxy: str | None = None
     """Proxy to use for the connection."""
 
