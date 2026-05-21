@@ -171,7 +171,7 @@ def _build_sample(task_dir: Path) -> dict:
             # keep it well below ``runtime_timeout`` so the swerex layer can
             # return a clean timeout error rather than tripping a deployment-
             # level cancel.
-            "action_timeout": 300,
+            "action_timeout": agent_timeout_sec,
             # ``max_turns`` is a safety net; the binding constraint should be
             # ``agent.timeout_sec`` from ``task.toml``, not the turn cap.
             "max_turns": 100000,

@@ -12,6 +12,6 @@
 
   _target_: uni_agent.agent_loop.UniAgentLoop
 
-  concurrency: 16
+  concurrency: 128
   log_dir: /tmp/terminal_bench_eval
   mask_abnormal_exit_traj: false
