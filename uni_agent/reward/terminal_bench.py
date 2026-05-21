@@ -105,9 +105,7 @@ class TerminalBenchRewardSpec(AbstractRewardSpec):
         if kind == "text":
             reward_text = (await self.env.read_file(REWARD_TEXT_PATH)).strip()
             return {"reward": float(reward_text)}
-        raise FileNotFoundError(
-            f"Neither {REWARD_JSON_PATH} nor {REWARD_TEXT_PATH} exists after running tests"
-        )
+        raise FileNotFoundError(f"Neither {REWARD_JSON_PATH} nor {REWARD_TEXT_PATH} exists after running tests")
 
     @auto_await
     async def apply_gold_solution(self) -> dict:

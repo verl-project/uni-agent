@@ -123,10 +123,7 @@ def main() -> None:
     num_workers = min(args.num_workers, len(samples))
     workers = [TestEvalActor.remote() for _ in range(num_workers)]
     chunk_size = (len(samples) - 1) // num_workers + 1
-    futures = [
-        workers[i].run_batch.remote(samples[i * chunk_size : (i + 1) * chunk_size])
-        for i in range(num_workers)
-    ]
+    futures = [workers[i].run_batch.remote(samples[i * chunk_size : (i + 1) * chunk_size]) for i in range(num_workers)]
 
     logger.info(f"verifying {len(samples)} samples across {num_workers} workers (chunk_size={chunk_size})")
     begin_time = time.time()
@@ -141,9 +138,7 @@ def main() -> None:
     fail_tle_num = sum(not _is_resolved(r) and not r.get("eval_completed") for r in results)
 
     fail_wa_names = [
-        _task_id(s)
-        for s, r in zip(samples, results, strict=True)
-        if not _is_resolved(r) and r.get("eval_completed")
+        _task_id(s) for s, r in zip(samples, results, strict=True) if not _is_resolved(r) and r.get("eval_completed")
     ]
     fail_tle_names = [
         _task_id(s)
@@ -155,8 +150,7 @@ def main() -> None:
     avg_exec_time = sum(exec_times) / len(exec_times) if exec_times else 0.0
 
     logger.info(
-        f"all_num: {all_num}, success_num: {success_num}, "
-        f"fail_wa_num: {fail_wa_num}, fail_tle_num: {fail_tle_num}"
+        f"all_num: {all_num}, success_num: {success_num}, fail_wa_num: {fail_wa_num}, fail_tle_num: {fail_tle_num}"
     )
     logger.info(f"avg_execution_time: {avg_exec_time:.2f}s (n={len(exec_times)})")
     logger.info(f"fail_wa task_ids (test ran, reward<{SUCCESS_REWARD_THRESHOLD}): {fail_wa_names}")

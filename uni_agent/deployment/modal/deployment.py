@@ -251,9 +251,7 @@ class ModalDeployment(AbstractDeployment):
                 try:
                     await self.stop()
                 except Exception as stop_exc:
-                    self.logger.error(
-                        f"Cleanup after failed sandbox start raised: {stop_exc}"
-                    )
+                    self.logger.error(f"Cleanup after failed sandbox start raised: {stop_exc}")
                 if retry < max_retries - 1:
                     sleep_time = min(30, 2**retry)
                     self.logger.info(f"Retrying modal deployment startup in {sleep_time} seconds...")

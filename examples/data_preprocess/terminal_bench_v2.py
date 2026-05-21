@@ -5,11 +5,10 @@ import os
 import shutil
 import subprocess
 import tarfile
-import tomllib
 from pathlib import Path, PurePosixPath
 
+import tomllib
 from datasets import Dataset
-
 
 impl = os.getenv("DEPLOYMENT", "modal").lower()
 if impl != "modal":
