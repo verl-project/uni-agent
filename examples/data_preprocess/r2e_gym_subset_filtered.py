@@ -150,7 +150,7 @@ def build_r2e_gym_verified():
             "extra_info": {
                 "tools_kwargs": {
                     "env": {
-                        "image": image_name,
+                        "deployment": {"image": image_name},
                         "post_setup_cmd": POST_SETUP_CMD,
                     },
                     "reward": {
