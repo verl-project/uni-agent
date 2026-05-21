@@ -254,7 +254,6 @@ def get_vefaas_client(access_key: str, secret_key: str, region: str):
     configuration.auto_retry = False
     configuration.region = region
     configuration.client_side_validation = True
-    configuration.proxy = "http://[fdbd:dc02:fe:20a2::1]:8118"
     api_client = volcenginesdkcore.ApiClient(configuration)
     return volcenginesdkvefaas.VEFAASApi(api_client)
 
