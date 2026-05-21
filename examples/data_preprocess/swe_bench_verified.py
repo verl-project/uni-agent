@@ -1,12 +1,21 @@
 # ruff: noqa: E501
 import argparse
 import os
+from pathlib import Path
 
 from datasets import load_dataset
 
 impl = os.getenv("DEPLOYMENT", "vefaas").lower()
 if impl == "local":
-    raise NotImplementedError("Local deployment is not implemented yet")
+
+    def get_image_name(dataset_id: str, instance_id: str) -> str:
+        assert dataset_id == "swe-bench-verified"
+        parts = instance_id.split("__")
+        assert len(parts) == 2
+        project_name = parts[0].lower()
+        instance_number = parts[1].lower()
+        return f"swebench/sweb.eval.x86_64.{project_name}_1776_{instance_number}:latest"
+
 elif impl == "vefaas":
     from uni_agent.deployment.vefaas.deployment import get_vefaas_image_name as get_image_name
 elif impl == "modal":
@@ -104,6 +113,12 @@ A successful resolution means:
 """.strip()
 
 
+def _save_parquet(dataset, local_save_dir: str, filename: str) -> None:
+    save_dir = Path(local_save_dir).expanduser()
+    save_dir.mkdir(parents=True, exist_ok=True)
+    dataset.to_parquet(str(save_dir / filename))
+
+
 def build_swe_bench_verified():
     def process_swe_bench_verified(example):
         dataset_id = "swe-bench-verified"
@@ -152,4 +167,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     sbv_dataset = build_swe_bench_verified()
-    sbv_dataset.to_parquet(f"{args.local_save_dir}/swe_bench_verified_{impl}.parquet")
+    _save_parquet(sbv_dataset, args.local_save_dir, f"swe_bench_verified_{impl}.parquet")

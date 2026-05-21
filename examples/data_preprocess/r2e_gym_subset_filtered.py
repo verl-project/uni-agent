@@ -2,13 +2,12 @@
 import argparse
 import json
 import os
+from pathlib import Path
 
 from datasets import load_dataset
 
 impl = os.getenv("DEPLOYMENT", "vefaas").lower()
-if impl == "local":
-    raise NotImplementedError("Local deployment is not implemented yet")
-elif impl == "vefaas":
+if impl in {"local", "vefaas"}:
     PUB_VOLCES_IMG_URL_R2E = "enterprise-public-cn-beijing.cr.volces.com/r2e-gym-subset/{instance_number}:latest"
 
     def get_image_name(dataset_id: str, instance_id: str) -> str:
@@ -125,6 +124,12 @@ ln -s /root/r2e_tests /testbed/r2e_tests
 """.strip()
 
 
+def _save_parquet(dataset, local_save_dir: str, filename: str) -> None:
+    save_dir = Path(local_save_dir).expanduser()
+    save_dir.mkdir(parents=True, exist_ok=True)
+    dataset.to_parquet(str(save_dir / filename))
+
+
 def build_r2e_gym_verified():
     from r2egym.commit_models.diff_classes import ParsedCommit
 
@@ -176,4 +181,4 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     sbv_dataset = build_r2e_gym_verified()
-    sbv_dataset.to_parquet(f"{args.local_save_dir}/r2e_gym_subset_filtered.parquet")
+    _save_parquet(sbv_dataset, args.local_save_dir, "r2e_gym_subset_filtered.parquet")
