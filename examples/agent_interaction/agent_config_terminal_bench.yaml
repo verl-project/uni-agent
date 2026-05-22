@@ -1,0 +1,17 @@
+# Terminal-Bench v2 agent-loop config.
+#
+# Mode-2 (full-override) usage: every per-task field — ``env`` / ``reward`` /
+# ``interaction`` / ``tools`` — is emitted into ``extra_info.tools_kwargs``
+# by ``examples/data_preprocess/terminal_bench_v2.py``. ``UniAgentLoop``
+# deep-merges those over this YAML, so this file only needs to carry truly
+# global / process-wide knobs. Anything you put here will act as a default
+# that any matching key in ``tools_kwargs`` can override (e.g. you could
+# pin ``interaction.action_timeout`` here and let the dataset override it
+# per task).
+- name: swe_agent
+
+  _target_: uni_agent.agent_loop.UniAgentLoop
+
+  concurrency: 128
+  log_dir: /tmp/terminal_bench_eval
+  mask_abnormal_exit_traj: false

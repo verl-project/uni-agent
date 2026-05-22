@@ -22,10 +22,17 @@ async def run_sample(sample):
     instance = sample["extra_info"]["tools_kwargs"]
     impl = os.getenv("DEPLOYMENT", "vefaas").lower()
 
+    # SWE preprocessors emit ``env.deployment.image`` (nested, matching
+    # ``AgentEnvConfig`` / ``DeployConfig``). Older parquets used flat
+    # ``env.image``; accept both so a stale parquet doesn't silently break.
+    instance_image = instance["env"].get("deployment", {}).get("image") or instance["env"].get("image")
+    if instance_image is None:
+        raise KeyError("No image found in instance.env.deployment.image or instance.env.image")
+
     if impl == "vefaas":
         deployment_config = {
             "type": "vefaas",
-            "image": instance["env"]["image"],
+            "image": instance_image,
             "command": "curl -fsSL https://vefaas-swe.tos-cn-beijing.ivolces.com/swe-rex/install_1.4.0.sh | bash -s -- {token}",
             "timeout": 600.0,
             "startup_timeout": 180.0,
@@ -35,7 +42,7 @@ async def run_sample(sample):
     elif impl == "modal":
         deployment_config = {
             "type": "modal",
-            "image": instance["env"]["image"],
+            "image": instance_image,
             "startup_timeout": 600.0,
             "runtime_timeout": 600.0,
             "deployment_timeout": 3600.0,

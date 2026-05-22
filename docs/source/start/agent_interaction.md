@@ -17,6 +17,12 @@ The inference and verification scripts for this page live under `examples/agent_
 | Qwen3.5-9B                     | temp=1.0, topp=0.7, tp=4, 100 turns, 64K context   | **53.8** (Avg@1) |
 | Qwen3.5-35B-A3B                | temp=1.0, topp=0.7, tp=4, 300 turns, 128K context  | **68.4** (Avg@1) |
 
+**Reference results on Terminal-Bench v2 with Uni-Agent:**
+
+| **Model**          | Inference Config                                    | **Uni-Agent** |
+| ------------------ | --------------------------------------------------- |:-------------:|
+| Qwen3.6-35B-A3B    | temp=1.0, topp=0.95, tp=8, 200K context         | **42.53** (Avg@1) |
+
 `Avg@N` reports the average pass rate over `N` rollouts per task.
 
 ---
