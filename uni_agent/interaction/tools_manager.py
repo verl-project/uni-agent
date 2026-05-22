@@ -90,6 +90,10 @@ class ToolsManager:
         if func_name == "execute_bash":
             return func_params.get("command", "")
 
+        if func_name in ["lark-cli"]:
+            command = func_params.get("command", "")
+            return f"lark-cli {command}" if command else ""
+
         # Start building the command
         cmd_parts = [shlex.quote(func_name)]
 

@@ -1,0 +1,52 @@
+#!/usr/bin/env python3
+"""
+Debug-only wrapper that exec()s straight into the real `lark-cli` binary.
+
+The uni-agent framework special-cases ``lark-cli`` in
+``uni_agent/interaction/tools_manager.py`` and emits a bash command like
+``lark-cli <command>``. PATH resolution lands on this script first (the
+uni-agent ``install_dir`` is prepended to PATH), so this wrapper must locate
+the *real* ``lark-cli`` (installed by ``npm install -g @larksuite/cli``,
+typically at ``/opt/homebrew/bin/lark-cli`` or ``$(npm root -g)/...``) and
+exec into it -- otherwise we would recurse infinitely into ourselves.
+
+This wrapper also lets ``which lark-cli`` succeed during tool installation
+and lets developers manually run ``lark-cli <args>`` for parity with the
+agent path.
+"""
+
+import os
+import sys
+
+
+def _find_real_lark_cli() -> str | None:
+    """Walk PATH and return the first ``lark-cli`` that is not this script."""
+    self_real = os.path.realpath(sys.argv[0])
+    for path_dir in os.environ.get("PATH", "").split(os.pathsep):
+        if not path_dir:
+            continue
+        candidate = os.path.join(path_dir, "lark-cli")
+        if not (os.path.isfile(candidate) and os.access(candidate, os.X_OK)):
+            continue
+        if os.path.realpath(candidate) == self_real:
+            continue
+        return candidate
+    return None
+
+
+def main() -> int:
+    real = _find_real_lark_cli()
+    if real is None:
+        sys.stderr.write(
+            "Error: `lark-cli` is not installed or not on PATH.\n"
+            "Install: npm install -g @larksuite/cli\n"
+            "Auth:    lark-cli auth login --recommend\n"
+        )
+        return 127
+
+    os.execv(real, ["lark-cli", *sys.argv[1:]])
+    return 0  # unreachable
+
+
+if __name__ == "__main__":
+    sys.exit(main())

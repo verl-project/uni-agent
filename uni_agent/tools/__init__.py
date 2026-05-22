@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from .finish import FinishTool
 from .registry import get_tool, AbstractTool
 from .execute_bash import ExecuteBashTool
+from .lark_cli import LarkCliTool
 from .search_arxiv import SearchArxivTool
 from .search import SearchWikiTool
 from .str_replace_editor import StrReplaceEditorTool
@@ -26,6 +27,7 @@ __all__ = [
     "ToolConfig",
     "ExecuteBashTool",
     "FinishTool",
+    "LarkCliTool",
     "SearchArxivTool",
     "SearchWikiTool",
     "StrReplaceEditorTool",
