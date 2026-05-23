@@ -67,7 +67,12 @@ def _split_frontmatter(text: str) -> tuple[str, str, str]:
     Returns ``(description, name, body)``. Missing fields come back as ``""``.
     Only ``name`` and ``description`` are recognised today; ``paths:`` and
     other Qwen / Claude fields are silently ignored for forward compatibility.
+
+    Uses ``yaml.safe_load`` so block scalars (``description: |``), quoted
+    values containing colons, and other valid YAML constructs all work.
     """
+    import yaml
+
     stripped = text.lstrip()
     if not stripped.startswith("---"):
         # No frontmatter -- treat the whole file as body, no metadata.
@@ -80,12 +85,14 @@ def _split_frontmatter(text: str) -> tuple[str, str, str]:
 
     frontmatter = stripped[3:end].strip()
     body = stripped[end + 4 :].lstrip("\n")
-    description = ""
-    name = ""
-    for line in frontmatter.splitlines():
-        bare = line.lstrip()
-        if bare.lower().startswith("description:"):
-            description = bare.split(":", 1)[1].strip().strip("'\"")
-        elif bare.lower().startswith("name:"):
-            name = bare.split(":", 1)[1].strip().strip("'\"")
+
+    try:
+        meta = yaml.safe_load(frontmatter)
+    except yaml.YAMLError:
+        meta = None
+    if not isinstance(meta, dict):
+        meta = {}
+
+    description = str(meta.get("description") or "").strip()
+    name = str(meta.get("name") or "").strip()
     return description, name, body

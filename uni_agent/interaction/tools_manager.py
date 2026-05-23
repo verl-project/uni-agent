@@ -33,7 +33,7 @@ class ToolsManager:
     async def parse_action(
         self,
         model_output: str,
-    ) -> dict:
+    ) -> tuple[str, list[OpenAIFunctionToolCall]]:
         tools = [OpenAIFunctionToolSchema(**schema) for schema in self.tools_schemas]
         content, tool_calls = self._tool_parser.extract_tool_calls(model_output, tools)
 

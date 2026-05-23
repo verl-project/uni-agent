@@ -62,8 +62,10 @@ class AgentInteraction:
         they live as real files on disk (read lazily, progressive
         disclosure).
 
-        Idempotent: a second call is a no-op (we re-render the manifest
-        but only append it once, using a sentinel marker).
+        Call this exactly once, after ``AgentEnv.install_skills`` has
+        populated ``runtime_paths``. The method is **not** idempotent --
+        calling it twice will append the manifest twice. The single
+        in-tree caller (``UniAgentLoop.run``) already enforces this.
         """
         if self.skills_manager is None:
             return

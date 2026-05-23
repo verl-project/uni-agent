@@ -278,21 +278,47 @@ class OpenAICompatibleChatModel:
             normalized_messages.append(normalized_message)
         return normalized_messages
 
+    # OpenAI ChatCompletion top-level sampling fields. Keys not in this set
+    # are forwarded via ``extra_body`` so vendor extensions (top_k,
+    # repetition_penalty, ...) still reach vLLM/SGLang-style endpoints
+    # without 400-ing real OpenAI for unknown top-level args.
+    _OPENAI_TOP_LEVEL_SAMPLING_FIELDS: frozenset[str] = frozenset(
+        {
+            "temperature",
+            "top_p",
+            "presence_penalty",
+            "frequency_penalty",
+            "max_tokens",
+            "max_completion_tokens",
+            "stop",
+            "n",
+            "seed",
+            "logprobs",
+            "top_logprobs",
+            "logit_bias",
+            "user",
+        }
+    )
+
     async def query(
         self,
         messages: list[dict[str, str]],
         rollout_cache: dict[str, Any] | None,
         **kwargs,
     ) -> list[dict] | dict:
-        sampling_params = kwargs.get("sampling_params", self.sampling_params)
+        sampling_params = kwargs.get("sampling_params", self.sampling_params) or {}
         api_messages = self._normalize_messages_for_api(rollout_cache["extra_fields"]["api_messages"])
+
+        top_level = {k: v for k, v in sampling_params.items() if k in self._OPENAI_TOP_LEVEL_SAMPLING_FIELDS}
+        extra_body = {k: v for k, v in sampling_params.items() if k not in self._OPENAI_TOP_LEVEL_SAMPLING_FIELDS}
 
         with simple_timer("generate_sequences", rollout_cache["metrics"]):
             chat_completion = await self.client.chat.completions.create(
                 model=self.model_name,
                 messages=api_messages,
                 tools=self.tools_schemas,
-                extra_body=dict(sampling_params),
+                extra_body=extra_body or None,
+                **top_level,
             )
 
         response_message = chat_completion.choices[0].message

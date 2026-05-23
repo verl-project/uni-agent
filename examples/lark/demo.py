@@ -38,7 +38,7 @@ vllm serve /mnt/hdfs/yyding/models/Qwen3.6-35B-A3B \
 Run:
 
     BASE_URL=http://localhost:8000/v1 \
-    MODEL_NAME=Qwen/Qwen3-Coder-30B-A3B-Instruct \
+    MODEL_NAME=Qwen/Qwen3.6-35B-A3B \
     python examples/lark/demo.py
 """
 

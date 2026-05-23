@@ -93,8 +93,8 @@ class LarkCliTool(AbstractTool):
 
     def get_install_command(self) -> str | None:
         return (
-            "lark-cli --version >/dev/null 2>&1 || { "
+            "lark-cli --version >/dev/null 2>&1 || ( "
             "echo 'lark-cli not found in PATH. Install with: "
             "npm install -g @larksuite/cli && lark-cli auth login --recommend' >&2; "
-            "exit 1; }"
+            "exit 1 )"
         )
