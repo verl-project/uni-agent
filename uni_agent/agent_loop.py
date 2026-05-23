@@ -17,6 +17,7 @@ from uni_agent.interaction import (
     ToolsManagerConfig,
 )
 from uni_agent.reward import load_reward_spec
+from uni_agent.skills import SkillsManager, SkillsManagerConfig
 from verl.experimental.agent_loop.agent_loop import AgentLoopBase, AgentLoopOutput
 from verl.experimental.agent_loop.utils import resolve_config_path
 
@@ -60,6 +61,7 @@ class UniAgentLoop(AgentLoopBase):
             tools_config_list=config_dict["tools"],
             parser=config_dict.get("tool_parser", "qwen3_coder"),
         )
+        self.skills_manager = self._init_skills_manager(config_dict.get("skills"))
         self.env = self._init_env(config_dict["env"])
         self.output_dir = Path(config_dict["log_dir"]) / self.run_id
         self.interaction = AgentInteraction(
@@ -68,6 +70,7 @@ class UniAgentLoop(AgentLoopBase):
             model=self.chat_model,
             tools_manager=self.tools_manager,
             messages=list(kwargs["raw_prompt"]),
+            skills_manager=self.skills_manager,
             **config_dict["interaction"],
         )
         if config_dict["reward"] is not None:
@@ -98,6 +101,9 @@ class UniAgentLoop(AgentLoopBase):
                 # to generate correct tool call format in response
                 self.chat_model.set_tools_schemas(self.tools_manager.tools_schemas)
                 await self.env.install_tools(self.tools_manager.tools)
+                if self.skills_manager is not None:
+                    await self.env.install_skills(self.skills_manager)
+                    self.interaction.inject_skills_manifest()
 
                 interaction_result = await self.interaction.run()
                 interaction_result["metrics"] = dict(interaction_result.get("rollout_cache", {}).get("metrics", {}))
@@ -243,6 +249,19 @@ class UniAgentLoop(AgentLoopBase):
     def _init_tools_manager(self, tools_config_list: list[dict], parser: str = "qwen3_coder") -> ToolsManager:
         tools_manager_config = ToolsManagerConfig(tools=tools_config_list, parser=parser)
         return ToolsManager(tools_manager_config=tools_manager_config)
+
+    def _init_skills_manager(self, skills_config: dict | None) -> SkillsManager | None:
+        """Build a SkillsManager from per-run config.
+
+        - ``skills_config is None`` or missing: skills system disabled (no
+          manifest injection, no container push). Backward-compatible default.
+        - ``skills_config`` provided: build a ``SkillsManagerConfig`` and
+          scan its ``skills_dir`` for ``<name>/SKILL.md`` subdirectories.
+        """
+        if not skills_config:
+            return None
+        cfg = SkillsManagerConfig(**skills_config)
+        return SkillsManager.from_config(cfg)
 
     def _init_env(self, config_dict: dict) -> AgentEnv:
         env_config = AgentEnvConfig(**config_dict)

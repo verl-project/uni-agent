@@ -4,6 +4,7 @@ import orjson
 from pydantic import BaseModel
 
 from uni_agent.async_logging import get_logger
+from uni_agent.skills.manager import SkillsManager
 from uni_agent.utils import auto_await
 from verl.tools.schemas import OpenAIFunctionToolCall
 from verl.utils.profiler import simple_timer
@@ -41,15 +42,45 @@ class AgentInteraction:
         action_timeout: int = 60,
         timeout_budget: int = 3,
         max_turns: int = 50,
+        skills_manager: SkillsManager | None = None,
     ):
         self.env = env
         self.model = model
         self.tools_manager = tools_manager
+        self.skills_manager = skills_manager
         self.messages = messages
         self.action_timeout = action_timeout
         self.timeout_budget = timeout_budget
         self.max_turns = max_turns
         self.logger = get_logger("interaction", run_id)
+
+    def inject_skills_manifest(self) -> None:
+        """Append the skills manifest to the first system message.
+
+        The manifest lists each discovered skill (name + description +
+        path to its SKILL.md) so the model knows what is available and
+        how to load it on demand. Skill *bodies* are not in the prompt --
+        they live as real files on disk (read lazily, progressive
+        disclosure).
+
+        Idempotent: a second call is a no-op (we re-render the manifest
+        but only append it once, using a sentinel marker).
+        """
+        if self.skills_manager is None:
+            return
+        manifest = self.skills_manager.build_manifest()
+        if not manifest:
+            return
+
+        block = "\n\n" + manifest
+        for msg in self.messages:
+            if msg.get("role") == "system":
+                content = msg.get("content") or ""
+                if "<available_skills>" in content:
+                    return
+                msg["content"] = content + block
+                return
+        self.messages.insert(0, {"role": "system", "content": manifest})
 
     async def step(self, step_idx: int):
         # step index start from 1

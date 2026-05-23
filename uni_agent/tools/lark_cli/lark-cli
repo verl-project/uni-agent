@@ -45,7 +45,6 @@ def main() -> int:
         return 127
 
     os.execv(real, ["lark-cli", *sys.argv[1:]])
-    return 0  # unreachable
 
 
 if __name__ == "__main__":

@@ -55,8 +55,9 @@ Tips:
 - Most commands return JSON on stdout. Use `--format pretty|table|csv|ndjson`
   to switch formatting if needed.
 - Send messages only with `--as bot`; user-identity send is not supported.
-- Refer to the bundled Skills (lark-calendar, lark-docs, lark-im, lark-vc, ...)
-  for the exact command vocabulary and recommended workflows.
+- If the system prompt lists ``lark-*`` Skills (lark-calendar, lark-doc,
+  lark-im, lark-vc, ...), `cat` them on demand for the exact command
+  vocabulary and recommended workflows.
 """.strip()
 
 
@@ -84,35 +85,6 @@ class LarkCliTool(AbstractTool):
     def local_path(self) -> Path:
         return Path(__file__).parent / "lark-cli"
 
-    @property
-    def skills_dir(self) -> Path:
-        """Local directory holding bundled SKILL.md files for this tool.
-
-        Skills are NOT pushed into the container. They are loaded by the agent
-        loop on the host side and injected into the model's system prompt
-        (see ``get_skills`` below). This mirrors how Claude Code consumes the
-        upstream `larksuite/cli` skills under ``~/.claude/skills/``.
-        """
-        return Path(__file__).parent / "skills"
-
-    def get_skills(self) -> list[dict]:
-        """Load bundled SKILL.md files for prompt injection.
-
-        Returns a list of ``{"name": str, "description": str, "body": str}``
-        dicts, one per skill, sorted by filename for determinism.
-        Returns an empty list if the skills directory does not exist yet.
-        """
-        skills: list[dict] = []
-        if not self.skills_dir.is_dir():
-            return skills
-
-        for skill_path in sorted(self.skills_dir.glob("*/SKILL.md")):
-            name = skill_path.parent.name
-            text = skill_path.read_text(encoding="utf-8")
-            description, body = _split_skill_frontmatter(text)
-            skills.append({"name": name, "description": description, "body": body})
-        return skills
-
     def get_tool_schema(self) -> dict:
         return self.build_tool_schema(
             description=DESCRIPTION,
@@ -120,35 +92,9 @@ class LarkCliTool(AbstractTool):
         )
 
     def get_install_command(self) -> str | None:
-        # Best-effort install. Assumes the runtime has node/npm available.
-        # Authentication (`lark-cli auth login`) must be performed beforehand
-        # on the host, and ~/.config/larksuite (or equivalent) must already be
-        # populated when the tool is invoked.
         return (
-            "lark-cli --version >/dev/null 2>&1 "
-            "|| (npm install -g @larksuite/cli "
-            "&& chmod +x \"$(npm root -g)/@larksuite/cli/scripts/run.js\" 2>/dev/null || true)"
+            "lark-cli --version >/dev/null 2>&1 || { "
+            "echo 'lark-cli not found in PATH. Install with: "
+            "npm install -g @larksuite/cli && lark-cli auth login --recommend' >&2; "
+            "exit 1; }"
         )
-
-
-def _split_skill_frontmatter(text: str) -> tuple[str, str]:
-    """Parse a SKILL.md file into (description, body).
-
-    Supports both Claude-Code-style YAML frontmatter
-    (``---\\ndescription: ...\\n---\\n<body>``) and a fallback where the first
-    non-empty line is treated as the description.
-    """
-    stripped = text.lstrip()
-    if stripped.startswith("---"):
-        end = stripped.find("\n---", 3)
-        if end != -1:
-            frontmatter = stripped[3:end].strip()
-            body = stripped[end + 4 :].lstrip("\n")
-            description = ""
-            for line in frontmatter.splitlines():
-                if line.lower().startswith("description:"):
-                    description = line.split(":", 1)[1].strip().strip("'\"")
-                    break
-            return description, body
-    first_line, _, rest = text.partition("\n")
-    return first_line.strip("# ").strip(), rest.lstrip("\n")

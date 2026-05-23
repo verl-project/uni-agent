@@ -26,6 +26,31 @@ class HostDeploymentConfig(BaseModel):
         return HostDeployment.from_config(self, run_id)
 
 
+class LocalNativeDeploymentConfig(BaseModel):
+    """Configuration for in-process pexpect-based host execution.
+
+    Like ``HostDeploymentConfig`` this runs commands directly on the host (no
+    container), but drives bash via ``pexpect`` / PTY rather than
+    ``asyncio.create_subprocess_exec``. Compatible with the framework's
+    sync-style ``auto_await`` API. See
+    ``uni_agent/deployment/local_native/runtime.py`` for details.
+    """
+
+    type: Literal["local_native"] = "local_native"
+    """Discriminator for (de)serialization. Do not change."""
+    timeout: float = 60.0
+    """Default timeout for runtime operations."""
+    startup_timeout: float = 120.0
+    """Timeout for the initial bash session handshake."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    def get_deployment(self, run_id: str):
+        from .local_native.deployment import LocalNativeDeployment
+
+        return LocalNativeDeployment.from_config(self, run_id)
+
+
 class LocalDeploymentConfig(BaseModel):
     """Configuration for a local sandbox."""
 
@@ -124,6 +149,10 @@ class VefaasDeploymentConfig(BaseModel):
 
 
 DeployConfig: TypeAlias = Annotated[
-    VefaasDeploymentConfig | LocalDeploymentConfig | HostDeploymentConfig | ModalDeploymentConfig,
+    VefaasDeploymentConfig
+    | LocalDeploymentConfig
+    | HostDeploymentConfig
+    | LocalNativeDeploymentConfig
+    | ModalDeploymentConfig,
     Field(discriminator="type"),
 ]
