@@ -20,8 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
-from collections.abc import AsyncIterator
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 
 _READY_MARKER = b"[event] ready"
 
@@ -91,8 +90,7 @@ class LarkEventListener:
             if not line:
                 rc = await self.proc.wait()
                 raise LarkEventListenerError(
-                    f"`lark-cli event consume {self.event_key}` exited "
-                    f"before becoming ready (rc={rc})"
+                    f"`lark-cli event consume {self.event_key}` exited before becoming ready (rc={rc})"
                 )
             _write_stderr(line)
             if _READY_MARKER in line:
@@ -188,9 +186,7 @@ async def fetch_bot_open_id(command_prefix: Sequence[str] | None = None) -> str:
         data = json.loads(out)
     except json.JSONDecodeError as e:
         preview = out[:300].decode("utf-8", errors="replace")
-        raise LarkEventListenerError(
-            f"could not parse bot info JSON: {e}\noutput preview: {preview!r}"
-        ) from e
+        raise LarkEventListenerError(f"could not parse bot info JSON: {e}\noutput preview: {preview!r}") from e
     for path in (("bot", "open_id"), ("data", "bot", "open_id"), ("open_id",)):
         cur = data
         ok = True
@@ -202,6 +198,4 @@ async def fetch_bot_open_id(command_prefix: Sequence[str] | None = None) -> str:
                 break
         if ok and isinstance(cur, str) and cur.startswith("ou_"):
             return cur
-    raise LarkEventListenerError(
-        f"could not find bot.open_id in `lark-cli` response: {data!r}"
-    )
+    raise LarkEventListenerError(f"could not find bot.open_id in `lark-cli` response: {data!r}")

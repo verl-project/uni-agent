@@ -23,6 +23,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
+from app.lark_chat import prompts  # noqa: E402
+from app.lark_chat.conversation import ConversationStore  # noqa: E402
+from app.lark_chat.listener import LarkEventListener, fetch_bot_open_id  # noqa: E402
 from uni_agent.interaction import (  # noqa: E402
     AgentEnv,
     AgentEnvConfig,
@@ -33,10 +36,6 @@ from uni_agent.interaction import (  # noqa: E402
 )
 from uni_agent.skills import SkillsManager, SkillsManagerConfig  # noqa: E402
 from uni_agent.tools import ToolConfig  # noqa: E402
-
-from app.lark_chat import prompts  # noqa: E402
-from app.lark_chat.conversation import ConversationStore  # noqa: E402
-from app.lark_chat.listener import LarkEventListener, fetch_bot_open_id  # noqa: E402
 
 
 @dataclass
@@ -66,7 +65,7 @@ class Settings:
     max_history_turns: int = 30
 
     @classmethod
-    def from_env(cls) -> "Settings":
+    def from_env(cls) -> Settings:
         auth_token = os.environ.get("LOCAL_ATTACH_AUTH_TOKEN")
         if not auth_token:
             raise RuntimeError(
@@ -218,9 +217,7 @@ async def handle_one_message(
         # run()'s synthetic terminator (max_step_limit / unknown_error)
         # has no matching assistant message -- skip the iterator advance.
         is_terminator = (
-            step.exit_reason in ("max_step_limit", "unknown_error")
-            and not step.tool_results
-            and not step.response
+            step.exit_reason in ("max_step_limit", "unknown_error") and not step.tool_results and not step.response
         )
         if is_terminator:
             print(f"   [step {step.step_idx}] exit={step.exit_reason} (loop terminator)")
@@ -240,16 +237,11 @@ async def handle_one_message(
         else:
             preview = (step.response or "").strip().splitlines()
             preview_str = preview[0][:120] if preview else "(empty)"
-            print(
-                f"   [step {step.step_idx}] no tool_call, exit={step.exit_reason or '?'} "
-                f"→ {preview_str}"
-            )
+            print(f"   [step {step.step_idx}] no tool_call, exit={step.exit_reason or '?'} → {preview_str}")
 
     last_step = trajectory[-1] if trajectory else None
     if last_step is not None:
-        print(
-            f"   ✓ turn done in {len(trajectory)} step(s); exit={last_step.exit_reason}"
-        )
+        print(f"   ✓ turn done in {len(trajectory)} step(s); exit={last_step.exit_reason}")
 
 
 async def main() -> None:
@@ -312,18 +304,13 @@ async def main() -> None:
     listener = LarkEventListener(
         event_key="im.message.receive_v1",
         as_identity="bot",
-        jq=(
-            f'select(.sender_id != "{bot_open_id}") | '
-            'select(.message_type == "text" or .message_type == "post")'
-        ),
+        jq=(f'select(.sender_id != "{bot_open_id}") | select(.message_type == "text" or .message_type == "post")'),
         command_prefix=lark_cli_prefix,
     )
     await listener.start()
     print("  listener ready")
 
-    print(
-        "\n[6/6] Entering chat loop. Send a Lark message to the bot. Ctrl+C to stop.\n"
-    )
+    print("\n[6/6] Entering chat loop. Send a Lark message to the bot. Ctrl+C to stop.\n")
 
     try:
         async for event in listener:

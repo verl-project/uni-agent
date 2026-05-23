@@ -1,7 +1,6 @@
 # ruff: noqa: E501
 """System prompt + user-message formatter for the Lark chat agent."""
 
-
 SYSTEM_PROMPT = """You are an agent embedded in a Lark / Feishu chat. You help the user by calling tools, including `lark-cli` to actually send messages back to them.
 
 # The shape of one user turn
