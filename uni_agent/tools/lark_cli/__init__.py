@@ -1,7 +1,7 @@
 # ruff: noqa: E501
 """Lark/Feishu CLI tool definition.
 
-Thin wrapper around the official ``lark-cli`` binary
+Thin shim around the official ``lark-cli`` binary
 (https://github.com/larksuite/cli). The actual command string the model
 emits is forwarded through the shell verbatim (see the ``lark-cli`` case in
 ``uni_agent/interaction/tools_manager.py``), so any feature ``lark-cli``
@@ -12,12 +12,14 @@ The tool is registered under the name ``lark-cli`` (matching the upstream
 binary). The containing Python package directory stays ``lark_cli`` because
 hyphens are not valid in Python module names.
 
-Authentication is expected to be done *outside* the container by the user
-(``lark-cli auth login --recommend``). The local credential file is then
-mounted/copied into the runtime environment.
+This tool is a **system tool** (``copy_to_remote = False``): the framework
+does not ship or copy any ``lark-cli`` binary into the runtime. Users must
+install ``lark-cli`` themselves inside the runtime (typically via
+``npm install -g @larksuite/cli``) and complete OAuth
+(``lark-cli auth login --recommend``) so the binary is on PATH and ready to
+use. ``install_tools`` only asserts presence via the install_command +
+``which lark-cli``.
 """
-
-from pathlib import Path
 
 from pydantic import BaseModel, Field
 
@@ -77,13 +79,11 @@ class LarkCliArguments(BaseModel):
 
 @register_tool("lark-cli")
 class LarkCliTool(AbstractTool):
+    copy_to_remote = False  # system tool; see module docstring
+
     @property
     def name(self) -> str:
         return "lark-cli"
-
-    @property
-    def local_path(self) -> Path:
-        return Path(__file__).parent / "lark-cli"
 
     def get_tool_schema(self) -> dict:
         return self.build_tool_schema(
@@ -95,6 +95,6 @@ class LarkCliTool(AbstractTool):
         return (
             "lark-cli --version >/dev/null 2>&1 || ( "
             "echo 'lark-cli not found in PATH. Install with: "
-            "npm install -g @larksuite/cli && lark-cli auth login --recommend' >&2; "
+            "npm install -g @larksuite/cli && lark-cli auth login' >&2; "
             "exit 1 )"
         )

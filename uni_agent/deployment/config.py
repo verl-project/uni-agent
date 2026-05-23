@@ -92,6 +92,39 @@ class LocalDeploymentConfig(BaseModel):
         return LocalDeployment.from_config(self, run_id)
 
 
+class LocalAttachDeploymentConfig(BaseModel):
+    """Configuration for attaching to a user-managed swerex server.
+
+    Unlike ``LocalDeploymentConfig`` (which ``docker run``s a fresh sandbox),
+    this deployment **does not** start, stop, or otherwise manage a container.
+    The user is responsible for launching a container ahead of time, running
+    ``swerex.server`` inside it, and exposing it on a reachable host/port.
+    ``start()`` attaches over HTTP; ``stop()`` is a no-op.
+    """
+
+    host: str = "http://127.0.0.1"
+    """Host of the user-managed swerex server (e.g. ``http://127.0.0.1``)."""
+    port: int = 8000
+    """Port the swerex server is listening on (the host-side published port)."""
+    auth_token: str
+    """Auth token passed to ``swerex.server --auth-token`` by the user."""
+    timeout: float = 60.0
+    """Timeout for runtime operations."""
+    startup_timeout: float = 30.0
+    """Timeout for the initial ``is_alive`` probe inside ``start()``."""
+    proxy: str | None = None
+    """Optional proxy for the runtime HTTP client."""
+
+    type: Literal["local_attach"] = "local_attach"
+    """Discriminator for (de)serialization/CLI. Do not change."""
+    model_config = ConfigDict(extra="forbid")
+
+    def get_deployment(self, run_id: str):
+        from .local_attach.deployment import LocalAttachDeployment
+
+        return LocalAttachDeployment.from_config(self, run_id)
+
+
 class ModalDeploymentConfig(BaseModel):
     """Configuration for Modal deployment."""
 
@@ -151,6 +184,7 @@ class VefaasDeploymentConfig(BaseModel):
 DeployConfig: TypeAlias = Annotated[
     VefaasDeploymentConfig
     | LocalDeploymentConfig
+    | LocalAttachDeploymentConfig
     | HostDeploymentConfig
     | LocalNativeDeploymentConfig
     | ModalDeploymentConfig,

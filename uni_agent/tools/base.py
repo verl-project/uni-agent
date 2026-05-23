@@ -1,6 +1,7 @@
 """Abstract base class for scaffold tools."""
 
 from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import BaseModel
@@ -60,11 +61,30 @@ def _normalize_json_schema(value: Any) -> Any:
 class AbstractTool(ABC):
     """Abstract tool definition with description and install command."""
 
+    copy_to_remote: bool = True
+    """Whether ``install_tools`` should copy ``local_path`` into the runtime.
+
+    True (default): framework-shipped tool scripts that get pushed to
+    ``install_dir/<name>``. False: *system tools* whose binary the user
+    installs separately and is already on PATH inside the runtime (e.g.
+    ``lark-cli`` via ``npm install -g``, ``gh`` via apt). When False,
+    ``install_tools`` skips copy+chmod and only runs ``get_install_command()``
+    + ``which <name>`` as a presence check; ``local_path`` is ignored.
+    """
+
     @property
     @abstractmethod
     def name(self) -> str:
         """Tool name (e.g. execute_bash, str_replace_editor, submit)."""
         ...
+
+    @property
+    def local_path(self) -> Path | None:
+        """Local script to copy into the runtime as ``install_dir/<name>``.
+        Must point at an existing file when ``copy_to_remote`` is True;
+        ignored (and may stay ``None``) otherwise.
+        """
+        return None
 
     @abstractmethod
     def get_tool_schema(self) -> dict:
