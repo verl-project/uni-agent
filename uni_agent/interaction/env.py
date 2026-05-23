@@ -1,7 +1,7 @@
 import re
 import shlex
 from pathlib import Path, PurePath
-from typing import TYPE_CHECKING, Literal
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 from swerex.exceptions import BashIncorrectSyntaxError, CommandTimeoutError
@@ -16,9 +16,9 @@ from swerex.runtime.abstract import (
 
 from uni_agent.async_logging import get_logger
 from uni_agent.deployment import DeployConfig
+from uni_agent.skills.manager import SkillsManager
 from uni_agent.tools.base import AbstractTool
 from uni_agent.utils import auto_await
-from uni_agent.skills.manager import SkillsManager
 
 
 class ActionTimeoutError(Exception):
@@ -132,9 +132,7 @@ class AgentEnv:
             for skill in skills_manager.skills:
                 skills_manager.runtime_paths[skill.name] = skill.source_dir
             names = "\n".join(s.name for s in skills_manager.skills)
-            self.logger.info(
-                f"Host runtime: {len(skills_manager.skills)} skill(s) read in place, no copy\n{names}"
-            )
+            self.logger.info(f"Host runtime: {len(skills_manager.skills)} skill(s) read in place, no copy\n{names}")
             return
 
         for skill in skills_manager.skills:

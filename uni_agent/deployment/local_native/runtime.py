@@ -89,7 +89,7 @@ def _split_bash_command(input: str) -> list[str]:
     - "cmd1<<EOF\na\nb\nEOF" is one command (heredoc)
     """
     input = input.strip()
-    if not input or all(l.strip().startswith("#") for l in input.splitlines()):
+    if not input or all(line.strip().startswith("#") for line in input.splitlines()):
         # bashlex can't deal with empty strings or the like.
         return []
     parsed = bashlex.parse(input)
@@ -225,7 +225,7 @@ class BashSession(Session):
             output = output.strip()
             return BashObservation(output=output, exit_code=0, expect_string=matched_expect_string)
         except pexpect.TIMEOUT:
-            raise pexpect.TIMEOUT("Failed to interrupt session")
+            raise pexpect.TIMEOUT("Failed to interrupt session") from None
 
     async def run(self, action: BashAction | BashInterruptAction) -> BashObservation:
         """Dispatch a bash action."""
@@ -252,7 +252,9 @@ class BashSession(Session):
             expect_index = self.shell.expect(expect_strings, timeout=action.timeout)  # type: ignore
             matched_expect_string = expect_strings[expect_index]
         except pexpect.TIMEOUT as e:
-            raise CommandTimeoutError(f"timeout after {action.timeout} seconds while running command {action.command!r}") from e
+            raise CommandTimeoutError(
+                f"timeout after {action.timeout} seconds while running command {action.command!r}"
+            ) from e
         output: str = _strip_control_chars(self.shell.before)  # type: ignore
         if action.is_interactive_quit:
             assert not action.is_interactive_command
@@ -295,7 +297,9 @@ class BashSession(Session):
             expect_index = self.shell.expect(expect_strings, timeout=action.timeout)  # type: ignore
             matched_expect_string = expect_strings[expect_index]
         except pexpect.TIMEOUT as e:
-            raise CommandTimeoutError(f"timeout after {action.timeout} seconds while running command {action.command!r}") from e
+            raise CommandTimeoutError(
+                f"timeout after {action.timeout} seconds while running command {action.command!r}"
+            ) from e
         output: str = _strip_control_chars(self.shell.before)  # type: ignore
 
         # 2. Capture exit code.
@@ -309,7 +313,7 @@ class BashSession(Session):
             try:
                 self.shell.expect(_exit_code_suffix, timeout=1)
             except pexpect.TIMEOUT:
-                raise NoExitCodeError("timeout while getting exit code")
+                raise NoExitCodeError("timeout while getting exit code") from None
             exit_code_raw: str = _strip_control_chars(self.shell.before)  # type: ignore
             exit_code = re.findall(f"{_exit_code_prefix}([0-9]+)", exit_code_raw)
             if len(exit_code) != 1:
@@ -323,7 +327,7 @@ class BashSession(Session):
             try:
                 self.shell.expect(self._ps1, timeout=0.1)
             except pexpect.TIMEOUT:
-                raise CommandTimeoutError("Timeout while getting PS1 after exit code extraction")
+                raise CommandTimeoutError("Timeout while getting PS1 after exit code extraction") from None
             output = output.replace(self._UNIQUE_STRING, "").replace(self._ps1, "")
         except Exception:
             if action.check == "raise":

@@ -80,8 +80,7 @@ skills_manager = SkillsManager.from_config(
     SkillsManagerConfig(skills_dir=skills_dir),
 )
 print(f"[skills] skills_dir={skills_dir} (exists={skills_dir.is_dir()})")
-print(f"[skills] discovered {len(skills_manager.skills)} skill(s): "
-      f"{[s.name for s in skills_manager.skills]}\n")
+print(f"[skills] discovered {len(skills_manager.skills)} skill(s): {[s.name for s in skills_manager.skills]}\n")
 
 # For local_native runtime, env.install_skills is a no-op (skills are read
 # in place from the host filesystem). For container runtimes it copies

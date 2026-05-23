@@ -55,7 +55,7 @@ class SkillsManager:
         self.runtime_paths: dict[str, Path] = {}
 
     @classmethod
-    def from_config(cls, config: SkillsManagerConfig) -> "SkillsManager":
+    def from_config(cls, config: SkillsManagerConfig) -> SkillsManager:
         """Scan ``config.skills_dir`` for ``<name>/SKILL.md`` subdirs."""
         skills: list[Skill] = []
         if config.skills_dir is not None:
