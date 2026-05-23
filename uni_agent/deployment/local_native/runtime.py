@@ -281,9 +281,10 @@ class BashSession(Session):
         try:
             individual_commands = _split_bash_command(action.command)
         except Exception as e:
-            # bashlex is buggy and can throw varied errors (Parsing, NotImplemented, TypeError, ...).
-            # Fall back to emitting a unique tail string and seeking on it.
-            self.logger.error("Bashlex fail: %s", e)
+            self.logger.debug(
+                f"bashlex could not split command (falling back to tail-marker mode): "
+                f"{type(e).__name__}: {e}"
+            )
             action.command += f"\n TMPEXITCODE=$? ; sleep 0.1; echo -n '{self._UNIQUE_STRING}' ; (exit $TMPEXITCODE)"
             fallback_terminator = True
         else:

@@ -5,7 +5,11 @@ from typing import Any
 
 import regex
 
-from verl.tools.schemas import OpenAIFunctionCallSchema, OpenAIFunctionToolCall, OpenAIFunctionToolSchema
+from uni_agent.interaction.tool_schemas import (
+    OpenAIFunctionCallSchema,
+    OpenAIFunctionToolCall,
+    OpenAIFunctionToolSchema,
+)
 
 
 class FunctionCallFormatError(Exception):

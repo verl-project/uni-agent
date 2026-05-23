@@ -5,12 +5,11 @@ from pydantic import BaseModel
 
 from uni_agent.async_logging import get_logger
 from uni_agent.skills.manager import SkillsManager
-from uni_agent.utils import auto_await
-from verl.tools.schemas import OpenAIFunctionToolCall
-from verl.utils.profiler import simple_timer
+from uni_agent.utils import auto_await, simple_timer
 
 from .env import ActionIncorrectSyntaxError, ActionTimeoutError, AgentEnv, TerminalNotAliveError
 from .model import AgentChatModel, MaxTokenExceededError
+from .tool_schemas import OpenAIFunctionToolCall
 from .tool_parser import FunctionCallFormatError
 from .tools_manager import ToolsManager
 
@@ -76,8 +75,6 @@ class AgentInteraction:
         for msg in self.messages:
             if msg.get("role") == "system":
                 content = msg.get("content") or ""
-                if "<available_skills>" in content:
-                    return
                 msg["content"] = content + block
                 return
         self.messages.insert(0, {"role": "system", "content": manifest})

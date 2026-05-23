@@ -3,15 +3,7 @@ import uuid
 from functools import cached_property
 from typing import Any
 
-from uni_agent.utils import get_event_loop
-from verl.utils.chat_template import apply_chat_template
-from verl.utils.profiler import simple_timer
-from verl.utils.tokenizer import normalize_token_ids
-
-try:
-    from openai import AsyncOpenAI
-except ImportError:  # pragma: no cover - handled at runtime
-    AsyncOpenAI = None
+from uni_agent.utils import get_event_loop, simple_timer
 
 
 class MaxTokenExceededError(Exception):
@@ -42,6 +34,8 @@ class AgentChatModel:
         self.tools_schemas = tools_schemas
 
     async def prepare_rollout_cache(self, messages: list[dict[str, str]]) -> dict[str, Any]:
+        from verl.utils.tokenizer import normalize_token_ids
+
         prompt_ids = await self.loop.run_in_executor(
             None,
             lambda: self.tokenizer.apply_chat_template(
@@ -139,6 +133,9 @@ class AgentChatModel:
         return response_str, rollout_cache, generation_info
 
     async def _get_new_message_ids(self, new_messages: list[dict[str, Any]]) -> list[int]:
+        from verl.utils.chat_template import apply_chat_template
+        from verl.utils.tokenizer import normalize_token_ids
+
         tokenized_prompt = await self.loop.run_in_executor(
             None,
             lambda: apply_chat_template(
@@ -152,6 +149,9 @@ class AgentChatModel:
 
     @cached_property
     def message_boundary_tokens(self) -> list[int]:
+        from verl.utils.chat_template import apply_chat_template
+        from verl.utils.tokenizer import normalize_token_ids
+
         dummy_history = [
             {"role": "user", "content": "dummy user"},
             {"role": "assistant", "content": "dummy assistant"},
@@ -221,10 +221,8 @@ class OpenAICompatibleChatModel:
             self.timeout = 300
         self.base_url = self.base_url.rstrip("/")
         self.loop = get_event_loop()
-        if AsyncOpenAI is None:
-            raise ImportError(
-                "openai is required for OpenAICompatibleChatModel. Please install it with `pip install openai`."
-            )
+
+        from openai import AsyncOpenAI
         self.client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url, timeout=self.timeout)
 
     def set_tools_schemas(self, tools_schemas: list[dict]) -> None:
@@ -293,7 +291,7 @@ class OpenAICompatibleChatModel:
                 model=self.model_name,
                 messages=api_messages,
                 tools=self.tools_schemas,
-                temperature=sampling_params.get("temperature", 0.0),
+                extra_body=dict(sampling_params),
             )
 
         response_message = chat_completion.choices[0].message

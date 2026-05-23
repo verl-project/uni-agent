@@ -2,6 +2,25 @@ import asyncio
 import concurrent.futures
 import functools
 import inspect
+import time
+from contextlib import contextmanager
+
+
+@contextmanager
+def simple_timer(name: str, timing_raw: dict[str, float]):
+    """Accumulate the elapsed wall time of the ``with`` block into ``timing_raw[name]``.
+
+    Drop-in replacement for ``verl.utils.profiler.simple_timer`` -- same
+    signature and accumulation semantics, but uses ``time.perf_counter``
+    directly so we don't have to drag in ``codetiming`` (or ``verl``)
+    just to time a block of code.
+    """
+    start = time.perf_counter()
+    try:
+        yield
+    finally:
+        elapsed = time.perf_counter() - start
+        timing_raw[name] = timing_raw.get(name, 0.0) + elapsed
 
 
 def get_event_loop():

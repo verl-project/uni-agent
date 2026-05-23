@@ -3,9 +3,13 @@ import shlex
 
 from pydantic import BaseModel, ConfigDict
 
+from uni_agent.interaction.tool_schemas import (
+    OpenAIFunctionCallSchema,
+    OpenAIFunctionToolCall,
+    OpenAIFunctionToolSchema,
+)
 from uni_agent.interaction.tool_parser import FunctionCallFormatError, get_tool_parser
 from uni_agent.tools import ToolConfig
-from verl.tools.schemas import OpenAIFunctionCallSchema, OpenAIFunctionToolCall, OpenAIFunctionToolSchema
 
 
 class ToolsManagerConfig(BaseModel):
