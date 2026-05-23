@@ -149,33 +149,36 @@ class XMLToolParser:
         return tool_call
 
     def _get_function_calls(self, model_output: str) -> list[str]:
-        # Find all tool calls
+        """Return ``<function=...>`` bodies found inside ``<tool_call>`` blocks.
+        Empty list = nothing recoverable (caller treats as "no tool calls").
+        """
         matched_ranges = self.tool_call_regex.findall(model_output)
         raw_tool_calls = [match[0] if match[0] else match[1] for match in matched_ranges]
-
-        # Back-off strategy if no tool_call tags found
-        if len(raw_tool_calls) == 0:
-            raise FunctionCallFormatError("No function call found in the response.")
-
         raw_function_calls = []
         for tool_call in raw_tool_calls:
             raw_function_calls.extend(self.tool_call_function_regex.findall(tool_call))
-
-        function_calls = [match[0] if match[0] else match[1] for match in raw_function_calls]
-        return function_calls
+        return [match[0] if match[0] else match[1] for match in raw_function_calls]
 
     def extract_tool_calls(
         self, model_output: str, tools: list[OpenAIFunctionToolSchema]
     ) -> tuple[str, list[OpenAIFunctionToolCall]]:
+        """Parse ``<tool_call>...</tool_call>`` blocks out of ``model_output``.
+
+        Returns ``(content_before_marker, tool_calls)``. ``tool_calls`` is
+        ``[]`` whenever nothing parseable comes out -- whether the marker
+        was absent or present-but-unrecoverable. Callers decide what to
+        do (single-shot raises, chat treats as turn-end). When a function
+        name IS recovered but invalid (unknown name, bad arg type, ...)
+        we still raise :class:`FunctionCallFormatError`.
+        """
         if self.tool_call_start_token not in model_output:
-            raise FunctionCallFormatError("No function call found in the response.")
+            return model_output, []
 
         function_calls = self._get_function_calls(model_output)
-        if len(function_calls) == 0:
-            raise FunctionCallFormatError("No function call found in the response.")
+        if not function_calls:
+            return model_output, []
         tool_calls = [self._parse_xml_function_call(function_call_str, tools) for function_call_str in function_calls]
 
-        # Extract content before tool calls
         content_index = model_output.find(self.tool_call_start_token)
         content_index = content_index if content_index >= 0 else model_output.find(self.tool_call_prefix)
         content = model_output[:content_index]
@@ -203,16 +206,25 @@ class HermesToolParser:
     def extract_tool_calls(
         self, model_output: str, tools: list[OpenAIFunctionToolSchema]
     ) -> tuple[str, list[OpenAIFunctionToolCall]]:
+        """Parse ``<tool_call>{...}</tool_call>`` JSON blocks out of ``model_output``.
+
+        Returns ``(content_before_marker, tool_calls)``. ``tool_calls`` is
+        ``[]`` when nothing parseable comes out (no marker, or marker
+        pair with empty body); callers decide. The "unclosed" case
+        (``<tool_call>`` opened with partial JSON, no closing tag) DOES
+        raise -- partial JSON is a clear formatting bug worth surfacing
+        back to the model.
+        """
         if self.tool_call_start_token not in model_output:
-            raise FunctionCallFormatError(f"No function call found in the response. {self._FORMAT_HINT}")
+            return model_output, []
         if self.tool_call_end_token not in model_output:
             raise FunctionCallFormatError(
                 f"Unclosed tool call: missing {self.tool_call_end_token}. {self._FORMAT_HINT}"
             )
 
-        matches = self.tool_call_regex.findall(model_output)
+        matches = [m for m in self.tool_call_regex.findall(model_output) if m.strip()]
         if not matches:
-            raise FunctionCallFormatError(f"No function call found in the response. {self._FORMAT_HINT}")
+            return model_output, []
 
         valid_names = {tool.function.name for tool in tools if tool.type == "function"}
 

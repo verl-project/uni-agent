@@ -35,8 +35,10 @@ class ToolsManager:
         model_output: str,
     ) -> tuple[str, list[OpenAIFunctionToolCall]]:
         """Parse tool calls from raw text. Returns ``(content, tool_calls)``;
-        ``tool_calls`` may be empty (callers decide what that means).
-        Malformed calls raise :class:`FunctionCallFormatError`.
+        ``tool_calls`` is ``[]`` when the text contains no tool-call
+        marker (callers decide -- single-shot raises, chat_mode treats
+        as turn-end). Markers that ARE present but malformed raise
+        :class:`FunctionCallFormatError`.
         """
         tools = [OpenAIFunctionToolSchema(**schema) for schema in self.tools_schemas]
         content, tool_calls = self._tool_parser.extract_tool_calls(model_output, tools)

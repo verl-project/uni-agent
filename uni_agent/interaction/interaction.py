@@ -18,8 +18,9 @@ ToolStatus = Literal["ok", "timeout", "syntax_error", "skipped"]
 
 
 class ToolResult(BaseModel):
-    """Per-tool-call result inside a single step. ``observation`` is what was
-    sent back to the model as the ``role="tool"`` content (error text included).
+    """Per-tool-call result inside a single step. ``observation`` is the
+    string sent back to the model as the ``role="tool"`` content (error
+    text included).
     """
 
     tool_call_id: str
@@ -58,10 +59,11 @@ class AgentInteraction:
         skills_manager: SkillsManager | None = None,
         chat_mode: bool = False,
     ):
-        """:param chat_mode: how to treat an assistant message with **no** tool
-        calls. ``False`` (default, single-shot / training / code-eval):
-        ``format_error``, loop continues. ``True`` (long-running chat):
-        ``turn_done``, loop returns to wait for the next user message.
+        """:param chat_mode: how to treat an assistant message with no
+        tool calls. ``False`` (default, training / code-eval) raises
+        ``format_error`` so the loop continues. ``True`` (long-running
+        chat) marks the step ``turn_done`` so the caller can wait for
+        the next user message.
         """
         self.env = env
         self.model = model
@@ -147,8 +149,8 @@ class AgentInteraction:
         # step 3: parse model response to actions
         self.rollout_cache = rollout_cache
 
-        # Mirror api-shaped assistant message into self.messages so
-        # persistence/replay keeps the assistant<->tool linkage.
+        # Persist the assistant message in api-shape (with tool_calls)
+        # so replay preserves the assistant<->tool linkage.
         assistant_msg: dict[str, object] = {"role": "assistant", "content": model_output}
         if tool_calls:
             assistant_msg["tool_calls"] = tool_calls
@@ -190,15 +192,14 @@ class AgentInteraction:
 
         step_output.thought = content
 
-        # step 4: chat_mode only -- no tool call = turn-final reply.
-        # (Single-shot mode already raised FunctionCallFormatError above.)
+        # step 4: chat_mode-only end-of-turn (single-shot already raised above).
         if not tool_calls:
             step_output.done = True
             step_output.exit_reason = "turn_done"
             self.logger.info(f"💬 TURN DONE (no tool call): {model_output}")
             return step_output
 
-        # step 5: execute every tool call sequentially in the shared bash session
+        # step 5: run each tool call sequentially in the shared bash session
         tool_results: list[ToolResult] = []
         tool_messages: list[dict[str, object]] = []
         saw_finish = False
@@ -253,23 +254,16 @@ class AgentInteraction:
                     }
                 )
 
-                # Stop the loop and synthesize `skipped` results for the
-                # rest when the session is gone or timeout budget is out
-                # (keeps the assistant<->tool N:N invariant).
+                # On hard failure (dead session / budget out), synthesize
+                # `skipped` results for remaining tool calls to keep the
+                # assistant<->tool N:N invariant, then break.
                 budget_exhausted = self.timeout_budget < 0
                 if terminal_dead or budget_exhausted:
-                    if terminal_dead:
-                        skipped_reason = (
-                            "Skipped: the bash session died while running a previous "
-                            "tool call in this step. No further tool calls in this "
-                            "assistant response were executed."
-                        )
-                    else:
-                        skipped_reason = (
-                            "Skipped: timeout budget exhausted while running a previous "
-                            "tool call in this step. No further tool calls in this "
-                            "assistant response were executed."
-                        )
+                    skipped_reason = (
+                        "Skipped: the bash session died mid-step; no further tool calls ran."
+                        if terminal_dead
+                        else "Skipped: timeout budget exhausted mid-step; no further tool calls ran."
+                    )
                     for remaining in tool_calls[idx + 1 :]:
                         tool_results.append(
                             ToolResult(
@@ -291,14 +285,13 @@ class AgentInteraction:
                         )
                     break
 
-        # step 6: commit collected tool messages to both histories
+        # step 6: commit collected tool messages
         self.messages.extend(tool_messages)
         self.rollout_cache = await self.model.append_messages_to_rollout_cache(tool_messages, self.rollout_cache)
         step_output.tool_results = tool_results
 
-        # step 7: pick step-level exit_reason (precedence: terminal_dead >
-        # timeout_budget_exhausted > finished > completed_with_tool_errors >
-        # completed).
+        # step 7: step-level exit_reason (precedence: terminal_dead >
+        # timeout_budget_exhausted > finished > completed_with_tool_errors > completed)
         if terminal_dead:
             step_output.done = True
             step_output.exit_reason = "terminal_dead"

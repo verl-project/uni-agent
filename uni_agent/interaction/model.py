@@ -235,8 +235,8 @@ class OpenAICompatibleChatModel:
         self.tools_schemas = tools_schemas
 
     async def prepare_rollout_cache(self, messages: list[dict[str, str]]) -> dict[str, Any]:
-        """OpenAI path is stateless; the caller owns ``messages`` and
-        re-passes it every :meth:`query`. Only metrics live in the cache.
+        """Stateless: caller owns ``messages`` and re-passes them every
+        :meth:`query`. Cache holds only metrics.
         """
         return {"metrics": {}}
 
@@ -245,15 +245,15 @@ class OpenAICompatibleChatModel:
         new_messages: list[dict[str, Any]],
         rollout_cache: dict[str, Any] | None,
     ):
-        """No-op. Kept so :class:`AgentInteraction` can dispatch uniformly
-        over training (:class:`AgentChatModel`) and inference paths.
+        """No-op; kept so :class:`AgentInteraction` can dispatch uniformly
+        across training and inference paths.
         """
         return rollout_cache
 
     def _normalize_messages_for_api(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Strip locally-added fields the OpenAI API doesn't accept.
-        Tool messages missing ``tool_call_id`` (e.g. format-error fallbacks)
-        are forwarded as-is.
+        Tool messages missing ``tool_call_id`` (format-error fallbacks)
+        pass through as-is.
         """
         normalized_messages = []
         for message in messages:
