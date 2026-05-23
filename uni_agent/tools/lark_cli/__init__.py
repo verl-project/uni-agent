@@ -125,7 +125,7 @@ class LarkCliTool(AbstractTool):
         # on the host, and ~/.config/larksuite (or equivalent) must already be
         # populated when the tool is invoked.
         return (
-            "command -v lark-cli >/dev/null 2>&1 "
+            "lark-cli --version >/dev/null 2>&1 "
             "|| (npm install -g @larksuite/cli "
             "&& chmod +x \"$(npm root -g)/@larksuite/cli/scripts/run.js\" 2>/dev/null || true)"
         )
