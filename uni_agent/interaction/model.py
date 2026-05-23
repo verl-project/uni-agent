@@ -223,6 +223,7 @@ class OpenAICompatibleChatModel:
         self.loop = get_event_loop()
 
         from openai import AsyncOpenAI
+
         self.client = AsyncOpenAI(api_key=self.api_key, base_url=self.base_url, timeout=self.timeout)
 
     def set_tools_schemas(self, tools_schemas: list[dict]) -> None:

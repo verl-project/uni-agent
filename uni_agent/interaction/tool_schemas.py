@@ -78,7 +78,7 @@ class OpenAIFunctionCallSchema(BaseModel):
     @staticmethod
     def from_openai_function_parsed_schema(
         parsed_schema: OpenAIFunctionParsedSchema,
-    ) -> tuple["OpenAIFunctionCallSchema", bool]:
+    ) -> tuple[OpenAIFunctionCallSchema, bool]:
         has_decode_error = False
         try:
             arguments = json.loads(parsed_schema.arguments)

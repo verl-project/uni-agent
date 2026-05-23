@@ -9,8 +9,8 @@ from uni_agent.utils import auto_await, simple_timer
 
 from .env import ActionIncorrectSyntaxError, ActionTimeoutError, AgentEnv, TerminalNotAliveError
 from .model import AgentChatModel, MaxTokenExceededError
-from .tool_schemas import OpenAIFunctionToolCall
 from .tool_parser import FunctionCallFormatError
+from .tool_schemas import OpenAIFunctionToolCall
 from .tools_manager import ToolsManager
 
 

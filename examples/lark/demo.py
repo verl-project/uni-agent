@@ -117,8 +117,7 @@ tools_manager = ToolsManager(
 skills_manager = SkillsManager.from_config(
     SkillsManagerConfig(skills_dir=skills_dir),
 )
-print(f"\n[skills] discovered {len(skills_manager.skills)} skill(s): "
-      f"{[s.name for s in skills_manager.skills]}\n")
+print(f"\n[skills] discovered {len(skills_manager.skills)} skill(s): {[s.name for s in skills_manager.skills]}\n")
 
 # --- model -----------------------------------------------------------------
 model = OpenAICompatibleChatModel(
