@@ -34,14 +34,16 @@ class ToolsManager:
         self,
         model_output: str,
     ) -> tuple[str, list[OpenAIFunctionToolCall]]:
+        """Parse tool calls from raw text via the registered tool parser.
+
+        Returns ``(content, tool_calls)``. ``tool_calls`` may be **empty**
+        -- callers (e.g. the agent loop) decide what that means (e.g.
+        turn-final assistant message in chat mode, vs. format error in
+        single-shot mode that requires a tool call). Malformed tool calls
+        still raise :class:`FunctionCallFormatError`.
+        """
         tools = [OpenAIFunctionToolSchema(**schema) for schema in self.tools_schemas]
         content, tool_calls = self._tool_parser.extract_tool_calls(model_output, tools)
-
-        if len(tool_calls) == 0:
-            raise FunctionCallFormatError("No function call found in the response.")
-        elif len(tool_calls) > 1:
-            raise FunctionCallFormatError(f"Number of tool calls {len(tool_calls)} exceeds max_parallel_calls 1.")
-
         return content, tool_calls
 
     async def parse_structured_action(
@@ -49,6 +51,12 @@ class ToolsManager:
         content: str,
         tool_calls_data: list[dict],
     ) -> tuple[str, list[OpenAIFunctionToolCall]]:
+        """Parse tool calls from an OpenAI-style structured ``tool_calls`` list.
+
+        Like :meth:`parse_action`, the returned list may be empty
+        (callers decide). Unknown tool names and invalid JSON arguments
+        still raise :class:`FunctionCallFormatError`.
+        """
         tool_calls = []
         valid_names = {schema["function"]["name"] for schema in self.tools_schemas}
         for tool_call_data in tool_calls_data:
@@ -76,11 +84,6 @@ class ToolsManager:
                     function=function_call,
                 )
             )
-
-        if len(tool_calls) == 0:
-            raise FunctionCallFormatError("No function call found in the response.")
-        if len(tool_calls) > 1:
-            raise FunctionCallFormatError(f"Number of tool calls {len(tool_calls)} exceeds max_parallel_calls 1.")
         return content, tool_calls
 
     def get_tool_bash_command(self, tool_call: OpenAIFunctionToolCall) -> str:

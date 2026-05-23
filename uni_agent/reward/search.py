@@ -29,7 +29,8 @@ def _extract_answer_from_trajectory(trajectory: list, messages: list[dict]) -> s
     Looks for the last trajectory step with exit_reason == "finished" and tries,
     in order:
     1. JSON-parse the <tool_call> block from the model response (most reliable).
-    2. Fallback: use the observation (finish script echoes the answer to stdout).
+    2. Fallback: use the finish/submit tool observation
+       (the finish script echoes the answer to stdout).
     """
     for step in reversed(trajectory):
         if getattr(step, "exit_reason", None) != "finished":
@@ -56,11 +57,13 @@ def _extract_answer_from_trajectory(trajectory: list, messages: list[dict]) -> s
                 pass
 
         # Fallback: the finish script prints the answer to stdout
-        obs = getattr(step, "observation", "")
-        if obs:
-            cleaned = obs.strip()
-            if cleaned:
-                return cleaned
+        tool_results = getattr(step, "tool_results", []) or []
+        for tr in reversed(tool_results):
+            if getattr(tr, "name", "") in ("finish", "submit") and getattr(tr, "status", "") == "ok":
+                obs = (getattr(tr, "observation", "") or "").strip()
+                if obs:
+                    return obs
+                break
 
     return None
 

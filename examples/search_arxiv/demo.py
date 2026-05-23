@@ -117,6 +117,11 @@ else:
     print("No step output found.")
 
 print("\nFinal result:")
-print(last_step.observation)
+if last_step is None:
+    print("(empty)")
+elif last_step.tool_results:
+    print(last_step.tool_results[-1].observation)
+else:
+    print(last_step.response or "(empty)")
 
 env.close()

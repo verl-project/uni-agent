@@ -1,7 +1,8 @@
 import time
+from typing import Literal
 
 import orjson
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from uni_agent.async_logging import get_logger
 from uni_agent.skills.manager import SkillsManager
@@ -13,15 +14,32 @@ from .tool_parser import FunctionCallFormatError
 from .tool_schemas import OpenAIFunctionToolCall
 from .tools_manager import ToolsManager
 
+ToolStatus = Literal["ok", "timeout", "syntax_error", "skipped"]
+
+
+class ToolResult(BaseModel):
+    """Per-tool-call result inside a single step.
+
+    Status is the *tool-level* outcome; the *step-level* outcome lives in
+    :attr:`StepOutput.exit_reason`. ``observation`` always carries what
+    was sent back to the model as the ``role="tool"`` message content (so
+    error tools also carry their error text here).
+    """
+
+    tool_call_id: str
+    name: str
+    action: str = ""
+    observation: str = ""
+    status: ToolStatus
+    execution_time: float | None = None
+
 
 class StepOutput(BaseModel):
     step_idx: int
 
     response: str = ""
     thought: str = ""
-    action: str = ""
-    observation: str = ""
-    execution_time: float | None = None
+    tool_results: list[ToolResult] = Field(default_factory=list)
     done: bool = False
     exit_reason: str = ""
 
@@ -82,6 +100,38 @@ class AgentInteraction:
         self.messages.insert(0, {"role": "system", "content": manifest})
 
     async def step(self, step_idx: int):
+        """Run one model-call + tool-execution cycle.
+
+        Supports **multiple tool calls per assistant message** (executed
+        sequentially in the shared bash session, results appended in
+        order) and treats a model response **without any tool calls** as
+        a turn-final assistant reply (``done=True`` with
+        ``exit_reason="turn_done"``) -- which is what enables long-running
+        chat use cases on top of the same loop.
+
+        Single-shot scripts that rely on the legacy "exactly one tool
+        call per response, terminate on ``finish``/``submit``" pattern
+        keep working unchanged: the model still returns one tool call,
+        ``finish`` still flips ``done=True`` with
+        ``exit_reason="finished"``.
+
+        Two levels of outcome are reported:
+
+        * **Tool level** -- per-call :class:`ToolResult` records on
+          ``step_output.tool_results`` (``status`` is one of ``ok``,
+          ``timeout``, ``syntax_error``, ``skipped``).
+        * **Step level** -- a single ``step_output.exit_reason`` string
+          plus ``step_output.done``:
+
+          - terminal (``done=True``):
+            ``finished``, ``turn_done``, ``token_limit``,
+            ``terminal_dead``, ``timeout_budget_exhausted``.
+          - non-terminal (``done=False``):
+            ``completed``, ``completed_with_tool_errors``,
+            ``format_error``.
+          - set by :meth:`run` outer loop:
+            ``max_step_limit``, ``unknown_error``.
+        """
         # step index start from 1
         step_output = StepOutput(step_idx=step_idx)
         self.logger.info(f"{'=' * 25} STEP {step_idx} {'=' * 25}")
@@ -91,7 +141,7 @@ class AgentInteraction:
 
         # step 2: generate response and update rollout cache
         try:
-            model_output, rollout_cache, generation_info = await self.model.query(
+            model_output, tool_calls, rollout_cache, generation_info = await self.model.query(
                 messages=self.messages,
                 rollout_cache=self.rollout_cache,
             )
@@ -109,20 +159,38 @@ class AgentInteraction:
 
         # step 3: parse model response to actions
         self.rollout_cache = rollout_cache
-        self.messages.append({"role": "assistant", "content": model_output})  # tool call message
+
+        # Mirror api-shaped assistant message into self.messages: keep
+        # tool_calls when present so persistence/replay keeps the
+        # assistant<->tool linkage intact across runs.
+        assistant_msg: dict[str, object] = {"role": "assistant", "content": model_output}
+        if tool_calls:
+            assistant_msg["tool_calls"] = tool_calls
+        self.messages.append(assistant_msg)
+
         try:
-            structured_tool_calls = self.rollout_cache.get("extra_fields", {}).get("last_tool_calls", [])
-            if structured_tool_calls:
+            if tool_calls:
                 content, tool_calls = await self.tools_manager.parse_structured_action(
                     content=model_output,
-                    tool_calls_data=structured_tool_calls,
+                    tool_calls_data=tool_calls,
                 )
             else:
                 content, tool_calls = await self.tools_manager.parse_action(model_output=model_output)
         except FunctionCallFormatError as e:
-            user_message = {"role": "tool", "content": str(e)}
-            self.messages.append(user_message)  # error message
-            self.rollout_cache = await self.model.append_messages_to_rollout_cache([user_message], self.rollout_cache)
+            if tool_calls:
+                error_msgs: list[dict[str, object]] = [
+                    {
+                        "role": "tool",
+                        "tool_call_id": tc["id"],
+                        "name": tc["function"]["name"],
+                        "content": str(e),
+                    }
+                    for tc in tool_calls
+                ]
+            else:
+                error_msgs = [{"role": "tool", "content": str(e)}]
+            self.messages.extend(error_msgs)
+            self.rollout_cache = await self.model.append_messages_to_rollout_cache(error_msgs, self.rollout_cache)
             step_output.exit_reason = "format_error"
             model_output_preview = "\n".join(model_output.splitlines()[:20])
             self.logger.error(
@@ -132,68 +200,135 @@ class AgentInteraction:
             )
             return step_output
 
-        # step 4: run action in the environment
-        tool_call: OpenAIFunctionToolCall = tool_calls[0]
-        action_cmd = self.tools_manager.get_tool_bash_command(tool_call)
         step_output.thought = content
-        step_output.action = action_cmd
-        self.logger.info(f"💭 THOUGHT:\n{content}")
-        self.logger.info(f"🎬 ACTION:\n{action_cmd}")
-        execution_t0 = time.perf_counter()
-        with simple_timer("tool_calls", self.rollout_cache["metrics"]):
-            try:
-                observation = await self.env.run_action(action_cmd, action_timeout=self.action_timeout)
-                tool_message = {"role": "tool", "content": observation}
-                self.messages.append(tool_message)  # tool response message
-                self.rollout_cache = await self.model.append_messages_to_rollout_cache(
-                    [tool_message], self.rollout_cache
-                )
-                step_output.observation = observation
-            except ActionTimeoutError as e:
-                self.logger.error(str(e))
-                user_message = {"role": "tool", "content": str(e)}
-                self.messages.append(user_message)
-                self.rollout_cache = await self.model.append_messages_to_rollout_cache(
-                    [user_message], self.rollout_cache
-                )
-                step_output.exit_reason = "timeout_error"
-                self.logger.info(f"Existing timeout budget: {self.timeout_budget}")
-                if self.timeout_budget > 0:
-                    self.timeout_budget -= 1
-                    return step_output
-                else:
-                    step_output.done = True
-                    return step_output
-            except ActionIncorrectSyntaxError as e:
-                self.logger.error(str(e))
-                user_message = {"role": "tool", "content": str(e)}
-                self.messages.append(user_message)
-                self.rollout_cache = await self.model.append_messages_to_rollout_cache(
-                    [user_message], self.rollout_cache
-                )
-                step_output.exit_reason = "syntax_error"
-                return step_output
-            except TerminalNotAliveError as e:
-                self.logger.error(str(e))
-                user_message = {"role": "tool", "content": str(e)}
-                self.messages.append(user_message)
-                self.rollout_cache = await self.model.append_messages_to_rollout_cache(
-                    [user_message], self.rollout_cache
-                )
-                step_output.exit_reason = "terminal_not_alive"
-                step_output.done = True
-                return step_output
 
-        # step 5: finalize step output
-        execution_time = time.perf_counter() - execution_t0
-        step_output.execution_time = execution_time
-        if tool_call.function.name in ["finish", "submit"]:
+        # step 4: no tool calls -> turn-final assistant reply (chat mode)
+        if not tool_calls:
+            step_output.done = True
+            step_output.exit_reason = "turn_done"
+            self.logger.info(f"💬 TURN DONE (no tool call): {model_output}")
+            return step_output
+
+        # step 5: execute every tool call sequentially in the shared bash session
+        tool_results: list[ToolResult] = []
+        tool_messages: list[dict[str, object]] = []
+        saw_finish = False
+        terminal_dead = False
+
+        with simple_timer("tool_calls", self.rollout_cache["metrics"]):
+            for idx, tool_call in enumerate(tool_calls):
+                tool_call: OpenAIFunctionToolCall  # type: ignore[no-redef]
+                action_cmd = self.tools_manager.get_tool_bash_command(tool_call)
+                self.logger.info(f"🎬 ACTION ({tool_call.function.name}):\n{action_cmd}")
+
+                tool_t0 = time.perf_counter()
+                status: ToolStatus
+                try:
+                    observation = await self.env.run_action(action_cmd, action_timeout=self.action_timeout)
+                    status = "ok"
+                    if tool_call.function.name in ("finish", "submit"):
+                        saw_finish = True
+                except ActionTimeoutError as e:
+                    observation = str(e)
+                    status = "timeout"
+                    self.timeout_budget -= 1
+                    self.logger.error(f"{observation} (timeout_budget left: {self.timeout_budget})")
+                except ActionIncorrectSyntaxError as e:
+                    observation = str(e)
+                    status = "syntax_error"
+                    self.logger.error(observation)
+                except TerminalNotAliveError as e:
+                    observation = str(e)
+                    status = "skipped"
+                    terminal_dead = True
+                    self.logger.error(observation)
+                elapsed = time.perf_counter() - tool_t0
+
+                tool_results.append(
+                    ToolResult(
+                        tool_call_id=tool_call.id,
+                        name=tool_call.function.name,
+                        action=action_cmd,
+                        observation=observation,
+                        status=status,
+                        execution_time=elapsed,
+                    )
+                )
+
+                tool_messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "name": tool_call.function.name,
+                        "content": observation,
+                    }
+                )
+
+                # Stop the in-step loop and synthesize skipped results
+                # for the remaining tool calls when (a) the bash session
+                # is gone, or (b) the timeout budget is now exhausted.
+                budget_exhausted = self.timeout_budget < 0
+                if terminal_dead or budget_exhausted:
+                    if terminal_dead:
+                        skipped_reason = (
+                            "Skipped: the bash session died while running a previous "
+                            "tool call in this step. No further tool calls in this "
+                            "assistant response were executed."
+                        )
+                    else:
+                        skipped_reason = (
+                            "Skipped: timeout budget exhausted while running a previous "
+                            "tool call in this step. No further tool calls in this "
+                            "assistant response were executed."
+                        )
+                    for remaining in tool_calls[idx + 1 :]:
+                        tool_results.append(
+                            ToolResult(
+                                tool_call_id=remaining.id,
+                                name=remaining.function.name,
+                                action="",
+                                observation=skipped_reason,
+                                status="skipped",
+                                execution_time=None,
+                            )
+                        )
+                        tool_messages.append(
+                            {
+                                "role": "tool",
+                                "tool_call_id": remaining.id,
+                                "name": remaining.function.name,
+                                "content": skipped_reason,
+                            }
+                        )
+                    break
+
+        # step 6: commit collected tool messages to both histories
+        self.messages.extend(tool_messages)
+        self.rollout_cache = await self.model.append_messages_to_rollout_cache(tool_messages, self.rollout_cache)
+        step_output.tool_results = tool_results
+
+        # step 7: finalize step-level outcome (precedence: terminal_dead >
+        # timeout_budget_exhausted > finished > completed_with_tool_errors >
+        # completed). Tool-level statuses are already on tool_results.
+        if terminal_dead:
+            step_output.done = True
+            step_output.exit_reason = "terminal_dead"
+            return step_output
+        if self.timeout_budget < 0:
+            step_output.done = True
+            step_output.exit_reason = "timeout_budget_exhausted"
+            self.logger.info("Exit step: timeout budget exhausted.")
+            return step_output
+        if saw_finish:
             step_output.done = True
             step_output.exit_reason = "finished"
-        else:
+            return step_output
+        if any(tr.status in ("timeout", "syntax_error") for tr in tool_results):
             step_output.done = False
-            step_output.exit_reason = "completed"
-
+            step_output.exit_reason = "completed_with_tool_errors"
+            return step_output
+        step_output.done = False
+        step_output.exit_reason = "completed"
         return step_output
 
     @auto_await

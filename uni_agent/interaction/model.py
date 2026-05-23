@@ -83,7 +83,20 @@ class AgentChatModel:
         messages: list[dict[str, str]],
         rollout_cache: dict[str, Any] | None,
         **kwargs,
-    ) -> list[dict] | dict:
+    ) -> tuple[str, list[dict], dict[str, Any], dict[str, int]]:
+        """Run one model call.
+
+        Returns ``(text, tool_calls, rollout_cache, generation_info)``:
+
+        - ``text``: decoded assistant text (raw model output -- may
+          contain XML/Hermes-style tool-call markers that downstream
+          parsers will extract).
+        - ``tool_calls``: always ``[]`` on this training path. Verl's
+          rollout server returns token ids (no structured tool calls),
+          so callers always fall back to parsing ``text`` via the
+          registered tool parser.
+        - ``rollout_cache`` / ``generation_info``: as before.
+        """
         request_id = rollout_cache["request_id"]
         prompt_ids = rollout_cache["prompt_ids"]
         metrics = rollout_cache["metrics"]
@@ -130,7 +143,8 @@ class AgentChatModel:
                 f"prompt_ids length {len(rollout_cache['prompt_ids'])} exceeds max_model_len {self.max_model_len}\n"
                 f"Generated response:\n{response_str}"
             )
-        return response_str, rollout_cache, generation_info
+
+        return response_str, [], rollout_cache, generation_info
 
     async def _get_new_message_ids(self, new_messages: list[dict[str, Any]]) -> list[int]:
         from verl.utils.chat_template import apply_chat_template
@@ -230,58 +244,55 @@ class OpenAICompatibleChatModel:
         self.tools_schemas = tools_schemas
 
     async def prepare_rollout_cache(self, messages: list[dict[str, str]]) -> dict[str, Any]:
-        return {
-            "metrics": {},
-            "extra_fields": {
-                "backend": "openai-compatible",
-                "api_messages": [dict(message) for message in messages],
-                "last_tool_calls": [],
-            },
-        }
+        """The OpenAI path is stateless across calls except for metrics
+        accumulation -- the conversation history is owned and passed in
+        explicitly by the caller (``AgentInteraction.messages``), so
+        nothing else needs to live in ``rollout_cache``.
+        """
+        return {"metrics": {}}
 
     async def append_messages_to_rollout_cache(
         self,
-        new_messages: list[dict[str, str]],
+        new_messages: list[dict[str, Any]],
         rollout_cache: dict[str, Any] | None,
     ):
-        api_messages = rollout_cache["extra_fields"]["api_messages"]
-        last_tool_calls = rollout_cache["extra_fields"].get("last_tool_calls", [])
-        last_tool_call = last_tool_calls[0] if last_tool_calls else None
+        """No-op on the OpenAI path.
 
-        for message in new_messages:
-            if message["role"] == "tool":
-                tool_message = {
-                    "role": "tool",
-                    "content": message["content"],
-                }
-                if last_tool_call is not None:
-                    tool_message["tool_call_id"] = last_tool_call["id"]
-                    tool_message["name"] = last_tool_call["function"]["name"]
-                api_messages.append(tool_message)
-            else:
-                api_messages.append(dict(message))
-
+        The training counterpart (:class:`AgentChatModel`) uses this to
+        tokenize and accumulate ``prompt_ids``; here the caller owns
+        the message list (`AgentInteraction.messages`) and re-passes it
+        on every :meth:`query` call, so there's nothing to stash.
+        Method is kept so :meth:`AgentInteraction.step` can dispatch
+        uniformly over both model classes.
+        """
         return rollout_cache
 
-    def _normalize_messages_for_api(self, api_messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _normalize_messages_for_api(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Strip locally-added fields the OpenAI API doesn't accept.
+
+        Tolerates ``role=tool`` messages that lack ``tool_call_id``
+        (e.g. error-path messages produced when parsing failed before
+        a specific tool call could be identified) -- they're forwarded
+        without the field; OpenAI will likely reject them but that's
+        a caller-side correctness issue, not something to swallow here.
+        """
         normalized_messages = []
-        for message in api_messages:
+        for message in messages:
             normalized_message = {"role": message["role"]}
             if message.get("content") is not None:
                 normalized_message["content"] = message["content"]
             if message["role"] == "assistant" and message.get("tool_calls"):
                 normalized_message["tool_calls"] = message["tool_calls"]
             if message["role"] == "tool":
-                normalized_message["tool_call_id"] = message["tool_call_id"]
+                tool_call_id = message.get("tool_call_id")
+                if tool_call_id is not None:
+                    normalized_message["tool_call_id"] = tool_call_id
                 if message.get("name") is not None:
                     normalized_message["name"] = message["name"]
             normalized_messages.append(normalized_message)
         return normalized_messages
 
-    # OpenAI ChatCompletion top-level sampling fields. Keys not in this set
-    # are forwarded via ``extra_body`` so vendor extensions (top_k,
-    # repetition_penalty, ...) still reach vLLM/SGLang-style endpoints
-    # without 400-ing real OpenAI for unknown top-level args.
+    # OpenAI ChatCompletion top-level sampling fields.
     _OPENAI_TOP_LEVEL_SAMPLING_FIELDS: frozenset[str] = frozenset(
         {
             "temperature",
@@ -305,9 +316,25 @@ class OpenAICompatibleChatModel:
         messages: list[dict[str, str]],
         rollout_cache: dict[str, Any] | None,
         **kwargs,
-    ) -> list[dict] | dict:
+    ) -> tuple[str, list[dict], dict[str, Any], dict[str, int]]:
+        """Run one chat-completion call.
+
+        Returns ``(text, tool_calls, rollout_cache, generation_info)``:
+
+        - ``text``: assistant ``content`` from the response (may be ``""``
+          when the model only emits tool calls).
+        - ``tool_calls``: structured list (OpenAI shape:
+          ``{"id", "type", "function": {"name", "arguments"}}``) -- one
+          entry per parallel tool call. ``[]`` if the model returned
+          plain text only.
+        - ``rollout_cache``: unchanged except for ``metrics`` timing
+          accumulation. The OpenAI path is stateless across calls;
+          ``messages`` is read directly from the input arg and the
+          caller owns the running history.
+        - ``generation_info``: ``prompt_tokens`` / ``completion_tokens``.
+        """
         sampling_params = kwargs.get("sampling_params", self.sampling_params) or {}
-        api_messages = self._normalize_messages_for_api(rollout_cache["extra_fields"]["api_messages"])
+        api_messages = self._normalize_messages_for_api(messages)
 
         top_level = {k: v for k, v in sampling_params.items() if k in self._OPENAI_TOP_LEVEL_SAMPLING_FIELDS}
         extra_body = {k: v for k, v in sampling_params.items() if k not in self._OPENAI_TOP_LEVEL_SAMPLING_FIELDS}
@@ -325,41 +352,24 @@ class OpenAICompatibleChatModel:
         response_content = response_message.content or ""
         response_tool_calls = list(response_message.tool_calls or [])
 
-        if response_tool_calls:
-            serialized_tool_calls = []
-            for tool_call in response_tool_calls:
-                serialized_tool_calls.append(
-                    {
-                        "id": tool_call.id,
-                        "type": tool_call.type,
-                        "function": {
-                            "name": tool_call.function.name,
-                            "arguments": tool_call.function.arguments,
-                        },
-                    }
-                )
-            rollout_cache["extra_fields"]["last_tool_calls"] = serialized_tool_calls
-            rollout_cache["extra_fields"]["api_messages"].append(
-                {
-                    "role": "assistant",
-                    "content": response_content,
-                    "tool_calls": serialized_tool_calls,
-                }
-            )
-        else:
-            rollout_cache["extra_fields"]["last_tool_calls"] = []
-            rollout_cache["extra_fields"]["api_messages"].append(
-                {
-                    "role": "assistant",
-                    "content": response_content,
-                }
-            )
+        serialized_tool_calls: list[dict] = [
+            {
+                "id": tool_call.id,
+                "type": tool_call.type,
+                "function": {
+                    "name": tool_call.function.name,
+                    "arguments": tool_call.function.arguments,
+                },
+            }
+            for tool_call in response_tool_calls
+        ]
 
         usage = chat_completion.usage
         completion_tokens = usage.completion_tokens if usage is not None else max(len(response_content.split()), 1)
         prompt_tokens = usage.prompt_tokens if usage is not None else 0
         return (
             response_content,
+            serialized_tool_calls,
             rollout_cache,
             {
                 "prompt_tokens": prompt_tokens,
