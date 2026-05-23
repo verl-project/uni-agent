@@ -84,15 +84,17 @@ class AgentEnv:
         await self.communicate(f"export PATH={shlex.quote(install_dir.as_posix())}:$PATH", check="raise")
         for tool in tools:
             tool_name = tool.name
-            local_tool_path = tool.local_path
-            assert local_tool_path.is_file(), f"Tool {tool_name} not found"
-
-            container_tool_path = install_dir / tool_name
-            await self.copy_to_container(
-                src=local_tool_path,
-                tgt=container_tool_path,
-            )
-            await self.communicate(f"chmod +x {container_tool_path.as_posix()}", check="raise")
+            if tool.copy_to_remote:
+                local_tool_path = tool.local_path
+                assert local_tool_path is not None and local_tool_path.is_file(), (
+                    f"Tool {tool_name} has copy_to_remote=True but local_path={local_tool_path!r} is not a file"
+                )
+                container_tool_path = install_dir / tool_name
+                await self.copy_to_container(
+                    src=local_tool_path,
+                    tgt=container_tool_path,
+                )
+                await self.communicate(f"chmod +x {container_tool_path.as_posix()}", check="raise")
             install_cmd = tool.get_install_command()
             if install_cmd:
                 await self.communicate(install_cmd, check="raise")
