@@ -84,18 +84,9 @@ class AgentChatModel:
         rollout_cache: dict[str, Any] | None,
         **kwargs,
     ) -> tuple[str, list[dict], dict[str, Any], dict[str, int]]:
-        """Run one model call.
-
-        Returns ``(text, tool_calls, rollout_cache, generation_info)``:
-
-        - ``text``: decoded assistant text (raw model output -- may
-          contain XML/Hermes-style tool-call markers that downstream
-          parsers will extract).
-        - ``tool_calls``: always ``[]`` on this training path. Verl's
-          rollout server returns token ids (no structured tool calls),
-          so callers always fall back to parsing ``text`` via the
-          registered tool parser.
-        - ``rollout_cache`` / ``generation_info``: as before.
+        """Run one model call. Returns ``(text, tool_calls, rollout_cache,
+        generation_info)``. ``tool_calls`` is always ``[]`` on the training
+        path -- verl returns token ids, so callers must parse ``text``.
         """
         request_id = rollout_cache["request_id"]
         prompt_ids = rollout_cache["prompt_ids"]
@@ -244,10 +235,8 @@ class OpenAICompatibleChatModel:
         self.tools_schemas = tools_schemas
 
     async def prepare_rollout_cache(self, messages: list[dict[str, str]]) -> dict[str, Any]:
-        """The OpenAI path is stateless across calls except for metrics
-        accumulation -- the conversation history is owned and passed in
-        explicitly by the caller (``AgentInteraction.messages``), so
-        nothing else needs to live in ``rollout_cache``.
+        """OpenAI path is stateless; the caller owns ``messages`` and
+        re-passes it every :meth:`query`. Only metrics live in the cache.
         """
         return {"metrics": {}}
 
@@ -256,25 +245,15 @@ class OpenAICompatibleChatModel:
         new_messages: list[dict[str, Any]],
         rollout_cache: dict[str, Any] | None,
     ):
-        """No-op on the OpenAI path.
-
-        The training counterpart (:class:`AgentChatModel`) uses this to
-        tokenize and accumulate ``prompt_ids``; here the caller owns
-        the message list (`AgentInteraction.messages`) and re-passes it
-        on every :meth:`query` call, so there's nothing to stash.
-        Method is kept so :meth:`AgentInteraction.step` can dispatch
-        uniformly over both model classes.
+        """No-op. Kept so :class:`AgentInteraction` can dispatch uniformly
+        over training (:class:`AgentChatModel`) and inference paths.
         """
         return rollout_cache
 
     def _normalize_messages_for_api(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Strip locally-added fields the OpenAI API doesn't accept.
-
-        Tolerates ``role=tool`` messages that lack ``tool_call_id``
-        (e.g. error-path messages produced when parsing failed before
-        a specific tool call could be identified) -- they're forwarded
-        without the field; OpenAI will likely reject them but that's
-        a caller-side correctness issue, not something to swallow here.
+        Tool messages missing ``tool_call_id`` (e.g. format-error fallbacks)
+        are forwarded as-is.
         """
         normalized_messages = []
         for message in messages:
@@ -317,21 +296,10 @@ class OpenAICompatibleChatModel:
         rollout_cache: dict[str, Any] | None,
         **kwargs,
     ) -> tuple[str, list[dict], dict[str, Any], dict[str, int]]:
-        """Run one chat-completion call.
-
-        Returns ``(text, tool_calls, rollout_cache, generation_info)``:
-
-        - ``text``: assistant ``content`` from the response (may be ``""``
-          when the model only emits tool calls).
-        - ``tool_calls``: structured list (OpenAI shape:
-          ``{"id", "type", "function": {"name", "arguments"}}``) -- one
-          entry per parallel tool call. ``[]`` if the model returned
-          plain text only.
-        - ``rollout_cache``: unchanged except for ``metrics`` timing
-          accumulation. The OpenAI path is stateless across calls;
-          ``messages`` is read directly from the input arg and the
-          caller owns the running history.
-        - ``generation_info``: ``prompt_tokens`` / ``completion_tokens``.
+        """Run one chat-completion call. Returns ``(text, tool_calls,
+        rollout_cache, generation_info)``. ``tool_calls`` is the OpenAI
+        ``{"id", "type", "function": {"name", "arguments"}}`` shape (one
+        entry per parallel call; ``[]`` if the model returned plain text).
         """
         sampling_params = kwargs.get("sampling_params", self.sampling_params) or {}
         api_messages = self._normalize_messages_for_api(messages)

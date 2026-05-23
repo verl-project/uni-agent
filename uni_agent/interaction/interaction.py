@@ -18,12 +18,8 @@ ToolStatus = Literal["ok", "timeout", "syntax_error", "skipped"]
 
 
 class ToolResult(BaseModel):
-    """Per-tool-call result inside a single step.
-
-    Status is the *tool-level* outcome; the *step-level* outcome lives in
-    :attr:`StepOutput.exit_reason`. ``observation`` always carries what
-    was sent back to the model as the ``role="tool"`` message content (so
-    error tools also carry their error text here).
+    """Per-tool-call result inside a single step. ``observation`` is what was
+    sent back to the model as the ``role="tool"`` content (error text included).
     """
 
     tool_call_id: str
@@ -60,7 +56,13 @@ class AgentInteraction:
         timeout_budget: int = 3,
         max_turns: int = 50,
         skills_manager: SkillsManager | None = None,
+        chat_mode: bool = False,
     ):
+        """:param chat_mode: how to treat an assistant message with **no** tool
+        calls. ``False`` (default, single-shot / training / code-eval):
+        ``format_error``, loop continues. ``True`` (long-running chat):
+        ``turn_done``, loop returns to wait for the next user message.
+        """
         self.env = env
         self.model = model
         self.tools_manager = tools_manager
@@ -69,6 +71,7 @@ class AgentInteraction:
         self.action_timeout = action_timeout
         self.timeout_budget = timeout_budget
         self.max_turns = max_turns
+        self.chat_mode = chat_mode
         self.logger = get_logger("interaction", run_id)
 
     def inject_skills_manifest(self) -> None:
@@ -102,35 +105,19 @@ class AgentInteraction:
     async def step(self, step_idx: int):
         """Run one model-call + tool-execution cycle.
 
-        Supports **multiple tool calls per assistant message** (executed
-        sequentially in the shared bash session, results appended in
-        order) and treats a model response **without any tool calls** as
-        a turn-final assistant reply (``done=True`` with
-        ``exit_reason="turn_done"``) -- which is what enables long-running
-        chat use cases on top of the same loop.
+        Outcome is reported at two levels:
 
-        Single-shot scripts that rely on the legacy "exactly one tool
-        call per response, terminate on ``finish``/``submit``" pattern
-        keep working unchanged: the model still returns one tool call,
-        ``finish`` still flips ``done=True`` with
-        ``exit_reason="finished"``.
+        * **Tool**: per-call :class:`ToolResult` on ``step_output.tool_results``
+          with ``status`` in ``{ok, timeout, syntax_error, skipped}``.
+        * **Step**: ``step_output.exit_reason`` + ``done``:
 
-        Two levels of outcome are reported:
+          - terminal (``done=True``): ``finished``, ``turn_done``,
+            ``token_limit``, ``terminal_dead``, ``timeout_budget_exhausted``.
+          - non-terminal (``done=False``): ``completed``,
+            ``completed_with_tool_errors``, ``format_error``.
+          - set by :meth:`run`: ``max_step_limit``, ``unknown_error``.
 
-        * **Tool level** -- per-call :class:`ToolResult` records on
-          ``step_output.tool_results`` (``status`` is one of ``ok``,
-          ``timeout``, ``syntax_error``, ``skipped``).
-        * **Step level** -- a single ``step_output.exit_reason`` string
-          plus ``step_output.done``:
-
-          - terminal (``done=True``):
-            ``finished``, ``turn_done``, ``token_limit``,
-            ``terminal_dead``, ``timeout_budget_exhausted``.
-          - non-terminal (``done=False``):
-            ``completed``, ``completed_with_tool_errors``,
-            ``format_error``.
-          - set by :meth:`run` outer loop:
-            ``max_step_limit``, ``unknown_error``.
+        ``turn_done`` is gated on ``self.chat_mode`` (see ``__init__``).
         """
         # step index start from 1
         step_output = StepOutput(step_idx=step_idx)
@@ -160,9 +147,8 @@ class AgentInteraction:
         # step 3: parse model response to actions
         self.rollout_cache = rollout_cache
 
-        # Mirror api-shaped assistant message into self.messages: keep
-        # tool_calls when present so persistence/replay keeps the
-        # assistant<->tool linkage intact across runs.
+        # Mirror api-shaped assistant message into self.messages so
+        # persistence/replay keeps the assistant<->tool linkage.
         assistant_msg: dict[str, object] = {"role": "assistant", "content": model_output}
         if tool_calls:
             assistant_msg["tool_calls"] = tool_calls
@@ -176,6 +162,8 @@ class AgentInteraction:
                 )
             else:
                 content, tool_calls = await self.tools_manager.parse_action(model_output=model_output)
+            if not tool_calls and not self.chat_mode:
+                raise FunctionCallFormatError("No function call found in the response.")
         except FunctionCallFormatError as e:
             if tool_calls:
                 error_msgs: list[dict[str, object]] = [
@@ -202,7 +190,8 @@ class AgentInteraction:
 
         step_output.thought = content
 
-        # step 4: no tool calls -> turn-final assistant reply (chat mode)
+        # step 4: chat_mode only -- no tool call = turn-final reply.
+        # (Single-shot mode already raised FunctionCallFormatError above.)
         if not tool_calls:
             step_output.done = True
             step_output.exit_reason = "turn_done"
@@ -264,9 +253,9 @@ class AgentInteraction:
                     }
                 )
 
-                # Stop the in-step loop and synthesize skipped results
-                # for the remaining tool calls when (a) the bash session
-                # is gone, or (b) the timeout budget is now exhausted.
+                # Stop the loop and synthesize `skipped` results for the
+                # rest when the session is gone or timeout budget is out
+                # (keeps the assistant<->tool N:N invariant).
                 budget_exhausted = self.timeout_budget < 0
                 if terminal_dead or budget_exhausted:
                     if terminal_dead:
@@ -307,9 +296,9 @@ class AgentInteraction:
         self.rollout_cache = await self.model.append_messages_to_rollout_cache(tool_messages, self.rollout_cache)
         step_output.tool_results = tool_results
 
-        # step 7: finalize step-level outcome (precedence: terminal_dead >
+        # step 7: pick step-level exit_reason (precedence: terminal_dead >
         # timeout_budget_exhausted > finished > completed_with_tool_errors >
-        # completed). Tool-level statuses are already on tool_results.
+        # completed).
         if terminal_dead:
             step_output.done = True
             step_output.exit_reason = "terminal_dead"

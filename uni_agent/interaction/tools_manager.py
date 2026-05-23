@@ -34,13 +34,9 @@ class ToolsManager:
         self,
         model_output: str,
     ) -> tuple[str, list[OpenAIFunctionToolCall]]:
-        """Parse tool calls from raw text via the registered tool parser.
-
-        Returns ``(content, tool_calls)``. ``tool_calls`` may be **empty**
-        -- callers (e.g. the agent loop) decide what that means (e.g.
-        turn-final assistant message in chat mode, vs. format error in
-        single-shot mode that requires a tool call). Malformed tool calls
-        still raise :class:`FunctionCallFormatError`.
+        """Parse tool calls from raw text. Returns ``(content, tool_calls)``;
+        ``tool_calls`` may be empty (callers decide what that means).
+        Malformed calls raise :class:`FunctionCallFormatError`.
         """
         tools = [OpenAIFunctionToolSchema(**schema) for schema in self.tools_schemas]
         content, tool_calls = self._tool_parser.extract_tool_calls(model_output, tools)
@@ -51,11 +47,9 @@ class ToolsManager:
         content: str,
         tool_calls_data: list[dict],
     ) -> tuple[str, list[OpenAIFunctionToolCall]]:
-        """Parse tool calls from an OpenAI-style structured ``tool_calls`` list.
-
-        Like :meth:`parse_action`, the returned list may be empty
-        (callers decide). Unknown tool names and invalid JSON arguments
-        still raise :class:`FunctionCallFormatError`.
+        """Parse OpenAI-style structured tool calls. May return an empty list
+        (callers decide); unknown names / invalid JSON args raise
+        :class:`FunctionCallFormatError`.
         """
         tool_calls = []
         valid_names = {schema["function"]["name"] for schema in self.tools_schemas}
