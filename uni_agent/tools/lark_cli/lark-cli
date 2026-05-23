@@ -21,7 +21,7 @@ import sys
 
 def _find_real_lark_cli() -> str | None:
     """Walk PATH and return the first ``lark-cli`` that is not this script."""
-    self_real = os.path.realpath(sys.argv[0])
+    self_real = os.path.realpath(__file__)
     for path_dir in os.environ.get("PATH", "").split(os.pathsep):
         if not path_dir:
             continue
