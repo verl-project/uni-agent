@@ -41,6 +41,20 @@ if impl == "local":
         deployment_config["published_port"] = int(local_port)
     if local_extra_args:
         deployment_config["extra_run_args"] = shlex.split(local_extra_args)
+elif impl == "local_attach":
+    # Attach to a user-managed sandbox.
+    # start the sandbox:
+    #   docker run -d --name milo-sandbox -p 18000:18000 -v ~/.uni-agent/app/milo:/workspace
+    #     python:3.12 bash -lc "pip install -q swe-rex && \
+    #     python3 -m swerex.server --host 0.0.0.0 --port 18000 --auth-token milowww"
+    deployment_config = {
+        "type": "local_attach",
+        "host": os.getenv("LOCAL_ATTACH_HOST", "http://127.0.0.1"),
+        "port": int(os.getenv("LOCAL_ATTACH_PORT", "18000")),
+        "auth_token": os.environ.get("LOCAL_ATTACH_AUTH_TOKEN", "milowww"),
+        "timeout": 60.0,
+        "startup_timeout": 30.0,
+    }
 elif impl == "vefaas":
     assert os.getenv("VOLCE_ACCESS_KEY") is not None, "VOLCE_ACCESS_KEY must be set"
     assert os.getenv("VOLCE_SECRET_KEY") is not None, "VOLCE_SECRET_KEY must be set"
