@@ -44,4 +44,5 @@ The documentation is organized into three sections:
    :maxdepth: 1
    :caption: Blog
 
-   blog/index.md
+   blog/vision.md
+   blog/lark_agent.md

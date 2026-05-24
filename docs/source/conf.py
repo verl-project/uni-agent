@@ -90,6 +90,7 @@ html_extra_path = [
     "../../assets/async_comp.png",
     "../../assets/results_qwen3_30b.png",
     "../../assets/results_qwen3p5_9b.png",
+    "../../assets/lark-summarize-group-chat.jpeg",
 ]
 
 # Add the JavaScript file

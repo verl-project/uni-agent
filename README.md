@@ -18,6 +18,15 @@ The long-term vision is to build the backend infrastructure for next-generation 
 
 **One stack from inference to training:** Uni-Agent reuses the same interaction stack from large-scale agent execution to RL training, with support for advanced paradigms such as fully-async and partial rollout.
 
+## Vision: Milo & Miko 🔮
+
+Beyond the framework, the research direction we are building toward is **agents that continually learn from real conversations with the people who use them**. We are framing this around two flagship agents:
+
+- **Project Milo** — the chat agent that actually gets you. Reads intent and subtext, learns what matters to you over time, and on top of that helps you get work done across schedules, mail, and docs. Seed prototype: [`app/lark_chat`](./app/lark_chat).
+- **Project Miko** — the coding agent that actually gets the problem. Reads specs and codebases, reasons through real engineering challenges, and on top of that manages the whole project for excellent end-to-end performance.
+
+This is a long-term proposal, not a current release. Read the full vision: [Agents That Grow With You](https://uni-agent.readthedocs.io/en/latest/blog/vision.html).
+
 ## Quickstart 🚀
 
 Start with the docs below:

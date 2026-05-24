@@ -3,7 +3,7 @@
 
 # You can set these variables from the command line.
 SPHINXOPTS    =
-SPHINXBUILD   = LC_ALL=C.utf8 sphinx-build
+SPHINXBUILD   = LC_ALL=C.UTF-8 sphinx-build
 SPHINXPROJ    = uni-agent
 SOURCEDIR     = source
 BUILDDIR      = _build
