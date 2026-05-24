@@ -1,0 +1,36 @@
+# Personal override config for the long-running Lark chat agent.
+# This file is gitignored (`*.local.yaml`).
+#
+#   python -m app.lark_chat.main --config app/lark_chat/config.local.yaml
+
+container: milo-sandbox
+
+swerex:
+  host: http://127.0.0.1
+  port: 18000
+  auth_token: milowww
+
+model:
+  base_url: http://localhost:8000/v1
+  name: Qwen/Qwen3.6-35B-A3B
+  api_key: EMPTY
+  sampling_params:
+    temperature: 1.0
+    top_p: 0.95
+    presence_penalty: 1.5
+    top_k: 20
+    repetition_penalty: 1.0
+
+tools:
+  - execute_bash
+  - lark-cli
+  - str_replace_editor
+  - finish
+
+skills_dir: ~/.uni-agent/skills
+transcripts_dir: ~/.uni-agent/app/lark_chat/transcripts
+
+agent:
+  action_timeout: 60
+  max_steps_per_turn: 20
+  max_history_turns: 30

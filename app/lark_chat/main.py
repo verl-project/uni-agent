@@ -13,19 +13,23 @@ See ``app/lark_chat/README.md`` for setup, env vars, and run examples.
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import os
 import sys
 import traceback
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
+
+import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from app.lark_chat import prompts  # noqa: E402
-from app.lark_chat.conversation import ConversationStore  # noqa: E402
 from app.lark_chat.listener import LarkEventListener, fetch_bot_open_id  # noqa: E402
+from app.lark_chat.transcript import TranscriptStore  # noqa: E402
 from uni_agent.interaction import (  # noqa: E402
     AgentEnv,
     AgentEnvConfig,
@@ -37,66 +41,86 @@ from uni_agent.interaction import (  # noqa: E402
 from uni_agent.skills import SkillsManager, SkillsManagerConfig  # noqa: E402
 from uni_agent.tools import ToolConfig  # noqa: E402
 
+DEFAULT_CONFIG_PATH = Path(__file__).parent / "config.yaml"
+
 
 @dataclass
-class Settings:
-    """Runtime config sourced from environment variables.
+class SwerexConfig:
+    host: str
+    port: int
+    auth_token: str
 
-    Deployment is always ``local_attach`` -- the agent's bash session +
-    its ``lark-cli`` both live inside a user-managed Docker container,
-    so identity stays consistent between event subscription and reply.
-    """
 
-    container: str
-    swerex_host: str
-    swerex_port: int
-    swerex_auth_token: str
+@dataclass
+class ModelConfig:
+    base_url: str
+    name: str
+    api_key: str
+    sampling_params: dict[str, Any] = field(default_factory=dict)
 
-    model_base_url: str
-    model_api_key: str
-    model_name: str
-    sampling_params: dict
 
-    skills_dir: Path
-    history_dir: Path
-
+@dataclass
+class AgentLoopConfig:
     action_timeout: int = 60
     max_steps_per_turn: int = 20
     max_history_turns: int = 30
 
+
+@dataclass
+class LarkChatConfig:
+    """Runtime config for the long-running Lark chat agent.
+
+    Deployment is always ``local_attach`` -- the agent's bash session +
+    its ``lark-cli`` both live inside a user-managed Docker container,
+    so identity stays consistent between event subscription and reply.
+    Load from YAML via :meth:`load`. Secrets (``swerex.auth_token``,
+    ``model.api_key``) may be left ``null`` in YAML and supplied through
+    ``LOCAL_ATTACH_AUTH_TOKEN`` / ``API_KEY`` env vars instead.
+    """
+
+    container: str
+    swerex: SwerexConfig
+    model: ModelConfig
+    tools: list[str]
+    skills_dir: Path
+    transcripts_dir: Path
+    agent: AgentLoopConfig
+
     @classmethod
-    def from_env(cls) -> Settings:
-        auth_token = os.environ.get("LOCAL_ATTACH_AUTH_TOKEN")
+    def load(cls, path: Path) -> LarkChatConfig:
+        if not path.exists():
+            raise FileNotFoundError(f"Config file not found: {path}")
+        raw = yaml.safe_load(path.read_text()) or {}
+
+        swerex_raw = raw.get("swerex") or {}
+        auth_token = swerex_raw.get("auth_token") or os.environ.get("LOCAL_ATTACH_AUTH_TOKEN")
         if not auth_token:
             raise RuntimeError(
-                "LOCAL_ATTACH_AUTH_TOKEN is required (matches the --auth-token "
-                "you started swerex.server with inside the container)."
+                "swerex.auth_token is required: set it in the config file or via the "
+                "LOCAL_ATTACH_AUTH_TOKEN env var (must match the --auth-token passed "
+                "to swerex.server inside the container)."
             )
+
+        model_raw = raw.get("model") or {}
+        api_key = model_raw.get("api_key") or os.environ.get("API_KEY") or "EMPTY"
+
         return cls(
-            container=os.getenv("LOCAL_ATTACH_CONTAINER", "lark-chat-sandbox"),
-            swerex_host=os.getenv("LOCAL_ATTACH_HOST", "http://127.0.0.1"),
-            swerex_port=int(os.getenv("LOCAL_ATTACH_PORT", "18000")),
-            swerex_auth_token=auth_token,
-            model_base_url=os.getenv("BASE_URL", "http://localhost:8000/v1"),
-            model_api_key=os.getenv("API_KEY", "EMPTY"),
-            model_name=os.getenv("MODEL_NAME", "Qwen/Qwen3.6-35B-A3B"),
-            sampling_params={
-                "temperature": float(os.getenv("MODEL_TEMPERATURE", "1.0")),
-                "top_p": float(os.getenv("MODEL_TOP_P", "0.95")),
-                "presence_penalty": float(os.getenv("MODEL_PRESENCE_PENALTY", "1.5")),
-                "top_k": int(os.getenv("MODEL_TOP_K", "20")),
-                "repetition_penalty": float(os.getenv("MODEL_REPETITION_PENALTY", "1.0")),
-            },
-            skills_dir=Path(os.getenv("LARK_SKILLS_DIR", str(Path.home() / ".uni-agent" / "skills"))),
-            history_dir=Path(
-                os.getenv(
-                    "LARK_CHAT_HISTORY_DIR",
-                    str(Path.home() / ".uni-agent" / "app" / "lark_chat"),
-                )
+            container=raw["container"],
+            swerex=SwerexConfig(
+                host=swerex_raw["host"],
+                port=int(swerex_raw["port"]),
+                auth_token=auth_token,
             ),
-            action_timeout=int(os.getenv("LARK_CHAT_ACTION_TIMEOUT", "60")),
-            max_steps_per_turn=int(os.getenv("LARK_CHAT_MAX_STEPS_PER_TURN", "20")),
-            max_history_turns=int(os.getenv("LARK_CHAT_MAX_HISTORY_TURNS", "30")),
+            model=ModelConfig(
+                base_url=model_raw["base_url"],
+                name=model_raw["name"],
+                api_key=api_key,
+                sampling_params=dict(model_raw.get("sampling_params") or {}),
+            ),
+            tools=list(raw.get("tools") or []),
+            skills_dir=Path(raw["skills_dir"]).expanduser(),
+            transcripts_dir=Path(raw["transcripts_dir"]).expanduser(),
+            agent=AgentLoopConfig(**(raw.get("agent") or {})),
         )
 
     def lark_cli_prefix(self) -> list[str]:
@@ -110,9 +134,9 @@ class Settings:
         return AgentEnvConfig(
             deployment={
                 "type": "local_attach",
-                "host": self.swerex_host,
-                "port": self.swerex_port,
-                "auth_token": self.swerex_auth_token,
+                "host": self.swerex.host,
+                "port": self.swerex.port,
+                "auth_token": self.swerex.auth_token,
                 "timeout": 300.0,
                 "startup_timeout": 30.0,
             },
@@ -142,8 +166,8 @@ async def handle_one_message(
     model: OpenAICompatibleChatModel,
     tools_manager: ToolsManager,
     skills_manager: SkillsManager,
-    store: ConversationStore,
-    settings: Settings,
+    store: TranscriptStore,
+    config: LarkChatConfig,
 ) -> None:
     chat_id = event.get("chat_id")
     message_id = event.get("message_id")
@@ -168,7 +192,7 @@ async def handle_one_message(
     if first_turn:
         messages: list[dict] = [{"role": "system", "content": prompts.SYSTEM_PROMPT}]
     else:
-        messages = trim_history(persisted, max_user_turns=settings.max_history_turns)
+        messages = trim_history(persisted, max_user_turns=config.agent.max_history_turns)
 
     messages.append(
         {
@@ -193,8 +217,8 @@ async def handle_one_message(
         tools_manager=tools_manager,
         messages=messages,
         skills_manager=skills_manager if first_turn else None,
-        action_timeout=settings.action_timeout,
-        max_turns=settings.max_steps_per_turn,
+        action_timeout=config.agent.action_timeout,
+        max_turns=config.agent.max_steps_per_turn,
         chat_mode=True,
     )
     if first_turn:
@@ -244,19 +268,33 @@ async def handle_one_message(
         print(f"   ✓ turn done in {len(trajectory)} step(s); exit={last_step.exit_reason}")
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Long-running Lark chat agent.")
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=DEFAULT_CONFIG_PATH,
+        help=f"Path to YAML config (default: {DEFAULT_CONFIG_PATH}).",
+    )
+    return parser.parse_args()
+
+
 async def main() -> None:
-    settings = Settings.from_env()
+    args = parse_args()
+    config = LarkChatConfig.load(args.config)
 
     print("=" * 80)
     print("Lark chat agent (multi-turn, multi-tool)")
     print("=" * 80)
-    print(f"container:     {settings.container}")
-    print(f"swerex:        {settings.swerex_host}:{settings.swerex_port}")
-    print(f"model:         {settings.model_name} @ {settings.model_base_url}")
-    print(f"skills dir:    {settings.skills_dir} (exists={settings.skills_dir.is_dir()})")
-    print(f"history dir:   {settings.history_dir}")
+    print(f"config:        {args.config}")
+    print(f"container:     {config.container}")
+    print(f"swerex:        {config.swerex.host}:{config.swerex.port}")
+    print(f"model:         {config.model.name} @ {config.model.base_url}")
+    print(f"tools:         {config.tools}")
+    print(f"skills dir:    {config.skills_dir} (exists={config.skills_dir.is_dir()})")
+    print(f"transcripts:   {config.transcripts_dir}")
 
-    lark_cli_prefix = settings.lark_cli_prefix()
+    lark_cli_prefix = config.lark_cli_prefix()
     print(f"lark-cli via:  {' '.join(lark_cli_prefix)} lark-cli ...")
 
     print("\n[1/6] Resolving bot open_id via Lark Open API...")
@@ -265,40 +303,33 @@ async def main() -> None:
 
     print("\n[2/6] Starting sandbox env...")
     run_id = str(uuid.uuid4())
-    env = AgentEnv(run_id=run_id, env_config=settings.build_env_config())
+    env = AgentEnv(run_id=run_id, env_config=config.build_env_config())
     await env.start()
     print("  env started")
 
     print("\n[3/6] Installing tools + skills...")
     tools_manager = ToolsManager(
-        ToolsManagerConfig(
-            tools=[
-                ToolConfig(name="execute_bash"),
-                ToolConfig(name="lark-cli"),
-                ToolConfig(name="str_replace_editor"),
-                ToolConfig(name="finish"),
-            ]
-        )
+        ToolsManagerConfig(tools=[ToolConfig(name=name) for name in config.tools]),
     )
     await env.install_tools(tools_manager.tools)
 
-    skills_manager = SkillsManager.from_config(SkillsManagerConfig(skills_dir=settings.skills_dir))
+    skills_manager = SkillsManager.from_config(SkillsManagerConfig(skills_dir=config.skills_dir))
     await env.install_skills(skills_manager)
     print(f"  {len(skills_manager.skills)} skill(s): {[s.name for s in skills_manager.skills]}")
 
-    await env.communicate("mkdir -p /workspace/history", check="raise")
+    await env.communicate("mkdir -p /workspace/memory/notes", check="raise")
 
     print("\n[4/6] Wiring model client...")
     model = OpenAICompatibleChatModel(
-        base_url=settings.model_base_url,
-        api_key=settings.model_api_key,
-        model_name=settings.model_name,
-        sampling_params=settings.sampling_params,
+        base_url=config.model.base_url,
+        api_key=config.model.api_key,
+        model_name=config.model.name,
+        sampling_params=config.model.sampling_params,
     )
     model.set_tools_schemas(tools_manager.tools_schemas)
 
-    store = ConversationStore(base_dir=settings.history_dir / "conversations")
-    print(f"  conversation store: {store.base_dir}")
+    store = TranscriptStore(base_dir=config.transcripts_dir)
+    print(f"  transcript store: {store.base_dir}")
 
     print("\n[5/6] Starting Lark event listener...")
     listener = LarkEventListener(
@@ -322,7 +353,7 @@ async def main() -> None:
                     tools_manager=tools_manager,
                     skills_manager=skills_manager,
                     store=store,
-                    settings=settings,
+                    config=config,
                 )
             except Exception:
                 print("✗ message handler failed:")

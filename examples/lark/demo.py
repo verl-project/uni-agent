@@ -292,6 +292,7 @@ interaction = AgentInteraction(
     skills_manager=skills_manager,
     action_timeout=60,
     max_turns=100,
+    chat_mode=True,
 )
 
 

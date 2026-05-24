@@ -1,4 +1,4 @@
-"""JSON-backed per-chat conversation store.
+"""JSON-backed per-chat transcript store.
 
 One JSON file per ``chat_id`` at ``<base_dir>/<sanitized_chat_id>.json``
 holding the OpenAI-shaped message history (with ``tool_calls`` on
@@ -22,8 +22,8 @@ def _safe_filename(chat_id: str) -> str:
     return name or "default"
 
 
-class ConversationStore:
-    """Per-``chat_id`` persistent message store on local disk."""
+class TranscriptStore:
+    """Per-``chat_id`` persistent message-log store on local disk."""
 
     def __init__(self, base_dir: Path):
         self.base_dir = Path(base_dir)
@@ -46,7 +46,7 @@ class ConversationStore:
         return data
 
     def save(self, chat_id: str, messages: list[dict]) -> None:
-        """Atomically replace the conversation file with ``messages``."""
+        """Atomically replace the transcript file with ``messages``."""
         p = self.path(chat_id)
         tmp = p.with_suffix(p.suffix + ".tmp")
         tmp.write_text(

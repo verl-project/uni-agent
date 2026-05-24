@@ -3,9 +3,14 @@
 A long-running process that listens for IM messages on Lark / Feishu,
 dispatches each user message to a multi-step agent loop running on a
 shared sandbox env, and replies back through `lark-cli`. Each chat is a
-real **ongoing conversation**: history is persisted per `chat_id` and
-trimmed on a sliding window so you can talk to the same bot across many
-turns and across process restarts.
+real **ongoing conversation**: the OpenAI-shaped message log is
+persisted per `chat_id` and trimmed on a sliding window so you can
+talk to the same bot across many turns and across process restarts.
+
+The agent also keeps a **persistent user profile / preferences memory**
+under the container's `/workspace/memory/`, written by the model
+itself, so it accumulates a real picture of the user across
+conversations (not just within a single chat thread).
 
 Sits on top of the same `AgentInteraction` loop as `examples/lark/demo.py`,
 but evolves it from "one user request → one run → exit" to
@@ -28,10 +33,10 @@ response (fallback)** as end-of-turn — see
                 │      ▼                                                  │
                 │  async for event:                                       │
                 │     handle_one_message(event)                           │
-                │       1. ConversationStore.load(chat_id)                │
+                │       1. TranscriptStore.load(chat_id)                  │
                 │       2. trim_history(...) + append user msg            │
                 │       3. AgentInteraction.run()  ──────────────┐        │
-                │       4. ConversationStore.save(messages)      │        │
+                │       4. TranscriptStore.save(messages)        │        │
                 │                                                ▼        │
                 │  shared AgentEnv (local_attach)                         │
                 │      └─ swerex.server in <container>                    │
@@ -47,8 +52,9 @@ response (fallback)** as end-of-turn — see
 - **One container, one bash session, one model client** for the lifetime of the process.
 - Inbound messages are handled **serially** (the bash session is single-threaded — running two agent turns in parallel through it is pointless). If the user sends two messages back-to-back, the second is queued.
 - **Single lark identity, single auth.** Both the listener AND the agent's replies route through the container's `lark-cli` (via `docker exec -i <container>`). You auth `lark-cli` **once**, inside the container — no host/container identity drift.
-- Per-chat history is one JSON file per `chat_id` under `~/.uni-agent/app/lark_chat/conversations/`. We persist the **OpenAI-shaped** history (`tool_calls` on assistant messages, `tool_call_id` on tool responses) so re-feeding it preserves the assistant↔tool linkage.
-- The agent's **long-term notes** live at `/workspace/history/` inside the container, which is bind-mounted to a host directory — so notes survive container / process restarts. The system prompt nudges the model to read this on demand and write *digested* context there (decisions, preferences, pending tasks), not raw transcripts.
+- Two distinct persistence stores, with different lifecycles and owners:
+  - **Per-chat transcripts** — one JSON file per `chat_id` under `~/.uni-agent/app/lark_chat/transcripts/`, written by Python. Holds the **OpenAI-shaped** message log (`tool_calls` on assistants, `tool_call_id` on `role=tool` entries) so re-feeding preserves the assistant↔tool linkage and the model "remembers" the last N turns of THIS chat.
+  - **Long-term memory** — files under `/workspace/memory/` inside the container (bind-mounted to a host dir), written by **the model itself** via `str_replace_editor`. Holds the user's profile, preferences, and digested per-topic notes — survives chat-history trimming AND process restarts, and is shared across all chats with the same bot.
 
 ## Setup
 
@@ -98,51 +104,70 @@ Drop SKILL.md packs under `~/.uni-agent/skills/` (override with `LARK_SKILLS_DIR
 ### 5. Run
 
 ```bash
-LOCAL_ATTACH_CONTAINER=lark-chat-sandbox \
-LOCAL_ATTACH_PORT=18000 \
-LOCAL_ATTACH_AUTH_TOKEN=CHANGEME \
-BASE_URL=http://localhost:8000/v1 \
-MODEL_NAME=Qwen/Qwen3.6-35B-A3B \
-python -m app.lark_chat.main
+LOCAL_ATTACH_AUTH_TOKEN=CHANGEME python -m app.lark_chat.main
 ```
 
 Send a message to the bot in Lark; the trace prints per-turn step / tool / status info. Ctrl+C to shut down (the listener stops cleanly via stdin EOF, the env is closed).
 
-## Configuration (env vars)
+To use a custom config:
 
-| Variable | Default | Purpose |
+```bash
+LOCAL_ATTACH_AUTH_TOKEN=CHANGEME python -m app.lark_chat.main --config /path/to/my.yaml
+```
+
+## Configuration
+
+All non-secret settings live in [`config.yaml`](./config.yaml). Override the path with `--config <file>`. Top-level keys:
+
+| Key | Default | Purpose |
 |---|---|---|
-| `LOCAL_ATTACH_CONTAINER` | `lark-chat-sandbox` | Container name the listener `docker exec`s into and `swerex.server` runs in |
-| `LOCAL_ATTACH_HOST` | `http://127.0.0.1` | swerex.server host |
-| `LOCAL_ATTACH_PORT` | `18000` | swerex.server port |
-| `LOCAL_ATTACH_AUTH_TOKEN` | *(required)* | swerex.server `--auth-token` |
-| `BASE_URL` | `http://localhost:8000/v1` | OpenAI-compatible endpoint |
-| `API_KEY` | `EMPTY` | API key for the endpoint |
-| `MODEL_NAME` | `Qwen/Qwen3.6-35B-A3B` | Model name sent to endpoint |
-| `MODEL_TEMPERATURE` / `MODEL_TOP_P` / `MODEL_TOP_K` / `MODEL_PRESENCE_PENALTY` / `MODEL_REPETITION_PENALTY` | sensible defaults | Sampling overrides |
-| `LARK_SKILLS_DIR` | `~/.uni-agent/skills` | Skill packs directory |
-| `LARK_CHAT_HISTORY_DIR` | `~/.uni-agent/app/lark_chat` | Persisted conversations root |
-| `LARK_CHAT_ACTION_TIMEOUT` | `60` | Seconds per single tool call |
-| `LARK_CHAT_MAX_STEPS_PER_TURN` | `20` | Agent steps before forcing turn end (hard cap; `finish` should land it well under this) |
-| `LARK_CHAT_MAX_HISTORY_TURNS` | `30` | Trim history to last N user-anchored turns |
+| `container` | `lark-chat-sandbox` | Container name the listener `docker exec`s into and `swerex.server` runs in. Owns the lark-cli auth. |
+| `swerex.host` / `.port` | `http://127.0.0.1` / `18000` | swerex.server endpoint |
+| `swerex.auth_token` | `null` → `$LOCAL_ATTACH_AUTH_TOKEN` | swerex.server `--auth-token`. Secret; leave `null` in YAML and set the env var, or inline for local dev. |
+| `model.base_url` / `.name` | `http://localhost:8000/v1` / `Qwen/Qwen3.6-35B-A3B` | OpenAI-compatible endpoint + model name |
+| `model.api_key` | `null` → `$API_KEY` → `EMPTY` | Secret; same rule as `swerex.auth_token`. |
+| `model.sampling_params` | sensible defaults | Forwarded to the chat-completion call (`temperature`, `top_p`, `top_k`, `presence_penalty`, `repetition_penalty`, ...) |
+| `tools` | `[execute_bash, lark-cli, str_replace_editor, finish]` | Tools registered on `ToolsManager`. Each entry becomes `ToolConfig(name=...)`. |
+| `skills_dir` | `~/.uni-agent/skills` | Skill packs directory (`~` is expanded) |
+| `transcripts_dir` | `~/.uni-agent/app/lark_chat/transcripts` | Where per-chat message-log JSON files live on the host (one file per `chat_id`). Distinct from the container's `/workspace/memory/` (model-curated user profile / preferences / notes). |
+| `agent.action_timeout` | `60` | Seconds per single tool call |
+| `agent.max_steps_per_turn` | `20` | Agent steps before forcing turn end (hard cap; `finish` should land it well under this) |
+| `agent.max_history_turns` | `30` | Trim history to last N user-anchored turns |
+
+**Env var overrides** are intentionally limited to secrets:
+
+| Env var | Falls back to | When YAML field is `null` |
+|---|---|---|
+| `LOCAL_ATTACH_AUTH_TOKEN` | `swerex.auth_token` | required (raise if both missing) |
+| `API_KEY` | `model.api_key` | defaults to `"EMPTY"` |
 
 ## What happens per user message
 
 1. **Filter at the source.** `lark-cli event consume` is launched with a `--jq` filter that drops events from the bot itself (`sender_id == <bot_open_id>`) and any non-text/post message types, so they never reach the Python loop.
-2. **Load + trim history.** `ConversationStore.load(chat_id)` returns the persisted message list; `trim_history` keeps the system message + the last `LARK_CHAT_MAX_HISTORY_TURNS` user-anchored chunks intact (never strips a `role=tool` away from its parent `role=assistant`).
+2. **Load + trim transcript.** `TranscriptStore.load(chat_id)` returns the persisted message list; `trim_history` keeps the system message + the last `agent.max_history_turns` user-anchored chunks intact (never strips a `role=tool` away from its parent `role=assistant`).
 3. **Append the new user message.** Includes a structured Lark metadata block (`chat_id`, `message_id`, `sender_open_id`, `chat_type`, `message_type`, `create_time`) above the content so the agent can call `lark-cli im +messages-reply --message-id <om_...>` directly without parsing IDs out of prose.
-4. **Run one turn.** `AgentInteraction.run()` loops: model call → parse 0..N tool calls → execute each sequentially → repeat. The turn ends when the model calls `finish` (preferred end-of-turn signal) or returns plain text with no tool call (fallback). `max_steps_per_turn` is a hard safety cap.
-5. **Persist.** `result["messages"]` (the OpenAI-shape conversation) is saved atomically back to the chat's JSON file.
+4. **Run one turn.** `AgentInteraction.run()` loops: model call → parse 0..N tool calls → execute each sequentially → repeat. The system prompt requires the agent to `ls /workspace/memory/` + `cat profile.md preferences.md` at the start of every turn, then do the work, then write any newly-learned durable facts back into memory BEFORE replying. The turn ends when the model calls `finish` (preferred end-of-turn signal) or returns plain text with no tool call (fallback). `agent.max_steps_per_turn` is a hard safety cap.
+5. **Persist transcript.** `result["messages"]` (the OpenAI-shape message log) is saved atomically back to the chat's JSON file. Memory files are *not* touched by Python — the model wrote them in step 4.
 
-## Long-term memory contract
+## Long-term memory contract (`/workspace/memory/`)
 
-The container's `/workspace` is bind-mounted to `~/.uni-agent/app/lark_chat/workspace` on the host (per the bootstrap above). The agent's notes at `/workspace/history/` therefore survive container restarts.
+The container's `/workspace` is bind-mounted to `~/.uni-agent/app/lark_chat/workspace` on the host (per the bootstrap above). `/workspace/memory/` therefore survives container / process restarts, and is shared across every chat the bot handles.
 
-The system prompt instructs the model to:
+The system prompt establishes a fixed file layout the model is required to follow:
 
-- `ls /workspace/history/` at the start of a turn IF the request hints at long-term context (skip for greetings / one-shot questions).
-- Write **digested** context (decisions, preferences, pending work) — not chat transcripts — using `str_replace_editor` or `execute_bash`.
-- Re-read relevant files before deciding how to act.
+| Path | Purpose |
+|---|---|
+| `/workspace/memory/profile.md` | WHO the user is — name, role/team, timezone, language, contact, projects |
+| `/workspace/memory/preferences.md` | HOW the user wants you to behave — reply language, formatting style, default identity, recurring constraints |
+| `/workspace/memory/notes/<slug>.md` | Durable per-topic state — pending tasks, decisions, ongoing efforts |
+
+Read/write protocol enforced by the prompt:
+
+- **Read every turn**: `ls /workspace/memory/` + `cat profile.md preferences.md` in a single batched assistant response, unless the in-context history of THIS conversation already shows the load happened.
+- **Write same turn** *before* replying: whenever the user reveals a fact (name, role, timezone, language, project) or a preference, update the relevant file via `str_replace_editor`.
+- **Never mirror the transcript** — memory is digested bullets, not raw chat dumps.
+
+`mkdir -p /workspace/memory/notes` is run at startup by `main.py` so the directory always exists; the model is responsible for actually populating it.
 
 ## Files
 
@@ -150,8 +175,9 @@ The system prompt instructs the model to:
 app/lark_chat/
 ├── __init__.py
 ├── README.md              ← this file
-├── main.py                ← entrypoint: bootstrap + listener loop
+├── config.yaml            ← default config (override with --config <path>)
+├── main.py                ← entrypoint: bootstrap + listener loop + LarkChatConfig
 ├── prompts.py             ← SYSTEM_PROMPT + format_user_message
-├── conversation.py        ← ConversationStore (JSON per chat_id)
+├── transcript.py          ← TranscriptStore (JSON message log per chat_id)
 └── listener.py            ← LarkEventListener + fetch_bot_open_id
 ```
