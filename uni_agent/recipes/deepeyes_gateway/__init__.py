@@ -1,0 +1,1 @@
+"""DeepEyes gateway recipe."""
