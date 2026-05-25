@@ -106,31 +106,15 @@ class AgentLoopConfig:
 
 @dataclass
 class LarkChatConfig:
-    """Runtime config loaded from YAML via :meth:`load`."""
+    """Runtime config for the Lark chat agent.
+
+    Loaded from YAML via :meth:`load`. Secrets (``deployment.swerex.auth_token``
+    for ``local_attach``, ``model.api_key``) may be left ``null`` in YAML and
+    supplied through ``LOCAL_ATTACH_AUTH_TOKEN`` / ``API_KEY`` env vars instead.
+    """
 
     deployment: DeploymentConfig
     memory_dir: Path
-    model: ModelConfig
-    tools: list[str]
-    skills_dir: Path
-    transcripts_dir: Path
-    agent: AgentLoopConfig
-
-
-@dataclass
-class LarkChatConfig:
-    """Runtime config for the long-running Lark chat agent.
-
-    Deployment is always ``local_attach`` -- the agent's bash session +
-    its ``lark-cli`` both live inside a user-managed Docker container,
-    so identity stays consistent between event subscription and reply.
-    Load from YAML via :meth:`load`. Secrets (``swerex.auth_token``,
-    ``model.api_key``) may be left ``null`` in YAML and supplied through
-    ``LOCAL_ATTACH_AUTH_TOKEN`` / ``API_KEY`` env vars instead.
-    """
-
-    container: str
-    swerex: SwerexConfig
     model: ModelConfig
     tools: list[str]
     skills_dir: Path
