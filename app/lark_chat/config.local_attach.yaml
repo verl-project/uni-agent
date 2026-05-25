@@ -1,0 +1,41 @@
+# local_attach deployment: bash + lark-cli inside a user-managed
+# Docker container; host attaches to its swerex.server over HTTP.
+# Bootstrap + run instructions: see app/lark_chat/README.md.
+
+deployment:
+  type: local_attach
+  container: lark-chat-sandbox
+  swerex:
+    host: http://127.0.0.1
+    port: 18000
+    auth_token: CHANGEME   # or leave null and pass LOCAL_ATTACH_AUTH_TOKEN env var
+  post_setup_cmd: cd /workspace
+
+# Container path. Bind-mount /workspace to a host dir so memory survives container restarts.
+memory_dir: /workspace/memory
+
+model:
+  base_url: http://localhost:8000/v1
+  name: Qwen/Qwen3.6-35B-A3B
+  api_key: EMPTY
+  sampling_params:
+    temperature: 1.0
+    top_p: 0.95
+    presence_penalty: 1.5
+    top_k: 20
+    repetition_penalty: 1.0
+
+tools:
+  - execute_bash
+  - lark-cli
+  - str_replace_editor
+  - finish
+
+skills_dir: ~/.agents/skills
+transcripts_dir: ~/.uni-agent/app/lark_chat/transcripts
+
+agent:
+  action_timeout: 60
+  max_steps_per_turn: 20
+  history_max_tokens: 128000      # compaction trigger
+  history_target_tokens: 32000    # post-compaction size

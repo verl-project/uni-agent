@@ -32,7 +32,7 @@ Prereqs (on the host, one-time, both modes)
 ------------------------------------------------------------------------
 
 1. (Optional, for skills) ``npx skills add larksuite/cli -y -g`` or
-   manually copy any ``<name>/SKILL.md`` packs under ``~/.uni-agent/skills/``.
+   manually copy any ``<name>/SKILL.md`` packs under ``~/.agents/skills/``.
    Override the directory with ``LARK_SKILLS_DIR=...``.
 2. An OpenAI-compatible chat completion endpoint serving a tool-calling
    model (e.g. vLLM hosting Qwen3-Coder). Defaults to ``localhost:8000``.
@@ -116,7 +116,7 @@ model_base_url = os.getenv("BASE_URL", "http://localhost:8000/v1")
 model_api_key = os.getenv("API_KEY", "EMPTY")
 model_name = os.getenv("MODEL_NAME", "Qwen/Qwen3.6-35B-A3B")
 
-skills_dir = Path(os.getenv("LARK_SKILLS_DIR", str(Path.home() / ".uni-agent" / "skills")))
+skills_dir = Path(os.getenv("LARK_SKILLS_DIR", str(Path.home() / ".agents" / "skills")))
 
 # --- deployment ------------------------------------------------------------
 # Pick where the bash session + tools live:

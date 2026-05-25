@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import shlex
 import sys
 import traceback
 import uuid
@@ -41,7 +42,11 @@ from uni_agent.interaction import (  # noqa: E402
 from uni_agent.skills import SkillsManager, SkillsManagerConfig  # noqa: E402
 from uni_agent.tools import ToolConfig  # noqa: E402
 
-DEFAULT_CONFIG_PATH = Path(__file__).parent / "config.yaml"
+DEFAULT_CONFIG_PATH = Path(__file__).parent / "config.local_native.yaml"
+
+_DEFAULT_LOCAL_ATTACH_MEMORY_DIR = Path("/workspace/memory")
+_DEFAULT_LOCAL_NATIVE_MEMORY_DIR = Path("~/.uni-agent/app/lark_chat/memory").expanduser()
+_DEFAULT_LOCAL_NATIVE_TOOL_INSTALL_DIR = Path("~/.uni-agent/bin").expanduser()
 
 
 @dataclass
@@ -49,6 +54,29 @@ class SwerexConfig:
     host: str
     port: int
     auth_token: str
+
+
+@dataclass
+class LocalAttachDeployment:
+    """Bash session + ``lark-cli`` live in a user-managed Docker container;
+    the host listener routes through ``docker exec -i <container>``."""
+
+    container: str
+    swerex: SwerexConfig
+    post_setup_cmd: str | None = "cd /workspace"
+    timeout: float = 300.0
+    startup_timeout: float = 30.0
+
+
+@dataclass
+class LocalNativeDeployment:
+    """Pexpect bash directly on the host; reuses host-side ``lark-cli``."""
+
+    startup_timeout: float = 60.0
+    tool_install_dir: Path = field(default_factory=lambda: _DEFAULT_LOCAL_NATIVE_TOOL_INSTALL_DIR)
+
+
+DeploymentConfig = LocalAttachDeployment | LocalNativeDeployment
 
 
 @dataclass
@@ -63,7 +91,30 @@ class ModelConfig:
 class AgentLoopConfig:
     action_timeout: int = 60
     max_steps_per_turn: int = 20
-    max_history_turns: int = 30
+    history_max_tokens: int = 128000
+    """Compaction trigger; history is forwarded unchanged while it fits under this."""
+    history_target_tokens: int = 32000
+    """Post-compaction size. Must be ``<= history_max_tokens``."""
+
+    def __post_init__(self) -> None:
+        if self.history_target_tokens > self.history_max_tokens:
+            raise ValueError(
+                f"agent.history_target_tokens ({self.history_target_tokens}) must be "
+                f"<= agent.history_max_tokens ({self.history_max_tokens})."
+            )
+
+
+@dataclass
+class LarkChatConfig:
+    """Runtime config loaded from YAML via :meth:`load`."""
+
+    deployment: DeploymentConfig
+    memory_dir: Path
+    model: ModelConfig
+    tools: list[str]
+    skills_dir: Path
+    transcripts_dir: Path
+    agent: AgentLoopConfig
 
 
 @dataclass
@@ -92,25 +143,59 @@ class LarkChatConfig:
             raise FileNotFoundError(f"Config file not found: {path}")
         raw = yaml.safe_load(path.read_text()) or {}
 
-        swerex_raw = raw.get("swerex") or {}
-        auth_token = swerex_raw.get("auth_token") or os.environ.get("LOCAL_ATTACH_AUTH_TOKEN")
-        if not auth_token:
-            raise RuntimeError(
-                "swerex.auth_token is required: set it in the config file or via the "
-                "LOCAL_ATTACH_AUTH_TOKEN env var (must match the --auth-token passed "
-                "to swerex.server inside the container)."
+        deployment_raw = raw.get("deployment") or {}
+        dep_type = deployment_raw.get("type") or "local_attach"
+        if dep_type == "local_attach":
+            swerex_raw = deployment_raw.get("swerex") or {}
+            auth_token = swerex_raw.get("auth_token") or os.environ.get("LOCAL_ATTACH_AUTH_TOKEN")
+            if not auth_token:
+                raise RuntimeError(
+                    "deployment.swerex.auth_token is required for local_attach: set it in the "
+                    "config file or via the LOCAL_ATTACH_AUTH_TOKEN env var (must match the "
+                    "--auth-token passed to swerex.server inside the container)."
+                )
+            if "container" not in deployment_raw:
+                raise RuntimeError("deployment.container is required for local_attach")
+            deployment: DeploymentConfig = LocalAttachDeployment(
+                container=deployment_raw["container"],
+                swerex=SwerexConfig(
+                    host=swerex_raw["host"],
+                    port=int(swerex_raw["port"]),
+                    auth_token=auth_token,
+                ),
+                post_setup_cmd=deployment_raw.get("post_setup_cmd", "cd /workspace"),
+                timeout=float(deployment_raw.get("timeout", 300.0)),
+                startup_timeout=float(deployment_raw.get("startup_timeout", 30.0)),
             )
+            default_memory_dir = _DEFAULT_LOCAL_ATTACH_MEMORY_DIR
+        elif dep_type == "local_native":
+            tool_install_dir = Path(
+                deployment_raw.get("tool_install_dir") or _DEFAULT_LOCAL_NATIVE_TOOL_INSTALL_DIR
+            ).expanduser()
+            deployment = LocalNativeDeployment(
+                startup_timeout=float(deployment_raw.get("startup_timeout", 60.0)),
+                tool_install_dir=tool_install_dir,
+            )
+            default_memory_dir = _DEFAULT_LOCAL_NATIVE_MEMORY_DIR
+        else:
+            raise ValueError(
+                f"deployment.type={dep_type!r} is not supported; expected 'local_attach' or 'local_native'."
+            )
+
+        memory_raw = raw.get("memory_dir")
+        if memory_raw is None:
+            memory_dir = default_memory_dir
+        else:
+            memory_path = Path(memory_raw)
+            # local_attach memory_dir is a container path; don't expand ~ to a host path.
+            memory_dir = memory_path.expanduser() if isinstance(deployment, LocalNativeDeployment) else memory_path
 
         model_raw = raw.get("model") or {}
         api_key = model_raw.get("api_key") or os.environ.get("API_KEY") or "EMPTY"
 
         return cls(
-            container=raw["container"],
-            swerex=SwerexConfig(
-                host=swerex_raw["host"],
-                port=int(swerex_raw["port"]),
-                auth_token=auth_token,
-            ),
+            deployment=deployment,
+            memory_dir=memory_dir,
             model=ModelConfig(
                 base_url=model_raw["base_url"],
                 name=model_raw["name"],
@@ -124,39 +209,134 @@ class LarkChatConfig:
         )
 
     def lark_cli_prefix(self) -> list[str]:
-        """argv prefix routing host-side ``lark-cli`` calls (listener +
-        bot open_id lookup) into the same container the agent uses, so
-        every lark-cli call shares one identity / one auth.
-        """
-        return ["docker", "exec", "-i", self.container]
+        """argv prefix wrapping ``lark-cli`` calls (``docker exec -i <container>``
+        for ``local_attach``, empty for ``local_native``)."""
+        if isinstance(self.deployment, LocalAttachDeployment):
+            return ["docker", "exec", "-i", self.deployment.container]
+        return []
 
     def build_env_config(self) -> AgentEnvConfig:
+        if isinstance(self.deployment, LocalAttachDeployment):
+            d = self.deployment
+            return AgentEnvConfig(
+                deployment={
+                    "type": "local_attach",
+                    "host": d.swerex.host,
+                    "port": d.swerex.port,
+                    "auth_token": d.swerex.auth_token,
+                    "timeout": d.timeout,
+                    "startup_timeout": d.startup_timeout,
+                },
+                env_variables={"NO_COLOR": "1", "TERM": "dumb"},
+                post_setup_cmd=d.post_setup_cmd,
+            )
+
+        native = self.deployment
         return AgentEnvConfig(
             deployment={
-                "type": "local_attach",
-                "host": self.swerex.host,
-                "port": self.swerex.port,
-                "auth_token": self.swerex.auth_token,
-                "timeout": 300.0,
-                "startup_timeout": 30.0,
+                "type": "local_native",
+                "startup_timeout": native.startup_timeout,
             },
             env_variables={"NO_COLOR": "1", "TERM": "dumb"},
-            post_setup_cmd="cd /workspace",
+            tool_install_dir=native.tool_install_dir,
         )
 
 
-def trim_history(messages: list[dict], max_user_turns: int) -> list[dict]:
-    """Keep the system message + the most-recent ``max_user_turns``
-    user-anchored chunks. Trimming respects chunk boundaries so a
-    ``role=tool`` is never separated from its parent ``role=assistant``
-    (the OpenAI API rejects that with a 400 on ``tool_call_id`` linkage).
+def _get_token_counter() -> Any:
+    """``(text) -> int`` token counter; tiktoken ``cl100k_base`` when available,
+    else ``len(text) // 4``. Cached on the function attribute."""
+    cached = getattr(_get_token_counter, "_cached", None)
+    if cached is not None:
+        return cached
+    try:
+        import tiktoken
+
+        enc = tiktoken.get_encoding("cl100k_base")
+
+        def count(text: str) -> int:
+            return len(enc.encode(text or "", disallowed_special=()))
+    except Exception:
+
+        def count(text: str) -> int:
+            return max(1, len(text or "") // 4)
+
+    _get_token_counter._cached = count  # type: ignore[attr-defined]
+    return count
+
+
+def _message_tokens(msg: dict, count: Any) -> int:
+    n = 0
+    content = msg.get("content")
+    if isinstance(content, str):
+        n += count(content)
+    elif isinstance(content, list):
+        for part in content:
+            if isinstance(part, dict):
+                n += count(part.get("text") or "")
+    for tc in msg.get("tool_calls") or []:
+        fn = tc.get("function") or {}
+        n += count(fn.get("name") or "")
+        n += count(fn.get("arguments") or "")
+    if isinstance(msg.get("name"), str):
+        n += count(msg["name"])
+    return n + 4
+
+
+def compact_history(
+    messages: list[dict],
+    *,
+    max_tokens: int,
+    target_tokens: int,
+) -> list[dict]:
+    """Hysteresis history compaction.
+
+    Returns ``messages`` unchanged while total tokens fit under ``max_tokens``;
+    otherwise trims non-system messages in user-anchored chunks down to
+    ``target_tokens``. Chunks are atomic (so a ``role=tool`` is never separated
+    from its parent ``role=assistant`` -- OpenAI rejects that with a 400 on
+    ``tool_call_id`` linkage). The most-recent chunk is always kept.
     """
-    user_idxs = [i for i, m in enumerate(messages) if m.get("role") == "user"]
-    if len(user_idxs) <= max_user_turns:
+    if max_tokens <= 0 or target_tokens <= 0:
         return messages
-    cutoff = user_idxs[-max_user_turns]
-    head = [m for m in messages[:cutoff] if m.get("role") == "system"]
-    return head + messages[cutoff:]
+
+    count = _get_token_counter()
+
+    sys_msgs: list[dict] = []
+    rest: list[dict] = []
+    rest_costs: list[int] = []
+    sys_cost = 0
+    for m in messages:
+        cost = _message_tokens(m, count)
+        if m.get("role") == "system":
+            sys_msgs.append(m)
+            sys_cost += cost
+        else:
+            rest.append(m)
+            rest_costs.append(cost)
+
+    if sys_cost + sum(rest_costs) <= max_tokens:
+        return messages
+
+    user_idxs = [i for i, m in enumerate(rest) if m.get("role") == "user"]
+    if not user_idxs:
+        return messages
+
+    chunks: list[tuple[list[dict], int]] = []
+    for i, start in enumerate(user_idxs):
+        end = user_idxs[i + 1] if i + 1 < len(user_idxs) else len(rest)
+        chunks.append((rest[start:end], sum(rest_costs[start:end])))
+
+    budget = max(0, target_tokens - sys_cost)
+    kept_rev: list[list[dict]] = []
+    used = 0
+    for chunk, cost in reversed(chunks):
+        if not kept_rev or used + cost <= budget:
+            kept_rev.append(chunk)
+            used += cost
+        else:
+            break
+
+    return sys_msgs + [m for chunk in reversed(kept_rev) for m in chunk]
 
 
 async def handle_one_message(
@@ -190,9 +370,15 @@ async def handle_one_message(
     first_turn = not persisted
 
     if first_turn:
-        messages: list[dict] = [{"role": "system", "content": prompts.SYSTEM_PROMPT}]
+        messages: list[dict] = [
+            {"role": "system", "content": prompts.build_system_prompt(memory_dir=config.memory_dir)}
+        ]
     else:
-        messages = trim_history(persisted, max_user_turns=config.agent.max_history_turns)
+        messages = compact_history(
+            persisted,
+            max_tokens=config.agent.history_max_tokens,
+            target_tokens=config.agent.history_target_tokens,
+        )
 
     messages.append(
         {
@@ -287,15 +473,22 @@ async def main() -> None:
     print("Lark chat agent (multi-turn, multi-tool)")
     print("=" * 80)
     print(f"config:        {args.config}")
-    print(f"container:     {config.container}")
-    print(f"swerex:        {config.swerex.host}:{config.swerex.port}")
+    if isinstance(config.deployment, LocalAttachDeployment):
+        print("deployment:    local_attach")
+        print(f"container:     {config.deployment.container}")
+        print(f"swerex:        {config.deployment.swerex.host}:{config.deployment.swerex.port}")
+    else:
+        print("deployment:    local_native (pexpect on host, no container)")
+        print(f"tool install:  {config.deployment.tool_install_dir}")
+    print(f"memory dir:    {config.memory_dir}  (inside runtime bash)")
     print(f"model:         {config.model.name} @ {config.model.base_url}")
     print(f"tools:         {config.tools}")
     print(f"skills dir:    {config.skills_dir} (exists={config.skills_dir.is_dir()})")
     print(f"transcripts:   {config.transcripts_dir}")
 
     lark_cli_prefix = config.lark_cli_prefix()
-    print(f"lark-cli via:  {' '.join(lark_cli_prefix)} lark-cli ...")
+    prefix_str = " ".join(lark_cli_prefix) + " " if lark_cli_prefix else ""
+    print(f"lark-cli via:  {prefix_str}lark-cli ...")
 
     print("\n[1/6] Resolving bot open_id via Lark Open API...")
     bot_open_id = await fetch_bot_open_id(command_prefix=lark_cli_prefix)
@@ -317,7 +510,8 @@ async def main() -> None:
     await env.install_skills(skills_manager)
     print(f"  {len(skills_manager.skills)} skill(s): {[s.name for s in skills_manager.skills]}")
 
-    await env.communicate("mkdir -p /workspace/memory/notes", check="raise")
+    notes_dir = config.memory_dir / "notes"
+    await env.communicate(f"mkdir -p {shlex.quote(str(notes_dir))}", check="raise")
 
     print("\n[4/6] Wiring model client...")
     model = OpenAICompatibleChatModel(

@@ -11,7 +11,7 @@ Mirrors Claude Code / Qwen Code's progressive disclosure model:
   alongside ``SKILL.md`` and read lazily by the model.
 
 Skills are fully **user-managed**: drop the directories you want exposed
-into a single host-side dir (e.g. ``~/.uni-agent/skills/``) and point
+into a single host-side dir (e.g. ``~/.agents/skills/``) and point
 ``SkillsManagerConfig.skills_dir`` at it. Tools themselves bundle no
 skills. Path resolution and per-deployment transfer are owned by
 ``AgentEnv`` (see ``env.install_skills``): host deployments keep skills
@@ -35,7 +35,7 @@ class SkillsManagerConfig(BaseModel):
         description=(
             "Host-side directory holding ``<skill-name>/SKILL.md`` subdirs. "
             "All discovered skills come from here -- tools ship no skills "
-            "of their own. ``~`` is expanded. Example: ``~/.uni-agent/skills``."
+            "of their own. ``~`` is expanded. Example: ``~/.agents/skills``."
         ),
     )
     model_config = ConfigDict(extra="forbid")

@@ -30,11 +30,11 @@ Through `lark-cli`, the agent can operate the Lark surface area your account can
 Two layers of persistence:
 
 - **Per-chat transcript**: a JSON message log per `chat_id`, preserving OpenAI-shaped assistant/tool linkage so multi-turn conversations continue cleanly.
-- **Long-term memory**: model-written files under `/workspace/memory/`, such as `profile.md`, `preferences.md`, and topic notes.
+- **Long-term memory**: model-written files under the configured `memory_dir` (`/workspace/memory/` in the container for the `local_attach` deployment, or `~/.uni-agent/app/lark_chat/memory/` on the host for `local_native`) — `profile.md`, `preferences.md`, and topic notes.
 
 The transcript captures what happened recently in this chat. Memory captures what should remain true tomorrow: your name, timezone, team, projects, language preference, recurring constraints, and the people you often mention.
 
-If history is trimmed, the process restarts, or the container is recreated, memory still lives on the host bind mount. The next Lark message picks up from there.
+If history is trimmed, the process restarts, or the container is recreated, memory still lives where it was written. The next Lark message picks up from there.
 
 ### Bring your own model
 
@@ -51,11 +51,10 @@ Big GPU box? Run the bigger model. Laptop demo? Point it at a smaller endpoint. 
 
 ---
 
-## Quickstart
+## Step 0: Prerequisites and dependencies
 
-### Step 0: Prerequisites and dependencies
-
-- macOS or Linux with Docker (Recommended)
+- macOS or Linux
+- Docker (used by the recommended `local_attach` deployment; not strictly required if you choose `local_native`)
 - An OpenAI-compatible chat-completions endpoint
 - A Lark/Feishu app in the [Lark Open Platform](https://open.feishu.cn)
 
@@ -68,11 +67,20 @@ cd uni-agent
 python3 -m venv .venv
 source .venv/bin/activate
 
-pip install swe-rex pydantic loguru orjson aiohttp openai
+pip install swe-rex pydantic loguru orjson aiohttp openai pexpect pyyaml
 ```
 
+## Step 1: Create a Lark bot
 
-### Step 1: Start the sandbox and authenticate `lark-cli`
+**Create a Lark bot and authorize it.**
+
+- `npm install -g @larksuite/cli` to install the CLI; `lark-cli --version` to verify.
+- `lark-cli config init --new`, creates a new app in the [Lark Open Platform](https://open.feishu.cn) (browser flow, captures `app_id` / `app_secret`).
+- `lark-cli auth login`, OAuth device flow that binds the app to your Feishu account and grants its scopes.
+
+The agent acts as this bot; its reach is exactly the scopes you authorized.
+
+**Deploy in a sandbox (Optional).** Running LLM-generated shell directly against your host is risky on a personal machine. For isolation, spin up a Docker container first and run the same setup as above inside it (plus a `swerex.server` so the host process can attach over HTTP):
 
 ```bash
 docker rm -f lark-chat-sandbox 2>/dev/null
@@ -92,19 +100,18 @@ docker exec -d lark-chat-sandbox bash -lc '
   python3 -m swerex.server --host 0.0.0.0 --port 18000 --auth-token CHANGEME'
 ```
 
-The container owns the shell runtime, `lark-cli` authentication, skills, and `swerex.server`. The host process talks to it through the local attach endpoint. `CHANGEME` can be any token as long as it matches the config below.
+`CHANGEME` can be any string; just match it in Step 2.
 
-### Step 2: Configure the bot
+## Step 2: Configure
 
-Edit `app/lark_chat/config.yaml` (the default config the app reads on startup). A working example:
+Open `app/lark_chat/config.local_native.yaml`, the default config:
 
 ```yaml
-container: lark-chat-sandbox
+deployment:
+  type: local_native
+  startup_timeout: 60.0
 
-swerex:
-  host: http://127.0.0.1
-  port: 18000
-  auth_token: CHANGEME
+memory_dir: ~/.uni-agent/app/lark_chat/memory
 
 model:
   base_url: http://localhost:8000/v1
@@ -123,26 +130,60 @@ tools:
   - str_replace_editor
   - finish
 
-skills_dir: ~/.uni-agent/skills
+skills_dir: ~/.agents/skills
 transcripts_dir: ~/.uni-agent/app/lark_chat/transcripts
 
 agent:
   action_timeout: 60
   max_steps_per_turn: 20
-  max_history_turns: 30
+  history_max_tokens: 128000      # compaction trigger
+  history_target_tokens: 32000    # post-compaction size
 ```
 
-`container` and `swerex.auth_token` must match what Step 1 used. Everything else has sensible defaults; tweak `model.base_url` / `model.name` to point at your endpoint.
+What each section does:
 
-### Step 3: Run the bot
+- `deployment`: where the agent's bash session runs. `local_native` runs in-process via `pexpect`; `startup_timeout` caps boot.
+- `memory_dir`: long-term notes the agent writes (profile, preferences, topic memos). Survives restarts.
+- `model`: any OpenAI-compatible chat-completions endpoint. Two common setups:
+  - **Self-hosted**: serve a model with vLLM or SGLang and point `base_url` at it (`api_key` can be any non-empty string).
+  - **Hosted API**: e.g. Doubao Seed on Volc Ark, set `base_url: https://ark.cn-beijing.volces.com/api/v3`, `name: doubao-seed-1-6-250615` (or your model id), `api_key: <ARK_API_KEY>`.
+- `sampling_params`: forwarded to the chat-completions call.
+- `tools`: built-in tool wrappers exposed to the model.
+- `skills_dir`: where `SkillsManager` finds skill packs (`lark-im`, `lark-base`, …).
+- `transcripts_dir`: per-chat JSON trajectory logs (model messages + tool calls + results).
+- `agent`: per-action timeout, max model steps per Lark turn, and a hysteresis-style history budget — `history_max_tokens` is the compaction trigger, `history_target_tokens` the size we compact back down to. While we stay under the trigger, the history is forwarded unchanged so the model server's prefix KV cache hits across turns.
+
+**For `local_attach`**, edit `config.local_attach.yaml` and override just the `deployment` block + `memory_dir`; everything else stays the same:
+
+```yaml
+deployment:
+  type: local_attach
+  container: lark-chat-sandbox       # match docker run --name
+  swerex:
+    host: http://127.0.0.1
+    port: 18000
+    auth_token: CHANGEME             # match swerex.server --auth-token
+  post_setup_cmd: cd /workspace
+
+memory_dir: /workspace/memory        # container path; bind-mount /workspace to a host dir to persist memory across container restarts.
+```
+
+## Step 3: Run
 
 ```bash
 python -m app.lark_chat.main
 ```
 
-(Pass `--config <path>` if you keep your config somewhere other than `app/lark_chat/config.yaml`.)
+That picks up `config.local_native.yaml`. For `local_attach`, pass the config explicitly:
 
-Startup resolves the bot `open_id`, starts the sandbox env, installs tools and skills, wires the model client, starts the Lark event listener, and enters the chat loop. When you see this line, it is live:
+```bash
+LOCAL_ATTACH_AUTH_TOKEN=CHANGEME \
+  python -m app.lark_chat.main --config app/lark_chat/config.local_attach.yaml
+```
+
+(`LOCAL_ATTACH_AUTH_TOKEN` is only needed when `deployment.swerex.auth_token` is `null` in the YAML.)
+
+You're live when you see:
 
 ```text
 Entering chat loop. Send a Lark message to the bot.
