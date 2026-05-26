@@ -80,10 +80,11 @@ env_config = AgentEnvConfig(**{
 - **`command`** runs inside the sandbox and should start `swerex.server`. It can use `{token}` and `{port}` placeholders.
 - **`container_runtime`** can be set to an Apptainer/Singularity binary path, `docker`, or `podman`.
 - **`published_port`** optionally pins the localhost port used by the `swerex` server.
+- **`runtime_port`** is the port where `swerex.server` listens inside a Docker/Podman sandbox. The default is `8000`.
 - **`extra_run_args`** can pass additional runtime flags. For example, Apptainer bind mounts or GPU flags must appear before the image argument.
 - **`network`** is Docker/Podman-specific and useful when the current process is itself running inside Docker.
 
-Apptainer launches the server with host networking, so the selected port is passed directly to `swerex.server`. Docker and Podman keep using port publishing.
+Apptainer launches the server with host networking, so the selected port is passed directly to `swerex.server`. Docker and Podman use port publishing by default: `runtime_port` is the port inside the sandbox container, while `published_port` is the host-side port Uni-Agent connects to. When Uni-Agent connects over a shared container network, it connects to the sandbox IP and `runtime_port`. When Docker/Podman uses host networking, port publishing is skipped and Uni-Agent connects to `runtime_port`.
 
 Useful local overrides:
 
