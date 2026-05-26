@@ -1,178 +1,196 @@
 # Agent Reinforcement Learning
 
-After you can run parallel agent interaction, the next step is to train the policy with the same rollout stack. Uni-Agent connects the agent loop to `verl`, so each training sample can launch a sandbox, run multi-turn tool interaction, compute a task reward, and feed the result back into RL training.
+In the previous pages, we focused on inference-time agent behavior: how an agent calls tools, interacts with environments, and solves tasks through multi-turn interaction. A major advantage of Uni-Agent is that the same interaction stack can be connected directly to training engines such as `verl`, so you can move from running agents to training them without any modification.
 
-For agent tasks, we recommend **fully asynchronous training**. Agent rollouts have uneven latency because different tasks take different numbers of turns, commands, tests, and sandbox operations. Fully async training keeps rollout workers and training workers running independently, which usually gives better utilization than waiting for every rollout in a synchronous batch.
+That is where agent reinforcement learning becomes interesting. Once the agent can already run real rollouts, the next step is to optimize it with large-scale training. This is also where the systems challenge appears: each sample may involve multi-turn reasoning, tool calls, environment interaction, and test execution, and episode latency can vary a lot across tasks.
 
-<div style="margin: 20px 0; text-align: center;">
-  <img src="../async_comp.png" alt="Fully asynchronous agent training comparison" style="width: 100%; max-width: 600px; height: auto;" />
-</div>
+This page introduces the training scripts under `examples/agent_train`, explains how **agent config** is defined and used, and compares the **synchronous** and **fully asynchronous** training recipes built on top of `verl`.
 
-The figure below shows an example **Qwen3-30B-A3B-Instruct** training run on veFaaS (100 Turns, 128K), using R2E-Gym-Subset for training and SWE-Bench Verified for evaluation.
-
-<div style="margin: 20px 0; text-align: center;">
-  <img src="../results_qwen3_30b.png" alt="Qwen3-Coder training results" style="width: 100%; max-width: 800px; height: auto;" />
-</div>
-
-
-The figure below shows an example **Qwen3.5-9B** training run on veFaaS (100 Turns, 128K), using SWE-reBench for training and SWE-Bench Verified for evaluation.
-
-<div style="margin: 20px 0; text-align: center;">
-  <img src="../results_qwen3p5_9b.png" alt="Qwen3.5-9B training results" style="width: 100%; max-width: 800px; height: auto;" />
-</div>
-
-The launch scripts live under `examples/agent_train`.
+The training launchers live under `examples/agent_train`.
 
 ---
 
-## Recommended Scripts
+## Training Overview
 
-Use the fully async scripts for normal agent RL runs:
+The two launcher scripts are:
 
-- `examples/agent_train/train_qwen3p5_dense.sh`: fully async recipe for a dense Qwen3.5 model. This is the best starting point for most runs.
-- `examples/agent_train/train_qwen3p5_moe.sh`: fully async recipe for Qwen3.5 MoE with Megatron parallelism and MTP-related settings.
-- `examples/agent_train/train_qwen3_moe.sh`: older Qwen3 MoE fully async recipe, kept mainly as a reference.
-- `examples/agent_train/single_node_debug.sh`: small single-node debug launcher for checking data, runtime env, agent config, and rollout behavior.
+| Script | Mode| Best for |
+|--------|------|----------|
+| `train_sync.sh` | Synchronous | First runs, simpler debugging, predictable update rhythm |
+| `train_fully_async.sh` | Fully asynchronous | Large-scale runs, better utilization when episode latency is uneven |
 
-`examples/agent_train/train_sync.sh` is still available for reference, but it is not the recommended path for long-horizon agent training. Sync training is simpler conceptually, but agent rollout latency is too variable for it to be the default choice.
+Both scripts train an agent policy with the same overall components:
+
+1. Load prompts from a Parquet dataset.
+2. Run multi-turn agent rollouts in parallel sandboxes.
+3. Compute rewards from the task outcome.
+4. Update the policy with GRPO-style training.
+5. Periodically evaluate on the validation set.
+
+Both scripts also share the same idea of **agent configuration**:
+
+- The training script sets high-level trainer, rollout, model, and cluster parameters.
+- `AGENT_CONFIG_PATH` points to a YAML file that defines the agent loop itself: interaction limits, sandbox config, tools, and reward settings.
+- Sample-specific fields from the dataset, such as environment image or reward metadata, are merged in at runtime.
+
+That separation is important: the shell script controls the **training system**, while the YAML controls the **agent interaction behavior inside each rollout**.
 
 ---
 
-## Prepare Inputs
+## Before You Launch
 
-Launch training from the repository root so Ray can package both `verl/` and `uni_agent/`.
+Both scripts are designed to be launched from the repository root so Ray can package both `verl/` and `uni_agent/`.
 
-Set a shared data root first:
+The common path variables are:
+
+| Variable | Meaning | Default |
+|----------|---------|---------|
+| `RAY_DATA_HOME` | Root directory for models, data, checkpoints, and runtime env files | `${HOME}/verl` |
+| `MODEL_PATH` | Policy model checkpoint | `${RAY_DATA_HOME}/models/Qwen3-30B-A3B-Instruct-xml-template` |
+| `CKPTS_DIR` | Output directory for training logs and checkpoints | `${RAY_DATA_HOME}/ckpts/${project_name}/${exp_name}` |
+| `TRAIN_FILE` | Training dataset in Parquet format | `${RAY_DATA_HOME}/data/swe_agent/r2e_gym_subset_filtered.parquet` |
+| `TEST_FILE` | Validation dataset in Parquet format | `${RAY_DATA_HOME}/data/swe_agent/swe_bench_verified.parquet` |
+| `RUNTIME_ENV` | Ray runtime environment YAML | `${RAY_DATA_HOME}/data/swe_agent/runtime_env.yaml` |
+| `AGENT_CONFIG_PATH` | Agent loop config YAML | `examples/agent_interaction/agent_config.yaml` |
+
+Prepare the training and validation datasets first:
 
 ```bash
-export RAY_DATA_HOME=${RAY_DATA_HOME:-${HOME}/verl}
-mkdir -p "${RAY_DATA_HOME}/data/swe_agent"
-```
+export RAY_DATA_HOME=~/verl
 
-### Dataset
+# Training set: r2e-gym-subset
+python examples/data_preprocess/r2e_gym_subset_filtered.py \
+    --local-save-dir "${RAY_DATA_HOME}/data/swe_agent"
 
-The training scripts expect Parquet datasets with `prompt`, `agent_name`, and `extra_info.tools_kwargs`. The `tools_kwargs` field carries per-sample sandbox and reward metadata, such as the task image, repository reset command, and reward metadata.
-
-For a Modal-based SWE training setup:
-
-```bash
-# Training Data
-DEPLOYMENT=modal python examples/data_preprocess/swe_rebench.py --local-save-dir "${RAY_DATA_HOME}/data/swe_agent"
-# Evaluation Data
-DEPLOYMENT=modal python examples/data_preprocess/swe_bench_verified.py --local-save-dir "${RAY_DATA_HOME}/data/swe_agent"
+# Validation set: SWE-bench Verified
+python examples/data_preprocess/swe_bench_verified.py \
+    --local-save-dir "${RAY_DATA_HOME}/data/swe_agent"
 ```
 
 This writes:
 
-- `${RAY_DATA_HOME}/data/swe_agent/swe_rebench_filtered_modal.parquet`
-- `${RAY_DATA_HOME}/data/swe_agent/swe_bench_verified_modal.parquet`
+- `${RAY_DATA_HOME}/data/swe_agent/r2e_gym_subset_filtered.parquet` as `TRAIN_FILE`
+- `${RAY_DATA_HOME}/data/swe_agent/swe_bench_verified.parquet` as `TEST_FILE`
 
-If you use a different backend, set `DEPLOYMENT` accordingly and point `TRAIN_FILE` / `TEST_FILE` to the generated files.
+XML tool-call template
 
-### Runtime Env
-
-Ray uses a runtime env file to package the working directory and inject credentials into the job. Start from the example:
-
-```bash
-cp examples/agent_interaction/runtime_env.yaml \
-   "${RAY_DATA_HOME}/data/swe_agent/runtime_env.yaml"
-```
-
-Edit that file before launching training. For Modal, set `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET`. For veFaaS, set `VEFAAS_FUNCTION_ID`, `VEFAAS_FUNCTION_ROUTE`, `VOLCE_ACCESS_KEY`, and `VOLCE_SECRET_KEY`.
-
-### Training Agent Config
-
-The training script controls the training system. The agent config controls what happens inside each rollout: sandbox backend, tools, interaction limits, and reward settings.
-
-For Modal:
-
-```bash
-cp examples/agent_interaction/agent_config_modal.yaml "${RAY_DATA_HOME}/data/swe_agent/agent_config.yaml"
-```
-
-For veFaaS, copy `examples/agent_interaction/agent_config_vefaas.yaml` instead.
-
-At runtime, the trainer passes this path through:
+If you use Qwen3-30B-A3B-Instruct for agent training, replace the `chat_template` field in `tokenizer_config.json` with the XML version below.
+The original template uses JSON-style tool calls, but Uni-Agent expects XML-style tool calls during rollout.
 
 ```text
-actor_rollout_ref.rollout.agent.agent_loop_config_path=${AGENT_CONFIG_PATH}
+"chat_template": "{% macro render_extra_keys(json_dict, handled_keys) %}\n    {%- if json_dict is mapping %}\n        {%- for json_key in json_dict if json_key not in handled_keys %}\n            {%- if json_dict[json_key] is mapping or (json_dict[json_key] is sequence and json_dict[json_key] is not string) %}\n                {{- '\\n<' ~ json_key ~ '>' ~ (json_dict[json_key] | tojson | safe) ~ '</' ~ json_key ~ '>' }}\n            {%- else %}\n                {{-'\\n<' ~ json_key ~ '>' ~ (json_dict[json_key] | string) ~ '</' ~ json_key ~ '>' }}\n            {%- endif %}\n        {%- endfor %}\n    {%- endif %}\n{% endmacro %}\n\n{%- if messages[0][\"role\"] == \"system\" %}\n    {%- set system_message = messages[0][\"content\"] %}\n    {%- set loop_messages = messages[1:] %}\n{%- else %}\n    {%- set loop_messages = messages %}\n{%- endif %}\n\n{%- if not tools is defined %}\n    {%- set tools = [] %}\n{%- endif %}\n\n{%- if system_message is defined %}\n    {{- \"<|im_start|>system\\n\" + system_message }}\n{%- else %}\n    {%- if tools is iterable and tools | length > 0 %}\n        {{- \"<|im_start|>system\\nYou are Qwen, a helpful AI assistant that can interact with a computer to solve tasks.\" }}\n    {%- endif %}\n{%- endif %}\n{%- if tools is iterable and tools | length > 0 %}\n    {{- \"\\n\\n# Tools\\n\\nYou have access to the following functions:\\n\\n\" }}\n    {{- \"<tools>\" }}\n    {%- for tool in tools %}\n        {%- if tool.function is defined %}\n            {%- set tool = tool.function %}\n        {%- endif %}\n        {{- \"\\n<function>\\n<name>\" ~ tool.name ~ \"</name>\" }}\n        {%- if tool.description is defined %}\n            {{- '\\n<description>' ~ (tool.description | trim) ~ '</description>' }}\n        {%- endif %}\n        {{- '\\n<parameters>' }}\n        {%- if tool.parameters is defined and tool.parameters is mapping and tool.parameters.properties is defined and tool.parameters.properties is mapping %}\n            {%- for param_name, param_fields in tool.parameters.properties|items %}\n                {{- '\\n<parameter>' }}\n                {{- '\\n<name>' ~ param_name ~ '</name>' }}\n                {%- if param_fields.type is defined %}\n                    {{- '\\n<type>' ~ (param_fields.type | string) ~ '</type>' }}\n                {%- endif %}\n                {%- if param_fields.description is defined %}\n                    {{- '\\n<description>' ~ (param_fields.description | trim) ~ '</description>' }}\n                {%- endif %}\n                {%- set handled_keys = ['name', 'type', 'description'] %}\n                {{- render_extra_keys(param_fields, handled_keys) }}\n                {{- '\\n</parameter>' }}\n            {%- endfor %}\n        {%- endif %}\n        {% set handled_keys = ['type', 'properties'] %}\n        {{- render_extra_keys(tool.parameters, handled_keys) }}\n        {{- '\\n</parameters>' }}\n        {%- set handled_keys = ['type', 'name', 'description', 'parameters'] %}\n        {{- render_extra_keys(tool, handled_keys) }}\n        {{- '\\n</function>' }}\n    {%- endfor %}\n    {{- \"\\n</tools>\" }}\n    {{- '\\n\\nIf you choose to call a function ONLY reply in the following format with NO suffix:\\n\\n<tool_call>\\n<function=example_function_name>\\n<parameter=example_parameter_1>\\nvalue_1\\n</parameter>\\n<parameter=example_parameter_2>\\nThis is the value for the second parameter\\nthat can span\\nmultiple lines\\n</parameter>\\n</function>\\n</tool_call>\\n\\n<IMPORTANT>\\nReminder:\\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\\n- Required parameters MUST be specified\\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\\n</IMPORTANT>' }}\n{%- endif %}\n{%- if system_message is defined %}\n    {{- '<|im_end|>\\n' }}\n{%- else %}\n    {%- if tools is iterable and tools | length > 0 %}\n        {{- '<|im_end|>\\n' }}\n    {%- endif %}\n{%- endif %}\n{%- for message in loop_messages %}\n    {%- if message.role == \"assistant\" and message.tool_calls is defined and message.tool_calls is iterable and message.tool_calls | length > 0 %}\n        {{- '<|im_start|>' + message.role }}\n        {%- if message.content is defined and message.content is string and message.content | trim | length > 0 %}\n            {{- '\\n' + message.content | trim + '\\n' }}\n        {%- endif %}\n        {%- for tool_call in message.tool_calls %}\n            {%- if tool_call.function is defined %}\n                {%- set tool_call = tool_call.function %}\n            {%- endif %}\n            {{- '\\n<tool_call>\\n<function=' + tool_call.name + '>\\n' }}\n            {%- if tool_call.arguments is defined %}\n                {%- for args_name, args_value in tool_call.arguments|items %}\n                    {{- '<parameter=' + args_name + '>\\n' }}\n                    {%- set args_value = args_value | tojson | safe if args_value is mapping or (args_value is sequence and args_value is not string) else args_value | string %}\n                    {{- args_value }}\n                    {{- '\\n</parameter>\\n' }}\n                {%- endfor %}\n            {%- endif %}\n            {{- '</function>\\n</tool_call>' }}\n        {%- endfor %}\n        {{- '<|im_end|>\\n' }}\n    {%- elif message.role == \"user\" or message.role == \"system\" or message.role == \"assistant\" %}\n        {{- '<|im_start|>' + message.role + '\\n' + message.content + '<|im_end|>' + '\\n' }}\n    {%- elif message.role == \"tool\" %}\n        {%- if loop.previtem and loop.previtem.role != \"tool\" %}\n            {{- '<|im_start|>user\\n' }}\n        {%- endif %}\n        {{- '<tool_response>\\n' }}\n        {{- message.content }}\n        {{- '\\n</tool_response>\\n' }}\n        {%- if not loop.last and loop.nextitem.role != \"tool\" %}\n            {{- '<|im_end|>\\n' }}\n        {%- elif loop.last %}\n            {{- '<|im_end|>\\n' }}\n        {%- endif %}\n    {%- else %}\n        {{- '<|im_start|>' + message.role + '\\n' + message.content + '<|im_end|>\\n' }}\n    {%- endif %}\n{%- endfor %}\n{%- if add_generation_prompt %}\n    {{- '<|im_start|>assistant\\n' }}\n{%- endif %}\n"
 ```
-
-The dataset still provides per-sample fields such as `tools_kwargs.env.image`, `tools_kwargs.env.post_setup_cmd`, and `tools_kwargs.reward.metadata`.
 
 ---
 
-## Launch Fully Async Training
+## Launch Sync/Async Training
 
-Set the common paths explicitly:
-
-```bash
-export MODEL_PATH="${RAY_DATA_HOME}/models/Qwen3.5-9B"
-export TRAIN_FILE="${RAY_DATA_HOME}/data/swe_agent/swe_rebench_filtered_modal.parquet"
-export TEST_FILE="${RAY_DATA_HOME}/data/swe_agent/swe_bench_verified_modal.parquet"
-export RUNTIME_ENV="${RAY_DATA_HOME}/data/swe_agent/runtime_env.yaml"
-export AGENT_CONFIG_PATH="${RAY_DATA_HOME}/data/swe_agent/agent_config.yaml"
-```
-
-Then launch the dense fully async recipe:
+Then launch one of the scripts from the repo root:
 
 ```bash
-NNODES_TRAIN=1 \
-NNODES_ROLLOUT=1 \
-NGPUS_PER_NODE=8 \
-bash examples/agent_train/train_qwen3p5_dense.sh
+bash examples/agent_train/train_sync.sh
 ```
 
-For the MoE recipe:
+or:
 
 ```bash
-export MODEL_PATH="${RAY_DATA_HOME}/models/Qwen3.5-35B-A3B"
-
-NNODES_TRAIN=1 \
-NNODES_ROLLOUT=1 \
-NGPUS_PER_NODE=8 \
-bash examples/agent_train/train_qwen3p5_moe.sh
+bash examples/agent_train/train_fully_async.sh
 ```
 
-Scale `NNODES_TRAIN` and `NNODES_ROLLOUT` separately. Training nodes run policy updates; rollout nodes run inference and agent environments. For agent workloads, rollout capacity is often the first bottleneck because sandboxes and task execution can dominate latency.
+If you use VEFAAS or other remote environments, make sure the required credentials and deployment settings are already present in `runtime_env.yaml` or the job environment. See the environment setup document for the sandbox-side details.
 
----
 
-## Key Knobs
-
-Start with the script defaults, then tune these first:
-
-- `NNODES_ROLLOUT`, `NNODES_TRAIN`, `NGPUS_PER_NODE`: cluster size split between rollout and training.
-- `TRAIN_FILE`, `TEST_FILE`: train and validation Parquet files.
-- `MODEL_PATH`: base policy checkpoint.
-- `RUNTIME_ENV`: Ray runtime env with Python path, dependency, and credential settings.
-- `AGENT_CONFIG_PATH`: agent loop YAML.
-- `n_resp_per_prompt`: number of rollouts per prompt.
-- `actor_rollout_ref.rollout.agent.num_workers`: number of agent rollout workers per rollout process.
-- `max_prompt_length`, `max_response_length`: context budget for the agent trajectory.
-- `staleness_threshold`, `trigger_parameter_sync_step`, `require_batches`, `partial_rollout`: fully async scheduling and weight synchronization behavior.
-
-For MoE or large models, also check tensor, pipeline, context, and expert parallelism settings such as `GEN_TP`, `TP`, `PP`, `CP`, and `EP` in `train_qwen3p5_moe.sh`.
-
----
-
-## Single-Node Debug
-
-Before launching a large run, use the debug script to validate the full path from data loading to rollout execution:
+Agent training uses `actor_rollout_ref.rollout.agent.agent_loop_config_path` to locate the YAML file that defines the agent loop. In the default scripts, this path is:
 
 ```bash
-export TRAIN_FILE="${RAY_DATA_HOME}/data/swe_agent/swe_rebench_filtered_modal.parquet"
-export TEST_FILE="${RAY_DATA_HOME}/data/swe_agent/swe_bench_verified_modal.parquet"
-export RUNTIME_ENV="${RAY_DATA_HOME}/data/swe_agent/runtime_env.yaml"
-export AGENT_CONFIG_PATH="${RAY_DATA_HOME}/data/swe_agent/agent_config.yaml"
-
-bash examples/agent_train/single_node_debug.sh
+examples/agent_interaction/agent_config.yaml
 ```
 
-Use this to catch missing credentials, wrong sandbox images, broken `post_setup_cmd`, or reward errors before scaling out.
+At runtime, the config is consumed in layers:
 
----
+1. The training script passes `agent_loop_config_path` into the rollout config.
+2. `uni_agent/agent_loop.py` loads the YAML file and reads the first agent definition from it.
+3. The trainer injects rollout-side model objects such as the client, tokenizer, and sampling parameters.
+4. Per-sample fields from the dataset, especially `tools_kwargs.env` and `tools_kwargs.reward`, are merged into the config before each rollout starts.
 
-## Sync Training
+This means the YAML defines the **base agent template**, while the dataset can still customize the sandbox image, setup commands, and reward metadata for each sample.
 
-`train_sync.sh` exists for comparison and simple experiments. For production agent RL, prefer the fully async scripts above. Sync training waits for the rollout batch to complete before updating the policy, which is usually inefficient for long-horizon agent tasks with highly variable episode lengths.
+### Annotated agent config
+
+Below is the default config used by the training scripts, with explanations for each section:
+
+```yaml
+# examples/agent_interaction/agent_config.yaml
+
+- name: xxx_agent
+  # Agent name. This should match the `agent_name` field in the dataset.
+  # Each sample uses this name to select the corresponding agent config.
+
+  _target_: uni_agent.agent_loop.UniAgentLoop
+  # Agent loop class. Keep this value unless you are replacing the rollout logic.
+
+  concurrency: 512
+  # Global concurrency budget inside the agent loop. The implementation divides
+  # this across rollout workers to cap how many environments run at once.
+
+  log_dir: /tmp/swebench_qwen3_coder
+  # Base directory for per-run logs such as trajectories and interaction results.
+
+  interaction:
+    action_timeout: 300
+    # Max time for one tool/action call inside a rollout.
+
+    max_turns: 100
+    # Max number of model-environment turns per episode.
+
+  env:
+    deployment:
+      type: vefaas
+      command: curl -fsSL https://vefaas-swe.tos-cn-beijing.ivolces.com/swe-rex/install_1.4.0.sh | bash -s -- {token}
+      timeout: 600
+    env_variables:
+      PIP_PROGRESS_BAR: "off"
+      PIP_CACHE_DIR: "~/.cache/pip"
+      PAGER: "cat"
+      MANPAGER: "cat"
+      LESS: "-R"
+      TQDM_DISABLE: "1"
+      GIT_PAGER: "cat"
+  # Sandbox template. The dataset can still override pieces such as image and
+  # post-setup commands for each sample.
+
+  tools:
+    - name: str_replace_editor
+    - name: execute_bash
+    - name: submit
+  # Tools installed into each sandbox before interaction starts.
+
+  reward:
+    eval_timeout: 600
+  # Base reward config. Dataset-provided reward metadata is merged into this.
+```
+
+### What each top-level section means
+
+| Key | Purpose | Typical tuning advice |
+|-----|---------|-----------------------|
+| `name` | Logical name of the agent loop entry | Usually keep as is unless you define multiple agent types |
+| `_target_` | Python class that implements the loop | Change only when extending the framework |
+| `concurrency` | Cap on total simultaneous agent episodes | Raise when your backend can sustain more sandboxes |
+| `log_dir` | Directory for run logs and cached rollout outputs | Point to fast, large local storage |
+| `interaction` | Turn limit and action timeout | Increase `max_turns` for harder tasks; keep timeouts conservative |
+| `env` | Sandbox deployment template and env vars | Match your actual deployment backend and credentials |
+| `tools` | Tool list exposed to the model | Keep only tools the task truly needs |
+| `reward` | Reward-side settings shared by all samples | Most often `eval_timeout` and reward backend options |
+
+### How this differs from trainer config
+
+It helps to separate three config layers:
+
+| Layer | Controlled by | Examples |
+|-------|---------------|----------|
+| Training system | `train_sync.sh` / `train_fully_async.sh` | node counts, batch sizes, optimizer, rollout engine, parallelism |
+| Agent loop | `AGENT_CONFIG_PATH` YAML | tools, sandbox, interaction limits, reward base config |
+| Per-sample task data | Dataset row under `extra_info.tools_kwargs` | container image, repo reset command, reward metadata |
+
+If you want to change **how many GPUs or workers** the run uses, edit the shell script. If you want to change **how the agent behaves inside each environment**, edit the YAML. If you want task-specific sandbox or reward details, edit the dataset generation pipeline.

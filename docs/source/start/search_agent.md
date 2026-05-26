@@ -1,184 +1,251 @@
-# Train a Search Agent
+# Build a Simple Search Agent
 
-This page walks through the end-to-end search agent example under `examples/search_agent`. The agent is trained on the [ASearcher](https://github.com/inclusionAI/ASearcher) dataset and learns to answer open-domain questions by calling a self-hosted LocalWiki retrieval service.
+Suppose you want an agent that can search arXiv, read recent paper abstracts, and return a shortlist of the most relevant results.
 
-The example uses two tools:
+With Uni-Agent, this is a small customization task rather than a framework rewrite. In this example, we build an arXiv search agent from scratch and use it to search recent papers, read their abstracts, and produce a ranked paper list.
 
-- `search`: query Wikipedia passages through LocalWiki, or use its `crawl` command to fetch full passages for selected Wikipedia URLs.
-- `finish`: submit the final answer for reward computation.
+The runnable code lives in `examples/search_agent/demo.py`.
 
-Training uses the same fully asynchronous `verl` stack described in the agent training guide. The difference is the task: instead of editing code in a sandbox, the agent repeatedly searches, reads, reasons, and submits an answer.
+We will go through the process in three simple steps:
 
----
-
-## Workflow
-
-The full workflow has three steps:
-
-1. Preprocess ASearcher data into Uni-Agent Parquet format.
-2. Start the LocalWiki retrieval service.
-3. Submit the fully async training job.
-
-The wrapper script `examples/search_agent/run_localwiki_and_train.sh` handles steps 2 and 3 together.
+1. Customize a search tool
+2. Launch a model service
+3. Run interaction
 
 ---
 
-## Step 1: Prepare the ASearcher Dataset
+## Step 1: Customize a Search Tool
 
-Use `examples/data_preprocess/asearcher.py` to convert raw ASearcher JSON or JSONL data into Parquet files:
+In this example, we customize the tool `search_arxiv`, defined under `uni_agent/tools/search_arxiv`.
 
-```bash
-python examples/data_preprocess/asearcher.py \
-    --input_json /path/to/asearcher.jsonl \
-    --local_save_dir ~/uni_agent_data/data/asearcher_uni_processed \
-    --train_rows 8192 \
-    --test_rows 100
-```
+This tool contains two files, and they have different roles:
 
-This writes:
+- `uni_agent/tools/search_arxiv/__init__.py`:
+  - This file registers the tool and defines its schema.
+  - The schema tells the agent model what the tool does and how to call it.
+  - The recommended pattern is to define an `Arguments(BaseModel)` class for the tool parameters and then call `AbstractTool.build_tool_schema(...)` to generate the tool schema.
+- `uni_agent/tools/search_arxiv/search_arxiv`:
+  - This is the executable script that is copied into the environment and actually runs the search.
+  - It is installed into the environment and can be executed directly by the agent.
 
-- `~/uni_agent_data/data/asearcher_uni_processed/train.parquet`
-- `~/uni_agent_data/data/asearcher_uni_processed/test.parquet`
+The main parameters of `search_arxiv` are:
 
-Each row contains:
+| Parameter | Type | Meaning | Example |
+|-----------|------|---------|---------|
+| `query` | `string` | Topic or keyword query for searching arXiv papers. | `"Reinforcement Learning"` |
+| `max_results` | `integer` | Maximum number of paper candidates returned by the tool. | `5` |
+| `days` | `integer` | Recency window in days. Only papers updated within this range are kept. | `30` |
 
-- `prompt`: the system and user messages.
-- `agent_name`: set to `search_agent`, matching `examples/search_agent/agent_config.yaml`.
-- `extra_info.tools_kwargs.reward`: the ground-truth answer used by the search reward.
-
----
-
-## Step 2: Prepare LocalWiki
-
-The `search` and `crawl` tools call a LocalWiki HTTP service backed by a FAISS index and BGE-M3 embeddings. The service provides:
-
-- `/retrieve`: semantic search over Wikipedia passages.
-- `/crawl`: full-passage lookup by Wikipedia URL.
-
-Follow `uni_agent/tools/search/localwiki/README.md` to prepare the retrieval artifacts. The recommended path is to download the prebuilt FAISS index and corpus:
+You can validate the tool locally:
 
 ```bash
-export DATA_ROOT=${HOME}/uni_agent_data
-
-hf download begunner/wikipedia-2024-06-bge-m3-faiss-ivf \
-    --repo-type dataset \
-    --local-dir "$DATA_ROOT/wiki24"
-
-cd "$DATA_ROOT/wiki24"
-cat wiki24_faiss.index.part?? > wiki24_faiss.index
-mv "$DATA_ROOT/wiki24/preprocessed" "$DATA_ROOT/wiki24/wiki24_preprocessed"
+chmod +x uni_agent/tools/search_arxiv/search_arxiv
+uni_agent/tools/search_arxiv/search_arxiv --query "Reinforcement Learning" --max_results 5 --days 30
 ```
 
-You also need the retrieval model:
+This command will print a list of recent arXiv papers, including the title, authors, published time, abstract URL, PDF URL, and abstract text. If these fields are returned correctly, then the tool itself is working as expected.
 
-```bash
-hf download BAAI/bge-m3 --local-dir "$DATA_ROOT/model/bge-m3"
-```
-
-The wrapper script starts LocalWiki for you, so you do not need to start the server manually for training.
-
----
-
-## Step 3: Run Training
-
-Start from the repository root with a running Ray cluster. Set `DATA_ROOT` to the directory that contains the processed ASearcher data, model checkpoint, and LocalWiki artifacts:
-
-```bash
-DATA_ROOT=~/uni_agent_data \
-bash examples/search_agent/run_localwiki_and_train.sh
-```
-
-The expected layout is:
+For example, the output may look like:
 
 ```text
-${DATA_ROOT}/
-├── data/asearcher_uni_processed/
-│   ├── train.parquet
-│   └── test.parquet
-├── model/
-│   ├── Qwen3-30B-A3B-Thinking-2507/
-│   └── bge-m3/
-└── wiki24/
-    ├── wiki24_faiss.index
-    ├── wiki24_data.jsonl
-    └── wiki24_preprocessed/
+[1] Some Recent Paper Title
+Authors: Author A, Author B
+Published: 2026-03-20T12:34:56Z
+Abstract URL: http://arxiv.org/abs/2603.xxxxx
+PDF URL: https://arxiv.org/pdf/2603.xxxxx
+Abstract: This paper studies ...
 ```
 
-The wrapper does the following:
-
-1. Starts `uni_agent/tools/search/localwiki/run_localwiki.sh`.
-2. Waits for `http://127.0.0.1:8001/docs` to become reachable.
-3. Patches `examples/search_agent/agent_config.yaml` with the Ray head IP.
-4. Submits `examples/search_agent/train_fully_async_128K.sh` with `ray job submit`.
-5. Keeps the LocalWiki process alive for the training job.
-
-LocalWiki logs are written under `${LOG_DIR:-logs}/localwiki_<timestamp>.log`.
+This tool gives the agent a strong starting point: instead of reasoning from scratch, the model can quickly ground itself on a set of recent papers, read the abstracts, and organize the information into a useful shortlist. In other words, the tool provides retrieval, while the agent provides ranking, filtering, and recommending.
 
 ---
 
-## Key Files
+## Step 2: Launch a Model Service
 
-- `examples/search_agent/agent_config.yaml`: agent loop config. It uses host deployment, the `hermes` tool parser, `search` and `finish` tools, and the `search` reward.
-- `examples/search_agent/runtime_env.yaml`: Ray runtime env for packaging Uni-Agent, `verl`, Python dependencies, and environment variables.
-- `examples/search_agent/train_fully_async_128K.sh`: fully async GRPO training script with a 128K response budget.
-- `examples/search_agent/run_localwiki_and_train.sh`: wrapper that starts LocalWiki and submits the training job.
+In Uni-Agent, the Agent Model is a separate module. This design makes it easy to switch between different model backends without changing the rest of the interaction pipeline.
 
-The training script automatically resolves the Ray head IP and writes a temporary agent config where:
+For example, you can connect the agent to:
 
-```yaml
-RETRIEVAL_SERVICE_URL: "http://${RAY_HEAD_IP}:8001/retrieve"
-CRAWL_SERVICE_URL: "http://${RAY_HEAD_IP}:8001/crawl"
-```
+- a local serving backend such as vLLM or SGLang
+- an internal inference gateway
+- any other OpenAI-compatible chat-completions service
 
----
-
-## Useful Overrides
-
-Common environment variables:
-
-- `DATA_ROOT`: root directory for data, model checkpoints, and LocalWiki artifacts.
-- `LOCALWIKI_PORT`: LocalWiki service port, default `8001`.
-- `LOCALWIKI_READY_TIMEOUT`: how long the wrapper waits for LocalWiki startup, default `300` seconds.
-- `LOG_DIR`: where LocalWiki logs are written.
-- `NNODES_ROLLOUT`, `NNODES_TRAIN`, `NGPUS_PER_NODE`: Ray cluster shape for fully async training.
-
-Common training settings in `train_fully_async_128K.sh`:
-
-- `rollout_n`: number of rollouts per prompt.
-- `max_prompt_length`, `max_response_length`: context budget.
-- `actor_rollout_ref.rollout.agent.num_workers`: number of agent rollout workers.
-- `staleness_threshold`, `trigger_parameter_sync_step`, `require_batches`, `partial_rollout`: fully async scheduling behavior.
-
----
-
-## Inference Only
-
-If you only want to run rollouts without training, start LocalWiki first:
+For example, you can start a local vLLM service like this:
 
 ```bash
-DATA_ROOT=~/uni_agent_data \
-bash uni_agent/tools/search/localwiki/run_localwiki.sh
+vllm serve Qwen/Qwen3-Coder-30B-A3B-Instruct --enable-auto-tool-choice --tool-call-parser qwen3_coder --tensor-parallel-size 4
 ```
-
-Then run parallel inference with the search agent config:
-
-```bash
-python examples/agent_interaction/parallel_infer.py \
-    --data-path ~/uni_agent_data/data/asearcher_uni_processed/test.parquet \
-    --model-path ~/uni_agent_data/model/Qwen3-30B-A3B-Thinking-2507 \
-    --agent-config-path examples/search_agent/agent_config.yaml \
-    --engine vllm \
-    --tensor-parallel-size 4 \
-    --num-workers 8 \
-    --max-turns 64 \
-    --max-samples 4
-```
-
-Make sure `RETRIEVAL_SERVICE_URL` and `CRAWL_SERVICE_URL` point to the LocalWiki server reachable by the rollout workers.
 
 ---
 
-## Output
+## Step 3: Run Interaction
 
-During training, metrics such as reward, response length, tool-call counts, and validation generations are logged under the `search_agent` project. The reward is computed by `uni_agent/reward/search.py`, which extracts the submitted `finish` answer and compares it against the ASearcher ground truth.
+Once the tool and model service are ready, you can run the full demo directly.
 
+Before running, set the environment-side credentials:
+
+```bash
+# deployment env_vars
+export DEPLOYMENT=vefaas
+export VOLCE_ACCESS_KEY=xxxxxxxxxx
+export VOLCE_SECRET_KEY=xxxxxxxxxx
+export VEFAAS_FUNCTION_ID=xxxxxxxxxx
+export VEFAAS_FUNCTION_ROUTE=xxxxxxxxxx
+# model service env_vars
+export BASE_URL=http://localhost:8000/v1
+export MODEL_NAME=Qwen/Qwen3-Coder-30B-A3B-Instruct
+```
+
+Then run the demo from the repository root:
+
+```bash
+DEBUG_MODE=1 python examples/search_agent/demo.py
+```
+
+Setting `DEBUG_MODE=1` is recommended while developing. It prints the full runtime information to the current terminal, which makes it much easier to inspect environment startup, tool installation, model interaction, and final execution results.
+
+If everything works as expected, you will get something like the following result:
+
+```text
+[1/4] Starting environment...
+[2/4] Installing tools...
+/usr/local/bin/search_arxiv
+/usr/local/bin/finish
+
+[3/4] Running interaction...
+
+[4/4] Final status:
+exit_reason: finished
+done: True
+
+Final result:
+Observation:
+Based on the arXiv papers from the last month, here are the 5 most relevant papers about 'Agent Reinforcement Learning' with one-sentence reasons:
+
+1. **ThinkJEPA: Empowering Latent World Models with Large Vision-Language Reasoning Model** (http://arxiv.org/abs/2603.22281v1)
+   This paper addresses agent-based prediction by combining dense-frame dynamics modeling with long-horizon semantic guidance, which is crucial for reinforcement learning agents that need to plan and reason about future states.
+
+2. **WorldCache: Content-Aware Caching for Accelerated Video World Models** (http://arxiv.org/abs/2603.22286v1)
+   This work enhances world models used in reinforcement learning by improving computational efficiency through intelligent feature caching, directly impacting the training and deployment of agent-based systems.
+
+3. **End-to-End Training for Unified Tokenization and Latent Denoising** (http://arxiv.org/abs/2603.22283v1)
+   This research advances latent world models that are fundamental to agent reinforcement learning by enabling unified training of tokenization and generation processes, reducing complexity in agent architectures.
+
+4. **The Dual Mechanisms of Spatial Reasoning in Vision-Language Models** (http://arxiv.org/abs/2603.22278v1)
+   While focused on vision-language models, this paper provides insights into spatial reasoning capabilities essential for agents to understand and interact with environments in reinforcement learning settings.
+
+5. **Scaling DoRA: High-Rank Adaptation via Factored Norms and Fused Kernels** (http://arxiv.org/abs/2603.22276v1)
+   This work improves the efficiency of adapting large models, which is critical for deploying reinforcement learning agents in practical scenarios with limited computational resources.
+
+These papers were selected based on their direct relevance to agent-based reinforcement learning systems, particularly those involving world modeling, spatial reasoning, and efficient model adaptation.
+```
+
+After that, it helps to understand what the script is doing internally. The demo mainly combines four parts: the environment, the tool list, the model wrapper, and the interaction loop.
+
+### Environment
+
+The script follows the same environment pattern as `examples/agent_env/demo.py` and uses `AgentEnv`:
+
+```python
+env_config = {
+    "deployment": {
+        "type": "vefaas",
+        "image": ".../python:3.12",
+        "command": "curl -fsSL ... | bash -s -- {token}",
+        "timeout": 300.0,
+        "startup_timeout": 180.0,
+    },
+    "env_variables": {
+        "PIP_PROGRESS_BAR": "off",
+    },
+}
+env = AgentEnv(run_id=run_id, env_config=AgentEnvConfig(**env_config))
+```
+
+### Tool List
+
+The tool list tells Uni-Agent which tools should be installed into the environment and exposed to the model:
+
+```python
+tools_manager = ToolsManager(
+    ToolsManagerConfig(
+        tools=[
+            ToolConfig(name="search_arxiv"),
+            ToolConfig(name="finish"),
+        ]
+    )
+)
+```
+
+### Model Wrapper
+
+The model wrapper lets Uni-Agent talk to your external model service:
+
+```python
+model = OpenAICompatibleChatModel(
+    base_url=model_base_url,
+    api_key=model_api_key,
+    model_name=model_name,
+    sampling_params={"temperature": 0.0, "max_tokens": 8192},
+)
+model.set_tools_schemas(tools_manager.tools_schemas)
+```
+
+### Task And Interaction
+
+The task is defined as a normal chat prompt. In this example, the agent is asked to search recent arXiv papers, read the abstracts, and return a ranked list:
+
+```python
+user_request = (
+    "Please search arXiv papers from the last month about 'Agent Reinforcement Learning', "
+    "read the abstracts, and give me a ranked list of the 5 most relevant papers with "
+    "one-sentence reasons. For each paper, include the arXiv abstract URL."
+)
+```
+
+The system prompt tells the model how to behave in the loop. In this demo, we explicitly require a tool call in every assistant turn:
+
+```python
+messages = [
+    {
+        "role": "system",
+        "content": (
+            "You are a simple arXiv paper search agent. "
+            "Every assistant response MUST contain EXACTLY ONE tool call. "
+            "Do not reply with plain text without a tool call."
+        ),
+    },
+    {"role": "user", "content": user_request},
+]
+```
+
+Finally, pass everything into `AgentInteraction`:
+
+```python
+interaction = AgentInteraction(
+    run_id=run_id,
+    env=env,
+    model=model,
+    tools_manager=tools_manager,
+    messages=messages,
+    action_timeout=60,
+    max_turns=20,
+)
+```
+
+At runtime, the script does four things in order:
+
+1. start the environment
+2. install the tools into the environment
+3. run the multi-turn interaction loop
+4. print the final status and final result
+
+That is the key idea of Uni-Agent in practice: once the tool and model are defined, running the agent is mostly just composition.
+
+If you want to extend this example later, the most common changes are:
+
+1. replace `search_arxiv` with another search backend
+2. add richer filtering fields to the tool schema
+3. change the prompt to target another search scenario
+4. switch to a different OpenAI-compatible model service
+5. change the finish format for your own task
