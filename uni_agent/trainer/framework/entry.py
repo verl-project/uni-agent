@@ -47,6 +47,8 @@ async def build_agent_framework(
     tool_parser_name = config.actor_rollout_ref.rollout.get("multi_turn", {}).get("format")
     if tool_parser_name is not None:
         gateway_actor_kwargs["tool_parser_name"] = tool_parser_name
+    gateway_actor_kwargs["prompt_length"] = config.actor_rollout_ref.rollout.prompt_length
+    gateway_actor_kwargs["response_length"] = config.actor_rollout_ref.rollout.response_length
 
     session_runtime = GatewayServingRuntime(
         llm_client=llm_client,

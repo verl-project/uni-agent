@@ -30,6 +30,21 @@ def ray_runtime():
     ray.shutdown()
 
 
+def test_gateway_actor_accepts_and_stores_rollout_budget():
+    """Wave2 commit 1: actor constructor accepts prompt_length / response_length."""
+    from uni_agent.trainer.gateway.gateway import _GatewayActor
+    from tests.uni_agent.trainer.support import FakeTokenizer, InspectingBackend
+
+    actor = _GatewayActor(
+        tokenizer=FakeTokenizer(),
+        backend=InspectingBackend(),
+        prompt_length=2048,
+        response_length=1024,
+    )
+    assert actor._prompt_length == 2048
+    assert actor._response_length == 1024
+
+
 @pytest.mark.asyncio
 async def test_gateway_actor_abort_session_does_not_wait_for_backend_generate(ray_runtime):
     from uni_agent.trainer.gateway.gateway import GatewayActor

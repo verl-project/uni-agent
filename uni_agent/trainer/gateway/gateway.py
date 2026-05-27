@@ -278,6 +278,8 @@ class _GatewayActor:
         apply_chat_template_kwargs: dict[str, Any] | None = None,
         base_sampling_params: dict[str, Any] | None = None,
         allowed_request_sampling_param_keys: set[str] | frozenset[str] | None = None,
+        prompt_length: int | None = None,
+        response_length: int | None = None,
     ):
         # Same pattern as vllm_async_server.py / async_sglang_server.py:
         # use the node's routable IP for both bind and URL.
@@ -295,6 +297,8 @@ class _GatewayActor:
             else frozenset(allowed_request_sampling_param_keys)
         )
         self._allowed_request_sampling_param_keys = allowed_keys
+        self._prompt_length = prompt_length
+        self._response_length = response_length
         self._system_prompt = initialize_system_prompt(
             tokenizer,
             **self._apply_chat_template_kwargs,
