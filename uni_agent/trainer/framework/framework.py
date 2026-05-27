@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
-from abc import ABC, abstractmethod
 from dataclasses import replace
 from functools import partial
 from uuid import uuid4
@@ -19,39 +18,11 @@ from verl.utils.transferqueue_utils import tq
 from verl.utils import tensordict_utils as tu
 from verl.utils.model import compute_position_id_with_mask
 
+from .base import AgentFramework
 from .multi_modal_postprocess import compute_multi_modal_inputs, compute_position_ids
 from .types import SessionRuntime, Trajectory
 
 logger = logging.getLogger(__name__)
-
-
-class AgentFramework(ABC):
-    """Abstract base for framework implementations.
-
-    Phase A: entry.py owns session runtime construction and passes it in.
-    Subclasses receive shared entry resources plus the raw config for
-    subclass-specific field parsing.
-
-    Phase B: trainer inlines entry; this from_config contract remains.
-    """
-
-    @classmethod
-    @abstractmethod
-    async def from_config(
-        cls,
-        *,
-        config,
-        session_runtime,
-        processor=None,
-        replay_buffer,
-        reward_loop_worker_handles=None,
-    ) -> "AgentFramework":
-        ...
-
-    @abstractmethod
-    async def generate_sequences(self, prompts: TensorDict) -> None:
-        """Run agent sessions and write finalized trajectories to TransferQueue."""
-        ...
 
 
 def _short_failure_reason(error: BaseException) -> str:
@@ -609,4 +580,3 @@ class OpenAICompatibleAgentFramework(AgentFramework):
             "seq_len": prompt_len + response_len,
         }
         return field, tag
-

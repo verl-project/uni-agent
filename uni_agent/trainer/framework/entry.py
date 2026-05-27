@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from omegaconf import OmegaConf
 
-from uni_agent.trainer.framework.framework import AgentFramework
+from uni_agent.trainer.framework.base import AgentFramework
 from uni_agent.trainer.gateway.runtime import GatewayServingRuntime
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.import_utils import load_class_from_fqn
