@@ -87,7 +87,11 @@ class AgentFrameworkRolloutAdapter:
         replay_buffer=None,
         **_,
     ) -> "AgentFrameworkRolloutAdapter":
-        del teacher_client
+        if teacher_client is not None:
+            raise ValueError(
+                "AgentFrameworkRolloutAdapter does not support teacher_client yet; "
+                "disable teacher policy/distillation or use an AgentLoopManager that supports it."
+            )
         assert replay_buffer is not None, "AgentFrameworkRolloutAdapter requires replay_buffer"
 
         framework = await build_agent_framework(

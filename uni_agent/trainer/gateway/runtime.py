@@ -8,10 +8,6 @@ import ray
 from verl.workers.rollout.llm_server import LLMServerClient
 
 
-async def _await_ray_ref(object_ref):
-    return await asyncio.wrap_future(object_ref.future())
-
-
 class GatewayServingRuntime:
     """Standalone serving runtime that owns gateway actors and delegates backend routing."""
 
@@ -95,7 +91,7 @@ class GatewayServingRuntime:
 
     async def shutdown(self) -> None:
         if self.owned_gateway_actors:
-            await asyncio.gather(*[_await_ray_ref(gateway.shutdown.remote()) for gateway in self.owned_gateway_actors])
+            await asyncio.gather(*(gateway.shutdown.remote() for gateway in self.owned_gateway_actors))
         self.owned_gateway_actors = []
         self.gateway_manager = None
 

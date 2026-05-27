@@ -51,7 +51,7 @@ async def test_gateway_actor_abort_session_does_not_wait_for_backend_generate(ra
         await asyncio.sleep(0.1)
 
         abort_ref = actor.abort_session.remote("session-abort-during-generate")
-        await asyncio.wait_for(asyncio.wrap_future(abort_ref.future()), timeout=0.3)
+        await asyncio.wait_for(abort_ref, timeout=0.3)
 
         request_task.cancel()
         try:

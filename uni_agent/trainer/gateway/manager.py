@@ -1,11 +1,6 @@
 from __future__ import annotations
 
-import asyncio
 from typing import Any
-
-
-async def _await_object_ref(object_ref):
-    return await asyncio.wrap_future(object_ref.future())
 
 
 class GatewayManager:
@@ -35,28 +30,28 @@ class GatewayManager:
     async def create_session(self, session_id: str, **kwargs):
         gateway_index = self._select_gateway_index()
         gateway = self.gateways[gateway_index]
-        handle = await _await_object_ref(gateway.create_session.remote(session_id=session_id, **kwargs))
+        handle = await gateway.create_session.remote(session_id=session_id, **kwargs)
         self._session_to_gateway_index[session_id] = gateway_index
         self.active_sessions_per_gateway[gateway_index] += 1
         return handle
 
     async def finalize_session(self, session_id: str):
         gateway, gateway_index = self._get_gateway(session_id)
-        trajectories = await _await_object_ref(gateway.finalize_session.remote(session_id=session_id))
+        trajectories = await gateway.finalize_session.remote(session_id=session_id)
         self._session_to_gateway_index.pop(session_id, None)
         self.active_sessions_per_gateway[gateway_index] -= 1
         return trajectories
 
     async def complete_session(self, session_id: str, reward_info: dict[str, Any] | None = None) -> None:
         gateway, _ = self._get_gateway(session_id)
-        await _await_object_ref(gateway.complete_session.remote(session_id=session_id, reward_info=reward_info))
+        await gateway.complete_session.remote(session_id=session_id, reward_info=reward_info)
 
     async def abort_session(self, session_id: str) -> None:
         gateway, gateway_index = self._get_gateway(session_id)
-        await _await_object_ref(gateway.abort_session.remote(session_id=session_id))
+        await gateway.abort_session.remote(session_id=session_id)
         self._session_to_gateway_index.pop(session_id, None)
         self.active_sessions_per_gateway[gateway_index] -= 1
 
     async def wait_for_completion(self, session_id: str, timeout: float | None = None) -> None:
         gateway, _ = self._get_gateway(session_id)
-        await _await_object_ref(gateway.wait_for_completion.remote(session_id=session_id, timeout=timeout))
+        await gateway.wait_for_completion.remote(session_id=session_id, timeout=timeout)
