@@ -76,7 +76,7 @@ class VefaasDeployment(AbstractDeployment):
         region = os.getenv("VEFAAS_REGION", "cn-beijing")
         if not all([access_key, secret_key, region]):
             raise ValueError("VOLCE_ACCESS_KEY, VOLCE_SECRET_KEY, and VEFAAS_REGION must be set")
-        self._vefaas_client = get_vefaas_client(access_key, secret_key, region)
+        self._vefaas_client = get_vefaas_client(access_key, secret_key, region, self._config.proxy)
 
     def add_hook(self, hook: DeploymentHook):
         self._hooks.add_hook(hook)
@@ -242,7 +242,7 @@ class VefaasDeployment(AbstractDeployment):
         self._stopped = True
 
 
-def get_vefaas_client(access_key: str, secret_key: str, region: str):
+def get_vefaas_client(access_key: str, secret_key: str, region: str, proxy: str | None = None):
     import volcenginesdkcore
     import volcenginesdkvefaas
 
@@ -254,6 +254,9 @@ def get_vefaas_client(access_key: str, secret_key: str, region: str):
     configuration.auto_retry = False
     configuration.region = region
     configuration.client_side_validation = True
+    if proxy:
+        configuration.http_proxy = proxy
+        configuration.https_proxy = proxy
     api_client = volcenginesdkcore.ApiClient(configuration)
     return volcenginesdkvefaas.VEFAASApi(api_client)
 
