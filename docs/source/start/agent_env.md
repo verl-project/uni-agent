@@ -84,7 +84,7 @@ env_config = AgentEnvConfig(**{
 - **`extra_run_args`** can pass additional runtime flags. For example, Apptainer bind mounts or GPU flags must appear before the image argument.
 - **`network`** is Docker/Podman-specific and useful when the current process is itself running inside Docker.
 
-Apptainer launches the server with host networking, so the selected port is passed directly to `swerex.server`. Docker and Podman use port publishing by default: `runtime_port` is the port inside the sandbox container, while `published_port` is the host-side port Uni-Agent connects to. When Uni-Agent connects over a shared container network, it connects to the sandbox IP and `runtime_port`. When Docker/Podman uses host networking, port publishing is skipped and Uni-Agent connects to `runtime_port`.
+Apptainer launches the server with host networking, so the selected port is passed directly to `swerex.server`. Docker and Podman use port publishing by default: `runtime_port` is the port inside the sandbox container, while `published_port` is the host-side port Uni-Agent connects to. When Uni-Agent itself runs inside a container and connects over a shared container network, it connects to the sandbox IP and `runtime_port`. When Uni-Agent runs on the host, it connects through `published_port`, even if the sandbox container is attached to a custom Docker/Podman network. When Docker/Podman uses host networking, port publishing is skipped and Uni-Agent connects to `runtime_port`.
 
 Useful local overrides:
 

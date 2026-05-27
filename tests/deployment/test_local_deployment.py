@@ -232,6 +232,29 @@ def test_oci_runtime_uses_published_port_with_explicit_host(monkeypatch):
     assert runtime_config.port == 4567
 
 
+def test_oci_runtime_uses_container_port_with_explicit_host_from_container(monkeypatch):
+    deployment = LocalDeployment(
+        run_id="test",
+        type="local",
+        container_runtime="docker",
+        image="python:3.12",
+        host="http://sandbox",
+        runtime_port=8000,
+        network="agent-net",
+    )
+    deployment._runtime_exec = lambda args, check=True: _completed_container()
+    monkeypatch.setattr(local_deployment, "_is_running_in_container", lambda: True)
+    monkeypatch.setattr(local_deployment, "LocalRuntime", _CapturingRuntime)
+    _CapturingRuntime.configs = []
+
+    asyncio.run(deployment._start_oci_container(token="secret", container_name="sandbox-name", published_port=4567))
+
+    runtime_config, run_id = _CapturingRuntime.configs[-1]
+    assert run_id == "test"
+    assert runtime_config.host == "http://sandbox"
+    assert runtime_config.port == 8000
+
+
 def test_oci_runtime_uses_container_port_with_explicit_host_and_host_network(monkeypatch):
     deployment = LocalDeployment(
         run_id="test",
@@ -316,6 +339,7 @@ def test_oci_runtime_uses_container_port_when_connecting_over_container_network(
     )
     deployment._runtime_exec = _capture_exec(commands)
     deployment._get_container_ip = lambda container_name: "172.18.0.9"
+    monkeypatch.setattr(local_deployment, "_is_running_in_container", lambda: True)
     monkeypatch.setattr(local_deployment, "LocalRuntime", _CapturingRuntime)
     _CapturingRuntime.configs = []
 
@@ -344,6 +368,29 @@ def test_oci_runtime_uses_container_port_when_connecting_over_container_network(
     ]
 
 
+def test_oci_runtime_uses_published_port_with_custom_network_from_host(monkeypatch):
+    deployment = LocalDeployment(
+        run_id="test",
+        type="local",
+        container_runtime="docker",
+        image="python:3.12",
+        runtime_port=8000,
+        network="agent-net",
+    )
+    deployment._runtime_exec = lambda args, check=True: _completed_container()
+    deployment._get_container_ip = lambda container_name: "172.18.0.9"
+    monkeypatch.setattr(local_deployment, "_is_running_in_container", lambda: False)
+    monkeypatch.setattr(local_deployment, "LocalRuntime", _CapturingRuntime)
+    _CapturingRuntime.configs = []
+
+    asyncio.run(deployment._start_oci_container(token="secret", container_name="sandbox-name", published_port=4567))
+
+    runtime_config, run_id = _CapturingRuntime.configs[-1]
+    assert run_id == "test"
+    assert runtime_config.host == "http://127.0.0.1"
+    assert runtime_config.port == 4567
+
+
 def test_oci_runtime_uses_container_port_when_inheriting_current_container_network(monkeypatch):
     commands = []
     deployment = LocalDeployment(
@@ -356,6 +403,7 @@ def test_oci_runtime_uses_container_port_when_inheriting_current_container_netwo
     deployment._runtime_exec = _capture_exec(commands)
     deployment._get_current_container_network = lambda: "agent-net"
     deployment._get_container_ip = lambda container_name: "172.18.0.9"
+    monkeypatch.setattr(local_deployment, "_is_running_in_container", lambda: True)
     monkeypatch.setattr(local_deployment, "LocalRuntime", _CapturingRuntime)
     _CapturingRuntime.configs = []
 
@@ -417,6 +465,7 @@ def test_oci_runtime_falls_back_to_published_port_when_container_ip_is_unavailab
     )
     deployment._runtime_exec = lambda args, check=True: _completed_container()
     deployment._get_container_ip = lambda container_name: None
+    monkeypatch.setattr(local_deployment, "_is_running_in_container", lambda: True)
     monkeypatch.setattr(local_deployment, "LocalRuntime", _CapturingRuntime)
     _CapturingRuntime.configs = []
 

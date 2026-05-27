@@ -189,13 +189,15 @@ class LocalDeployment(AbstractDeployment):
 
     def _get_runtime_endpoint(self, container_name: str, published_port: int, network: str | None) -> tuple[str, int]:
         if self._config.host:
-            port = self._config.runtime_port if network == _HOST_NETWORK else published_port
+            port = (
+                self._config.runtime_port if network == _HOST_NETWORK or _is_running_in_container() else published_port
+            )
             return self._config.host, port
 
         if network == _HOST_NETWORK:
             return "http://127.0.0.1", self._config.runtime_port
 
-        if network or _is_running_in_container():
+        if _is_running_in_container():
             container_ip = self._get_container_ip(container_name)
             if container_ip:
                 return f"http://{container_ip}", self._config.runtime_port
