@@ -255,8 +255,7 @@ def get_vefaas_client(access_key: str, secret_key: str, region: str, proxy: str 
     configuration.region = region
     configuration.client_side_validation = True
     if proxy:
-        configuration.http_proxy = proxy
-        configuration.https_proxy = proxy
+        configuration.proxy = proxy
     api_client = volcenginesdkcore.ApiClient(configuration)
     return volcenginesdkvefaas.VEFAASApi(api_client)
 
