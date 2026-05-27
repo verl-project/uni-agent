@@ -128,6 +128,48 @@ async def test_gateway_actor_continuation_budget_exhausted_materializes_length_s
 
 
 @pytest.mark.asyncio
+async def test_backend_value_error_raises_400():
+    from uni_agent.trainer.gateway.gateway import _GatewayActor
+    from fastapi import HTTPException
+
+    backend = InspectingBackend()
+    actor = _GatewayActor(tokenizer=FakeTokenizer(), backend=backend)
+    await actor.start()
+    try:
+        await actor.create_session("s1")
+        backend.next_error = ValueError(
+            "Prompt length (123456) exceeds the model's maximum context length (8192)."
+        )
+        with pytest.raises(HTTPException) as exc_info:
+            await actor._handle_chat_completions(
+                "s1", {"messages": [{"role": "user", "content": "hi"}]}
+            )
+
+        assert exc_info.value.status_code == 400
+        assert "exceeds the model's maximum context length" in str(exc_info.value.detail)
+    finally:
+        await actor.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_unknown_session_raises_404():
+    from uni_agent.trainer.gateway.gateway import _GatewayActor
+    from fastapi import HTTPException
+
+    actor = _GatewayActor(tokenizer=FakeTokenizer(), backend=InspectingBackend())
+    await actor.start()
+    try:
+        with pytest.raises(HTTPException) as exc_info:
+            await actor._handle_chat_completions(
+                "does-not-exist", {"messages": [{"role": "user", "content": "hi"}]}
+            )
+
+        assert exc_info.value.status_code == 404
+    finally:
+        await actor.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_gateway_actor_abort_session_does_not_wait_for_backend_generate(ray_runtime):
     from uni_agent.trainer.gateway.gateway import GatewayActor
 

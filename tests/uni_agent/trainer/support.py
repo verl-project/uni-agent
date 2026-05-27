@@ -179,8 +179,13 @@ class SingleUseVisionInfoExtractor:
 class InspectingBackend:
     def __init__(self):
         self.calls = []
+        self.next_error = None
 
     async def generate(self, request_id, *, prompt_ids, sampling_params, image_data=None, video_data=None):
+        if self.next_error is not None:
+            error = self.next_error
+            self.next_error = None
+            raise error
         self.calls.append(
             {
                 "request_id": request_id,

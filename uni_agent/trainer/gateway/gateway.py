@@ -317,6 +317,30 @@ class _GatewayActor:
         self._register_routes()
 
     def _register_routes(self) -> None:
+        @self._app.exception_handler(HTTPException)
+        async def _http_exception_handler(_request: Request, exc: HTTPException):
+            if isinstance(exc.detail, str):
+                message = exc.detail
+            elif isinstance(exc.detail, dict) and "message" in exc.detail:
+                message = str(exc.detail["message"])
+            else:
+                message = str(exc.detail)
+            error_type = (
+                "invalid_request_error" if 400 <= exc.status_code < 500
+                else "internal_server_error"
+            )
+            return JSONResponse(
+                status_code=exc.status_code,
+                content={
+                    "error": {
+                        "message": message,
+                        "type": error_type,
+                        "code": None,
+                        "param": None,
+                    }
+                },
+            )
+
         @self._app.post("/sessions/{session_id}/v1/chat/completions")
         async def _chat_completions(session_id: str, request: Request):
             payload = await request.json()
@@ -567,9 +591,7 @@ class _GatewayActor:
 
             async with session.request_lock:
                 if session.phase != SessionPhase.ACTIVE:
-                    raise HTTPException(
-                        status_code=409, detail=f"Session {session_id} is {session.phase.value.lower()}"
-                    )
+                    raise HTTPException(status_code=409, detail=f"Session {session_id} is {session.phase.value.lower()}")
 
                 self._touch_session(session)
                 messages = request_context["messages"]
@@ -580,10 +602,11 @@ class _GatewayActor:
 
                 if session.active_trajectory is None:
                     image_data, video_data = await self._extract_multi_modal_data(messages)
+                    prompt_ids = self._encode_full(
+                        messages, tools=tools, image_data=image_data, video_data=video_data
+                    )
                     active_trajectory = TrajectoryBuffer(
-                        prompt_ids=self._encode_full(
-                            messages, tools=tools, image_data=image_data, video_data=video_data
-                        )
+                        prompt_ids=prompt_ids
                     )
                 elif _is_request_context_prefix(session=session, messages=messages, tools=tools):
                     active_trajectory = _copy_trajectory_buffer(session.active_trajectory)
@@ -652,10 +675,11 @@ class _GatewayActor:
                         active=session.active_trajectory,
                     )
                     image_data, video_data = await self._extract_multi_modal_data(messages)
+                    prompt_ids = self._encode_full(
+                        messages, tools=tools, image_data=image_data, video_data=video_data
+                    )
                     active_trajectory = TrajectoryBuffer(
-                        prompt_ids=self._encode_full(
-                            messages, tools=tools, image_data=image_data, video_data=video_data
-                        )
+                        prompt_ids=prompt_ids
                     )
 
                 generation_context_ids = active_trajectory.prompt_ids + active_trajectory.response_ids
@@ -671,13 +695,18 @@ class _GatewayActor:
                     remaining_response_budget=remaining_response_budget,
                 )
 
-            output = await self._backend.generate(
-                request_id=session_id,
-                prompt_ids=generation_context_ids,
-                sampling_params=sampling_params,
-                image_data=image_data,
-                video_data=video_data,
-            )
+            try:
+                output = await self._backend.generate(
+                    request_id=session_id,
+                    prompt_ids=generation_context_ids,
+                    sampling_params=sampling_params,
+                    image_data=image_data,
+                    video_data=video_data,
+                )
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e)) from e
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"{e.__class__.__name__}: {e}") from e
 
             response_ids = list(output.token_ids)
             active_trajectory.response_ids.extend(response_ids)
@@ -690,9 +719,7 @@ class _GatewayActor:
             )
             async with session.request_lock:
                 if session.phase != SessionPhase.ACTIVE:
-                    raise HTTPException(
-                        status_code=409, detail=f"Session {session_id} is {session.phase.value.lower()}"
-                    )
+                    raise HTTPException(status_code=409, detail=f"Session {session_id} is {session.phase.value.lower()}")
 
                 if materialized_trajectory is not None:
                     session.trajectories.append(materialized_trajectory)
