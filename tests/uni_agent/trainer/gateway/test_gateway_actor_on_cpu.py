@@ -46,6 +46,88 @@ def test_gateway_actor_accepts_and_stores_rollout_budget():
 
 
 @pytest.mark.asyncio
+async def test_gateway_actor_max_tokens_clamped_to_remaining_response_budget():
+    from uni_agent.trainer.gateway.gateway import _GatewayActor
+    from uni_agent.trainer.gateway.types import TrajectoryBuffer
+
+    actor = _GatewayActor(
+        tokenizer=FakeTokenizer(),
+        backend=InspectingBackend(),
+        prompt_length=2048,
+        response_length=100,
+    )
+    await actor.start()
+    try:
+        await actor.create_session("s1")
+        actor._sessions["s1"].active_trajectory = TrajectoryBuffer(
+            prompt_ids=[1, 2, 3],
+            response_ids=[10] * 60,
+            response_mask=[1] * 60,
+        )
+
+        payload = {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 200}
+        actor._sessions["s1"].message_history = list(payload["messages"])
+        await actor._handle_chat_completions("s1", payload)
+
+        assert actor._backend.calls[-1]["sampling_params"]["max_tokens"] == 40
+    finally:
+        await actor.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_gateway_actor_continuation_budget_exhausted_materializes_length_stop():
+    from uni_agent.trainer.gateway.gateway import _GatewayActor
+    from uni_agent.trainer.gateway.types import TrajectoryBuffer
+
+    backend = InspectingBackend()
+    actor = _GatewayActor(
+        tokenizer=FakeTokenizer(),
+        backend=backend,
+        response_length=50,
+    )
+    await actor.start()
+    try:
+        await actor.create_session("s1")
+        session = actor._sessions["s1"]
+        session.active_trajectory = TrajectoryBuffer(
+            prompt_ids=[1, 2, 3, 4, 5],
+            response_ids=[10] * 45,
+            response_mask=[1] * 45,
+        )
+        prefix_messages = [
+            {"role": "user", "content": "search"},
+            {"role": "assistant", "content": "calling tool"},
+        ]
+        session.message_history = list(prefix_messages)
+        payload = {
+            "messages": prefix_messages
+            + [
+                {
+                    "role": "tool",
+                    "tool_call_id": "call-1",
+                    "content": "x" * 200,
+                }
+            ]
+        }
+        backend.calls.clear()
+
+        response = await actor._handle_chat_completions("s1", payload)
+
+        body = json.loads(response.body)
+        assert body["choices"][0]["finish_reason"] == "length"
+        assert body["choices"][0]["message"] == {"role": "assistant", "content": ""}
+        assert body["usage"]["completion_tokens"] == 0
+        assert backend.calls == []
+        assert session.active_trajectory is None
+        assert len(session.trajectories) == 1
+        assert session.trajectories[0].extra_fields["finish_reason"] == "length"
+        assert "length_truncated" not in session.trajectories[0].extra_fields
+        assert "traj_exit_reason" not in session.trajectories[0].extra_fields
+    finally:
+        await actor.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_gateway_actor_abort_session_does_not_wait_for_backend_generate(ray_runtime):
     from uni_agent.trainer.gateway.gateway import GatewayActor
 

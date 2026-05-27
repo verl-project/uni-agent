@@ -88,6 +88,7 @@ def _trajectory(
     response_ids: list[int] | None = None,
     response_logprobs: list[float] | None = None,
     num_turns: int = 2,
+    extra_fields: dict[str, object] | None = None,
 ):
     prompt_ids = prompt_ids or [10, 11]
     response_ids = response_ids or [20, 21]
@@ -99,6 +100,7 @@ def _trajectory(
         reward_score=None,
         num_turns=num_turns,
         multi_modal_data={"images": ["raw-image-should-not-be-written"]},
+        extra_fields=dict(extra_fields or {}),
     )
 
 
@@ -457,6 +459,27 @@ async def test_max_concurrent_sessions_caps_in_flight_sessions(monkeypatch):
     await framework.generate_sequences(_build_prompts(count=4, global_steps=10))
 
     assert max_observed <= 2
+
+
+def test_trajectory_to_tq_field_and_tag_copies_finish_reason():
+    from uni_agent.trainer.framework.framework import OpenAICompatibleAgentFramework
+
+    framework = OpenAICompatibleAgentFramework(
+        session_runtime=_FakeSessionRuntime({}),
+        agent_runner=lambda **_: None,
+    )
+    trajectory = _trajectory(extra_fields={"finish_reason": "length"})
+
+    _, tag = framework._trajectory_to_tq_field_and_tag(
+        trajectory=trajectory,
+        sample_fields={},
+        session_index=0,
+        global_steps=12,
+    )
+
+    assert tag["finish_reason"] == "length"
+    assert "length_truncated" not in tag
+    assert "traj_exit_reason" not in tag
 
 
 # ---------------------------------------------------------------------------

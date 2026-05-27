@@ -160,11 +160,14 @@ def _build_sampling_params(
     *,
     base_sampling_params: dict[str, Any],
     allowed_request_sampling_param_keys: frozenset[str],
+    remaining_response_budget: int | None = None,
 ) -> dict[str, Any]:
     sampling_params = dict(base_sampling_params)
     for key in allowed_request_sampling_param_keys:
         if key in payload:
             sampling_params[key] = payload[key]
+    if remaining_response_budget is not None and "max_tokens" in sampling_params:
+        sampling_params["max_tokens"] = min(sampling_params["max_tokens"], remaining_response_budget)
     return sampling_params
 
 
@@ -365,6 +368,7 @@ class _GatewayActor:
         *,
         session: GatewaySessionState,
         active: TrajectoryBuffer,
+        extra_fields: dict[str, Any] | None = None,
     ) -> Trajectory:
         return Trajectory(
             prompt_ids=list(active.prompt_ids),
@@ -374,6 +378,7 @@ class _GatewayActor:
             reward_info={},
             num_turns=_count_chat_turns(session.message_history),
             multi_modal_data=_build_multi_modal_trajectory_data(session.image_data, session.video_data),
+            extra_fields=dict(extra_fields) if extra_fields else {},
         )
 
     async def _default_vision_info_extractor(
@@ -600,6 +605,43 @@ class _GatewayActor:
                             image_data=new_image_data,
                             video_data=new_video_data,
                         )
+                        if (
+                            self._response_length is not None
+                            and len(active_trajectory.response_mask) + len(incremental_ids) >= self._response_length
+                        ):
+                            assistant_msg = {"role": "assistant", "content": ""}
+                            session.trajectories.append(
+                                self._build_materialized_trajectory(
+                                    session=session,
+                                    active=active_trajectory,
+                                    extra_fields={"finish_reason": "length"},
+                                )
+                            )
+                            session.active_trajectory = None
+                            session.message_history = messages + [assistant_msg]
+                            session.image_data = list(image_data) if image_data is not None else None
+                            session.video_data = list(video_data) if video_data is not None else None
+                            session.request_tools = tools
+                            self._touch_session(session)
+                            generation_context_ids = active_trajectory.prompt_ids + active_trajectory.response_ids
+                            return JSONResponse(
+                                {
+                                    "id": f"chatcmpl-{uuid4().hex}",
+                                    "object": "chat.completion",
+                                    "choices": [
+                                        {
+                                            "index": 0,
+                                            "message": assistant_msg,
+                                            "finish_reason": "length",
+                                        }
+                                    ],
+                                    "usage": {
+                                        "prompt_tokens": len(generation_context_ids),
+                                        "completion_tokens": 0,
+                                        "total_tokens": len(generation_context_ids),
+                                    },
+                                }
+                            )
                         active_trajectory.response_ids.extend(incremental_ids)
                         active_trajectory.response_mask.extend([0] * len(incremental_ids))
                         if active_trajectory.response_logprobs:
@@ -617,10 +659,16 @@ class _GatewayActor:
                     )
 
                 generation_context_ids = active_trajectory.prompt_ids + active_trajectory.response_ids
+                remaining_response_budget = (
+                    self._response_length - len(active_trajectory.response_mask)
+                    if self._response_length is not None
+                    else None
+                )
                 sampling_params = _build_sampling_params(
                     payload,
                     base_sampling_params=self._base_sampling_params,
                     allowed_request_sampling_param_keys=self._allowed_request_sampling_param_keys,
+                    remaining_response_budget=remaining_response_budget,
                 )
 
             output = await self._backend.generate(

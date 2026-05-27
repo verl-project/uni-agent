@@ -177,7 +177,19 @@ class SingleUseVisionInfoExtractor:
 
 
 class InspectingBackend:
+    def __init__(self):
+        self.calls = []
+
     async def generate(self, request_id, *, prompt_ids, sampling_params, image_data=None, video_data=None):
+        self.calls.append(
+            {
+                "request_id": request_id,
+                "prompt_ids": list(prompt_ids),
+                "sampling_params": dict(sampling_params),
+                "image_data": image_data,
+                "video_data": video_data,
+            }
+        )
         payload = json.dumps(
             {
                 "request_id": request_id,

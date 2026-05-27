@@ -580,4 +580,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
             "response_len": response_len,
             "seq_len": prompt_len + response_len,
         }
+        finish_reason = trajectory.extra_fields.get("finish_reason")
+        if finish_reason is not None:
+            tag["finish_reason"] = finish_reason
         return field, tag
