@@ -14,7 +14,7 @@ data:
   return_multi_modal_inputs: False
   filter_overlong_prompts: False
   custom_cls:
-    path: pkg://uni_agent.recipes.deepeyes_gateway.dataset
+    path: pkg://examples.agent_train.deepeyes_gateway.dataset
     name: DeepEyesGatewayDataset
 
 algorithm:
@@ -61,7 +61,7 @@ actor_rollout_ref:
       agent_loop_manager_class: uni_agent.trainer.framework.entry.AgentFrameworkRolloutAdapter
     custom:
       agent_framework:
-        agent_runner_fqn: uni_agent.recipes.deepeyes_gateway.agent_runner.deepeyes_agent_runner
+        agent_runner_fqn: examples.agent_train.deepeyes_gateway.agent_runner.deepeyes_agent_runner
         gateway_count: 8
         agent_runner_kwargs:
           max_turns: 5
@@ -83,5 +83,5 @@ trainer:
 
 reward:
   custom_reward_function:
-    path: pkg://uni_agent.recipes.deepeyes_gateway.reward
+    path: pkg://examples.agent_train.deepeyes_gateway.reward
     name: compute_score

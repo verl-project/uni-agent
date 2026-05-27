@@ -5,12 +5,12 @@ gateway framework path on `verl.trainer.main_ppo_sync`.
 
 ## Layout
 
-- `uni_agent.recipes.deepeyes_gateway.agent_runner`: gateway-backed DeepEyes
+- `examples.agent_train.deepeyes_gateway.agent_runner`: gateway-backed DeepEyes
   tool loop.
-- `uni_agent.recipes.deepeyes_gateway.dataset`: dataset adapter that emits
+- `examples.agent_train.deepeyes_gateway.dataset`: dataset adapter that emits
   `raw_prompt`, `tools_kwargs`, and reward fields without local prompt
   tokenization.
-- `uni_agent.recipes.deepeyes_gateway.reward`: self-contained `compute_score`
+- `examples.agent_train.deepeyes_gateway.reward`: self-contained `compute_score`
   wrapper for the DeepEyes LLM-as-a-judge reward.
 - `configs/deepeyes_gateway_grpo.yaml`: recipe config using
   `uni_agent.trainer.framework.entry.AgentFrameworkRolloutAdapter`.
@@ -61,12 +61,13 @@ bash examples/agent_train/deepeyes_gateway/run_deepeyes_gateway_grpo.sh
 ```
 
 The script resolves the config directory relative to its own location, then
-launches from the repository root so `uni_agent.*` recipe imports are stable.
+launches from the repository root so `examples.*` recipe imports are stable.
 
 ## Notes
 
 - No parquet data files are included in this example.
 - The image tool implementation is still loaded from `verl.tools` by the tool
-  config; the gateway framework adapter and recipe imports use `uni_agent.*`.
+  config; the gateway framework adapter uses `uni_agent.*`, while the recipe
+  imports live with this example under `examples.*`.
 - Reward scoring returns `0.0` if the judge service or reward dependencies are
   unavailable.
