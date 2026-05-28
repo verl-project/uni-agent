@@ -10,29 +10,6 @@ The training launchers live under `examples/agent_train`.
 
 ---
 
-## Two Training Paths
-
-Uni-Agent currently has two agent RL rollout paths.
-
-The default path uses `uni_agent.agent_loop.UniAgentLoop`. This is the path used
-by the existing training launchers and agent config YAMLs. It is best when you
-want Uni-Agent to own the model, tools, environment, reward, and interaction
-loop through `AgentInteraction`.
-
-The gateway framework path uses
-`uni_agent.trainer.framework.entry.AgentFrameworkRolloutAdapter`. It is best
-when you already have an OpenAI-compatible agent runner or need per-session
-gateway isolation. In that path, the trainer creates gateway sessions, the
-agent runner talks to `session.base_url`, and
-`OpenAICompatibleAgentFramework.generate_sequences(...)` writes rollout data
-back to the `verl` sync trainer.
-
-These paths coexist. A single training run normally chooses one rollout manager:
-either the `UniAgentLoop` path through `agent_loop_config_path`, or the gateway
-framework path through `actor_rollout_ref.rollout.agent.agent_loop_manager_class`.
-
----
-
 ## Training Overview
 
 The two launcher scripts are:
@@ -217,34 +194,3 @@ It helps to separate three config layers:
 | Per-sample task data | Dataset row under `extra_info.tools_kwargs` | container image, repo reset command, reward metadata |
 
 If you want to change **how many GPUs or workers** the run uses, edit the shell script. If you want to change **how the agent behaves inside each environment**, edit the YAML. If you want task-specific sandbox or reward details, edit the dataset generation pipeline.
-
----
-
-## Gateway Framework Training
-
-Gateway framework training is configured through the `verl` trainer config rather
-than an `AGENT_CONFIG_PATH` YAML. The important config entries are:
-
-```yaml
-actor_rollout_ref:
-  rollout:
-    agent:
-      agent_loop_manager_class: uni_agent.trainer.framework.entry.AgentFrameworkRolloutAdapter
-    custom:
-      agent_framework:
-        agent_runner_fqn: your_package.your_recipe.agent_runner.your_agent_runner
-        gateway_count: 8
-        tool_config_path: path/to/tool_config.yaml
-
-reward:
-  custom_reward_function:
-    path: pkg://your_package.your_recipe.reward
-    name: compute_score
-```
-
-The importable recipe code and runnable DeepEyes example live together under
-`examples/agent_train/deepeyes_gateway/`:
-
-```bash
-bash examples/agent_train/deepeyes_gateway/run_deepeyes_gateway_grpo.sh
-```
