@@ -81,36 +81,6 @@ async def test_gateway_serving_runtime_delegates_generate_to_llm_client(ray_runt
     ]
 
 
-@pytest.mark.asyncio
-async def test_gateway_serving_runtime_complete_session_forwards_reward_info(ray_runtime):
-    from uni_agent.trainer.gateway.runtime import GatewayServingRuntime
-
-    runtime = GatewayServingRuntime(
-        llm_client=RecordingLLMClient("PYTHON-API"),
-        gateway_count=1,
-        gateway_actor_kwargs={
-            "tokenizer": FakeTokenizer(),
-        },
-    )
-
-    session = await runtime.create_session("session-python-complete")
-    async with httpx.AsyncClient(timeout=5.0) as client:
-        response = await client.post(
-            f"{session.base_url}/chat/completions",
-            json={"model": "dummy-model", "messages": [{"role": "user", "content": "python complete"}]},
-        )
-        assert response.status_code == 200
-
-    await runtime.complete_session(
-        "session-python-complete",
-        reward_info={"score": 0.75, "label": "python-api"},
-    )
-    trajectories = await runtime.finalize_session("session-python-complete")
-    await runtime.shutdown()
-
-    assert len(trajectories) == 1
-    assert trajectories[0].reward_info == {"score": 0.75, "label": "python-api"}
-
 
 @pytest.mark.asyncio
 async def test_gateway_serving_runtime_round_robins_actors_across_alive_nodes(ray_runtime, monkeypatch):

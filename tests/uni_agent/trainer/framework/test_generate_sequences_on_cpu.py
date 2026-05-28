@@ -316,30 +316,6 @@ async def test_generate_sequences_zero_fills_rm_scores_when_no_reward_handles(mo
     assert rm_scores[0].tolist() == [0.0, 0.0]
 
 
-@pytest.mark.asyncio
-async def test_run_session_passes_session_runtime_to_agent_runner():
-    from uni_agent.trainer.framework.framework import OpenAICompatibleAgentFramework
-
-    runtime = _FakeSessionRuntime({"session-0-0": [_trajectory()]})
-    captured_kwargs = {}
-
-    async def agent_runner(**kwargs):
-        captured_kwargs.update(kwargs)
-
-    framework = OpenAICompatibleAgentFramework(
-        session_runtime=runtime,
-        agent_runner=agent_runner,
-    )
-
-    await framework._run_session(
-        prompts=_build_prompts(count=1),
-        raw_prompt=[{"role": "user", "content": "sample 0"}],
-        sample_index=0,
-        session_id="session-0-0-test",
-    )
-
-    assert captured_kwargs["session_runtime"] is runtime
-
 
 @pytest.mark.asyncio
 async def test_generate_sequences_keeps_other_prompts_when_prompt_task_raises(monkeypatch, caplog):

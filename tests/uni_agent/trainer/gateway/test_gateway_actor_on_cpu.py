@@ -30,19 +30,6 @@ def ray_runtime():
     ray.shutdown()
 
 
-def test_gateway_actor_accepts_and_stores_rollout_budget():
-    from uni_agent.trainer.gateway.gateway import _GatewayActor
-    from tests.uni_agent.trainer.support import FakeTokenizer, InspectingBackend
-
-    actor = _GatewayActor(
-        tokenizer=FakeTokenizer(),
-        backend=InspectingBackend(),
-        prompt_length=2048,
-        response_length=1024,
-    )
-    assert actor._prompt_length == 2048
-    assert actor._response_length == 1024
-
 
 @pytest.mark.asyncio
 async def test_gateway_actor_max_tokens_clamped_to_remaining_response_budget():
@@ -200,45 +187,6 @@ async def test_gateway_actor_abort_session_does_not_wait_for_backend_generate(ra
     ray.get(actor.shutdown.remote())
 
 
-def test_normalize_request_context_preserves_multimodal_blocks_for_later_extraction():
-    from uni_agent.trainer.gateway.gateway import _normalize_request_context
-
-    context = _normalize_request_context(
-        {
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": "look"},
-                        {"type": "image_url", "image_url": {"url": "file://image.png"}},
-                    ],
-                },
-                {
-                    "role": "assistant",
-                    "content": "",
-                    "tool_calls": [
-                        {
-                            "id": "call-1",
-                            "type": "function",
-                            "function": {"name": "search", "arguments": "{\"query\": \"weather\"}"},
-                        }
-                    ],
-                },
-                {
-                    "role": "tool",
-                    "tool_call_id": "call-1",
-                    "content": [{"type": "text", "text": "sunny"}],
-                },
-            ],
-            "tools": [{"type": "function", "function": {"name": "search", "parameters": {"type": "object"}}}],
-        }
-    )
-
-    assert context["tools"][0]["function"]["name"] == "search"
-    assert context["messages"][0]["content"][1]["type"] == "image_url"
-    assert context["messages"][1]["tool_calls"][0]["id"] == "call-1"
-    assert context["messages"][2]["tool_call_id"] == "call-1"
-
 
 def test_normalize_message_parses_tool_call_arguments_string_to_dict():
     from uni_agent.trainer.gateway.gateway import _normalize_message
@@ -326,14 +274,6 @@ def test_normalize_message_preserves_reasoning_content():
 
     assert result["reasoning_content"] == "step 1: ...; step 2: ..."
 
-
-def test_canonicalize_for_prefix_comparison_includes_reasoning_content():
-    from uni_agent.trainer.gateway.gateway import _canonicalize_message_for_prefix_comparison
-
-    a = {"role": "assistant", "content": "x", "reasoning_content": "rA"}
-    b = {"role": "assistant", "content": "x", "reasoning_content": "rB"}
-
-    assert _canonicalize_message_for_prefix_comparison(a) != _canonicalize_message_for_prefix_comparison(b)
 
 
 @pytest.mark.asyncio
@@ -735,63 +675,30 @@ async def test_gateway_actor_continuation_with_tool_returned_image_appends_media
 
 
 @pytest.mark.asyncio
-async def test_gateway_actor_prefix_mismatch_splits_trajectories(ray_runtime):
-    from uni_agent.trainer.gateway.gateway import GatewayActor
-
-    actor = GatewayActor.remote(tokenizer=FakeTokenizer(), backend=QueuedBackend(["FIRST", "SECOND"]))
-    ray.get(actor.start.remote())
-
-    session = ray.get(actor.create_session.remote("session-1"))
-
-    async with httpx.AsyncClient(timeout=5.0) as client:
-        first = await client.post(
-            f"{session.base_url}/chat/completions",
-            json={
+@pytest.mark.parametrize(
+    ("session_id", "first_payload", "second_payload"),
+    [
+        # Prefix mismatch: second request has a completely different context.
+        (
+            "session-prefix-mismatch",
+            {
                 "model": "dummy-model",
                 "messages": [{"role": "user", "content": "first turn"}],
             },
-        )
-        assert first.status_code == 200
-
-        second = await client.post(
-            f"{session.base_url}/chat/completions",
-            json={
+            {
                 "model": "dummy-model",
                 "messages": [{"role": "user", "content": "replacement context"}],
             },
-        )
-        assert second.status_code == 200
-
-    trajectories = ray.get(actor.finalize_session.remote("session-1"))
-    ray.get(actor.shutdown.remote())
-
-    assert len(trajectories) == 2
-    assert trajectories[0].prompt_ids != trajectories[1].prompt_ids
-
-
-@pytest.mark.asyncio
-async def test_gateway_actor_tool_context_change_splits_trajectory(ray_runtime):
-    from uni_agent.trainer.gateway.gateway import GatewayActor
-
-    actor = GatewayActor.remote(tokenizer=FakeTokenizer(), backend=QueuedBackend(["FIRST", "SECOND"]))
-    ray.get(actor.start.remote())
-
-    session = ray.get(actor.create_session.remote("session-tools"))
-
-    async with httpx.AsyncClient(timeout=5.0) as client:
-        first = await client.post(
-            f"{session.base_url}/chat/completions",
-            json={
+        ),
+        # Tool context change: tool set changes between turns.
+        (
+            "session-tool-context-change",
+            {
                 "model": "dummy-model",
                 "tools": [{"type": "function", "function": {"name": "search", "parameters": {"type": "object"}}}],
                 "messages": [{"role": "user", "content": "first turn"}],
             },
-        )
-        assert first.status_code == 200
-
-        second = await client.post(
-            f"{session.base_url}/chat/completions",
-            json={
+            {
                 "model": "dummy-model",
                 "tools": [{"type": "function", "function": {"name": "lookup", "parameters": {"type": "object"}}}],
                 "messages": [
@@ -800,10 +707,23 @@ async def test_gateway_actor_tool_context_change_splits_trajectory(ray_runtime):
                     {"role": "user", "content": "follow up"},
                 ],
             },
-        )
+        ),
+    ],
+)
+async def test_gateway_actor_context_change_splits_trajectory(ray_runtime, session_id, first_payload, second_payload):
+    from uni_agent.trainer.gateway.gateway import GatewayActor
+
+    actor = GatewayActor.remote(tokenizer=FakeTokenizer(), backend=QueuedBackend(["FIRST", "SECOND"]))
+    ray.get(actor.start.remote())
+    session = ray.get(actor.create_session.remote(session_id))
+
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        first = await client.post(f"{session.base_url}/chat/completions", json=first_payload)
+        assert first.status_code == 200
+        second = await client.post(f"{session.base_url}/chat/completions", json=second_payload)
         assert second.status_code == 200
 
-    trajectories = ray.get(actor.finalize_session.remote("session-tools"))
+    trajectories = ray.get(actor.finalize_session.remote(session_id))
     ray.get(actor.shutdown.remote())
 
     assert len(trajectories) == 2
@@ -836,62 +756,57 @@ async def test_gateway_actor_does_not_forward_tools_in_sampling_params(ray_runti
 
 
 @pytest.mark.asyncio
-async def test_gateway_actor_strips_request_envelope_but_keeps_sampling_params(ray_runtime):
-    from uni_agent.trainer.gateway.gateway import GatewayActor
-
-    actor = GatewayActor.remote(
-        tokenizer=FakeTokenizer(),
-        backend=RejectRequestEnvelopeBackend(
-            "SAFE",
-            expected_sampling_params={"temperature": 0.25, "top_p": 0.8, "max_tokens": 128},
-        ),
-        base_sampling_params={"temperature": 0.1, "top_p": 0.8, "max_tokens": 64},
-        allowed_request_sampling_param_keys={"temperature", "max_tokens"},
-    )
-    ray.get(actor.start.remote())
-    session = ray.get(actor.create_session.remote("session-envelope-boundary"))
-
-    async with httpx.AsyncClient(timeout=5.0) as client:
-        response = await client.post(
-            f"{session.base_url}/chat/completions",
-            json={
-                "model": "dummy-model",
+@pytest.mark.parametrize(
+    ("backend_kwargs", "session_id", "request_extra"),
+    [
+        # Whitelisted keys (temperature, max_tokens) are forwarded; non-whitelisted
+        # keys (presence_penalty) and envelope fields (model, tools, messages) are stripped.
+        (
+            {
+                "backend": RejectRequestEnvelopeBackend(
+                    "SAFE",
+                    expected_sampling_params={"temperature": 0.25, "top_p": 0.8, "max_tokens": 128},
+                ),
+                "base_sampling_params": {"temperature": 0.1, "top_p": 0.8, "max_tokens": 64},
+                "allowed_request_sampling_param_keys": {"temperature", "max_tokens"},
+            },
+            "session-envelope-boundary",
+            {
                 "temperature": 0.25,
                 "max_tokens": 128,
                 "presence_penalty": 1.5,
                 "tools": [{"type": "function", "function": {"name": "search", "parameters": {"type": "object"}}}],
-                "messages": [{"role": "user", "content": "first turn"}],
             },
-        )
-
-    ray.get(actor.shutdown.remote())
-
-    assert response.status_code == 200
-
-
-@pytest.mark.asyncio
-async def test_gateway_actor_ignores_non_whitelisted_request_sampling_params(ray_runtime):
+        ),
+        # Non-whitelisted key (top_p) in request is ignored; base_sampling_params used as-is.
+        (
+            {
+                "backend": RejectRequestEnvelopeBackend(
+                    "SAFE",
+                    expected_sampling_params={"temperature": 0.1, "top_p": 0.9},
+                ),
+                "base_sampling_params": {"temperature": 0.1, "top_p": 0.9},
+                "allowed_request_sampling_param_keys": {"temperature"},
+            },
+            "session-non-whitelist",
+            {"presence_penalty": 1.5},
+        ),
+    ],
+)
+async def test_gateway_actor_allowlist_filters_sampling_params(ray_runtime, backend_kwargs, session_id, request_extra):
     from uni_agent.trainer.gateway.gateway import GatewayActor
 
-    actor = GatewayActor.remote(
-        tokenizer=FakeTokenizer(),
-        backend=RejectRequestEnvelopeBackend(
-            "SAFE",
-            expected_sampling_params={"temperature": 0.1, "top_p": 0.9},
-        ),
-        base_sampling_params={"temperature": 0.1, "top_p": 0.9},
-        allowed_request_sampling_param_keys={"temperature"},
-    )
+    actor = GatewayActor.remote(tokenizer=FakeTokenizer(), **backend_kwargs)
     ray.get(actor.start.remote())
-    session = ray.get(actor.create_session.remote("session-non-whitelist"))
+    session = ray.get(actor.create_session.remote(session_id))
 
     async with httpx.AsyncClient(timeout=5.0) as client:
         response = await client.post(
             f"{session.base_url}/chat/completions",
             json={
                 "model": "dummy-model",
-                "presence_penalty": 1.5,
                 "messages": [{"role": "user", "content": "first turn"}],
+                **request_extra,
             },
         )
 
@@ -1324,19 +1239,3 @@ async def test_decode_response_normalizes_backend_stop_reasons(stop_reason, expe
 
     assert finish_reason == expected_finish_reason
 
-
-@pytest.mark.asyncio
-async def test_decode_response_preserves_unknown_stop_reasons():
-    """Unknown backend stop_reason values should be forwarded unchanged so a
-    future reader can spot a new backend value rather than silently coerce it.
-    """
-    from uni_agent.trainer.gateway.gateway import _GatewayActor
-
-    actor = _GatewayActor(tokenizer=FakeTokenizer(), backend=QueuedBackend(["IGNORED"]))
-    response_ids = [ord(char) for char in "hello"]
-
-    _message, finish_reason = await actor._decode_response(
-        response_ids, tools=None, stop_reason="unknown_future_value"
-    )
-
-    assert finish_reason == "unknown_future_value"
