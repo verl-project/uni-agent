@@ -4,6 +4,7 @@ import asyncio
 import json
 import time
 from dataclasses import replace
+from logging import getLogger
 from typing import Any
 from uuid import uuid4
 
@@ -592,6 +593,29 @@ class _GatewayActor:
         if session is None:
             raise HTTPException(status_code=404, detail=f"Unknown session_id: {session_id}")
 
+        if payload.get("stream") is True:
+            getLogger("gateway").warning(
+                "session=%s stream=true requested; gateway returns non-streaming response",
+                session_id,
+            )
+        n_value = payload.get("n", 1)
+        if n_value != 1:
+            raise HTTPException(status_code=400, detail=f"n={n_value} is not supported (only n=1)")
+        if payload.get("response_format") is not None:
+            raise HTTPException(status_code=400, detail="response_format is not supported")
+        tool_choice_payload = payload.get("tool_choice")
+        if isinstance(tool_choice_payload, dict):
+            raise HTTPException(
+                status_code=400,
+                detail='tool_choice with a specific function is not supported (only "auto" / "none" are supported)',
+            )
+        if isinstance(tool_choice_payload, str) and tool_choice_payload.lower() == "required":
+            raise HTTPException(
+                status_code=400,
+                detail='tool_choice="required" is not supported (only "auto" / "none" are supported)',
+            )
+        tool_choice = tool_choice_payload.lower() if isinstance(tool_choice_payload, str) else "auto"
+
         try:
             request_context = _normalize_request_context(payload)
         except MalformedRequestError as exc:
@@ -608,6 +632,8 @@ class _GatewayActor:
                 self._touch_session(session)
                 messages = request_context["messages"]
                 tools = request_context["tools"]
+                if tool_choice == "none":
+                    tools = None
                 request_chat_template_kwargs = request_context["chat_template_kwargs"]
                 materialized_trajectory = None
                 image_data = None

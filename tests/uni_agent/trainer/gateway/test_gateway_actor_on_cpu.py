@@ -31,7 +31,6 @@ def ray_runtime():
 
 
 def test_gateway_actor_accepts_and_stores_rollout_budget():
-    """Wave2 commit 1: actor constructor accepts prompt_length / response_length."""
     from uni_agent.trainer.gateway.gateway import _GatewayActor
     from tests.uni_agent.trainer.support import FakeTokenizer, InspectingBackend
 
@@ -281,7 +280,6 @@ def test_normalize_message_keeps_invalid_tool_call_arguments_string():
 
 @pytest.mark.asyncio
 async def test_request_chat_template_kwargs_forwarded(monkeypatch):
-    """Wave2 commit 4: payload chat_template_kwargs override actor-init kwargs."""
     from uni_agent.trainer.gateway.gateway import _GatewayActor
     import uni_agent.trainer.gateway.gateway as gw_mod
 
@@ -316,7 +314,6 @@ async def test_request_chat_template_kwargs_forwarded(monkeypatch):
 
 
 def test_normalize_message_preserves_reasoning_content():
-    """Wave2 commit 4: _normalize_message preserves reasoning_content field."""
     from uni_agent.trainer.gateway.gateway import _normalize_message
 
     result = _normalize_message(
@@ -331,13 +328,101 @@ def test_normalize_message_preserves_reasoning_content():
 
 
 def test_canonicalize_for_prefix_comparison_includes_reasoning_content():
-    """Wave2 commit 4: prefix comparison includes reasoning_content."""
     from uni_agent.trainer.gateway.gateway import _canonicalize_message_for_prefix_comparison
 
     a = {"role": "assistant", "content": "x", "reasoning_content": "rA"}
     b = {"role": "assistant", "content": "x", "reasoning_content": "rB"}
 
     assert _canonicalize_message_for_prefix_comparison(a) != _canonicalize_message_for_prefix_comparison(b)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("payload_extra", "expected_message_substr"),
+    [
+        ({"n": 2}, "n=2 is not supported"),
+        ({"response_format": {"type": "json_object"}}, "response_format is not supported"),
+        ({"tool_choice": "required"}, 'tool_choice="required"'),
+        (
+            {"tool_choice": {"type": "function", "function": {"name": "foo"}}},
+            "tool_choice",
+        ),
+    ],
+)
+async def test_unsupported_capabilities_rejected_with_400(payload_extra, expected_message_substr):
+    from uni_agent.trainer.gateway.gateway import _GatewayActor
+    from fastapi import HTTPException
+
+    actor = _GatewayActor(tokenizer=FakeTokenizer(), backend=InspectingBackend())
+    await actor.start()
+    try:
+        await actor.create_session("s1")
+        with pytest.raises(HTTPException) as exc_info:
+            await actor._handle_chat_completions(
+                "s1", {"messages": [{"role": "user", "content": "hi"}], **payload_extra}
+            )
+
+        assert exc_info.value.status_code == 400
+        assert expected_message_substr in str(exc_info.value.detail)
+    finally:
+        await actor.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_stream_true_softly_falls_back_to_non_streaming(caplog):
+    from uni_agent.trainer.gateway.gateway import _GatewayActor
+
+    actor = _GatewayActor(tokenizer=FakeTokenizer(), backend=InspectingBackend())
+    await actor.start()
+    try:
+        await actor.create_session("s1")
+        with caplog.at_level("WARNING", logger="gateway"):
+            response = await actor._handle_chat_completions(
+                "s1", {"messages": [{"role": "user", "content": "hi"}], "stream": True}
+            )
+
+        assert response.status_code == 200
+        assert any("stream=true" in record.getMessage() for record in caplog.records)
+    finally:
+        await actor.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_tool_choice_none_skips_tool_injection_and_parser(monkeypatch):
+    from uni_agent.trainer.gateway.gateway import _GatewayActor
+    import uni_agent.trainer.gateway.gateway as gw_mod
+
+    actor = _GatewayActor(
+        tokenizer=FakeTokenizer(),
+        backend=QueuedBackend(['<tool_call>\n{"name": "foo", "arguments": {}}\n</tool_call>']),
+        tool_parser_name="hermes",
+    )
+    captured_tools = {}
+    original_apply_chat_template = gw_mod._apply_chat_template
+
+    def _spy(tokenizer, messages, **kwargs):
+        captured_tools["tools"] = kwargs.get("tools")
+        return original_apply_chat_template(tokenizer, messages, **kwargs)
+
+    monkeypatch.setattr(gw_mod, "_apply_chat_template", _spy)
+    await actor.start()
+    try:
+        await actor.create_session("s1")
+        response = await actor._handle_chat_completions(
+            "s1",
+            {
+                "messages": [{"role": "user", "content": "hi"}],
+                "tools": [{"type": "function", "function": {"name": "foo", "parameters": {}}}],
+                "tool_choice": "none",
+            },
+        )
+
+        assert response.status_code == 200
+        assert captured_tools["tools"] is None
+        body = json.loads(response.body)
+        assert "tool_calls" not in body["choices"][0]["message"]
+    finally:
+        await actor.shutdown()
 
 
 @pytest.mark.asyncio
