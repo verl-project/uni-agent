@@ -23,6 +23,39 @@ from uni_agent.deployment.remote_runtime import RemoteRuntime, RemoteRuntimeConf
 __all__ = ["ModalDeployment"]
 
 
+# Modal cold-start fleet limiter.
+#
+# Mode A (run.log: "Runtime did not start within 299s") is the dominant Modal
+# failure mode at agent_concurrency >= 128: too many sandboxes hit the Modal
+# region's runtime-start pipeline simultaneously and timeout. The fix is NOT
+# to throttle the sandbox CREATE rate (Will gave us 30/s + 2k burst, vastly
+# above our actual ~1-2/s) but to cap how many sandboxes are simultaneously
+# in the "created but runtime not yet alive" state.
+#
+# _MAX_STARTING_GLOBAL is the user-facing fleet-wide intent. Because
+# asyncio.Semaphore is process-local, we divide by num_workers to derive each
+# worker's share -- same pattern as agent_loop.py's per-worker _semaphore.
+#
+# _INIT_WALL_BUDGET caps a single trajectory's total init wall-clock so a
+# stuck trajectory cannot hog a STARTING permit for 30+ minutes (the old
+# 5 retries x 300s startup_timeout scenario).
+_NUM_WORKERS = int(os.getenv("UNIAGENT_NUM_WORKERS", "8"))
+_MAX_STARTING_GLOBAL = int(os.getenv("MODAL_MAX_STARTING", "128"))
+_INIT_WALL_BUDGET = float(os.getenv("MODAL_INIT_WALL_BUDGET", "900"))
+_STARTING_SEMA: asyncio.Semaphore | None = None
+
+
+def _get_starting_semaphore() -> asyncio.Semaphore:
+    """Lazy-init STARTING semaphore. Lazy because asyncio.Semaphore must be
+    constructed inside the running event loop on some Python versions, and we
+    want the env vars resolved at first use rather than import time."""
+    global _STARTING_SEMA
+    if _STARTING_SEMA is None:
+        per_worker = max(1, _MAX_STARTING_GLOBAL // _NUM_WORKERS)
+        _STARTING_SEMA = asyncio.Semaphore(per_worker)
+    return _STARTING_SEMA
+
+
 def _get_modal_user() -> str:
     # not sure how to get the user from the modal api
     return modal.config._profile  # type: ignore
@@ -199,76 +232,125 @@ class ModalDeployment(AbstractDeployment):
         if self._app is None:
             self._app = await modal.App.lookup.aio("swe-rex", create_if_missing=True)
 
-        self.logger.info(f"Starting modal sandbox with image {self._image_name}")
-        self._hooks.on_custom_step("Starting modal sandbox")
-        t0 = time.time()
-        token = self._get_token()
-        self._sandbox = await modal.Sandbox.create.aio(
-            "/usr/bin/env",
-            "bash",
-            "-c",
-            self._start_swerex_cmd(token),
-            image=self._image,
-            timeout=int(self._deployment_timeout),
-            encrypted_ports=[self._port],
-            app=self._app,
-            **self._modal_kwargs,
-        )
-        tunnels = await self._sandbox.tunnels.aio()
-        tunnel = tunnels[self._port]
-        elapsed_sandbox_creation = time.time() - t0
-        self.logger.info(f"Sandbox ({self._sandbox.object_id}) created in {elapsed_sandbox_creation:.2f}s")
-        self.logger.info(f"Check sandbox logs at {await self.get_modal_log_url()}")
-        self.logger.info(f"Sandbox created with id {self._sandbox.object_id}")
-        await asyncio.sleep(1)
-        self.logger.info(f"Starting runtime at {tunnel.url}")
-        self._hooks.on_custom_step("Starting runtime")
-        runtime_config = RemoteRuntimeConfig(
-            host=tunnel.url,
-            timeout=self._runtime_timeout,
-            auth_token=token,
-            proxy=self._proxy,
-        )
-        self._runtime = RemoteRuntime.from_config(runtime_config, run_id=self.run_id)
-        remaining_startup_timeout = max(0, self._startup_timeout - elapsed_sandbox_creation)
-        t1 = time.time()
-        await self._wait_until_alive(timeout=remaining_startup_timeout)
-        await self.runtime.create_session(CreateBashSessionRequest(startup_timeout=60))
-        self.logger.info(f"Runtime started in {time.time() - t1:.2f}s")
+        # Hold the STARTING permit from sandbox.create through runtime alive.
+        # Release as soon as runtime.create_session returns: tool-call execution
+        # afterwards is LLM-bound and does not stress Modal's cold-start
+        # pipeline, so it must not occupy a permit.
+        async with _get_starting_semaphore():
+            self.logger.info(f"Starting modal sandbox with image {self._image_name}")
+            self._hooks.on_custom_step("Starting modal sandbox")
+            t0 = time.time()
+            token = self._get_token()
+            self._sandbox = await modal.Sandbox.create.aio(
+                "/usr/bin/env",
+                "bash",
+                "-c",
+                self._start_swerex_cmd(token),
+                image=self._image,
+                timeout=int(self._deployment_timeout),
+                encrypted_ports=[self._port],
+                app=self._app,
+                **self._modal_kwargs,
+            )
+            tunnels = await self._sandbox.tunnels.aio()
+            tunnel = tunnels[self._port]
+            elapsed_sandbox_creation = time.time() - t0
+            self.logger.info(f"Sandbox ({self._sandbox.object_id}) created in {elapsed_sandbox_creation:.2f}s")
+            self.logger.info(f"Check sandbox logs at {await self.get_modal_log_url()}")
+            self.logger.info(f"Sandbox created with id {self._sandbox.object_id}")
+            await asyncio.sleep(1)
+            self.logger.info(f"Starting runtime at {tunnel.url}")
+            self._hooks.on_custom_step("Starting runtime")
+            runtime_config = RemoteRuntimeConfig(
+                host=tunnel.url,
+                timeout=self._runtime_timeout,
+                auth_token=token,
+                proxy=self._proxy,
+            )
+            self._runtime = RemoteRuntime.from_config(runtime_config, run_id=self.run_id)
+            remaining_startup_timeout = max(0, self._startup_timeout - elapsed_sandbox_creation)
+            t1 = time.time()
+            await self._wait_until_alive(timeout=remaining_startup_timeout)
+            await self.runtime.create_session(CreateBashSessionRequest(startup_timeout=60))
+            self.logger.info(f"Runtime started in {time.time() - t1:.2f}s")
 
-    async def start(self, max_retries: int = 5):
-        """Starts the runtime with retry."""
+    async def start(self, max_retries: int = 2):
+        """Starts the runtime with retry, bounded by a wall-clock budget.
+
+        Two changes vs the original 5-retry loop:
+          * max_retries 5 -> 2: with startup_timeout=300s each, 5 retries
+            could hold a STARTING permit for ~25 minutes -- starving the
+            limiter for everyone else. 2 attempts caps that at ~10 min.
+          * MODAL_INIT_WALL_BUDGET hard cap (default 900s = 15 min): if the
+            sum of attempts exceeds this, give up early. The trajectory
+            becomes a reward=0 masked sample (handled in agent_loop.py's
+            outer except) which is far cheaper than blocking a permit.
+        """
         last_error: Exception | None = None
+        deadline = time.monotonic() + _INIT_WALL_BUDGET
         for retry in range(max_retries):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                self.logger.critical(f"Wall-clock budget {_INIT_WALL_BUDGET}s exhausted before attempt {retry + 1}")
+                break
             try:
-                await self._start()
+                await asyncio.wait_for(self._start(), timeout=max(60.0, remaining))
                 return
             except Exception as exc:
                 last_error = exc
                 self.logger.critical(f"Failed to create modal sandbox: {exc}")
-                # Best-effort cleanup; never let stop() failures shadow the real start
-                # error or short-circuit the retry loop.
-                try:
-                    await self.stop()
-                except Exception as stop_exc:
-                    self.logger.error(f"Cleanup after failed sandbox start raised: {stop_exc}")
-                if retry < max_retries - 1:
-                    sleep_time = min(30, 2**retry)
+                await self.stop()
+                if retry < max_retries - 1 and time.monotonic() < deadline:
+                    sleep_time = min(10, 2**retry)
                     self.logger.info(f"Retrying modal deployment startup in {sleep_time} seconds...")
                     await asyncio.sleep(sleep_time)
 
-        raise RuntimeError(f"Failed to create modal sandbox after {max_retries} retries") from last_error
+        raise RuntimeError(
+            f"Failed to create modal sandbox after {max_retries} retries (wall budget {_INIT_WALL_BUDGET}s)"
+        ) from last_error
 
     async def stop(self):
-        """Stops the runtime."""
+        """Stops the runtime.
+
+        Best-effort: each cleanup step is wrapped so a transient failure in one
+        does NOT skip subsequent steps. Specifically, we must always reach the
+        Modal sandbox terminate call, otherwise the sandbox lingers on Modal's
+        side and counts against the account's concurrent-sandbox cap.
+
+        Observed leak (round12, 2026-05-18): `self._runtime.close()` raises
+        `aiohttp.ServerDisconnectedError` when the agent server side has
+        already torn down the socket. Without the try/except, the function
+        returned early and `self._sandbox.terminate.aio()` never ran. After
+        thousands of trajectories across multiple runs, ~847 sandboxes were
+        leaked, hitting Modal's account cap and 100% failing new sandbox
+        creates in subsequent runs.
+        """
         if self._runtime is not None:
-            await self._runtime.close()
+            try:
+                await self._runtime.close()
+            except Exception as exc:
+                self.logger.warning(f"runtime.close() swallowed (continuing teardown): {type(exc).__name__}: {exc}")
             self._runtime = None
+
+        # CRITICAL — must always run to avoid leaking the modal sandbox.
         if self._sandbox is not None:
-            exit_code = await self._sandbox.poll.aio()
-            if exit_code is None:
-                await self._sandbox.terminate.aio()
-        self._sandbox = None
+            try:
+                exit_code = await self._sandbox.poll.aio()
+                if exit_code is None:
+                    await self._sandbox.terminate.aio()
+            except Exception as exc:
+                self.logger.warning(
+                    f"sandbox poll/terminate first attempt failed: "
+                    f"{type(exc).__name__}: {exc}; retrying terminate once."
+                )
+                try:
+                    await self._sandbox.terminate.aio()
+                except Exception as exc2:
+                    self.logger.error(
+                        f"sandbox.terminate.aio() retry also failed: {type(exc2).__name__}: {exc2}. Sandbox may leak."
+                    )
+            self._sandbox = None
+
         self._app = None
 
     @property
