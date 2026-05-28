@@ -67,7 +67,7 @@ def compute_position_ids(
     multi_modal_inputs: dict[str, torch.Tensor],
 ) -> torch.Tensor:
     """Return text-only or multimodal-aware position ids for a single sample."""
-    if processor is None:
+    if processor is None or not multi_modal_inputs:
         return compute_position_id_with_mask(attention_mask)
 
     multi_modal_kwargs = {

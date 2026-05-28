@@ -45,6 +45,32 @@ def test_compute_position_ids_returns_text_shape_without_processor():
     assert position_ids.tolist() == [[0, 0, 1, 2]]
 
 
+def test_compute_position_ids_empty_multimodal_inputs_uses_text_path(monkeypatch):
+    from uni_agent.trainer.framework import multi_modal_postprocess as mm_postprocess
+
+    processor = FakeProcessor()
+    input_ids = torch.tensor([[7, 8, 9, 10]], dtype=torch.long)
+    attention_mask = torch.tensor([[0, 1, 1, 1]], dtype=torch.long)
+    calls = []
+
+    def fake_compute_position_id_with_mask(mask):
+        calls.append(mask.clone())
+        return torch.full_like(mask, 7)
+
+    monkeypatch.setattr(
+        mm_postprocess,
+        "compute_position_id_with_mask",
+        fake_compute_position_id_with_mask,
+    )
+
+    position_ids = mm_postprocess.compute_position_ids(processor, input_ids, attention_mask, {})
+
+    assert len(calls) == 1
+    assert calls[0].tolist() == [[0, 1, 1, 1]]
+    assert position_ids.tolist() == [[7, 7, 7, 7]]
+    assert processor.last_get_rope_index_call is None
+
+
 def test_compute_position_ids_returns_multimodal_shape_with_processor():
     from uni_agent.trainer.framework.multi_modal_postprocess import compute_position_ids
 

@@ -409,6 +409,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
                 raw_prompt=raw_prompt,
                 session=session,
                 sample_index=sample_index,
+                session_runtime=self.session_runtime,
                 **(runner_kwargs or {}),
             )
             if self.wait_for_completion_after_agent_run:

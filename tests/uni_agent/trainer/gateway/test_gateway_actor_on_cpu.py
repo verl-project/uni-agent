@@ -102,6 +102,44 @@ def test_normalize_request_context_preserves_multimodal_blocks_for_later_extract
     assert context["messages"][2]["tool_call_id"] == "call-1"
 
 
+def test_normalize_message_parses_tool_call_arguments_string_to_dict():
+    from uni_agent.trainer.gateway.gateway import _normalize_message
+
+    result = _normalize_message(
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "x",
+                    "type": "function",
+                    "function": {"name": "f", "arguments": '{"x": 1}'},
+                }
+            ],
+        }
+    )
+
+    assert result["tool_calls"][0]["function"]["arguments"] == {"x": 1}
+
+
+def test_normalize_message_keeps_invalid_tool_call_arguments_string():
+    from uni_agent.trainer.gateway.gateway import _normalize_message
+
+    result = _normalize_message(
+        {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": "x",
+                    "type": "function",
+                    "function": {"name": "f", "arguments": "not json"},
+                }
+            ],
+        }
+    )
+
+    assert result["tool_calls"][0]["function"]["arguments"] == "not json"
+
+
 @pytest.mark.asyncio
 async def test_gateway_actor_forwards_image_data_on_initial_multimodal_request(ray_runtime):
     from uni_agent.trainer.gateway.gateway import GatewayActor, _normalize_request_context

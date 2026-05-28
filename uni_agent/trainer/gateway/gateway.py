@@ -81,6 +81,29 @@ def _validate_tool_calls(tool_calls: Any) -> None:
             raise MalformedRequestError("tool_call.function must be an object")
 
 
+def _normalize_tool_call_arguments(tool_calls: list[dict]) -> list[dict]:
+    """Parse tool_calls[i].function.arguments from JSON string to dict.
+
+    OpenAI spec defines arguments as a JSON string but Qwen-style chat
+    templates iterate via |items, requiring dict.
+    """
+    result = []
+    for tc in tool_calls:
+        tc = dict(tc)
+        func = tc.get("function")
+        if isinstance(func, dict):
+            func = dict(func)
+            args = func.get("arguments")
+            if isinstance(args, str):
+                try:
+                    func["arguments"] = json.loads(args)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            tc["function"] = func
+        result.append(tc)
+    return result
+
+
 def _normalize_message(message: Any) -> dict[str, Any]:
     """Normalize a single message: validate structure, coerce types, filter to known fields.
 
@@ -105,7 +128,7 @@ def _normalize_message(message: Any) -> dict[str, Any]:
         normalized["name"] = name
     if "tool_calls" in message:
         _validate_tool_calls(message["tool_calls"])
-        normalized["tool_calls"] = list(message["tool_calls"])
+        normalized["tool_calls"] = _normalize_tool_call_arguments(list(message["tool_calls"]))
     if "tool_call_id" in message:
         normalized["tool_call_id"] = str(message["tool_call_id"])
     return normalized
