@@ -81,7 +81,6 @@ async def test_gateway_serving_runtime_delegates_generate_to_llm_client(ray_runt
     ]
 
 
-
 @pytest.mark.asyncio
 async def test_gateway_serving_runtime_round_robins_actors_across_alive_nodes(ray_runtime, monkeypatch):
     """gateway_count > 1 should distribute actors across alive CPU nodes round-robin."""

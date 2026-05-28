@@ -16,8 +16,7 @@ class AgentFramework(ABC):
         config,
         replay_buffer,
         **kwargs,
-    ) -> "AgentFramework":
-        ...
+    ) -> AgentFramework: ...
 
     @abstractmethod
     async def generate_sequences(self, prompts: TensorDict) -> None:

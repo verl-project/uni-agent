@@ -45,18 +45,15 @@ class GatewayServingRuntime:
         # Round-robin across alive CPU nodes so gateway actors do not all pack onto
         # the driver node under Ray's default PACK scheduling. Mirrors
         # AgentLoopWorker placement (verl/experimental/agent_loop/agent_loop.py).
-        node_ids = [
-            node["NodeID"]
-            for node in ray.nodes()
-            if node["Alive"] and node["Resources"].get("CPU", 0) > 0
-        ]
+        node_ids = [node["NodeID"] for node in ray.nodes() if node["Alive"] and node["Resources"].get("CPU", 0) > 0]
         if not node_ids:
             raise RuntimeError("No alive CPU nodes available for GatewayActor placement")
 
         self.owned_gateway_actors = [
             GatewayActor.options(
                 scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
-                    node_id=node_ids[i % len(node_ids)], soft=True,
+                    node_id=node_ids[i % len(node_ids)],
+                    soft=True,
                 ),
             ).remote(**gateway_actor_kwargs)
             for i in range(gateway_count)

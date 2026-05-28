@@ -15,7 +15,8 @@ from fastapi.responses import JSONResponse
 from uni_agent.trainer.framework.types import SessionHandle, Trajectory
 from uni_agent.trainer.gateway.types import GatewaySessionState, SessionPhase, TrajectoryBuffer
 from verl.experimental.agent_loop.tool_parser import ToolParser
-from verl.utils.chat_template import apply_chat_template as _apply_chat_template, initialize_system_prompt
+from verl.utils.chat_template import apply_chat_template as _apply_chat_template
+from verl.utils.chat_template import initialize_system_prompt
 from verl.utils.tokenizer import normalize_token_ids
 from verl.workers.rollout.utils import run_uvicorn
 
@@ -24,12 +25,14 @@ class MalformedRequestError(ValueError):
     pass
 
 
-_DEFAULT_ALLOWED_REQUEST_SAMPLING_PARAM_KEYS = frozenset({
-    "temperature",
-    "top_p",
-    "top_k",
-    "max_tokens",
-})
+_DEFAULT_ALLOWED_REQUEST_SAMPLING_PARAM_KEYS = frozenset(
+    {
+        "temperature",
+        "top_p",
+        "top_k",
+        "max_tokens",
+    }
+)
 
 
 # Map backend stop_reason values to OpenAI-spec finish_reason values.
@@ -213,12 +216,8 @@ def _canonicalize_message_for_prefix_comparison(message: dict[str, Any]) -> dict
 def _is_message_prefix(prefix: list[dict[str, Any]], messages: list[dict[str, Any]]) -> bool:
     if len(prefix) > len(messages):
         return False
-    return [
-        _canonicalize_message_for_prefix_comparison(message)
-        for message in prefix
-    ] == [
-        _canonicalize_message_for_prefix_comparison(message)
-        for message in messages[: len(prefix)]
+    return [_canonicalize_message_for_prefix_comparison(message) for message in prefix] == [
+        _canonicalize_message_for_prefix_comparison(message) for message in messages[: len(prefix)]
     ]
 
 
@@ -234,7 +233,7 @@ def _is_request_context_prefix(
     # different key order compare equal in Python but may tokenize differently.
     # This could cause a false prefix match on the tools path.  Low practical
     # risk (same agent rarely reorders keys within a session), but worth noting.
-    #TODO: need to improve the prefix check logic, e.g.,how to handle tool lists and multimodal data
+    # TODO: need to improve the prefix check logic, e.g.,how to handle tool lists and multimodal data
     return _is_message_prefix(session.message_history, messages)
 
 
@@ -315,9 +314,7 @@ class _GatewayActor:
             tokenizer,
             **self._apply_chat_template_kwargs,
         )
-        self._tool_parser = (
-            ToolParser.get_tool_parser(tool_parser_name, tokenizer) if tool_parser_name else None
-        )
+        self._tool_parser = ToolParser.get_tool_parser(tool_parser_name, tokenizer) if tool_parser_name else None
         self._sessions: dict[str, GatewaySessionState] = {}
         self._app = FastAPI()
         self._server_port: int | None = None
@@ -334,10 +331,7 @@ class _GatewayActor:
                 message = str(exc.detail["message"])
             else:
                 message = str(exc.detail)
-            error_type = (
-                "invalid_request_error" if 400 <= exc.status_code < 500
-                else "internal_server_error"
-            )
+            error_type = "invalid_request_error" if 400 <= exc.status_code < 500 else "internal_server_error"
             return JSONResponse(
                 status_code=exc.status_code,
                 content={
@@ -494,10 +488,14 @@ class _GatewayActor:
 
         return normalize_token_ids(
             _apply_chat_template(
-                self._tokenizer, messages, tools=tools, add_generation_prompt=True,
+                self._tokenizer,
+                messages,
+                tools=tools,
+                add_generation_prompt=True,
                 **chat_template_kwargs,
             )
         )
+
     # TODO: check if delta tokenization is better than remove_system_prompt
     def _encode_incremental(
         self,
@@ -538,14 +536,19 @@ class _GatewayActor:
         else:
             ids = normalize_token_ids(
                 _apply_chat_template(
-                    self._tokenizer, messages, add_generation_prompt=True,
+                    self._tokenizer,
+                    messages,
+                    add_generation_prompt=True,
                     **chat_template_kwargs,
                 )
             )
-        return ids[len(self._system_prompt):]
+        return ids[len(self._system_prompt) :]
 
     async def _decode_response(
-        self, response_ids: list[int], *, tools: list[dict[str, Any]] | None = None,
+        self,
+        response_ids: list[int],
+        *,
+        tools: list[dict[str, Any]] | None = None,
         stop_reason: str | None = None,
     ) -> tuple[dict[str, Any], str]:
         """Decode model output tokens into an OpenAI-compatible assistant message.
@@ -559,10 +562,8 @@ class _GatewayActor:
             parsed_tools = None
             try:
                 from verl.tools.schemas import OpenAIFunctionToolSchema
-                parsed_tools = [
-                    OpenAIFunctionToolSchema(**t) if isinstance(t, dict) else t
-                    for t in tools
-                ]
+
+                parsed_tools = [OpenAIFunctionToolSchema(**t) if isinstance(t, dict) else t for t in tools]
             except Exception:
                 pass
             content, function_calls = await self._tool_parser.extract_tool_calls(response_ids, parsed_tools)
@@ -627,7 +628,9 @@ class _GatewayActor:
 
             async with session.request_lock:
                 if session.phase != SessionPhase.ACTIVE:
-                    raise HTTPException(status_code=409, detail=f"Session {session_id} is {session.phase.value.lower()}")
+                    raise HTTPException(
+                        status_code=409, detail=f"Session {session_id} is {session.phase.value.lower()}"
+                    )
 
                 self._touch_session(session)
                 messages = request_context["messages"]
@@ -648,9 +651,7 @@ class _GatewayActor:
                         video_data=video_data,
                         request_chat_template_kwargs=request_chat_template_kwargs,
                     )
-                    active_trajectory = TrajectoryBuffer(
-                        prompt_ids=prompt_ids
-                    )
+                    active_trajectory = TrajectoryBuffer(prompt_ids=prompt_ids)
                 elif _is_request_context_prefix(session=session, messages=messages, tools=tools):
                     active_trajectory = _copy_trajectory_buffer(session.active_trajectory)
                     image_data = list(session.image_data) if session.image_data is not None else None
@@ -726,9 +727,7 @@ class _GatewayActor:
                         video_data=video_data,
                         request_chat_template_kwargs=request_chat_template_kwargs,
                     )
-                    active_trajectory = TrajectoryBuffer(
-                        prompt_ids=prompt_ids
-                    )
+                    active_trajectory = TrajectoryBuffer(prompt_ids=prompt_ids)
 
                 generation_context_ids = active_trajectory.prompt_ids + active_trajectory.response_ids
                 remaining_response_budget = (
@@ -763,11 +762,15 @@ class _GatewayActor:
                 active_trajectory.response_logprobs.extend(list(output.log_probs))
 
             assistant_msg, finish_reason = await self._decode_response(
-                response_ids, tools=tools, stop_reason=output.stop_reason,
+                response_ids,
+                tools=tools,
+                stop_reason=output.stop_reason,
             )
             async with session.request_lock:
                 if session.phase != SessionPhase.ACTIVE:
-                    raise HTTPException(status_code=409, detail=f"Session {session_id} is {session.phase.value.lower()}")
+                    raise HTTPException(
+                        status_code=409, detail=f"Session {session_id} is {session.phase.value.lower()}"
+                    )
 
                 if materialized_trajectory is not None:
                     session.trajectories.append(materialized_trajectory)
@@ -868,7 +871,9 @@ class _GatewayActor:
             self._materialize_active_trajectory(session)
             self._set_phase(session, SessionPhase.FINALIZED)
             session.completed.set()
-            trajectories = [replace(trajectory, reward_info=dict(session.reward_info)) for trajectory in session.trajectories]
+            trajectories = [
+                replace(trajectory, reward_info=dict(session.reward_info)) for trajectory in session.trajectories
+            ]
             self._sessions.pop(session_id, None)
             return trajectories
 

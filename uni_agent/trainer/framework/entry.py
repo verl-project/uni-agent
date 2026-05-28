@@ -88,7 +88,7 @@ class AgentFrameworkRolloutAdapter:
         reward_loop_worker_handles=None,
         replay_buffer=None,
         **_,
-    ) -> "AgentFrameworkRolloutAdapter":
+    ) -> AgentFrameworkRolloutAdapter:
         if teacher_client is not None:
             raise ValueError(
                 "AgentFrameworkRolloutAdapter does not support teacher_client yet; "

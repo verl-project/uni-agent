@@ -159,7 +159,6 @@ async def test_generate_sequences_writes_tq_schema_for_each_session(monkeypatch)
         rollout_config={"n": 2, "val_kwargs": {"n": 2}},
     )
 
-
     await framework.generate_sequences(_build_prompts(global_steps=7))
 
     assert replay_buffer.adds == [
@@ -183,9 +182,7 @@ async def test_generate_sequences_writes_tq_schema_for_each_session(monkeypatch)
     first = fake_tq.batch_puts[0]
     fields = first["fields"]
     assert first["partition_id"] == "train"
-    assert first["tags"] == [
-        {"global_steps": 7, "status": "success", "prompt_len": 2, "response_len": 2, "seq_len": 4}
-    ]
+    assert first["tags"] == [{"global_steps": 7, "status": "success", "prompt_len": 2, "response_len": 2, "seq_len": 4}]
     assert fields["input_ids"].is_nested
     assert fields["response_mask"].is_nested
     assert fields["position_ids"].is_nested
@@ -241,7 +238,6 @@ async def test_generate_sequences_keeps_successful_sessions_when_one_session_fai
         rollout_config={"n": 2, "val_kwargs": {"n": 2}},
     )
 
-
     await framework.generate_sequences(_build_prompts(count=1, global_steps=8))
 
     assert replay_buffer.adds == [
@@ -276,13 +272,10 @@ async def test_generate_sequences_marks_prompt_failure_when_all_sessions_fail(mo
         rollout_config={"n": 1, "val_kwargs": {"n": 2}},
     )
 
-
     with pytest.raises(RuntimeError, match="All rollouts failed at global_steps=9"):
         await framework.generate_sequences(_build_prompts(count=1, global_steps=9, validate=True))
 
-    assert replay_buffer.adds == [
-        {"partition_id": "val", "items": {"uid-0": {"global_steps": 9, "status": "running"}}}
-    ]
+    assert replay_buffer.adds == [{"partition_id": "val", "items": {"uid-0": {"global_steps": 9, "status": "running"}}}]
     assert fake_tq.batch_puts == []
     assert fake_tq.puts == [{"key": "uid-0", "partition_id": "val", "tag": {"status": "failure"}}]
 
@@ -307,14 +300,12 @@ async def test_generate_sequences_zero_fills_rm_scores_when_no_reward_handles(mo
         rollout_config={"n": 1, "val_kwargs": {"n": 1}},
     )
 
-
     await framework.generate_sequences(_build_prompts(count=1, global_steps=10))
 
     # rm_scores is always written (zero-filled when no reward) so the trainer's
     # KVBatchMeta select_fields never hits a missing field across the batch.
     rm_scores = fake_tq.batch_puts[0]["fields"]["rm_scores"]
     assert rm_scores[0].tolist() == [0.0, 0.0]
-
 
 
 @pytest.mark.asyncio
@@ -388,7 +379,6 @@ async def test_generate_sequences_zero_fills_rollout_log_probs_when_missing(monk
         rollout_config={"n": 1, "val_kwargs": {"n": 1}},
     )
 
-
     await framework.generate_sequences(_build_prompts(count=1, global_steps=10))
 
     # rollout_log_probs is zero-filled rather than omitted so the trainer's
@@ -407,9 +397,7 @@ async def test_max_concurrent_sessions_caps_in_flight_sessions(monkeypatch):
     fake_tq = _FakeTransferQueue()
     replay_buffer = _FakeReplayBuffer()
     monkeypatch.setattr(framework_module, "tq", fake_tq)
-    runtime = _FakeSessionRuntime(
-        {f"session-{i}-0": [_trajectory()] for i in range(4)}
-    )
+    runtime = _FakeSessionRuntime({f"session-{i}-0": [_trajectory()] for i in range(4)})
 
     in_flight = 0
     max_observed = 0
@@ -430,7 +418,6 @@ async def test_max_concurrent_sessions_caps_in_flight_sessions(monkeypatch):
         rollout_config={"n": 1, "val_kwargs": {"n": 1}},
         max_concurrent_sessions=2,
     )
-
 
     await framework.generate_sequences(_build_prompts(count=4, global_steps=10))
 
@@ -466,6 +453,7 @@ def test_trajectory_to_tq_field_and_tag_copies_finish_reason():
 @pytest.fixture
 def ray_runtime():
     import ray
+
     ray.init(ignore_reinit_error=True)
     yield
     ray.shutdown()
@@ -475,6 +463,7 @@ def ray_runtime():
 async def test_score_trajectories_dispatches_only_final_trajectory_and_broadcasts(ray_runtime):
     """_score_trajectories scores trajectories[-1] only, broadcasts to all (matches AgentLoopWorkerTQ)."""
     import ray as ray_module
+
     from uni_agent.trainer.framework.framework import OpenAICompatibleAgentFramework
     from uni_agent.trainer.framework.types import Trajectory
 

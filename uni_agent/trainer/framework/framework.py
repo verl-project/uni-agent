@@ -7,16 +7,16 @@ from dataclasses import replace
 from functools import partial
 from uuid import uuid4
 
-from omegaconf import OmegaConf
 import torch
+from omegaconf import OmegaConf
 from tensordict import TensorDict
 from tensordict.tensorclass import NonTensorData, NonTensorStack
 
 from verl.tools.utils.tool_registry import initialize_tools_from_config
-from verl.utils.import_utils import load_class_from_fqn
-from verl.utils.transferqueue_utils import tq
 from verl.utils import tensordict_utils as tu
+from verl.utils.import_utils import load_class_from_fqn
 from verl.utils.model import compute_position_id_with_mask
+from verl.utils.transferqueue_utils import tq
 
 from .base import AgentFramework
 from .multi_modal_postprocess import compute_multi_modal_inputs, compute_position_ids
@@ -70,6 +70,7 @@ def _trajectory_to_reward_dataproto(trajectory, sample_fields):
     for parity.
     """
     import numpy as np
+
     from verl.protocol import DataProto
 
     prompt_ids = torch.tensor(trajectory.prompt_ids, dtype=torch.long).unsqueeze(0)
@@ -145,7 +146,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         processor=None,
         replay_buffer,
         reward_loop_worker_handles=None,
-    ) -> "OpenAICompatibleAgentFramework":
+    ) -> OpenAICompatibleAgentFramework:
         # TODO(phase-b): switch this to actor_rollout_ref.rollout.agent_framework.*
         af_cfg = OmegaConf.select(config, "actor_rollout_ref.rollout.custom.agent_framework", default={}) or {}
         agent_runner_fqn = af_cfg.get("agent_runner_fqn")
@@ -307,9 +308,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
                 sample_index=sample_index,
                 session_id=f"session-{sample_index}-{session_index}-{uuid4().hex}",
                 runner_kwargs={
-                    key: sample_fields[key]
-                    for key in ("tools_kwargs", "agent_name")
-                    if key in sample_fields
+                    key: sample_fields[key] for key in ("tools_kwargs", "agent_name") if key in sample_fields
                 },
             )
             for session_index in range(num_sessions)
@@ -459,9 +458,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         result = await worker.compute_score.remote(data)
 
         if "reward_score" not in result:
-            raise ValueError(
-                f"RewardLoopWorker result missing 'reward_score' key for uid={sample_fields.get('uid')}"
-            )
+            raise ValueError(f"RewardLoopWorker result missing 'reward_score' key for uid={sample_fields.get('uid')}")
         score = float(result["reward_score"])
         extra = dict(result.get("reward_extra_info") or {})
         return [(score, extra)] * len(session_trajectories)
@@ -554,7 +551,8 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         if trajectory.routed_experts is not None:
             field["routed_experts"] = (
                 torch.from_numpy(trajectory.routed_experts.copy())
-                if hasattr(trajectory.routed_experts, "copy") and not isinstance(trajectory.routed_experts, torch.Tensor)
+                if hasattr(trajectory.routed_experts, "copy")
+                and not isinstance(trajectory.routed_experts, torch.Tensor)
                 else trajectory.routed_experts
             )
         rm_scores = torch.zeros_like(responses, dtype=torch.float32)

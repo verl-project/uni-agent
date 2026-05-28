@@ -20,8 +20,8 @@ def _get_judge_client() -> tuple[Any | None, str]:
     model_name = os.environ.get("LLM_AS_A_JUDGE_MODEL", "")
 
     try:
-        from openai import OpenAI
         import requests
+        from openai import OpenAI
     except ImportError as error:
         logger.warning("Reward scoring dependencies are unavailable: %s", error)
         return None, ""
@@ -50,7 +50,9 @@ def _extract_answer(solution_str: str) -> tuple[str, bool]:
     if solution_str.count("<think>") != solution_str.count("</think>"):
         is_format_error = True
 
-    predict_no_think = solution_str.split("</think>")[-1].strip() if "</think>" in solution_str else solution_str.strip()
+    predict_no_think = (
+        solution_str.split("</think>")[-1].strip() if "</think>" in solution_str else solution_str.strip()
+    )
 
     if predict_no_think.count("<answer>") != predict_no_think.count("</answer>"):
         is_format_error = True

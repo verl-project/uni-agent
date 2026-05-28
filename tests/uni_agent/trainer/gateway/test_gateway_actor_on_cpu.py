@@ -30,7 +30,6 @@ def ray_runtime():
     ray.shutdown()
 
 
-
 @pytest.mark.asyncio
 async def test_gateway_actor_max_tokens_clamped_to_remaining_response_budget():
     from uni_agent.trainer.gateway.gateway import _GatewayActor
@@ -115,21 +114,18 @@ async def test_gateway_actor_continuation_budget_exhausted_materializes_length_s
 
 @pytest.mark.asyncio
 async def test_backend_value_error_raises_400():
-    from uni_agent.trainer.gateway.gateway import _GatewayActor
     from fastapi import HTTPException
+
+    from uni_agent.trainer.gateway.gateway import _GatewayActor
 
     backend = InspectingBackend()
     actor = _GatewayActor(tokenizer=FakeTokenizer(), backend=backend)
     await actor.start()
     try:
         await actor.create_session("s1")
-        backend.next_error = ValueError(
-            "Prompt length (123456) exceeds the model's maximum context length (8192)."
-        )
+        backend.next_error = ValueError("Prompt length (123456) exceeds the model's maximum context length (8192).")
         with pytest.raises(HTTPException) as exc_info:
-            await actor._handle_chat_completions(
-                "s1", {"messages": [{"role": "user", "content": "hi"}]}
-            )
+            await actor._handle_chat_completions("s1", {"messages": [{"role": "user", "content": "hi"}]})
 
         assert exc_info.value.status_code == 400
         assert "exceeds the model's maximum context length" in str(exc_info.value.detail)
@@ -139,16 +135,15 @@ async def test_backend_value_error_raises_400():
 
 @pytest.mark.asyncio
 async def test_unknown_session_raises_404():
-    from uni_agent.trainer.gateway.gateway import _GatewayActor
     from fastapi import HTTPException
+
+    from uni_agent.trainer.gateway.gateway import _GatewayActor
 
     actor = _GatewayActor(tokenizer=FakeTokenizer(), backend=InspectingBackend())
     await actor.start()
     try:
         with pytest.raises(HTTPException) as exc_info:
-            await actor._handle_chat_completions(
-                "does-not-exist", {"messages": [{"role": "user", "content": "hi"}]}
-            )
+            await actor._handle_chat_completions("does-not-exist", {"messages": [{"role": "user", "content": "hi"}]})
 
         assert exc_info.value.status_code == 404
     finally:
@@ -185,7 +180,6 @@ async def test_gateway_actor_abort_session_does_not_wait_for_backend_generate(ra
             pass
 
     ray.get(actor.shutdown.remote())
-
 
 
 def test_normalize_message_parses_tool_call_arguments_string_to_dict():
@@ -228,8 +222,8 @@ def test_normalize_message_keeps_invalid_tool_call_arguments_string():
 
 @pytest.mark.asyncio
 async def test_request_chat_template_kwargs_forwarded(monkeypatch):
-    from uni_agent.trainer.gateway.gateway import _GatewayActor
     import uni_agent.trainer.gateway.gateway as gw_mod
+    from uni_agent.trainer.gateway.gateway import _GatewayActor
 
     actor = _GatewayActor(
         tokenizer=FakeTokenizer(),
@@ -275,7 +269,6 @@ def test_normalize_message_preserves_reasoning_content():
     assert result["reasoning_content"] == "step 1: ...; step 2: ..."
 
 
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("payload_extra", "expected_message_substr"),
@@ -290,8 +283,9 @@ def test_normalize_message_preserves_reasoning_content():
     ],
 )
 async def test_unsupported_capabilities_rejected_with_400(payload_extra, expected_message_substr):
-    from uni_agent.trainer.gateway.gateway import _GatewayActor
     from fastapi import HTTPException
+
+    from uni_agent.trainer.gateway.gateway import _GatewayActor
 
     actor = _GatewayActor(tokenizer=FakeTokenizer(), backend=InspectingBackend())
     await actor.start()
@@ -329,8 +323,8 @@ async def test_stream_true_softly_falls_back_to_non_streaming(caplog):
 
 @pytest.mark.asyncio
 async def test_tool_choice_none_skips_tool_injection_and_parser(monkeypatch):
-    from uni_agent.trainer.gateway.gateway import _GatewayActor
     import uni_agent.trainer.gateway.gateway as gw_mod
+    from uni_agent.trainer.gateway.gateway import _GatewayActor
 
     actor = _GatewayActor(
         tokenizer=FakeTokenizer(),
@@ -576,8 +570,8 @@ async def test_gateway_actor_multimodal_reference_change_splits_trajectory(ray_r
 
 @pytest.mark.asyncio
 async def test_gateway_actor_continuation_with_tool_returned_image_appends_media(ray_runtime):
-    from verl.utils.chat_template import apply_chat_template, initialize_system_prompt
     from uni_agent.trainer.gateway.gateway import GatewayActor
+    from verl.utils.chat_template import apply_chat_template, initialize_system_prompt
 
     processor = FakeProcessor()
     tool_call_text = '<tool_call>\n{"name": "search", "arguments": {"query": "crop"}}\n</tool_call>'
@@ -935,7 +929,7 @@ def test_message_prefix_falls_back_to_raw_tool_argument_value_comparison_when_ar
                 {
                     "id": "call-1",
                     "type": "function",
-                    "function": {"name": "search", "arguments": "{\"query\": weather}"},
+                    "function": {"name": "search", "arguments": '{"query": weather}'},
                 }
             ],
         }
@@ -948,7 +942,7 @@ def test_message_prefix_falls_back_to_raw_tool_argument_value_comparison_when_ar
                 {
                     "id": "call-1",
                     "type": "function",
-                    "function": {"name": "search", "arguments": "{\"query\": sunny}"},
+                    "function": {"name": "search", "arguments": '{"query": sunny}'},
                 }
             ],
         }
@@ -969,6 +963,7 @@ async def test_gateway_actor_serializes_same_session_concurrent_requests(ray_run
     session = ray.get(actor.create_session.remote("session-concurrent"))
 
     async with httpx.AsyncClient(timeout=5.0) as client:
+
         async def send_request():
             return await client.post(
                 f"{session.base_url}/chat/completions",
@@ -1233,9 +1228,6 @@ async def test_decode_response_normalizes_backend_stop_reasons(stop_reason, expe
     actor = _GatewayActor(tokenizer=FakeTokenizer(), backend=QueuedBackend(["IGNORED"]))
     response_ids = [ord(char) for char in "hello"]
 
-    _message, finish_reason = await actor._decode_response(
-        response_ids, tools=None, stop_reason=stop_reason
-    )
+    _message, finish_reason = await actor._decode_response(response_ids, tools=None, stop_reason=stop_reason)
 
     assert finish_reason == expected_finish_reason
-

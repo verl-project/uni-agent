@@ -70,7 +70,9 @@ class DeepEyesGatewayDataset(RLHFDataset):
         assert image_offset == len(images), (
             f"image placeholder count {image_offset} does not match images count {len(images)}"
         )
-        assert video_offset == len(videos), f"video placeholder count {video_offset} does not match videos count {len(videos)}"
+        assert video_offset == len(videos), (
+            f"video placeholder count {video_offset} does not match videos count {len(videos)}"
+        )
         return messages, first_image
 
     def maybe_filter_out_long_prompts(self, dataframe=None):
@@ -86,7 +88,10 @@ class DeepEyesGatewayDataset(RLHFDataset):
         row_dict["raw_prompt"] = [
             {
                 "role": "system",
-                "content": "You are a helpful assistant. You can call functions to assist with the user query. Important: You must call only one function at a time.",
+                "content": (
+                    "You are a helpful assistant. You can call functions to assist with the user query. "
+                    "Important: You must call only one function at a time."
+                ),
             },
             {"role": "user", "content": raw_messages[1]["content"]},
         ]
