@@ -62,8 +62,6 @@ _FINISH_REASON_MAP = {
 }
 
 
-# TODO: double-check if all these validations/normalization are necessary
-# Make sure they don't alter messages in unexpected ways.
 def _normalize_message_content(content: Any) -> Any:
     """Normalize message content: coerce None to empty string, validate type."""
     if isinstance(content, list | dict | str):
@@ -213,14 +211,6 @@ def _canonicalize_message_for_prefix_comparison(message: dict[str, Any]) -> dict
     return normalized
 
 
-def _is_message_prefix(prefix: list[dict[str, Any]], messages: list[dict[str, Any]]) -> bool:
-    if len(prefix) > len(messages):
-        return False
-    return [_canonicalize_message_for_prefix_comparison(message) for message in prefix] == [
-        _canonicalize_message_for_prefix_comparison(message) for message in messages[: len(prefix)]
-    ]
-
-
 def _is_request_context_prefix(
     *,
     session: GatewaySessionState,
@@ -229,12 +219,12 @@ def _is_request_context_prefix(
 ) -> bool:
     if session.request_tools != tools:
         return False
-    # TODO: dict equality is not token-level equivalent — two tool schemas with
-    # different key order compare equal in Python but may tokenize differently.
-    # This could cause a false prefix match on the tools path.  Low practical
-    # risk (same agent rarely reorders keys within a session), but worth noting.
-    # TODO: need to improve the prefix check logic, e.g.,how to handle tool lists and multimodal data
-    return _is_message_prefix(session.message_history, messages)
+    history = session.message_history
+    if len(history) > len(messages):
+        return False
+    return [_canonicalize_message_for_prefix_comparison(m) for m in history] == [
+        _canonicalize_message_for_prefix_comparison(m) for m in messages[: len(history)]
+    ]
 
 
 def _copy_trajectory_buffer(buffer: TrajectoryBuffer | None) -> TrajectoryBuffer | None:
