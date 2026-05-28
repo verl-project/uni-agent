@@ -280,6 +280,67 @@ def test_normalize_message_keeps_invalid_tool_call_arguments_string():
 
 
 @pytest.mark.asyncio
+async def test_request_chat_template_kwargs_forwarded(monkeypatch):
+    """Wave2 commit 4: payload chat_template_kwargs override actor-init kwargs."""
+    from uni_agent.trainer.gateway.gateway import _GatewayActor
+    import uni_agent.trainer.gateway.gateway as gw_mod
+
+    actor = _GatewayActor(
+        tokenizer=FakeTokenizer(),
+        backend=InspectingBackend(),
+        apply_chat_template_kwargs={"enable_thinking": False},
+    )
+    captured_kwargs = {}
+    original_apply_chat_template = gw_mod._apply_chat_template
+
+    def _spy(tokenizer, messages, **kwargs):
+        captured_kwargs.update(kwargs)
+        return original_apply_chat_template(tokenizer, messages, **kwargs)
+
+    monkeypatch.setattr(gw_mod, "_apply_chat_template", _spy)
+    await actor.start()
+    try:
+        await actor.create_session("s1")
+        await actor._handle_chat_completions(
+            "s1",
+            {
+                "messages": [{"role": "user", "content": "hi"}],
+                "chat_template_kwargs": {"enable_thinking": True, "extra_flag": "x"},
+            },
+        )
+
+        assert captured_kwargs["enable_thinking"] is True
+        assert captured_kwargs["extra_flag"] == "x"
+    finally:
+        await actor.shutdown()
+
+
+def test_normalize_message_preserves_reasoning_content():
+    """Wave2 commit 4: _normalize_message preserves reasoning_content field."""
+    from uni_agent.trainer.gateway.gateway import _normalize_message
+
+    result = _normalize_message(
+        {
+            "role": "assistant",
+            "content": "answer",
+            "reasoning_content": "step 1: ...; step 2: ...",
+        }
+    )
+
+    assert result["reasoning_content"] == "step 1: ...; step 2: ..."
+
+
+def test_canonicalize_for_prefix_comparison_includes_reasoning_content():
+    """Wave2 commit 4: prefix comparison includes reasoning_content."""
+    from uni_agent.trainer.gateway.gateway import _canonicalize_message_for_prefix_comparison
+
+    a = {"role": "assistant", "content": "x", "reasoning_content": "rA"}
+    b = {"role": "assistant", "content": "x", "reasoning_content": "rB"}
+
+    assert _canonicalize_message_for_prefix_comparison(a) != _canonicalize_message_for_prefix_comparison(b)
+
+
+@pytest.mark.asyncio
 async def test_gateway_actor_forwards_image_data_on_initial_multimodal_request(ray_runtime):
     from uni_agent.trainer.gateway.gateway import GatewayActor, _normalize_request_context
 

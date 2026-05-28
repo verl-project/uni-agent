@@ -107,7 +107,7 @@ def _normalize_tool_call_arguments(tool_calls: list[dict]) -> list[dict]:
 def _normalize_message(message: Any) -> dict[str, Any]:
     """Normalize a single message: validate structure, coerce types, filter to known fields.
 
-    Constructs a new dict with only role/content/tool_calls/tool_call_id.
+    Constructs a new dict with only role/content/tool_calls/tool_call_id/reasoning_content.
     This ensures prefix comparison is not affected by extraneous fields.
     """
     if not isinstance(message, dict):
@@ -131,6 +131,11 @@ def _normalize_message(message: Any) -> dict[str, Any]:
         normalized["tool_calls"] = _normalize_tool_call_arguments(list(message["tool_calls"]))
     if "tool_call_id" in message:
         normalized["tool_call_id"] = str(message["tool_call_id"])
+    if "reasoning_content" in message:
+        reasoning_content = message["reasoning_content"]
+        if reasoning_content is not None and not isinstance(reasoning_content, str):
+            raise MalformedRequestError("message.reasoning_content must be a string or null")
+        normalized["reasoning_content"] = reasoning_content
     return normalized
 
 
@@ -144,14 +149,17 @@ def _validate_tools(tools: Any) -> list[Any] | None:
 
 
 def _normalize_request_context(payload: dict[str, Any]) -> dict[str, Any]:
-    """Normalize and validate the request payload, extracting messages and tools.
-    """
+    """Normalize and validate the request payload, extracting messages and tools."""
     messages = payload.get("messages")
     if not isinstance(messages, list) or not messages:
         raise MalformedRequestError("messages must be non-empty")
+    chat_template_kwargs = payload.get("chat_template_kwargs")
+    if chat_template_kwargs is not None and not isinstance(chat_template_kwargs, dict):
+        raise MalformedRequestError("chat_template_kwargs must be an object")
     return {
         "messages": [_normalize_message(message) for message in messages],
         "tools": _validate_tools(payload.get("tools")),
+        "chat_template_kwargs": dict(chat_template_kwargs) if chat_template_kwargs else {},
     }
 
 
@@ -455,8 +463,10 @@ class _GatewayActor:
         tools: list[dict[str, Any]] | None = None,
         image_data: list[Any] | None = None,
         video_data: list[Any] | None = None,
+        request_chat_template_kwargs: dict[str, Any] | None = None,
     ) -> list[int]:
         """Encode a full conversation for a new trajectory (includes system prompt + generation prompt)."""
+        chat_template_kwargs = {**self._apply_chat_template_kwargs, **(request_chat_template_kwargs or {})}
         if self._processor is not None:
             raw_prompt = _apply_chat_template(
                 self._processor,
@@ -464,7 +474,7 @@ class _GatewayActor:
                 tools=tools,
                 add_generation_prompt=True,
                 tokenize=False,
-                **self._apply_chat_template_kwargs,
+                **chat_template_kwargs,
             )
             videos = video_data
             video_metadata = None
@@ -484,7 +494,7 @@ class _GatewayActor:
         return normalize_token_ids(
             _apply_chat_template(
                 self._tokenizer, messages, tools=tools, add_generation_prompt=True,
-                **self._apply_chat_template_kwargs,
+                **chat_template_kwargs,
             )
         )
     # TODO: check if delta tokenization is better than remove_system_prompt
@@ -493,6 +503,7 @@ class _GatewayActor:
         messages: list[dict[str, Any]],
         image_data: list[Any] | None = None,
         video_data: list[Any] | None = None,
+        request_chat_template_kwargs: dict[str, Any] | None = None,
     ) -> list[int]:
         """Encode incremental messages (tool results, user follow-ups) for a continuation turn.
 
@@ -500,13 +511,14 @@ class _GatewayActor:
         alone (which prepends a system prompt), then strip the known system_prompt prefix.
         No tools parameter — tool schema is already in the initial prompt_ids.
         """
+        chat_template_kwargs = {**self._apply_chat_template_kwargs, **(request_chat_template_kwargs or {})}
         if self._processor is not None:
             raw_prompt = _apply_chat_template(
                 self._processor,
                 messages,
                 add_generation_prompt=True,
                 tokenize=False,
-                **self._apply_chat_template_kwargs,
+                **chat_template_kwargs,
             )
             videos = video_data
             video_metadata = None
@@ -526,7 +538,7 @@ class _GatewayActor:
             ids = normalize_token_ids(
                 _apply_chat_template(
                     self._tokenizer, messages, add_generation_prompt=True,
-                    **self._apply_chat_template_kwargs,
+                    **chat_template_kwargs,
                 )
             )
         return ids[len(self._system_prompt):]
@@ -596,6 +608,7 @@ class _GatewayActor:
                 self._touch_session(session)
                 messages = request_context["messages"]
                 tools = request_context["tools"]
+                request_chat_template_kwargs = request_context["chat_template_kwargs"]
                 materialized_trajectory = None
                 image_data = None
                 video_data = None
@@ -603,7 +616,11 @@ class _GatewayActor:
                 if session.active_trajectory is None:
                     image_data, video_data = await self._extract_multi_modal_data(messages)
                     prompt_ids = self._encode_full(
-                        messages, tools=tools, image_data=image_data, video_data=video_data
+                        messages,
+                        tools=tools,
+                        image_data=image_data,
+                        video_data=video_data,
+                        request_chat_template_kwargs=request_chat_template_kwargs,
                     )
                     active_trajectory = TrajectoryBuffer(
                         prompt_ids=prompt_ids
@@ -627,6 +644,7 @@ class _GatewayActor:
                             incremental_messages,
                             image_data=new_image_data,
                             video_data=new_video_data,
+                            request_chat_template_kwargs=request_chat_template_kwargs,
                         )
                         if (
                             self._response_length is not None
@@ -676,7 +694,11 @@ class _GatewayActor:
                     )
                     image_data, video_data = await self._extract_multi_modal_data(messages)
                     prompt_ids = self._encode_full(
-                        messages, tools=tools, image_data=image_data, video_data=video_data
+                        messages,
+                        tools=tools,
+                        image_data=image_data,
+                        video_data=video_data,
+                        request_chat_template_kwargs=request_chat_template_kwargs,
                     )
                     active_trajectory = TrajectoryBuffer(
                         prompt_ids=prompt_ids
