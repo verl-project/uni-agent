@@ -919,36 +919,34 @@ async def test_gateway_actor_tool_argument_json_equivalence_does_not_split_after
 
 
 def test_message_prefix_falls_back_to_raw_tool_argument_value_comparison_when_arguments_are_invalid_json():
-    from uni_agent.trainer.gateway.gateway import _is_message_prefix
+    from uni_agent.trainer.gateway.gateway import _canonicalize_message_for_prefix_comparison
 
-    prefix = [
-        {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-                {
-                    "id": "call-1",
-                    "type": "function",
-                    "function": {"name": "search", "arguments": '{"query": weather}'},
-                }
-            ],
-        }
-    ]
-    messages = [
-        {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-                {
-                    "id": "call-1",
-                    "type": "function",
-                    "function": {"name": "search", "arguments": '{"query": sunny}'},
-                }
-            ],
-        }
-    ]
+    prefix_msg = {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+            {
+                "id": "call-1",
+                "type": "function",
+                "function": {"name": "search", "arguments": '{"query": weather}'},
+            }
+        ],
+    }
+    other_msg = {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+            {
+                "id": "call-1",
+                "type": "function",
+                "function": {"name": "search", "arguments": '{"query": sunny}'},
+            }
+        ],
+    }
 
-    assert _is_message_prefix(prefix, messages) is False
+    # Both have invalid JSON arguments — they fall back to raw string comparison,
+    # which correctly returns not-equal since the strings differ.
+    assert _canonicalize_message_for_prefix_comparison(prefix_msg) != _canonicalize_message_for_prefix_comparison(other_msg)
 
 
 @pytest.mark.asyncio
