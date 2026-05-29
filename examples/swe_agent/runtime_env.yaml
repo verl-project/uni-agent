@@ -1,0 +1,51 @@
+# Ray runtime env for the SWE-bench fully-async RL training example.
+#
+# This is a TEMPLATE. Fill in the placeholders (<...>) before launching, or
+# export the corresponding variables in your shell and drop them here.
+#
+# `working_dir` is uploaded to every Ray worker, so point it at your uni-agent
+# checkout. PYTHONPATH must include both your verl checkout and uni-agent so the
+# `verl.experimental.fully_async_policy` entrypoint and `uni_agent.agent_loop`
+# resolve on the workers.
+
+working_dir: <PATH_TO_YOUR_UNI_AGENT_CHECKOUT>
+excludes: ["/.git/", "/.venv/", "/__pycache__/"]
+
+pip:
+  - loguru
+  - pydantic
+  - pydantic_settings
+  - swebench
+  - modal
+  - swe-rex
+  - boto3
+  - aiohttp
+
+env_vars:
+  PYTHONPATH: "<PATH_TO_YOUR_VERL_CHECKOUT>:<PATH_TO_YOUR_UNI_AGENT_CHECKOUT>"
+  TORCH_NCCL_AVOID_RECORD_STREAMS: "1"
+  CUDA_DEVICE_MAX_CONNECTIONS: "1"
+  # Some MoE EP kernels JIT-compile at runtime and read $CUDA_HOME to locate
+  # nvcc. If your container leaves it unset, the compile fails with
+  # "/bin/nvcc not found"; set it explicitly.
+  CUDA_HOME: "/usr/local/cuda"
+  # IMPORTANT: do NOT set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True.
+  # vLLM's CuMemAllocator (sleep mode / weight transfer) is incompatible with
+  # expandable segments and will assert at startup
+  # (vllm/device_allocator/cumem.py). See pytorch/pytorch#147851.
+  #
+  # NCCL settings below are tuned for NVLink-rich multi-GPU nodes (e.g. GB200
+  # NVL72). Adjust or remove for other fabrics.
+  NCCL_CUMEM_ENABLE: "1"
+  NCCL_NVLS_ENABLE: "1"
+  NCCL_MNNVL_ENABLE: "1"
+  VLLM_USE_NCCL_SYMM_MEM: "1"
+  # Modal credentials for the swe-rex sandboxes used by the SWE-bench rollout.
+  # Create a token with `modal token new` (or `modal token set --profile=<name>`
+  # for a team workspace) and paste the id/secret here, or leave these unset and
+  # rely on ~/.modal.toml on every Ray node.
+  MODAL_TOKEN_ID: "<YOUR_MODAL_TOKEN_ID>"
+  MODAL_TOKEN_SECRET: "<YOUR_MODAL_TOKEN_SECRET>"
+  # Weights & Biases. Prefer `wandb login` on the nodes; only set this if you
+  # must pass the key through the runtime env.
+  WANDB_API_KEY: "<YOUR_WANDB_API_KEY>"
