@@ -9,6 +9,7 @@ import tempfile
 import uuid
 from pathlib import Path
 from typing import Any, Self
+from urllib.parse import urlparse
 
 from swerex.deployment.abstract import AbstractDeployment
 from swerex.deployment.hooks.abstract import CombinedDeploymentHook, DeploymentHook
@@ -24,6 +25,8 @@ from uni_agent.deployment.remote_runtime import RemoteRuntimeConfig as LocalRunt
 _APPTAINER_RUNTIMES = {"apptainer", "singularity"}
 _CONTAINER_RUNTIME_ENV_VARS = ("UNI_AGENT_CONTAINER_RUNTIME", "LOCAL_CONTAINER_RUNTIME")
 _DEFAULT_CONTAINER_RUNTIME_CANDIDATES = ("apptainer", "singularity", "docker", "podman")
+_HOST_GATEWAY_NAMES = {"host.docker.internal", "host.containers.internal"}
+_HOST_NETWORK = "host"
 _IMAGE_URI_PREFIXES = (
     "docker://",
     "oras://",
@@ -46,7 +49,7 @@ def _sanitize_name(value: str) -> str:
 
 
 def _is_running_in_container() -> bool:
-    return Path("/.dockerenv").exists()
+    return Path("/.dockerenv").exists() or Path("/run/.containerenv").exists()
 
 
 def _pick_free_port() -> int:
@@ -69,6 +72,11 @@ def _default_container_runtime() -> str:
 
 def _runtime_basename(runtime: str) -> str:
     return Path(runtime).name.lower()
+
+
+def _is_host_gateway_name(host: str) -> bool:
+    parsed = urlparse(host if "://" in host else f"http://{host}")
+    return (parsed.hostname or "").lower() in _HOST_GATEWAY_NAMES
 
 
 def _is_apptainer_runtime(runtime: str) -> bool:
@@ -183,23 +191,35 @@ class LocalDeployment(AbstractDeployment):
         ip_address = result.stdout.strip()
         return ip_address or None
 
-    def _get_runtime_host(self, container_name: str) -> str:
-        if self._config.host:
-            return self._config.host
+    def _get_oci_network(self) -> str | None:
+        return self._config.network or self._get_current_container_network()
 
-        if _is_running_in_container() or self._config.network:
+    def _get_runtime_endpoint(self, container_name: str, published_port: int, network: str | None) -> tuple[str, int]:
+        if self._config.host:
+            port = (
+                self._config.runtime_port
+                if network == _HOST_NETWORK
+                or (_is_running_in_container() and not _is_host_gateway_name(self._config.host))
+                else published_port
+            )
+            return self._config.host, port
+
+        if network == _HOST_NETWORK:
+            return "http://127.0.0.1", self._config.runtime_port
+
+        if _is_running_in_container():
             container_ip = self._get_container_ip(container_name)
             if container_ip:
-                return f"http://{container_ip}"
+                return f"http://{container_ip}", self._config.runtime_port
 
-        return "http://127.0.0.1"
+        return "http://127.0.0.1", published_port
 
     def _format_command(self, token: str, port: int) -> str:
         return self._config.command.format(token=token, port=port)
 
-    def _build_run_command(self, container_name: str, published_port: int, command: str) -> list[str]:
-        network = self._config.network or self._get_current_container_network()
-
+    def _build_run_command(
+        self, container_name: str, published_port: int, command: str, network: str | None
+    ) -> list[str]:
         args = [
             self._config.container_runtime,
             "run",
@@ -212,7 +232,8 @@ class LocalDeployment(AbstractDeployment):
         ]
         if network:
             args.extend(["--network", network])
-        args.extend(["-p", f"{published_port}:{self._config.runtime_port}"])
+        if network != _HOST_NETWORK:
+            args.extend(["-p", f"{published_port}:{self._config.runtime_port}"])
         args.extend(self._config.extra_run_args)
         args.extend([self._config.image, "-lc", command])
         return args
@@ -276,16 +297,17 @@ class LocalDeployment(AbstractDeployment):
         self._runtime = LocalRuntime.from_config(runtime_config, run_id=self.run_id)
 
     async def _start_oci_container(self, token: str, container_name: str, published_port: int) -> None:
+        network = await asyncio.to_thread(self._get_oci_network)
         command = self._format_command(token=token, port=self._config.runtime_port)
         result = await asyncio.to_thread(
-            self._runtime_exec, self._build_run_command(container_name, published_port, command)
+            self._runtime_exec, self._build_run_command(container_name, published_port, command, network)
         )
         self._container_id = result.stdout.strip()
-        host = await asyncio.to_thread(self._get_runtime_host, container_name)
+        host, port = await asyncio.to_thread(self._get_runtime_endpoint, container_name, published_port, network)
         runtime_config = LocalRuntimeConfig(
             auth_token=token,
             host=host,
-            port=self._config.runtime_port,
+            port=port,
             timeout=self._config.timeout,
         )
         self._runtime = LocalRuntime.from_config(runtime_config, run_id=self.run_id)
