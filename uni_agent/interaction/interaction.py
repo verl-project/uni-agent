@@ -141,20 +141,6 @@ class AgentInteraction:
             )
             self.logger.debug(f"Model Output:\n{model_output}")
         except MaxTokenExceededError as e:
-            # Loguru re-runs .format() on the final rendered string. If we
-            # f-string an exception repr that contains '{' or '}' (a regex
-            # like re.compile('{...}'), a config dict, JSON, code) into the
-            # template field, the log call itself raises
-            # ValueError("Single '}' encountered in format string"). The
-            # outer error handlers in run() and in the agent_loop owner
-            # also do f-string logging, so a single brace cascades into
-            # killing the rollout worker. Use logger.error("{}", msg) so
-            # the template is the literal "{}" (always safe) and the
-            # brace-prone content is a positional arg that is NOT
-            # re-parsed by .format(). Include step_idx + cache lengths so
-            # token-limit failures can be located (step 1 = initial
-            # prompt+tools+system already exceeded max_model_len before
-            # generate even ran).
             _msg = (
                 f"[step{step_idx}] MaxTokenExceededError: "
                 f"response_mask_len_before={len(self.rollout_cache.get('response_mask', []))} "
@@ -203,10 +189,6 @@ class AgentInteraction:
             self.rollout_cache = await self.model.append_messages_to_rollout_cache(error_msgs, self.rollout_cache)
             step_output.exit_reason = "format_error"
             model_output_preview = "\n".join(model_output.splitlines()[:20])
-            # model_output is LLM-generated and routinely contains literal
-            # '{' / '}' (JSON, dict literals, code snippets). Use the safe
-            # "{}" template pattern; see the MaxTokenExceededError handler
-            # above for the full loguru gotcha explanation.
             _msg = (
                 f"Fail to parse thought and action from model output.\n"
                 f"Error Message: {str(e)}\n"
@@ -366,13 +348,6 @@ class AgentInteraction:
                     break
             except Exception as e:
                 # this should not happen, if it happens, we should fix the code
-                # Same loguru brace-bearing-message gotcha as the per-step
-                # handlers above: the exception repr can contain '{' / '}'
-                # (stringified config, JSON, regex) and re-formatting via an
-                # f-string in the template field crashes the log call itself.
-                # Use the "{}" positional template; also log type + state to
-                # disambiguate root causes (Modal swerex timeout, tokenizer
-                # corruption, transient HTTP, ...).
                 _msg = (
                     f"[step{step_idx}] unknown_error: {type(e).__name__}: {e} "
                     f"response_mask_len_before={len(self.rollout_cache.get('response_mask', []))} "
