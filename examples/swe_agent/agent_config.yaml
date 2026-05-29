@@ -1,0 +1,52 @@
+# Agent-loop config for SWE-bench RL training with Modal swe-rex sandboxes.
+#
+# Referenced from the launch script via
+#   actor_rollout_ref.rollout.agent.agent_loop_config_path=<this file>
+#
+# The `concurrency` field is the total number of in-flight trajectories across
+# the whole rollout fleet (it is divided by rollout.agent.num_workers to get a
+# per-worker semaphore). Tune it against your rollout KV budget and Modal
+# sandbox quota:
+#   - Too high relative to KV cache -> vLLM preemption cascade at high KV usage.
+#   - Too high relative to your Modal workspace cap -> sandbox-create failures.
+# A safe starting point is ~20 x (number of rollout replicas); ramp up once the
+# run is steady with no preemption. SWE-bench trajectories are long
+# (max_response up to 128K), so leave generous headroom for the long tail.
+- name: swe_agent
+
+  _target_: uni_agent.agent_loop.UniAgentLoop
+
+  concurrency: 80
+  log_dir: /tmp/swe_agent_rollout_logs
+  mask_abnormal_exit_traj: false
+  # Qwen3-235B-A22B uses the Hermes tool-call template. Using the wrong parser
+  # silently mis-parses tool calls and breaks training — match the parser to
+  # your model's chat template.
+  tool_parser: hermes
+
+  interaction:
+    action_timeout: 300
+    max_turns: 300
+
+  env:
+    deployment:
+      type: modal
+      startup_timeout: 300
+      runtime_timeout: 300
+      deployment_timeout: 3600
+    env_variables:
+      PIP_PROGRESS_BAR: "off"
+      PIP_CACHE_DIR: "~/.cache/pip"
+      PAGER: "cat"
+      MANPAGER: "cat"
+      LESS: "-R"
+      TQDM_DISABLE: "1"
+      GIT_PAGER: "cat"
+
+  tools:
+    - name: str_replace_editor
+    - name: execute_bash
+    - name: submit
+
+  reward:
+    eval_timeout: 300
