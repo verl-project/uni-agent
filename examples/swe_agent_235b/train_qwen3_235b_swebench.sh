@@ -20,14 +20,10 @@
 #             (train) and swe_bench_verified.py (val)
 #   - agent:  uni_agent.agent_loop.UniAgentLoop (Modal swe-rex sandboxes)
 #   - reward: vanilla GRPO (uni_agent.reward.swe_rebench / swe_bench)
-#   - max_prompt 4K, max_response 128K (SWE-bench trajectories are long: empirically
-#     mean response ~70K tokens, ~90 turns; a 32K cap truncates ~half of them)
+#   - context: max_prompt 4K, max_response 128K
 #
 # vLLM rollout notes (vLLM 0.21.x):
 #   - performance_mode=interactivity favoured throughput in our N=32 concurrency sweep
-#   - VLLM_USE_DEEP_GEMM=0 works around a vLLM 0.21 EP/CUTLASS init issue
-#   - keep gpu_memory_utilization with headroom (~0.9) for the checkpoint-engine
-#     weight-sync buckets (~2 GiB/bucket)
 #
 # All paths/addresses/topology are overridable via the env vars below.
 
@@ -46,7 +42,7 @@ DATA_ROOT=${DATA_ROOT:-/path/to/data-root}
 EXAMPLE_DIR=${EXAMPLE_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)}
 # Qwen3-235B-A22B-Instruct-2507 snapshot (first/only snapshot under the HF cache).
 MODEL_PATH=${MODEL_PATH:-$(ls -d ${DATA_ROOT}/hf-models/hub/models--Qwen--Qwen3-235B-A22B-Instruct-2507/snapshots/*/ 2>/dev/null | head -1)}
-MODEL_PATH=${MODEL_PATH%/}  # strip trailing slash
+MODEL_PATH=${MODEL_PATH%/}
 TRAIN_FILE=${TRAIN_FILE:-${DATA_ROOT}/data/swe_agent/swe_rebench_filtered.parquet}
 TEST_FILE=${TEST_FILE:-${DATA_ROOT}/data/swe_agent/swe_bench_verified.parquet}
 AGENT_CONFIG_PATH=${AGENT_CONFIG_PATH:-${EXAMPLE_DIR}/agent_config.yaml}
