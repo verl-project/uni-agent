@@ -5,7 +5,7 @@ A **local, CPU-only** repro (no GPU, no full training stack).
 ## Install
 
 ```bash
-git clone https://github.com/verl-project/uni-agent.git && cd uni-agent
+git clone https://github.com/verl-project/uni-agent.git && cd uni-agent && git checkout yy/modal_concurrency
 python3 -m venv .venv
 source .venv/bin/activate
 # verl submodule + other deps
@@ -26,6 +26,7 @@ DEPLOYMENT=modal python examples/data_preprocess/swe_bench_verified.py --local-s
 # 2. Run: start Ray, run the samples concurrently. Each sample spins up
 #    a Modal sandbox -> applies gold patch -> evaluates -> closes the sandbox.
 GLOBAL_CONCURRENCY=64 DEPLOYMENT=modal python -m reproduce.run
+GLOBAL_CONCURRENCY=256 DEPLOYMENT=modal python -m reproduce.run
 ```
 
 ## Logs

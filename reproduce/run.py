@@ -8,12 +8,17 @@ from pathlib import Path
 
 import ray
 from datasets import load_dataset
+from tqdm import tqdm
 
 from uni_agent.async_logging import add_file_handler, cleanup_handlers
 from uni_agent.interaction import AgentEnv, AgentEnvConfig
 from uni_agent.reward import load_reward_spec
 
-logger = logging.getLogger(__file__)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(message)s",
+)
+logger = logging.getLogger(__name__)
 logger.setLevel("INFO")
 
 
@@ -111,22 +116,40 @@ class TestEvalActor:
 
 def main():
     ray.init()
-    data_path = "reproduce/swe_bench_verified_modal.parquet"
+    data_path = "./reproduce/swe_bench_verified_modal.parquet"
     dataset = load_dataset("parquet", data_files=data_path, split="train")
     samples = dataset.to_list()
     workers = [TestEvalActor.remote() for _ in range(NUM_WORKERS)]
-    futures = []
-    chunk_size = (len(samples) - 1) // len(workers) + 1
-    for i in range(len(workers)):
-        chunk = samples[i * chunk_size : (i + 1) * chunk_size]
-        futures.append(workers[i].run_batch.remote(chunk))
-    # each future returns a list of per-sample results (one chunk per worker)
+    # one future per sample (round-robin across workers) so we can track
+    # per-sample progress; the actor semaphore still bounds real concurrency.
+    futures = [workers[i % len(workers)].run_single.remote(s) for i, s in enumerate(samples)]
+    fut_to_idx = {f: i for i, f in enumerate(futures)}
 
     begin_time = time.time()
-    results_chunk = ray.get(futures)
+    results = [None] * len(futures)
+    ok = wa = tle = 0
+    remaining = list(futures)
+    with tqdm(
+        total=len(futures),
+        desc="🚀 eval",
+        colour="green",
+        bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]{postfix}",
+    ) as pbar:
+        while remaining:
+            done, remaining = ray.wait(remaining, num_returns=1)
+            for d in done:
+                res = ray.get(d)
+                results[fut_to_idx[d]] = res
+                if res.get("resolved"):
+                    ok += 1
+                elif res.get("eval_completed"):
+                    wa += 1
+                else:
+                    tle += 1
+                pbar.set_postfix_str(f"✅{ok} ❌WA{wa} ⏱TLE{tle}")
+                pbar.update(1)
     end_time = time.time()
     logger.info(f"time cost: {end_time - begin_time:.2f}s")
-    results = [item for chunk in results_chunk for item in chunk]
     all_num = len(results)
     success_num = len([item for item in results if item.get("resolved")])
     fail_wa_num = len([item for item in results if not item.get("resolved") and item.get("eval_completed")])
