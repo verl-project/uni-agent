@@ -6,6 +6,7 @@ import shutil
 import socket
 import subprocess
 import tempfile
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Self
@@ -14,7 +15,6 @@ from swerex.deployment.abstract import AbstractDeployment
 from swerex.deployment.hooks.abstract import CombinedDeploymentHook, DeploymentHook
 from swerex.exceptions import DeploymentNotStartedError
 from swerex.runtime.abstract import Command, CreateBashSessionRequest, IsAliveResponse, UploadRequest
-from swerex.utils.wait import _wait_until_alive
 
 from uni_agent.async_logging import get_logger
 from uni_agent.deployment.config import LocalDeploymentConfig
@@ -99,6 +99,7 @@ class LocalDeployment(AbstractDeployment):
         self._server_process: subprocess.Popen[str] | None = None
         self._server_log_path: Path | None = None
         self._server_log_handle: Any | None = None
+        self._server_log_preserve = False
         self._stopped = False
 
     def add_hook(self, hook: DeploymentHook):
@@ -119,12 +120,35 @@ class LocalDeployment(AbstractDeployment):
         return await self._runtime.is_alive(timeout=timeout)
 
     async def _wait_until_alive(self, timeout: float) -> IsAliveResponse:
-        try:
-            return await _wait_until_alive(self.is_alive, timeout=timeout, function_timeout=0.5)
-        except TimeoutError as e:
-            self.logger.error("Local runtime did not start within timeout.")
-            await self.stop()
-            raise e
+        end_time = time.time() + timeout
+        n_attempts = 0
+        await_response = None
+        while time.time() < end_time:
+            if self._server_process is not None:
+                returncode = self._server_process.poll()
+                if returncode is not None:
+                    logs = self._get_apptainer_logs()
+                    message = f"Local runtime process exited before becoming alive with return code {returncode}."
+                    if logs:
+                        message = f"{message}\nContainer logs:\n{logs}"
+                    self.logger.error(message)
+                    await self.stop()
+                    raise RuntimeError(message)
+
+            await_response = await self.is_alive(timeout=0.5)
+            if await_response:
+                return await_response
+            await asyncio.sleep(0.25)
+            n_attempts += 1
+
+        last_response_message = await_response.message if await_response else None
+        message = (
+            f"Runtime did not start within {timeout}s (tried to connect {n_attempts} times). "
+            f"The last await response was:\n{last_response_message}"
+        )
+        self.logger.error("Local runtime did not start within timeout.")
+        await self.stop()
+        raise TimeoutError(message)
 
     def _get_token(self) -> str:
         return str(uuid.uuid4())
@@ -251,11 +275,27 @@ class LocalDeployment(AbstractDeployment):
         except Exception as exc:
             return f"<failed to fetch logs: {exc}>"
 
-    def _start_apptainer_process(self, args: list[str]) -> subprocess.Popen[str]:
-        fd, log_path = tempfile.mkstemp(prefix=f"uni-agent-local-{_sanitize_name(self.run_id)}-", suffix=".log")
+    def _configured_server_log_dir(self) -> Path | None:
+        log_dir = os.getenv("UNI_AGENT_LOCAL_DEPLOYMENT_LOG_DIR")
+        if not log_dir or log_dir.lower() in {"none", "false", "off"}:
+            return None
+        return Path(log_dir).expanduser()
+
+    def _open_server_log_file(self) -> tuple[Path, Any, bool]:
+        configured_log_dir = self._configured_server_log_dir()
+        if configured_log_dir is not None:
+            configured_log_dir.mkdir(parents=True, exist_ok=True)
+        fd, log_path = tempfile.mkstemp(
+            prefix=f"uni-agent-local-{_sanitize_name(self.run_id)}-",
+            suffix=".log",
+            dir=str(configured_log_dir) if configured_log_dir is not None else None,
+        )
         os.close(fd)
-        self._server_log_path = Path(log_path)
-        self._server_log_handle = self._server_log_path.open("w", encoding="utf-8", errors="replace")
+        path = Path(log_path)
+        return path, path.open("w", encoding="utf-8", errors="replace"), configured_log_dir is not None
+
+    def _start_apptainer_process(self, args: list[str]) -> subprocess.Popen[str]:
+        self._server_log_path, self._server_log_handle, self._server_log_preserve = self._open_server_log_file()
         self.logger.debug(f"Running Apptainer command: {_shell_join(args)}")
         return subprocess.Popen(
             args,
@@ -375,11 +415,15 @@ class LocalDeployment(AbstractDeployment):
 
         if self._server_log_path:
             try:
-                self._server_log_path.unlink(missing_ok=True)
+                if self._server_log_preserve:
+                    self.logger.info(f"Local deployment server log: {self._server_log_path}")
+                else:
+                    self._server_log_path.unlink(missing_ok=True)
             except Exception:
                 pass
             finally:
                 self._server_log_path = None
+                self._server_log_preserve = False
 
         if self._container_name and not _is_apptainer_runtime(self._config.container_runtime):
             try:

@@ -1,5 +1,7 @@
 import asyncio
 
+import pytest
+
 from uni_agent.deployment.local import deployment as local_deployment
 from uni_agent.deployment.local.deployment import (
     LocalDeployment,
@@ -164,6 +166,33 @@ class _FakeProcess:
         self.killed = True
 
 
+class _ExitedProcess:
+    def poll(self):
+        return 23
+
+
+def test_wait_until_alive_fails_when_apptainer_process_exits_early(tmp_path):
+    deployment = LocalDeployment(
+        run_id="test",
+        type="local",
+        container_runtime="apptainer",
+    )
+    log_path = tmp_path / "apptainer.log"
+    log_path.write_text("registry denied image access", encoding="utf-8")
+    deployment._server_process = _ExitedProcess()
+    deployment._server_log_path = log_path
+    deployment._stopped = False
+
+    with pytest.raises(RuntimeError) as exc_info:
+        asyncio.run(deployment._wait_until_alive(timeout=30))
+
+    message = str(exc_info.value)
+    assert "return code 23" in message
+    assert "registry denied image access" in message
+    assert deployment._stopped
+    assert not log_path.exists()
+
+
 def test_stop_closes_runtime_and_apptainer_process_without_docker_rm(tmp_path):
     deployment = LocalDeployment(
         run_id="test",
@@ -196,3 +225,30 @@ def test_stop_closes_runtime_and_apptainer_process_without_docker_rm(tmp_path):
     assert deployment._container_name is None
     assert deployment._container_id is None
     assert not log_path.exists()
+
+
+def test_configured_apptainer_server_log_dir_is_preserved(monkeypatch, tmp_path):
+    log_dir = tmp_path / "local-deployment-logs"
+    monkeypatch.setenv("UNI_AGENT_LOCAL_DEPLOYMENT_LOG_DIR", str(log_dir))
+    deployment = LocalDeployment(
+        run_id="test",
+        type="local",
+        container_runtime="apptainer",
+    )
+
+    log_path, log_handle, preserve = deployment._open_server_log_file()
+    log_handle.write("server log")
+    deployment._server_log_path = log_path
+    deployment._server_log_handle = log_handle
+    deployment._server_log_preserve = preserve
+    deployment._stopped = False
+
+    asyncio.run(deployment.stop())
+
+    assert preserve
+    assert log_path.parent == log_dir
+    assert log_path.name.startswith("uni-agent-local-test-")
+    assert log_path.exists()
+    assert log_path.read_text(encoding="utf-8") == "server log"
+    assert deployment._server_log_path is None
+    assert deployment._server_log_handle is None

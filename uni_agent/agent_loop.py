@@ -1,5 +1,6 @@
 import asyncio
 import json
+import os
 import pickle
 import uuid
 from pathlib import Path
@@ -162,6 +163,9 @@ class UniAgentLoop(AgentLoopBase):
         assert agent_loop_config_path is not None, "agent_loop_config_path is None"
         resolved_path = resolve_config_path(agent_loop_config_path)
         config_dict = yaml.safe_load(Path(resolved_path).read_text())[0]
+        agent_log_dir = os.getenv("UNI_AGENT_AGENT_LOG_DIR")
+        if agent_log_dir:
+            config_dict["log_dir"] = agent_log_dir
         # model config
         rollout_config = self.config.actor_rollout_ref.rollout
         max_model_len = (

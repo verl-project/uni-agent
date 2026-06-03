@@ -1,8 +1,12 @@
 """Abstract base for reward specs."""
 
-from abc import ABC, abstractmethod
+from __future__ import annotations
 
-from verl.experimental.agent_loop.agent_loop import AgentLoopOutput
+from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from verl.experimental.agent_loop.agent_loop import AgentLoopOutput
 
 
 class AbstractRewardSpec(ABC):

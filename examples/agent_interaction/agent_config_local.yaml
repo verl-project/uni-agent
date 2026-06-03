@@ -1,0 +1,34 @@
+- name: swe_agent
+
+  _target_: uni_agent.agent_loop.UniAgentLoop
+
+  concurrency: 4
+  log_dir: tmp/inference/agent-runs
+  mask_abnormal_exit_traj: false
+
+  interaction:
+    action_timeout: 300
+    max_turns: 300
+
+  env:
+    deployment:
+      type: local
+      command: python3 -m pip install -q swe-rex && python3 -m swerex.server --host 0.0.0.0 --port {port} --auth-token {token}
+      timeout: 600
+      startup_timeout: 180
+    env_variables:
+      PIP_PROGRESS_BAR: "off"
+      PIP_CACHE_DIR: "~/.cache/pip"
+      PAGER: "cat"
+      MANPAGER: "cat"
+      LESS: "-R"
+      TQDM_DISABLE: "1"
+      GIT_PAGER: "cat"
+
+  tools:
+    - name: str_replace_editor
+    - name: execute_bash
+    - name: submit
+
+  reward:
+    eval_timeout: 600
