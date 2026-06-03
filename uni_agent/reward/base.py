@@ -2,14 +2,12 @@
 
 from abc import ABC, abstractmethod
 
-from verl.experimental.agent_loop.agent_loop import AgentLoopOutput
-
 
 class AbstractRewardSpec(ABC):
     """Reward spec: computes reward from interaction result and optional env eval."""
 
     @abstractmethod
-    def compute_reward(self) -> AgentLoopOutput:
+    def compute_reward(self):
         """
         Compute reward (and optionally run eval in env) and return agent loop output.
 
