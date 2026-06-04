@@ -9,9 +9,12 @@ by the ``swe_bench_multilingual`` reward spec, so we only keep the fields that
 ``problem_statement``, ``FAIL_TO_PASS``, ``PASS_TO_PASS``.
 
 The repo lives at ``/testbed`` in the published ``swebench/sweb.eval.x86_64.<id>``
-images. The post-setup reset restores tracked files to ``base_commit`` but does NOT
-``git clean`` (that would delete build artifacts from image build and break the
-compiled-language test suites).
+images. The image already holds the repo at ``base_commit`` plus the harness's
+build-time ``pre_install``/``build`` edits (e.g. apache/lucene injects a gradle
+``testLogging`` block the parser relies on). Those edits are uncommitted, so
+post-setup *commits* them (instead of ``git reset --hard``, which would revert them
+and break grading) -- giving the agent a clean tree while preserving the build
+config.
 
 Example::
 
@@ -123,12 +126,13 @@ def build_swe_bench_multilingual():
             "PASS_TO_PASS": example["PASS_TO_PASS"],
         }
 
-        # Restore tracked files to base_commit, but keep untracked build artifacts.
         reset_script = " && ".join(
             [
                 "cd /testbed",
                 "git config --global --add safe.directory /testbed",
-                f"git reset --hard {example['base_commit']}",
+                "git config --global user.email swe-bench@example.com",
+                "git config --global user.name swe-bench",
+                'git commit -aqm "swe-bench setup" || true',
             ]
         )
 
