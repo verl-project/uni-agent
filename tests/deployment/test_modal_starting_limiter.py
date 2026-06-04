@@ -1,8 +1,8 @@
 """Tests for the Modal cold-start fleet limiter (2026-05-22 Patch).
 
 Covers:
-  * `_get_starting_semaphore` derives per-worker permits = MAX_STARTING / NUM_WORKERS,
-    is lazy, idempotent (singleton), and clamps to >=1.
+  * `_get_starting_semaphore` reads per-worker permits from
+    MODAL_MAX_STARTING_PER_WORKER, is lazy, idempotent (singleton), and clamps to >=1.
   * `ModalDeployment.start` retry loop respects max_retries=2 (not 5).
   * `ModalDeployment.start` wall-clock budget aborts further attempts once
     `MODAL_INIT_WALL_BUDGET` is exceeded.
@@ -30,17 +30,16 @@ from uni_agent.deployment.modal.deployment import ModalDeployment
 # -------------------- helpers --------------------
 
 
-def _reset_limiter_state(monkeypatch, *, num_workers=8, max_starting=128, wall_budget=900.0):
-    """Pin module constants to known values and force semaphore re-init.
+def _reset_limiter_state(monkeypatch, *, per_worker=16, wall_budget=900.0):
+    """Pin the limiter env vars to known values and force semaphore re-init.
 
-    Module-level constants are read at import; we mutate them with
-    monkeypatch.setattr so they revert after the test. `_STARTING_SEMA`
-    is the singleton cache -- clear it so the next call rebuilds with
-    the patched values.
+    The limiter reads MODAL_MAX_STARTING_PER_WORKER and MODAL_INIT_WALL_BUDGET
+    lazily (at first use / per call), so we set them via monkeypatch.setenv and
+    they revert after the test. `_STARTING_SEMA` is the singleton cache -- clear
+    it so the next call rebuilds with the patched value.
     """
-    monkeypatch.setattr(mod, "_NUM_WORKERS", num_workers, raising=True)
-    monkeypatch.setattr(mod, "_MAX_STARTING_GLOBAL", max_starting, raising=True)
-    monkeypatch.setattr(mod, "_INIT_WALL_BUDGET", wall_budget, raising=True)
+    monkeypatch.setenv("MODAL_MAX_STARTING_PER_WORKER", str(per_worker))
+    monkeypatch.setenv("MODAL_INIT_WALL_BUDGET", str(wall_budget))
     monkeypatch.setattr(mod, "_STARTING_SEMA", None, raising=True)
 
 
@@ -95,21 +94,21 @@ class _FakeDeployment(ModalDeployment):
 # -------------------- _get_starting_semaphore --------------------
 
 
-def test_starting_semaphore_per_worker_share_is_max_over_num_workers(monkeypatch):
-    _reset_limiter_state(monkeypatch, num_workers=8, max_starting=128)
+def test_starting_semaphore_uses_per_worker_env(monkeypatch):
+    _reset_limiter_state(monkeypatch, per_worker=16)
 
     async def _check():
         sem = mod._get_starting_semaphore()
         # Internal asyncio.Semaphore exposes its initial value via `_value`
         # on CPython 3.10+. This is the contract we rely on.
-        assert sem._value == 16, f"expected 128/8=16, got {sem._value}"
+        assert sem._value == 16, f"expected 16, got {sem._value}"
 
     asyncio.run(_check())
 
 
-def test_starting_semaphore_clamps_to_one_when_share_would_be_zero(monkeypatch):
-    # 7 global perms across 8 workers => floor(7/8)=0 -> must clamp to 1
-    _reset_limiter_state(monkeypatch, num_workers=8, max_starting=7)
+def test_starting_semaphore_clamps_to_one(monkeypatch):
+    # A per-worker value of 0 (or negative) must clamp to >=1 -> no deadlock.
+    _reset_limiter_state(monkeypatch, per_worker=0)
 
     async def _check():
         sem = mod._get_starting_semaphore()
@@ -119,7 +118,7 @@ def test_starting_semaphore_clamps_to_one_when_share_would_be_zero(monkeypatch):
 
 
 def test_starting_semaphore_is_singleton(monkeypatch):
-    _reset_limiter_state(monkeypatch, num_workers=4, max_starting=20)
+    _reset_limiter_state(monkeypatch, per_worker=5)
 
     async def _check():
         a = mod._get_starting_semaphore()
@@ -129,9 +128,8 @@ def test_starting_semaphore_is_singleton(monkeypatch):
     asyncio.run(_check())
 
 
-def test_starting_semaphore_handles_single_worker(monkeypatch):
-    # Edge case: degenerate 1-worker rollouter
-    _reset_limiter_state(monkeypatch, num_workers=1, max_starting=64)
+def test_starting_semaphore_respects_large_value(monkeypatch):
+    _reset_limiter_state(monkeypatch, per_worker=64)
 
     async def _check():
         sem = mod._get_starting_semaphore()
@@ -256,7 +254,7 @@ def test_starting_semaphore_serializes_concurrent_starts(monkeypatch):
     """With per-worker permits=2, 6 concurrent _start calls must have
     at most 2 inside the critical section at any time.
     """
-    _reset_limiter_state(monkeypatch, num_workers=4, max_starting=8)  # 8/4=2 permits
+    _reset_limiter_state(monkeypatch, per_worker=2)  # 2 permits
 
     # Each _start holds the permit for 0.05s, then succeeds.
     async def slow_ok(dep):
@@ -286,7 +284,7 @@ def test_starting_semaphore_caps_global_in_flight(monkeypatch):
     semaphore really caps the number of `_start` bodies running
     simultaneously across multiple ModalDeployment instances.
     """
-    _reset_limiter_state(monkeypatch, num_workers=4, max_starting=8)  # 2 permits
+    _reset_limiter_state(monkeypatch, per_worker=2)  # 2 permits
 
     shared = {"in_flight": 0, "peak": 0}
     lock = asyncio.Lock()
@@ -308,7 +306,7 @@ def test_starting_semaphore_caps_global_in_flight(monkeypatch):
 
     assert shared["in_flight"] == 0
     assert shared["peak"] <= 2, (
-        f"semaphore must cap concurrent _start bodies at 2 (= 8 global / 4 workers), observed peak={shared['peak']}"
+        f"semaphore must cap concurrent _start bodies at 2 (per-worker permits), observed peak={shared['peak']}"
     )
     assert shared["peak"] >= 1
 
@@ -317,7 +315,7 @@ def test_starting_semaphore_released_on_failure(monkeypatch):
     """Permit must be released even when `_start` raises -- otherwise
     a chain of failures would slowly leak all permits and deadlock.
     """
-    _reset_limiter_state(monkeypatch, num_workers=1, max_starting=1)  # 1 permit
+    _reset_limiter_state(monkeypatch, per_worker=1)  # 1 permit
 
     fail_first_two = {"n": 0}
 

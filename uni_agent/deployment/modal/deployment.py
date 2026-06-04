@@ -23,37 +23,32 @@ from uni_agent.deployment.remote_runtime import RemoteRuntime, RemoteRuntimeConf
 __all__ = ["ModalDeployment"]
 
 
-# Modal cold-start fleet limiter.
-#
-# Mode A (run.log: "Runtime did not start within 299s") is the dominant Modal
-# failure mode at agent_concurrency >= 128: too many sandboxes hit the Modal
-# region's runtime-start pipeline simultaneously and timeout. The fix is NOT
-# to throttle the sandbox CREATE rate (Will gave us 30/s + 2k burst, vastly
-# above our actual ~1-2/s) but to cap how many sandboxes are simultaneously
-# in the "created but runtime not yet alive" state.
-#
-# _MAX_STARTING_GLOBAL is the user-facing fleet-wide intent. Because
-# asyncio.Semaphore is process-local, we divide by num_workers to derive each
-# worker's share -- same pattern as agent_loop.py's per-worker _semaphore.
-#
-# _INIT_WALL_BUDGET caps a single trajectory's total init wall-clock so a
-# stuck trajectory cannot hog a STARTING permit for 30+ minutes (the old
-# 5 retries x 300s startup_timeout scenario).
-_NUM_WORKERS = int(os.getenv("UNIAGENT_NUM_WORKERS", "8"))
-_MAX_STARTING_GLOBAL = int(os.getenv("MODAL_MAX_STARTING", "128"))
-_INIT_WALL_BUDGET = float(os.getenv("MODAL_INIT_WALL_BUDGET", "900"))
+# Cap how many Modal sandboxes are simultaneously in the "created but runtime
+# not yet alive" state; too many at once cause "Runtime did not start" timeouts.
+# The semaphore is process-local, so MODAL_MAX_STARTING_PER_WORKER is a
+# per-worker cap (size it as fleet-wide target / num rollout workers).
+# MODAL_INIT_WALL_BUDGET caps a single trajectory's total init wall-clock.
+_DEFAULT_MAX_STARTING_PER_WORKER = 16
+_DEFAULT_INIT_WALL_BUDGET = 900.0
 _STARTING_SEMA: asyncio.Semaphore | None = None
 
 
 def _get_starting_semaphore() -> asyncio.Semaphore:
-    """Lazy-init STARTING semaphore. Lazy because asyncio.Semaphore must be
-    constructed inside the running event loop on some Python versions, and we
-    want the env vars resolved at first use rather than import time."""
+    """Lazy-init the per-worker STARTING semaphore.
+
+    Lazy so it is built inside the running loop and the env var is read at
+    first use, not at import (so vars set after import still apply).
+    """
     global _STARTING_SEMA
     if _STARTING_SEMA is None:
-        per_worker = max(1, _MAX_STARTING_GLOBAL // _NUM_WORKERS)
+        per_worker = max(1, int(os.getenv("MODAL_MAX_STARTING_PER_WORKER", str(_DEFAULT_MAX_STARTING_PER_WORKER))))
         _STARTING_SEMA = asyncio.Semaphore(per_worker)
     return _STARTING_SEMA
+
+
+def _get_init_wall_budget() -> float:
+    """Per-trajectory init wall-clock budget (seconds), resolved at call time."""
+    return float(os.getenv("MODAL_INIT_WALL_BUDGET", str(_DEFAULT_INIT_WALL_BUDGET)))
 
 
 def _get_modal_user() -> str:
@@ -232,10 +227,8 @@ class ModalDeployment(AbstractDeployment):
         if self._app is None:
             self._app = await modal.App.lookup.aio("swe-rex", create_if_missing=True)
 
-        # Hold the STARTING permit from sandbox.create through runtime alive.
-        # Release as soon as runtime.create_session returns: tool-call execution
-        # afterwards is LLM-bound and does not stress Modal's cold-start
-        # pipeline, so it must not occupy a permit.
+        # Hold the STARTING permit only through runtime startup; the tool-call
+        # body afterwards is LLM-bound and must not occupy a permit.
         async with _get_starting_semaphore():
             self.logger.info(f"Starting modal sandbox with image {self._image_name}")
             self._hooks.on_custom_step("Starting modal sandbox")
@@ -275,23 +268,19 @@ class ModalDeployment(AbstractDeployment):
             self.logger.info(f"Runtime started in {time.time() - t1:.2f}s")
 
     async def start(self, max_retries: int = 2):
-        """Starts the runtime with retry, bounded by a wall-clock budget.
+        """Start the runtime with retry, bounded by MODAL_INIT_WALL_BUDGET.
 
-        Two changes vs the original 5-retry loop:
-          * max_retries 5 -> 2: with startup_timeout=300s each, 5 retries
-            could hold a STARTING permit for ~25 minutes -- starving the
-            limiter for everyone else. 2 attempts caps that at ~10 min.
-          * MODAL_INIT_WALL_BUDGET hard cap (default 900s = 15 min): if the
-            sum of attempts exceeds this, give up early. The trajectory
-            becomes a reward=0 masked sample (handled in agent_loop.py's
-            outer except) which is far cheaper than blocking a permit.
+        Few retries + a wall-clock cap stop a stuck trajectory from holding a
+        STARTING permit for many minutes; on exhaustion it raises and the outer
+        agent_loop turns it into a reward=0 masked sample.
         """
         last_error: Exception | None = None
-        deadline = time.monotonic() + _INIT_WALL_BUDGET
+        wall_budget = _get_init_wall_budget()
+        deadline = time.monotonic() + wall_budget
         for retry in range(max_retries):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                self.logger.critical(f"Wall-clock budget {_INIT_WALL_BUDGET}s exhausted before attempt {retry + 1}")
+                self.logger.critical(f"Wall-clock budget {wall_budget}s exhausted before attempt {retry + 1}")
                 break
             try:
                 await asyncio.wait_for(self._start(), timeout=max(60.0, remaining))
@@ -306,24 +295,15 @@ class ModalDeployment(AbstractDeployment):
                     await asyncio.sleep(sleep_time)
 
         raise RuntimeError(
-            f"Failed to create modal sandbox after {max_retries} retries (wall budget {_INIT_WALL_BUDGET}s)"
+            f"Failed to create modal sandbox after {max_retries} retries (wall budget {wall_budget}s)"
         ) from last_error
 
     async def stop(self):
-        """Stops the runtime.
+        """Stop the runtime, best-effort.
 
-        Best-effort: each cleanup step is wrapped so a transient failure in one
-        does NOT skip subsequent steps. Specifically, we must always reach the
-        Modal sandbox terminate call, otherwise the sandbox lingers on Modal's
-        side and counts against the account's concurrent-sandbox cap.
-
-        Observed leak (round12, 2026-05-18): `self._runtime.close()` raises
-        `aiohttp.ServerDisconnectedError` when the agent server side has
-        already torn down the socket. Without the try/except, the function
-        returned early and `self._sandbox.terminate.aio()` never ran. After
-        thousands of trajectories across multiple runs, ~847 sandboxes were
-        leaked, hitting Modal's account cap and 100% failing new sandbox
-        creates in subsequent runs.
+        Each step is wrapped so a transient failure (e.g. runtime.close raising
+        when the socket is already gone) never skips sandbox terminate -- a
+        leaked sandbox counts against the account's concurrent-sandbox cap.
         """
         if self._runtime is not None:
             try:
