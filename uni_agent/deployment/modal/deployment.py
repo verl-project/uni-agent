@@ -23,7 +23,7 @@ from uni_agent.deployment.remote_runtime import RemoteRuntime, RemoteRuntimeConf
 __all__ = ["ModalDeployment"]
 
 _NUM_WORKERS = int(os.getenv("UNIAGENT_NUM_WORKERS", "8"))
-_MAX_STARTING_GLOBAL = int(os.getenv("MODAL_MAX_STARTING", "128"))
+_MAX_STARTING_GLOBAL = int(os.getenv("MODAL_MAX_STARTING", "10000"))
 _INIT_WALL_BUDGET = float(os.getenv("MODAL_INIT_WALL_BUDGET", "900"))
 _STARTING_SEMA: asyncio.Semaphore | None = None
 
