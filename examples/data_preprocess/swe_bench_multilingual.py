@@ -24,8 +24,7 @@ import os
 
 from datasets import load_dataset
 
-from swebench.harness.constants import MAP_REPO_TO_EXT, MAP_REPO_VERSION_TO_SPECS
-from swebench.harness.log_parsers import MAP_REPO_TO_PARSER
+from swebench.harness.constants import MAP_REPO_TO_EXT
 
 impl = os.getenv("DEPLOYMENT", "modal").lower()
 if impl != "modal":
@@ -106,20 +105,6 @@ A successful resolution means:
 """.strip()
 
 
-def _keep(example: dict) -> bool:
-    """Drop anything the official harness can't grade (a safety net; the released
-    dataset is fully covered)."""
-    repo = example.get("repo")
-    version = str(example.get("version"))
-    if repo not in MAP_REPO_TO_PARSER or repo not in MAP_REPO_TO_EXT:
-        return False
-    if repo not in MAP_REPO_VERSION_TO_SPECS or version not in MAP_REPO_VERSION_TO_SPECS[repo]:
-        return False
-    if not (example.get("test_patch") or "").strip():
-        return False
-    return bool(example.get("FAIL_TO_PASS"))
-
-
 def build_swe_bench_multilingual():
     def process(example):
         repo = example["repo"]
@@ -178,9 +163,7 @@ def build_swe_bench_multilingual():
     dataset = load_dataset(data_source, split="test")
     print(f"Loaded {len(dataset)} raw instances", flush=True)
 
-    dataset = dataset.filter(_keep)
-    print(f"{len(dataset)} instances remain after filtering", flush=True)
-
+    # Test set: keep every instance (no filtering).
     dataset = dataset.map(process, remove_columns=dataset.column_names)
     return dataset
 
