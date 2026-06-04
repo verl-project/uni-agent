@@ -198,6 +198,7 @@ class AgentInteraction:
             return step_output
 
         step_output.thought = content
+        self.logger.info(f"💭 THOUGHT:\n{content}")
 
         # step 4: chat_mode-only end-of-turn (single-shot already raised above).
         if not tool_calls:

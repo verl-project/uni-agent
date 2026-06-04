@@ -8,7 +8,7 @@ Uni-Agent is a unified framework for general agents at scale.
 - **All-in-one stack:** one framework for building, running, and training agents.
 - **Unified agent interface:** unified abstractions for diverse and complex real-world agent scenarios.
 
-The long-term vision is to build the backend infrastructure for next-generation agents across both inference and training, enabling them to perceive, act, and explore complex real-world tasks.
+The long-term vision is to build the backend infrastructure across both inference and training, enabling agents to perceive, act, and explore complex real-world tasks.
 
 ## Highlights ✨
 
@@ -17,15 +17,6 @@ The long-term vision is to build the backend infrastructure for next-generation 
 **Large-scale parallel interaction:** Uni-Agent supports high-throughput, stable parallel inference, execution, and verification for 1000+ concurrent agent tasks.
 
 **One stack from inference to training:** Uni-Agent reuses the same interaction stack from large-scale agent execution to RL training, with support for advanced paradigms such as fully-async and partial rollout.
-
-## Vision: Milo & Miko 🔮
-
-Beyond the framework, the research direction we are building toward is **agents that continually learn from real conversations with the people who use them**. We are framing this around two flagship agents:
-
-- **Project Milo** — the chat agent that actually gets you. Reads intent and subtext, learns what matters to you over time, and on top of that helps you get work done across schedules, mail, and docs. Seed prototype: [`app/lark_chat`](./app/lark_chat).
-- **Project Miko** — the coding agent that actually gets the problem. Reads specs and codebases, reasons through real engineering challenges, and on top of that manages the whole project for excellent end-to-end performance.
-
-This is a long-term proposal, not a current release. Read the full vision: [Agents That Grow With You](https://uni-agent.readthedocs.io/en/latest/blog/vision.html).
 
 ## Quickstart 🚀
 
@@ -124,7 +115,7 @@ The roadmap below highlights the next major directions for Uni-Agent.
 **Tool and Task Support**
 
 - [ ] GUI tool support.
-- [ ] Integration of Skills.
+- [x] Integration of Skills.
 - [ ] More built-in tools and task patterns.
 
 **Model Support**
@@ -139,6 +130,13 @@ The roadmap below highlights the next major directions for Uni-Agent.
 **Performance Optimization**
 
 - [ ] Optimize Agentic RL rollout performance (Ref: [Issue #6383](https://github.com/verl-project/verl/issues/6383)).
+
+## Acknowledgement 🙏
+
+Uni-Agent's large-scale parallel interaction and verification rely on remote sandbox backends. We gratefully acknowledge:
+
+- **[veFaaS](https://www.volcengine.com/product/vefaas)**: Volcengine Function-as-a-Service, used as a serverless backend for elastically launching agent sandboxes at scale.
+- **[Modal](https://modal.com)**: serverless cloud compute used to spin up isolated, reproducible sandbox environments for agent execution and evaluation.
 
 ## Citation 📚
 

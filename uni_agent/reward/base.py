@@ -7,11 +7,13 @@ class AbstractRewardSpec(ABC):
     """Reward spec: computes reward from interaction result and optional env eval."""
 
     @abstractmethod
-    def compute_reward(self):
+    async def compute_reward(self, interaction_result: dict, **kwargs) -> tuple:
         """
-        Compute reward (and optionally run eval in env) and return agent loop output.
+        Compute reward (and optionally run eval in env) from the interaction result.
 
         Returns:
-            AgentLoopOutput with reward_score and token ids from interaction_result.
+            A 2-tuple whose first element is the reward score (or eval report) and
+            whose second element is auxiliary info; the concrete element types
+            depend on the reward spec.
         """
         ...
