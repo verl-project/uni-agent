@@ -141,6 +141,10 @@ class SWEReBenchV2RewardSpec(AbstractRewardSpec):
             parser_name = instance.get("log_parser") or (instance.get("install_config") or {}).get("log_parser")
             parser = get_parser(parser_name)
             grading = (instance.get("grading") or "strict").lower()
+            self.logger.info(
+                f"SWE-rebench-V2 eval start: instance={instance.get('instance_id')} "
+                f"workdir={workdir} parser={parser_name} grading={grading} test_cmds={test_cmds}"
+            )
 
             eval_script = self._build_eval_script(workdir, base_commit, test_patch, test_cmds)
             script_path = Path(f"/tmp/sbv2_eval_{uuid.uuid4().hex}.sh")
@@ -163,6 +167,11 @@ class SWEReBenchV2RewardSpec(AbstractRewardSpec):
             subset_resolved = fail_to_pass <= passed and pass_to_pass <= passed
             resolved = passed_match if grading == "strict" else subset_resolved
 
+            f2p_resolved = sorted(fail_to_pass & passed)
+            f2p_missing = sorted(fail_to_pass - passed)
+            p2p_failed = sorted(pass_to_pass - passed)
+            unexpected_passed = sorted(passed - expected)
+
             result.update(
                 {
                     "resolved": resolved,
@@ -171,23 +180,73 @@ class SWEReBenchV2RewardSpec(AbstractRewardSpec):
                     "grading": grading,
                     "parser": parser_name,
                     "workdir": workdir,
+                    "num_parsed": len(parsed),
                     "num_passed_actual": len(passed),
-                    "fail_to_pass_resolved": sorted(fail_to_pass & passed),
-                    "fail_to_pass_missing": sorted(fail_to_pass - passed),
-                    "pass_to_pass_failed": sorted(pass_to_pass - passed),
-                    "unexpected_passed": sorted(passed - expected),
+                    "num_expected": len(expected),
+                    "fail_to_pass_resolved": f2p_resolved,
+                    "fail_to_pass_missing": f2p_missing,
+                    "pass_to_pass_failed": p2p_failed,
+                    "unexpected_passed": unexpected_passed,
                 }
             )
             self.logger.info(
                 f"SWE-rebench-V2 eval: resolved={resolved} passed_match={passed_match} "
-                f"subset={subset_resolved} f2p={len(fail_to_pass & passed)}/{len(fail_to_pass)} "
-                f"p2p_failed={len(pass_to_pass - passed)} parser={parser_name}"
+                f"subset={subset_resolved} f2p={len(f2p_resolved)}/{len(fail_to_pass)} "
+                f"p2p_failed={len(p2p_failed)} parsed={len(parsed)} parser={parser_name} "
+                f"time={result['eval_execution_time']:.1f}s"
             )
+            if not resolved:
+                self._log_failure_details(
+                    region=region,
+                    parsed=parsed,
+                    f2p_missing=f2p_missing,
+                    p2p_failed=p2p_failed,
+                    unexpected_passed=unexpected_passed,
+                    result=result,
+                )
         except Exception as exc:
             self.logger.error(f"Failed to evaluate SWE-rebench-V2 instance: {exc}")
             result["error"] = str(exc)
 
         return result["resolved"], result
+
+    # Caps for the failure diagnostics so a broken case doesn't flood the logs.
+    _MAX_NAMES_IN_LOG = 25
+    _OUTPUT_TAIL_CHARS = 4000
+
+    def _log_failure_details(
+        self,
+        *,
+        region: str,
+        parsed: dict,
+        f2p_missing: list[str],
+        p2p_failed: list[str],
+        unexpected_passed: list[str],
+        result: dict,
+    ) -> None:
+        """Emit enough detail to triage a gold-patch failure at a glance."""
+        cap = self._MAX_NAMES_IN_LOG
+
+        def fmt(names: list[str]) -> str:
+            shown = names[:cap]
+            suffix = f" (+{len(names) - cap} more)" if len(names) > cap else ""
+            return f"{shown}{suffix}"
+
+        self.logger.warning(
+            "SWE-rebench-V2 NOT resolved -- gold-patch grading failed:\n"
+            f"  FAIL_TO_PASS still failing ({len(f2p_missing)}): {fmt(f2p_missing)}\n"
+            f"  PASS_TO_PASS broke ({len(p2p_failed)}): {fmt(p2p_failed)}\n"
+            f"  unexpected PASSED not in expected ({len(unexpected_passed)}): {fmt(unexpected_passed)}"
+        )
+        if not parsed:
+            self.logger.warning(
+                "SWE-rebench-V2 parser matched 0 tests -- the test command most likely "
+                "failed to run (build error / missing binary / wrong workdir / test_patch "
+                "did not apply). Inspect the raw output tail below."
+            )
+        tail = region[-self._OUTPUT_TAIL_CHARS :]
+        result["test_output_tail"] = tail
+        self.logger.warning(f"SWE-rebench-V2 raw test-output tail (last {len(tail)} chars):\n{tail}")
 
     def _build_eval_script(self, workdir: str, base_commit: str, test_patch: str, test_cmds: list[str]) -> str:
         wd = shlex.quote(workdir)

@@ -15,6 +15,10 @@ from uni_agent.reward import load_reward_spec
 
 logger = logging.getLogger(__file__)
 logger.setLevel("INFO")
+handler = logging.StreamHandler()
+handler.setFormatter(logging.Formatter("%(message)s"))
+logger.addHandler(handler)
+logger.propagate = False
 
 
 async def run_sample(sample):
@@ -103,9 +107,9 @@ def main():
     # ray.init()
     # data_path = "/home/tiger/data/swe_agent/swe_rebench_filtered.parquet"
     # data_path = "/home/tiger/data/swe_agent/r2e_gym_subset.parquet"
-    data_path = "dataset/swe_rebench_v2_modal.parquet"
+    data_path = "/home/tiger/data/swe_agent/swe_rebench_v2_modal.parquet"
     dataset = load_dataset("parquet", data_files=data_path, split="train")
-    samples = dataset.to_list()[:1]
+    samples = dataset.to_list()[:16]
     workers = [TestEvalActor.remote() for _ in range(8)]
     futures = []
     chunk_size = (len(samples) - 1) // len(workers) + 1
