@@ -112,7 +112,7 @@ class _ImageBuilder:
             raise ValueError(msg) from e
 
     def ensure_pipx_installed(self, image: modal.Image) -> modal.Image:
-        image = image.apt_install("pipx")
+        image = image.apt_install("pipx", env={"DEBIAN_FRONTEND": "noninteractive"})
         return image.run_commands("pipx ensurepath")
 
     def auto(self, image_spec: str | modal.Image | PurePath) -> modal.Image:

@@ -100,12 +100,12 @@ class TestEvalActor:
 
 
 def main():
-    ray.init()
+    # ray.init()
     # data_path = "/home/tiger/data/swe_agent/swe_rebench_filtered.parquet"
     # data_path = "/home/tiger/data/swe_agent/r2e_gym_subset.parquet"
-    data_path = "/home/tiger/data/swe_agent/swe_bench_verified_modal.parquet"
+    data_path = "dataset/swe_rebench_v2_modal.parquet"
     dataset = load_dataset("parquet", data_files=data_path, split="train")
-    samples = dataset.to_list()
+    samples = dataset.to_list()[:1]
     workers = [TestEvalActor.remote() for _ in range(8)]
     futures = []
     chunk_size = (len(samples) - 1) // len(workers) + 1
