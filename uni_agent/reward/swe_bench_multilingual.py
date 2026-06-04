@@ -140,26 +140,27 @@ class SWEBenchMultilingualRewardSpec(AbstractRewardSpec):
 
     @auto_await
     async def _apply_patch(self, patch: str) -> None:
-        """Apply a patch to /testbed; tries several apply strategies in order."""
+        """Apply a patch to /testbed (used by verifiers for the gold patch).
+
+        All fallback strategies are chained inside a *single* shell command on
+        purpose: ``env.communicate(check="raise")`` calls ``env.close()`` (tearing
+        down the deployment) on a non-zero exit, so issuing one attempt per
+        ``communicate`` call would kill the runtime after the first failed strategy
+        and make every subsequent fallback raise ``DeploymentNotStartedError``.
+        The leading ``git apply -v`` mirrors the official swebench harness.
+        """
         if not patch or not patch.strip():
             self.logger.info("Empty patch, nothing to apply.")
             return
         patch_path = Path(f"/tmp/sbm_patch_{uuid.uuid4().hex}.diff")
         await self.env.write_file(patch_path, patch)
         p = patch_path.as_posix()
-        commands = [
-            f"cd /testbed && git apply -v --3way --recount --whitespace=nowarn {p}",
-            f"cd /testbed && git apply --whitespace=fix {p}",
-            f"cd /testbed && git apply --reject --whitespace=nowarn {p}",
-            f"cd /testbed && patch --batch --fuzz=5 -p1 -i {p}",
-        ]
-        last_error: Exception | None = None
-        for cmd in commands:
-            try:
-                await self.env.communicate(cmd, check="raise")
-                self.logger.info("Applied patch successfully!")
-                return
-            except RuntimeError as e:
-                last_error = e
-                continue
-        raise RuntimeError("Failed to apply patch with any command") from last_error
+        apply_cmd = (
+            "cd /testbed && ("
+            f"git apply -v {p} || "
+            f"git apply -v --3way --whitespace=nowarn {p} || "
+            f"patch --batch --fuzz=5 -p1 -i {p}"
+            ")"
+        )
+        await self.env.communicate(apply_cmd, check="raise", error_msg="Failed to apply patch")
+        self.logger.info("Applied patch successfully!")
