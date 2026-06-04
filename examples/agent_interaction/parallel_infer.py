@@ -12,6 +12,7 @@ import verl
 from verl import DataProto
 from verl.experimental.agent_loop import AgentLoopManager
 from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
+from verl.workers.rollout.llm_server import LLMServerManager
 
 # Setup basic logging
 logging.basicConfig(
@@ -74,7 +75,11 @@ def run_inference(args: argparse.Namespace):
     # 2. Init rollout manager
     logger.info("Initializing configuration and AgentLoopManager...")
     config = init_config(args)
-    agent_loop_manager = AgentLoopManager.create(config=config)
+    llm_server_manager = LLMServerManager.create(config=config)
+    agent_loop_manager = AgentLoopManager.create(
+        config=config,
+        llm_client=llm_server_manager.get_client(),
+    )
 
     # 3. Load dataset
     data_path = os.path.expanduser(args.data_path)
