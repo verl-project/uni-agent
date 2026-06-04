@@ -28,7 +28,7 @@ __all__ = ["ModalDeployment"]
 # The semaphore is process-local, so MODAL_MAX_STARTING_PER_WORKER is a
 # per-worker cap (size it as fleet-wide target / num rollout workers).
 # MODAL_INIT_WALL_BUDGET caps a single trajectory's total init wall-clock.
-_DEFAULT_MAX_STARTING_PER_WORKER = 16
+_DEFAULT_MAX_STARTING_PER_WORKER = 8
 _DEFAULT_INIT_WALL_BUDGET = 900.0
 _STARTING_SEMA: asyncio.Semaphore | None = None
 
