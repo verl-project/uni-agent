@@ -31,6 +31,7 @@ Example::
     DEPLOYMENT=modal python examples/data_preprocess/swe_rebench_v2.py \
         --local-save-dir ~/data/swe_agent --language python --max-samples 5000
 """
+
 import argparse
 import os
 
@@ -158,7 +159,9 @@ def _llm_metadata(example: dict) -> dict:
 
 
 def _make_keep_fn(args):
-    languages = None if args.language.lower() == "all" else {x.strip().lower() for x in args.language.split(",") if x.strip()}
+    languages = (
+        None if args.language.lower() == "all" else {x.strip().lower() for x in args.language.split(",") if x.strip()}
+    )
     if args.parsers.lower() == "all":
         parsers = None
     elif args.parsers.lower() == "supported":
