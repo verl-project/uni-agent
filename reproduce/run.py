@@ -7,9 +7,9 @@ import uuid
 from pathlib import Path
 
 import ray
-from datasets import load_dataset
 from tqdm import tqdm
 
+from datasets import load_dataset
 from uni_agent.async_logging import add_file_handler, cleanup_handlers
 from uni_agent.interaction import AgentEnv, AgentEnvConfig
 from uni_agent.reward import load_reward_spec
@@ -24,6 +24,7 @@ logger.setLevel("INFO")
 
 GLOBAL_CONCURRENCY = int(os.getenv("GLOBAL_CONCURRENCY", 64))
 NUM_WORKERS = int(os.getenv("NUM_WORKERS", 8))
+
 
 async def run_sample(sample):
     run_id = str(uuid.uuid4())
@@ -86,7 +87,6 @@ async def run_sample(sample):
     reward_spec = load_reward_spec(reward_config)
     add_file_handler(Path(f"reproduce/logs/{run_id}.log"), run_id)
 
-    
     try:
         await env.start()
         await reward_spec.apply_gold_patch()

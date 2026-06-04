@@ -22,6 +22,7 @@ Usage:
     python -m reproduce.analyze_logs --json           # machine-readable
     python -m reproduce.analyze_logs --list-failures   # print failing run ids
 """
+
 from __future__ import annotations
 
 import argparse
@@ -95,9 +96,9 @@ def parse_log(path: Path) -> RunInfo:
 
         if msg.startswith("Starting modal sandbox with image"):
             info.sandbox_attempts += 1
-        elif (cm := SANDBOX_CREATED_RE.search(msg)):
+        elif cm := SANDBOX_CREATED_RE.search(msg):
             info.sandbox_create_secs = float(cm["secs"])
-        elif (rm := RUNTIME_STARTED_RE.search(msg)):
+        elif rm := RUNTIME_STARTED_RE.search(msg):
             info.runtime_start_secs = float(rm["secs"])
         elif msg.startswith("Failed to create modal sandbox"):
             info.deploy_failures += 1
@@ -105,7 +106,7 @@ def parse_log(path: Path) -> RunInfo:
                 info.had_timeout = True
         elif RETRY_RE.search(msg):
             info.deploy_retries += 1
-        elif (em := CONN_ERR_RE.search(msg)):
+        elif em := CONN_ERR_RE.search(msg):
             info.conn_error_lines += 1
             info.stuck_requests.add(em["rid"])
         elif msg.startswith("Applied patch successfully"):
@@ -259,7 +260,9 @@ def print_report(rep: dict, list_failures: bool) -> None:
 
     dr = rep["deploy_retry"]
     print("\n[Deploy-level retries]  (ModalDeployment.start loop)")
-    print(f"  runs with >=1 failed attempt   {dr['runs_with_failed_attempt']:>4}  ({dr['runs_with_failed_attempt'] / n:.1%})")
+    print(
+        f"  runs with >=1 failed attempt   {dr['runs_with_failed_attempt']:>4}  ({dr['runs_with_failed_attempt'] / n:.1%})"
+    )
     print(f"  total failed attempts          {dr['total_failed_attempts']:>4}")
     print(f"  total retries triggered        {dr['total_retries']:>4}")
     print(f"  runs hitting startup timeout   {dr['runs_hit_startup_timeout']:>4}")
@@ -290,13 +293,17 @@ def print_report(rep: dict, list_failures: bool) -> None:
         print(f"  {'bucket':>8} {'runs':>5} {'deploy_retry':>13} {'conn_err':>9} {'fail':>6} {'mean_create':>12}")
         for b, d in rep["concurrency_buckets"].items():
             mc = f"{d['mean_sandbox_create_s']}s" if d["mean_sandbox_create_s"] is not None else "-"
-            print(f"  {b:>8} {d['runs']:>5} {d['deploy_retry_rate']:>12.1%} {d['conn_err_rate']:>8.1%} {d['fail_rate']:>5.1%} {mc:>12}")
+            print(
+                f"  {b:>8} {d['runs']:>5} {d['deploy_retry_rate']:>12.1%} {d['conn_err_rate']:>8.1%} {d['fail_rate']:>5.1%} {mc:>12}"
+            )
 
     if list_failures:
         print("\n[Failing runs]")
         for r in runs:
             if r.failed:
-                print(f"  {r.run_id}  outcome={r.outcome:<14} attempts={r.sandbox_attempts} conn_errs={r.conn_error_lines} dur={r.duration}")
+                print(
+                    f"  {r.run_id}  outcome={r.outcome:<14} attempts={r.sandbox_attempts} conn_errs={r.conn_error_lines} dur={r.duration}"
+                )
 
 
 def main() -> None:
