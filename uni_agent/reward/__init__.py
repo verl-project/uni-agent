@@ -3,6 +3,7 @@ from .registry import load_reward_spec
 _LAZY_EXPORTS = {
     "SearchRewardSpec": ".search",
     "SWEBenchRewardSpec": ".swe_bench",
+    "SWEBenchMultilingualRewardSpec": ".swe_bench_multilingual",
     "R2EGymRewardSpec": ".r2e_gym",
     "SWEREBenchRewardSpec": ".swe_rebench",
     "SWEReBenchV2RewardSpec": ".swe_rebench_v2",
@@ -12,6 +13,7 @@ __all__ = [
     "load_reward_spec",
     "SearchRewardSpec",
     "SWEBenchRewardSpec",
+    "SWEBenchMultilingualRewardSpec",
     "R2EGymRewardSpec",
     "SWEREBenchRewardSpec",
     "SWEReBenchV2RewardSpec",
