@@ -8,7 +8,7 @@ Uni-Agent is a unified framework for general agents at scale.
 - **All-in-one stack:** one framework for building, running, and training agents.
 - **Unified agent interface:** unified abstractions for diverse and complex real-world agent scenarios.
 
-The long-term vision is to build the backend infrastructure across both inference and training, enabling them to perceive, act, and explore complex real-world tasks.
+The long-term vision is to build the backend infrastructure across both inference and training, enabling agents to perceive, act, and explore complex real-world tasks.
 
 ## Highlights ✨
 
