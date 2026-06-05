@@ -11,6 +11,7 @@ REWARD_SPEC_REGISTRY: dict[str, type[AbstractRewardSpec]] = {}
 REWARD_SPEC_MODULES: dict[str, str] = {
     "search": "uni_agent.reward.search",
     "swe_bench": "uni_agent.reward.swe_bench",
+    "swe_bench_multilingual": "uni_agent.reward.swe_bench_multilingual",
     "swe_rebench": "uni_agent.reward.swe_rebench",
     "r2e_gym": "uni_agent.reward.r2e_gym",
     "terminal_bench": "uni_agent.reward.terminal_bench",
