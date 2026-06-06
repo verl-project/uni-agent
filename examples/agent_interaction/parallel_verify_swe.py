@@ -7,9 +7,9 @@ import uuid
 from pathlib import Path
 
 import ray
+from datasets import load_dataset
 from tqdm import tqdm
 
-from datasets import load_dataset
 from uni_agent.async_logging import add_file_handler, cleanup_handlers
 from uni_agent.interaction import AgentEnv, AgentEnvConfig
 from uni_agent.reward import load_reward_spec
@@ -118,7 +118,9 @@ def main():
     dataset = load_dataset("parquet", data_files=DATA_PATH, split="train")
     samples = dataset.to_list()
     logger.info(f"loaded {len(samples)} samples from {DATA_PATH}")
-    logger.info(f"deployment={os.getenv('DEPLOYMENT', 'vefaas')} workers={NUM_WORKERS} concurrency={GLOBAL_CONCURRENCY}")
+    logger.info(
+        f"deployment={os.getenv('DEPLOYMENT', 'vefaas')} workers={NUM_WORKERS} concurrency={GLOBAL_CONCURRENCY}"
+    )
 
     workers = [TestEvalActor.remote() for _ in range(NUM_WORKERS)]
     # one future per sample (round-robin across workers) so we can stream

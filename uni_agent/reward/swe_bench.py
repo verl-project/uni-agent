@@ -37,7 +37,7 @@ def _make_eval_script_list(instance, specs, env_name, repo_directory, base_commi
     if test_files:
         reset_tests_command = f"git checkout {base_commit} {' '.join(test_files)}"
     else:
-        reset_tests_command = f"echo 'skip reset'"
+        reset_tests_command = "echo 'skip reset'"
 
     apply_test_patch_command = f"git apply -v - <<'{_HEREDOC_DELIMITER}'\n{test_patch}\n{_HEREDOC_DELIMITER}"
     test_cmd = MAP_REPO_VERSION_TO_SPECS[instance["repo"]][instance["version"]]["test_cmd"]

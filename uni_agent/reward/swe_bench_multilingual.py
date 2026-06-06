@@ -124,7 +124,7 @@ class SWEBenchMultilingualRewardSpec(AbstractRewardSpec):
         if test_files:
             reset_tests_command = f"git checkout {base_commit} {' '.join(test_files)}"
         else:
-            reset_tests_command = f"echo 'skip reset'"
+            reset_tests_command = "echo 'skip reset'"
 
         build_commands = list(specs.get("build", []))
         apply_test_patch_command = (
