@@ -130,11 +130,6 @@ def build_swe_bench_multilingual():
                 "git tag -d $(git tag -l)",
                 "git reflog expire --expire=now --all",
                 "git gc --prune=now",
-                "git config --global user.email setup@swebench.config",
-                "git config --global user.name SWE-bench",
-                "git commit --allow-empty -am SWE-bench",
-                f"git checkout {metadata['base_commit']}",
-                "git clean -fdq",
             ]
         )
 
@@ -153,7 +148,13 @@ def build_swe_bench_multilingual():
             "extra_info": {
                 "tools_kwargs": {
                     "env": {
-                        "deployment": {"image": get_image_name(instance_id)},
+                        "deployment": {
+                            "image": get_image_name(instance_id),
+                            "modal_sandbox_kwargs": {
+                                "cpu": (0.5, 4.0),
+                                "memory": (1024, 8192),
+                            },
+                        },
                         "post_setup_cmd": reset_script,
                     },
                     "reward": {

@@ -28,7 +28,7 @@ __all__ = ["ModalDeployment"]
 # The semaphore is process-local, so MODAL_MAX_STARTING_PER_WORKER is a
 # per-worker cap (size it as fleet-wide target / num rollout workers).
 # MODAL_INIT_WALL_BUDGET caps a single trajectory's total init wall-clock.
-_DEFAULT_MAX_STARTING_PER_WORKER = 8
+_DEFAULT_MAX_STARTING_PER_WORKER = 64
 _DEFAULT_INIT_WALL_BUDGET = 900.0
 _STARTING_SEMA: asyncio.Semaphore | None = None
 
@@ -112,7 +112,7 @@ class _ImageBuilder:
             raise ValueError(msg) from e
 
     def ensure_pipx_installed(self, image: modal.Image) -> modal.Image:
-        image = image.apt_install("pipx")
+        image = image.apt_install("pipx", env={"DEBIAN_FRONTEND": "noninteractive"})
         return image.run_commands("pipx ensurepath")
 
     def auto(self, image_spec: str | modal.Image | PurePath) -> modal.Image:
@@ -167,6 +167,10 @@ class ModalDeployment(AbstractDeployment):
         self._proxy = proxy
         if modal_sandbox_kwargs is None:
             modal_sandbox_kwargs = {}
+        modal_sandbox_kwargs = dict(modal_sandbox_kwargs)
+        for _key in ("cpu", "memory"):
+            if isinstance(modal_sandbox_kwargs.get(_key), list):
+                modal_sandbox_kwargs[_key] = tuple(modal_sandbox_kwargs[_key])
         self._modal_kwargs = modal_sandbox_kwargs
         self._hooks = CombinedDeploymentHook()
 

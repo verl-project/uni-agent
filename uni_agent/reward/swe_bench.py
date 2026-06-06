@@ -15,6 +15,7 @@ from swebench.harness.constants import (
 from swebench.harness.grading import get_eval_tests_report, get_resolution_status
 from swebench.harness.log_parsers import MAP_REPO_TO_PARSER
 from swebench.harness.test_spec.python import get_test_directives
+from swebench.harness.utils import get_modified_files
 
 from uni_agent.async_logging import get_logger
 from uni_agent.interaction import AgentEnv
@@ -31,8 +32,12 @@ def _make_eval_script_list(instance, specs, env_name, repo_directory, base_commi
     which resets the whole repo (e.g. reverts tox.ini). We use no-op instead.
     """
     _HEREDOC_DELIMITER = "EOF_114329324912"
-
-    reset_tests_command = "git checkout master 2>/dev/null || git checkout main"
+    base_commit = instance["base_commit"]
+    test_files = get_modified_files(test_patch)
+    if test_files:
+        reset_tests_command = f"git checkout {base_commit} {' '.join(test_files)}"
+    else:
+        reset_tests_command = f"echo 'skip reset'"
 
     apply_test_patch_command = f"git apply -v - <<'{_HEREDOC_DELIMITER}'\n{test_patch}\n{_HEREDOC_DELIMITER}"
     test_cmd = MAP_REPO_VERSION_TO_SPECS[instance["repo"]][instance["version"]]["test_cmd"]

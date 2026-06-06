@@ -83,6 +83,12 @@ env_config = {
     "deployment": deployment_config,
     "env_variables": {
         "PIP_PROGRESS_BAR": "off",
+        "PIP_CACHE_DIR": "~/.cache/pip",
+        "PAGER": "cat",
+        "MANPAGER": "cat",
+        "LESS": "-R",
+        "TQDM_DISABLE": "1",
+        "GIT_PAGER": "cat",
     },
 }
 env_config = AgentEnvConfig(**env_config)

@@ -15,6 +15,7 @@ The inference and verification scripts for this page live under `examples/agent_
 | Qwen3-Coder-Next               | temp=0.8, topp=0.9, tp=16, 300 turns, 128K context | **67.6** (Avg@4) |
 | Qwen3.5-4B                     | temp=0.8, topp=0.9, tp=4, 100 turns, 64K context   | **45.2** (Avg@1) |
 | Qwen3.5-9B                     | temp=1.0, topp=0.7, tp=4, 100 turns, 64K context   | **53.8** (Avg@1) |
+| Qwen3.5-9B                     | temp=1.0, topp=0.95, tp=4, 200 turns, 128k context | **65.6** (Avg@1) |
 | Qwen3.5-35B-A3B                | temp=1.0, topp=0.7, tp=4, 300 turns, 128K context  | **68.4** (Avg@1) |
 
 **Reference results on Terminal-Bench v2 with Uni-Agent:**

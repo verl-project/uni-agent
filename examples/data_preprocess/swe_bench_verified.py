@@ -109,13 +109,7 @@ def build_swe_bench_verified():
         dataset_id = "swe-bench-verified"
         instance_id = example["instance_id"]
         image_name = get_image_name(dataset_id, instance_id)
-        reset_cmds = [
-            "cd /testbed",
-            "git restore .",
-            "git reset --hard",
-            f"git checkout {example['base_commit']}",
-            "git clean -fdq",
-        ]
+        reset_cmds = []
         reset_script = " && ".join(reset_cmds)
         sample = {
             "prompt": [

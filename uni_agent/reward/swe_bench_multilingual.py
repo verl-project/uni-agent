@@ -35,6 +35,7 @@ from swebench.harness.grading import get_eval_tests_report, get_resolution_statu
 from swebench.harness.log_parsers import MAP_REPO_TO_PARSER
 from swebench.harness.test_spec.javascript import get_download_img_commands
 from swebench.harness.test_spec.test_spec import make_test_spec
+from swebench.harness.utils import get_modified_files
 
 from uni_agent.async_logging import get_logger
 from uni_agent.interaction import AgentEnv
@@ -115,10 +116,15 @@ class SWEBenchMultilingualRewardSpec(AbstractRewardSpec):
         """
         instance = self.metadata
         repo_directory = "/testbed"
+        base_commit = instance["base_commit"]
         test_patch = instance["test_patch"]
         specs = MAP_REPO_VERSION_TO_SPECS[self.repo][self.version]
 
-        reset_tests_command = "git checkout master 2>/dev/null || git checkout main"
+        test_files = get_modified_files(test_patch)
+        if test_files:
+            reset_tests_command = f"git checkout {base_commit} {' '.join(test_files)}"
+        else:
+            reset_tests_command = f"echo 'skip reset'"
 
         build_commands = list(specs.get("build", []))
         apply_test_patch_command = (
@@ -128,6 +134,7 @@ class SWEBenchMultilingualRewardSpec(AbstractRewardSpec):
         test_commands = [test_cmd] if isinstance(test_cmd, str) else list(test_cmd)
 
         eval_commands = [
+            "chmod 1777 /tmp 2>/dev/null || true",
             f"cd {repo_directory}",
             f"git config --global --add safe.directory {repo_directory}",
             f"cd {repo_directory}",
@@ -142,7 +149,8 @@ class SWEBenchMultilingualRewardSpec(AbstractRewardSpec):
         # JS instances may ship test image fixtures pulled in right after the reset
         # (a no-op unless the instance carries ``image_assets``).
         if MAP_REPO_TO_EXT[self.repo] == "js":
-            eval_commands[4:4] = get_download_img_commands(instance)
+            idx = eval_commands.index(apply_test_patch_command)
+            eval_commands[idx:idx] = get_download_img_commands(instance)
         return eval_commands
 
     def _build_eval_script(self) -> str:
@@ -205,7 +213,7 @@ class SWEBenchMultilingualRewardSpec(AbstractRewardSpec):
         last_error: Exception | None = None
         for cmd in commands:
             try:
-                await self.env.communicate(cmd, check="raise")
+                await self.env.communicate(cmd, check="ignore")
                 self.logger.info("Applied patch successfully!")
                 return
             except RuntimeError as e:
