@@ -37,6 +37,9 @@ import os
 
 from datasets import load_dataset
 
+# Sandbox backend: affects the output filename and (for modal) the resource cap.
+impl = os.getenv("DEPLOYMENT", "modal").lower()
+
 # Image names ship in the dataset (docker.io/swerebenchv2/<name>:<tag>). If you
 # mirror them to another registry, set SRB2_IMAGE_REGISTRY to that prefix and the
 # leading ``docker.io/swerebenchv2`` is swapped for it (tag preserved).
@@ -140,12 +143,6 @@ def build_swe_rebench_v2(languages: set[str] | None, max_instances: int | None):
             "test_cmd": install_config["test_cmd"],
         }
 
-        # The instance image already has the repo at base_commit + install applied.
-        # Revert any install-induced edits to *tracked* files back to base_commit
-        # (matching the upstream golden-eval `git reset --hard HEAD`) while keeping
-        # untracked build artifacts (node_modules, compiled output, ...). Never
-        # `git clean`, which would delete those artifacts. Each step is guarded so
-        # env startup (post_setup runs with check="raise") never fails.
         reset_script = " && ".join(
             [
                 "git tag -d $(git tag -l) 2>/dev/null || true",
@@ -153,6 +150,10 @@ def build_swe_rebench_v2(languages: set[str] | None, max_instances: int | None):
                 "git gc --prune=now 2>/dev/null || true",
             ]
         )
+
+        deployment = {"image": resolve_image_name(example["image_name"])}
+        if impl == "modal":
+            deployment["modal_sandbox_kwargs"] = {"cpu": (0.5, 4.0), "memory": (1024, 8192)}
 
         return {
             "prompt": [
@@ -170,7 +171,7 @@ def build_swe_rebench_v2(languages: set[str] | None, max_instances: int | None):
             "extra_info": {
                 "tools_kwargs": {
                     "env": {
-                        "deployment": {"image": resolve_image_name(example["image_name"])},
+                        "deployment": deployment,
                         "post_setup_cmd": reset_script,
                     },
                     "reward": {
@@ -216,7 +217,6 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    impl = os.getenv("DEPLOYMENT", "modal").lower()
     languages = {x.strip() for x in args.languages.split(",") if x.strip()} or None
 
     save_dir = os.path.expanduser(args.local_save_dir)
