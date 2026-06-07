@@ -213,7 +213,7 @@ class SWEBenchMultilingualRewardSpec(AbstractRewardSpec):
         last_error: Exception | None = None
         for cmd in commands:
             try:
-                await self.env.communicate(cmd, check="ignore")
+                await self.env.communicate(cmd, check="raise")
                 self.logger.info("Applied patch successfully!")
                 return
             except RuntimeError as e:
