@@ -178,6 +178,7 @@ class UniAgentLoop(AgentLoopBase):
             "execution_time": interaction_result["execution_time"],
             "messages": interaction_result["messages"],
             "metrics": interaction_result.get("metrics", {}),
+            "reward_score": interaction_result.get("reward_score", None),
         }
         (self.output_dir / "interaction_result.json").write_text(
             json.dumps(save_content, ensure_ascii=False, indent=2, default=str),
