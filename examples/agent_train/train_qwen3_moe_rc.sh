@@ -213,7 +213,7 @@ python3 -m verl.experimental.fully_async_policy.fully_async_main \
     trainer.logger=['console','wandb'] \
     trainer.project_name="${project_name}" \
     trainer.experiment_name="${exp_name}" \
-    trainer.val_before_train=True \
+    trainer.val_before_train=False \
     trainer.save_freq=10 \
     trainer.total_epochs=10 \
     trainer.resume_mode=auto \
