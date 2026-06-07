@@ -46,7 +46,6 @@ from uni_agent.reward.registry import register_reward_spec
 from uni_agent.reward.swe_rebench_v2_log_parsers import NAME_TO_PARSER, TestStatus
 from uni_agent.utils import auto_await
 
-
 START_TEST_OUTPUT = ">>>>> Start Test Output"
 END_TEST_OUTPUT = ">>>>> End Test Output"
 
