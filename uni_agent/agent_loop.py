@@ -5,6 +5,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import yaml
 
 from uni_agent.async_logging import add_file_handler, get_logger
@@ -43,6 +44,12 @@ def _deep_merge(base: dict, overrides: dict) -> dict:
 
 class UniAgentLoop(AgentLoopBase):
     _semaphore: asyncio.Semaphore | None = None
+    # Cached (num_hidden_layers, num_experts_per_tok) of the rollout model. Used to
+    # synthesize a zero ``routed_experts`` for failed/empty trajectories when router
+    # replay (R3) is enabled. ``None`` after resolution means no replay tensor is needed
+    # (replay disabled or the model is dense / not MoE).
+    _routing_replay_shape: tuple[int, int] | None = None
+    _routing_replay_resolved: bool = False
 
     async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentLoopOutput:
         config_dict = self._init_config(sampling_params, **kwargs)
@@ -159,13 +166,48 @@ class UniAgentLoop(AgentLoopBase):
             response_ids=[dummy_token_id] * dummy_response_length,
             response_mask=[0] * dummy_response_length,
             response_logprobs=[0.0] * dummy_response_length,
-            routed_experts=None,
+            routed_experts=self._synth_failed_routed_experts(dummy_response_length),
             multi_modal_data={},
             reward_score=0,
             num_turns=0,
             metrics={},
             extra_fields=extra_fields,
         )
+
+    def _synth_failed_routed_experts(self, length: int) -> np.ndarray | None:
+        """Synthesize a zero ``routed_experts`` of shape ``(length, num_layers, top_k)``."""
+        shape = self._get_routing_replay_shape()
+        if shape is None:
+            return None
+        num_layers, top_k = shape
+        return np.zeros((length, num_layers, top_k), dtype=np.int64)
+
+    def _get_routing_replay_shape(self) -> tuple[int, int] | None:
+        """Resolve and cache ``(num_hidden_layers, num_experts_per_tok)`` for the rollout
+        model. Returns ``None`` if rollout routing replay is off or the model has no
+        experts. The HF config is loaded at most once per worker process."""
+        rollout_cfg = self.config.actor_rollout_ref.rollout
+        if not bool(getattr(rollout_cfg, "enable_rollout_routing_replay", False)):
+            return None
+        cls = UniAgentLoop
+        if not cls._routing_replay_resolved:
+            from transformers import AutoConfig
+
+            model_path = self.config.actor_rollout_ref.model.path
+            model_cfg = AutoConfig.from_pretrained(model_path, trust_remote_code=True)
+            # Newer Qwen3 nests MoE fields under ``text_config``; older configs keep them
+            # at the top level. ``... or 0`` guards against fields explicitly set to None.
+            text_cfg = getattr(model_cfg, "text_config", None) or model_cfg
+            num_layers = int(getattr(text_cfg, "num_hidden_layers", 0) or 0) or int(
+                getattr(model_cfg, "num_hidden_layers", 0) or 0
+            )
+            top_k = int(getattr(text_cfg, "num_experts_per_tok", 0) or 0) or int(
+                getattr(model_cfg, "num_experts_per_tok", 0) or 0
+            )
+            cls._routing_replay_shape = (num_layers, top_k) if num_layers > 0 and top_k > 0 else None
+            cls._routing_replay_resolved = True
+            self.logger.info(f"routed_experts replay shape resolved: {cls._routing_replay_shape}")
+        return cls._routing_replay_shape
 
     def _save_interaction_result(self, interaction_result: dict):
         self.output_dir.mkdir(parents=True, exist_ok=True)
@@ -178,6 +220,7 @@ class UniAgentLoop(AgentLoopBase):
             "execution_time": interaction_result["execution_time"],
             "messages": interaction_result["messages"],
             "metrics": interaction_result.get("metrics", {}),
+            "reward_score": interaction_result.get("reward_score", None),
         }
         (self.output_dir / "interaction_result.json").write_text(
             json.dumps(save_content, ensure_ascii=False, indent=2, default=str),
