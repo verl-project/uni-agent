@@ -46,9 +46,7 @@ from uni_agent.reward.registry import register_reward_spec
 from uni_agent.reward.swe_rebench_v2_log_parsers import NAME_TO_PARSER, TestStatus
 from uni_agent.utils import auto_await
 
-# Test-output markers wrapping the test command so the parser only sees the test
-# region (not the git-apply noise). Kept identical in spirit to the SWE-bench
-# harness but defined locally so this spec has no ``swebench`` dependency.
+
 START_TEST_OUTPUT = ">>>>> Start Test Output"
 END_TEST_OUTPUT = ">>>>> End Test Output"
 
@@ -247,7 +245,6 @@ class SWEREBenchV2RewardSpec(AbstractRewardSpec):
         p = patch_path.as_posix()
         commands = [
             # The lenient flags upstream uses to apply predictions/gold patches.
-            f"cd {self.repo_dir} && git apply -v --3way --recount --ignore-space-change --whitespace=nowarn {p}",
             f"cd {self.repo_dir} && git apply --whitespace=fix {p}",
             f"cd {self.repo_dir} && git apply --reject --whitespace=nowarn {p}",
             f"cd {self.repo_dir} && patch --batch --fuzz=5 -p1 -i {p}",

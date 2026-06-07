@@ -55,12 +55,11 @@ def resolve_image_name(image_name: str) -> str:
 
 
 # Human-readable language names for the prompt (dataset ``language`` codes).
-# Python-only for now; add the other dataset codes here to enable them, e.g.
-# "go": "Go", "ts": "TypeScript", "rust": "Rust", "java": "Java", ...
+# Python-only for now; add the other dataset codes here to enable them.
 LANGUAGE_NAMES = {
     "python": "Python",
 }
-
+SKIP_SAMPLES = []
 
 SYSTEM_PROMPT = """
 You are a helpful assistant that can interact with a computer to solve tasks.
@@ -190,7 +189,9 @@ def build_swe_rebench_v2(languages: set[str] | None, max_instances: int | None):
     if languages:
         wanted = {lang.lower() for lang in languages}
         dataset = dataset.filter(lambda ex: (ex.get("language") or "").lower() in wanted)
-        print(f"Kept {len(dataset)} instances after language filter {sorted(wanted)}", flush=True)
+    dataset = dataset.filter(lambda ex: ex["instance_id"] not in SKIP_SAMPLES)
+
+    print(f"Kept {len(dataset)} instances after language filter {sorted(wanted)}", flush=True)
 
     if max_instances is not None and max_instances >= 0:
         dataset = dataset.select(range(min(max_instances, len(dataset))))
