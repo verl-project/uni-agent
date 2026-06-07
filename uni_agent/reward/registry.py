@@ -13,6 +13,7 @@ REWARD_SPEC_MODULES: dict[str, str] = {
     "swe_bench": "uni_agent.reward.swe_bench",
     "swe_bench_multilingual": "uni_agent.reward.swe_bench_multilingual",
     "swe_rebench": "uni_agent.reward.swe_rebench",
+    "swe_rebench_v2": "uni_agent.reward.swe_rebench_v2",
     "r2e_gym": "uni_agent.reward.r2e_gym",
     "terminal_bench": "uni_agent.reward.terminal_bench",
     "terminal_bench_v2": "uni_agent.reward.terminal_bench",
