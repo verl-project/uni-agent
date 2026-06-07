@@ -18,6 +18,12 @@ The inference and verification scripts for this page live under `examples/agent_
 | Qwen3.5-9B                     | temp=1.0, topp=0.95, tp=4, 200 turns, 128k context | **65.6** (Avg@1) |
 | Qwen3.5-35B-A3B                | temp=1.0, topp=0.7, tp=4, 300 turns, 128K context  | **68.4** (Avg@1) |
 
+**Reference results on SWE-bench Multilingual with Uni-Agent:**
+
+| **Model**                    | Inference Config        | **Uni-Agent** |
+| ---------------------------- | ----------------------- |:-------------:|
+| Qwen3-Coder-30B-A3B-Instruct | 200 turns, 128K context | **32.3** (Avg@1) |
+
 **Reference results on Terminal-Bench v2 with Uni-Agent:**
 
 | **Model**          | Inference Config                                    | **Uni-Agent** |
