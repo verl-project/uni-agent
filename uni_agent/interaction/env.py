@@ -159,8 +159,8 @@ class AgentEnv:
     async def run_action(self, action_cmd: str, action_timeout: int, max_observation_length: int = 100_000) -> str:
         try:
             observation = await self.communicate(input=action_cmd, timeout=action_timeout, check="ignore")
-            observation = re.sub(r"\x1b\[[0-9;]*m|\r", "", observation)
-            if observation.strip() == "":
+            observation = re.sub(r"\x1b\[[0-9;]*m|\r", "", observation).strip()
+            if observation == "":
                 observation = "Your command ran successfully and did not produce any output."
             elif len(observation) > max_observation_length:
                 observation = (

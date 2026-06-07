@@ -6,6 +6,7 @@ _LAZY_EXPORTS = {
     "SWEBenchMultilingualRewardSpec": ".swe_bench_multilingual",
     "R2EGymRewardSpec": ".r2e_gym",
     "SWEREBenchRewardSpec": ".swe_rebench",
+    "SWEREBenchV2RewardSpec": ".swe_rebench_v2",
 }
 
 __all__ = [
@@ -15,6 +16,7 @@ __all__ = [
     "SWEBenchMultilingualRewardSpec",
     "R2EGymRewardSpec",
     "SWEREBenchRewardSpec",
+    "SWEREBenchV2RewardSpec",
 ]
 
 
