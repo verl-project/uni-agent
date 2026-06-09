@@ -257,20 +257,6 @@ class QueuedBackend:
         )
 
 
-class SlowBackend:
-    def __init__(self, response_text="SLOW", delay_s=1.5):
-        self.response_text = response_text
-        self.delay_s = delay_s
-
-    async def generate(self, request_id, *, prompt_ids, sampling_params, image_data=None, video_data=None):
-        await asyncio.sleep(self.delay_s)
-        token_ids = [ord(char) for char in self.response_text]
-        return TokenOutput(
-            token_ids=token_ids,
-            log_probs=[-0.1] * len(token_ids),
-            stop_reason="completed",
-        )
-
 
 class RecordingLLMClient:
     def __init__(self, response_text="OK"):
@@ -288,21 +274,6 @@ class RecordingLLMClient:
                 "kwargs": dict(kwargs),
             }
         )
-        token_ids = [ord(char) for char in self.response_text]
-        return TokenOutput(
-            token_ids=token_ids,
-            log_probs=[-0.1] * len(token_ids),
-            stop_reason="completed",
-        )
-
-
-class RejectToolsSamplingParamsBackend:
-    def __init__(self, response_text: str = "OK"):
-        self.response_text = response_text
-
-    async def generate(self, request_id, *, prompt_ids, sampling_params, image_data=None, video_data=None):
-        if "tools" in sampling_params:
-            raise RuntimeError("tools leaked into sampling_params")
         token_ids = [ord(char) for char in self.response_text]
         return TokenOutput(
             token_ids=token_ids,

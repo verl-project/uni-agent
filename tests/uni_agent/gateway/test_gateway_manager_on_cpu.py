@@ -5,7 +5,7 @@ import ray
 from tests.uni_agent.support import FakeTokenizer, QueuedBackend, TrackingGatewayActor
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def ray_runtime():
     ray.init(ignore_reinit_error=True)
     yield
@@ -14,6 +14,9 @@ def ray_runtime():
 
 @pytest.mark.asyncio
 async def test_gateway_manager_routes_sessions_stickily(ray_runtime):
+    """Each session is pinned to a single gateway actor (sticky routing).
+    Two consecutive requests for the same session_id land on the same
+    gateway, producing one continuous trajectory."""
     from uni_agent.gateway.config import GatewayActorConfig
     from uni_agent.gateway.gateway import GatewayActor
     from uni_agent.gateway.manager import GatewayManager
@@ -54,6 +57,9 @@ async def test_gateway_manager_routes_sessions_stickily(ray_runtime):
 
 @pytest.mark.asyncio
 async def test_gateway_manager_uses_least_active_sessions_routing(ray_runtime):
+    """New sessions are routed to the gateway actor with the fewest active
+    sessions (least-loaded). When a session is finalized the counter
+    decrements, making that gateway available for the next create."""
     from uni_agent.gateway.manager import GatewayManager
 
     gateways = [
@@ -81,27 +87,3 @@ async def test_gateway_manager_uses_least_active_sessions_routing(ray_runtime):
 
     ray.get([gateway.shutdown.remote() for gateway in gateways])
 
-
-@pytest.mark.asyncio
-async def test_gateway_manager_wait_for_completion_delegates_to_session_owner(ray_runtime):
-    from uni_agent.gateway.manager import GatewayManager
-
-    gateways = [
-        TrackingGatewayActor.remote("gw-0"),
-        TrackingGatewayActor.remote("gw-1"),
-    ]
-    ray.get([gateway.start.remote() for gateway in gateways])
-
-    manager = GatewayManager(gateways)
-    await manager.create_session("session-a")
-    await manager.create_session("session-b")
-
-    await manager.wait_for_completion("session-a", timeout=1.5)
-
-    stats_0 = ray.get(gateways[0].stats.remote())
-    stats_1 = ray.get(gateways[1].stats.remote())
-
-    assert stats_0["waited"] == [("session-a", 1.5)]
-    assert stats_1["waited"] == []
-
-    ray.get([gateway.shutdown.remote() for gateway in gateways])

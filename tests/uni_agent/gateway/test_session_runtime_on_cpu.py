@@ -8,6 +8,9 @@ from tests.uni_agent.support import FakeTokenizer, RecordingLLMClient
 
 
 def test_gateway_serving_runtime_rejects_zero_gateway_count():
+    """``GatewayServingRuntime`` raises ``ValueError`` when ``gateway_count=0``
+    and no external ``gateway_manager`` is supplied, rather than silently
+    carrying a half-initialized runtime."""
     from uni_agent.gateway.config import GatewayActorConfig
     from uni_agent.gateway.runtime import GatewayServingRuntime
 
@@ -19,7 +22,7 @@ def test_gateway_serving_runtime_rejects_zero_gateway_count():
         )
 
 
-@pytest.fixture
+@pytest.fixture(scope="session")
 def ray_runtime():
     ray.init(ignore_reinit_error=True)
     yield
@@ -28,6 +31,9 @@ def ray_runtime():
 
 @pytest.mark.asyncio
 async def test_gateway_serving_runtime_owns_gateway_lifecycle_and_session_runtime(ray_runtime):
+    """Full lifecycle through the runtime: create, chat (via HTTP), complete
+    (with reward_info), wait, finalize. Verifies the runtime→manager→actor
+    chain works end-to-end and the trajectory carries the reward."""
     from uni_agent.gateway.config import GatewayActorConfig
     from uni_agent.gateway.runtime import GatewayServingRuntime
 
@@ -108,3 +114,4 @@ async def test_gateway_serving_runtime_round_robins_actors_across_alive_nodes(ra
     assert captured_node_ids == ["a" * 56, "b" * 56, "a" * 56, "b" * 56, "a" * 56], captured_node_ids
     assert len(runtime.owned_gateway_actors) == 5
     # No shutdown call needed: stub actors have no real Ray state.
+
