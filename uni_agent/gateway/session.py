@@ -225,9 +225,7 @@ class GatewaySession:
                     completion_tokens=len(response_ids),
                 )
 
-    async def _prepare_generation_inputs(
-        self, payload: dict[str, Any], request_context: dict[str, Any]
-    ) -> EncodedData:
+    async def _prepare_generation_inputs(self, payload: dict[str, Any], request_context: dict[str, Any]) -> EncodedData:
         messages = request_context["messages"]
         tools = request_context["tools"]
         request_chat_template_kwargs = request_context["chat_template_kwargs"]

@@ -56,6 +56,7 @@ class _GatewayActor:
 
     def _register_routes(self) -> None:
         """Register HTTP handlers for chat completions and session completion."""
+
         @self._app.exception_handler(HTTPException)
         async def _http_exception_handler(_request: Request, exc: HTTPException):
             if isinstance(exc.detail, str):

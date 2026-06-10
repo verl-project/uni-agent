@@ -114,4 +114,3 @@ async def test_gateway_serving_runtime_round_robins_actors_across_alive_nodes(ra
     assert captured_node_ids == ["a" * 56, "b" * 56, "a" * 56, "b" * 56, "a" * 56], captured_node_ids
     assert len(runtime.owned_gateway_actors) == 5
     # No shutdown call needed: stub actors have no real Ray state.
-

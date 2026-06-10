@@ -1196,4 +1196,3 @@ async def test_gateway_actor_tool_call_decode_returns_openai_format(ray_runtime)
     # Should have both mask=0 (incremental) and mask=1 (model output) tokens
     assert 0 in trajectories[0].response_mask
     assert 1 in trajectories[0].response_mask
-

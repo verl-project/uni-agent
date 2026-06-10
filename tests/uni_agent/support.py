@@ -257,7 +257,6 @@ class QueuedBackend:
         )
 
 
-
 class RecordingLLMClient:
     def __init__(self, response_text="OK"):
         self.response_text = response_text

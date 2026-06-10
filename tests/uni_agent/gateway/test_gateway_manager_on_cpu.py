@@ -86,4 +86,3 @@ async def test_gateway_manager_uses_least_active_sessions_routing(ray_runtime):
     assert manager.active_sessions_per_gateway == [2, 1]
 
     ray.get([gateway.shutdown.remote() for gateway in gateways])
-
