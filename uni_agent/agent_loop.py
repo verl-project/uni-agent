@@ -51,6 +51,22 @@ class UniAgentLoop(AgentLoopBase):
     _routing_replay_shape: tuple[int, int] | None = None
     _routing_replay_resolved: bool = False
 
+    # Cached MoE shape (num_layers, topk) so the failure path in
+    # `_build_empty_agent_output` can produce a zero `routed_experts`
+    # tensor whose shape matches what the rollout backend (vLLM /
+    # SGLang) writes on the normal path. Without shape match,
+    # `verl.experimental.agent_loop.agent_loop._postprocess` crashes
+    # when a failed sample lands in the same batch as a normal sample
+    # whose `routed_experts` is a real tensor (the failed sample's
+    # `None` makes the per-sample tensor stack heterogeneous).
+    #
+    # Populated once per Rollouter actor in `_ensure_moe_shape_cached`;
+    # left as `None` if `enable_rollout_routing_replay` is off, so a
+    # failure that occurs before the first successful trajectory still
+    # returns a coherent `routed_experts=None`.
+    _moe_num_layers: int | None = None
+    _moe_topk: int | None = None
+
     async def run(self, sampling_params: dict[str, Any], **kwargs) -> AgentLoopOutput:
         config_dict = self._init_config(sampling_params, **kwargs)
         self.mask_abnormal_exit_traj = config_dict.get("mask_abnormal_exit_traj", False)
@@ -101,7 +117,14 @@ class UniAgentLoop(AgentLoopBase):
         self.logger.info(f"output_dir: {self.output_dir}")
 
         async with self._semaphore:
+            output: AgentLoopOutput | None = None
             try:
+                # Cache MoE shape once per worker so the failure-path
+                # builder can synthesize routed_experts with a tensor
+                # shape that matches the normal path. See
+                # `_ensure_moe_shape_cached` docstring.
+                await self._ensure_moe_shape_cached()
+
                 await self.env.start()
 
                 # tools schemas should be visible to the model
@@ -128,11 +151,152 @@ class UniAgentLoop(AgentLoopBase):
                 self._save_interaction_result(interaction_result)
                 output = await self.convert_to_agent_output(interaction_result)
             except Exception as e:
-                self.logger.critical(f"Agent loop failed before producing interaction result: {e}")
-                output = await self._build_empty_agent_output(exit_reason="agent_loop_failed")
+                # Use the brace-safe "{}" template (see
+                # uni_agent/interaction/interaction.py for the loguru
+                # gotcha) so an exception repr containing '{' / '}'
+                # cannot crash the logger and cascade into a Rollouter
+                # actor death.
+                self.logger.critical(
+                    "{}",
+                    f"Agent loop failed before producing interaction result: {type(e).__name__}: {e}",
+                )
+                try:
+                    output = await self._build_empty_agent_output(exit_reason="agent_loop_failed")
+                except Exception as build_exc:
+                    # Layer-2 safety net: even the failure-path builder
+                    # itself crashed (observed causes: tokenizer
+                    # corruption, AgentChatModel.prepare_rollout_cache
+                    # raising on a malformed prompt, schema mismatch on
+                    # AgentLoopOutput, attribute error from a partially
+                    # initialized loop). Without this, the inner except
+                    # raises a *new* exception that replaces the
+                    # function's return value and kills the Rollouter
+                    # actor — costing 5-10 min of idle + weight reload
+                    # for every trajectory that hits a Layer-1 crash.
+                    self.logger.opt(exception=True).error(
+                        "{}",
+                        f"[traj-fail-buildfail] {type(build_exc).__name__}: {build_exc} "
+                        f"(original exc: {type(e).__name__}: {e})",
+                    )
+                    output = self._make_minimal_output()
             finally:
-                await self.env.close()
+                # Wrap teardown so a failure during env.close (Modal
+                # sandbox terminate, swerex session close, etc.) does
+                # NOT replace `output` with an exception and kill the
+                # worker. The trajectory result is already computed by
+                # this point; teardown is best-effort.
+                try:
+                    await self.env.close()
+                except Exception as close_exc:
+                    self.logger.warning(
+                        "{}",
+                        f"env.close swallowed: {type(close_exc).__name__}: {close_exc}",
+                    )
             return output
+
+    async def _ensure_moe_shape_cached(self) -> None:
+        """Cache MoE `(num_layers, topk)` once per worker by reading the
+        model config.
+
+        This is needed only for the failure path: when
+        `enable_rollout_routing_replay=True`, vLLM / SGLang write a real
+        `routed_experts` tensor on every successful rollout, but the
+        failure path in `_build_empty_agent_output` cannot run rollout
+        and therefore has no source for the tensor. Returning `None`
+        from the failure path then mixes `None` with real tensors in
+        the same batch and crashes `verl`'s per-sample tensor stack.
+
+        Qwen3.5 MoE configs nest the architecture params under
+        `text_config`; older Qwen3 keeps them at the top level. We
+        probe both. If config navigation fails (non-MoE model,
+        unreachable HF cache, schema change) we leave the cache as
+        `None` and the failure path falls back to `routed_experts=None`
+        — same behaviour as before this PR.
+
+        This method MUST NOT raise; a failure here must never block a
+        normal rollout.
+        """
+        cls = type(self)
+        if cls._moe_num_layers is not None:
+            return
+        try:
+            from transformers import AutoConfig
+
+            model_path = self.config.actor_rollout_ref.model.path
+            # Block in a thread so transformers' file I/O does not
+            # stall the event loop.
+            model_cfg = await asyncio.to_thread(AutoConfig.from_pretrained, model_path, trust_remote_code=True)
+            text_cfg = getattr(model_cfg, "text_config", None) or model_cfg
+            num_layers = int(getattr(text_cfg, "num_hidden_layers", 0)) or int(
+                getattr(model_cfg, "num_hidden_layers", 0)
+            )
+            topk = int(getattr(text_cfg, "num_experts_per_tok", 0)) or int(getattr(model_cfg, "num_experts_per_tok", 0))
+            if num_layers > 0 and topk > 0:
+                cls._moe_num_layers = num_layers
+                cls._moe_topk = topk
+                self.logger.info(f"cached MoE shape: num_layers={num_layers} topk={topk}")
+        except Exception as exc:
+            self.logger.warning(
+                "{}",
+                f"_ensure_moe_shape_cached non-fatal failure "
+                f"(failure path will return routed_experts=None): "
+                f"{type(exc).__name__}: {exc}",
+            )
+
+    def _synth_failed_routed_experts(self, response_length: int) -> np.ndarray | None:
+        """Return a zero `routed_experts` tensor matching the normal
+        path's shape `(length, num_layers, topk)`, or `None` if routing
+        replay is off or the MoE shape cache is unavailable.
+
+        Pulled out as a helper so the failure-path code in
+        `_build_empty_agent_output` stays readable AND so unit tests
+        can exercise the shape contract without standing up the full
+        chat model + interaction stack.
+        """
+        rollout_cfg = self.config.actor_rollout_ref.rollout
+        if not bool(getattr(rollout_cfg, "enable_rollout_routing_replay", False)):
+            return None
+        if self._moe_num_layers is None or self._moe_num_layers <= 0 or self._moe_topk is None or self._moe_topk <= 0:
+            return None
+        return np.zeros(
+            (response_length, self._moe_num_layers, self._moe_topk),
+            dtype=np.int64,
+        )
+
+    def _make_minimal_output(self) -> AgentLoopOutput:
+        """Last-resort output for the Layer-2 safety net (the failure-path
+        builder itself failed).
+
+        Returns the absolute minimum a valid `AgentLoopOutput` allows so
+        the Rollouter actor survives. Trainer-side concat may still hit
+        shape issues if this minimal sample lands as `inputs[0]` in a
+        heterogeneous batch — but a transient batch error is strictly
+        cheaper than a Rollouter restart (5-10 min idle + weight reload
+        per crash).
+        """
+        pad_id = getattr(self.tokenizer, "pad_token_id", None)
+        if pad_id is None:
+            pad_id = getattr(self.tokenizer, "eos_token_id", None) or 0
+        if isinstance(pad_id, list):
+            pad_id = pad_id[0] if pad_id else 0
+        return AgentLoopOutput(
+            prompt_ids=[pad_id],
+            response_ids=[pad_id],
+            response_mask=[0],
+            response_logprobs=None,
+            routed_experts=None,
+            multi_modal_data={},
+            reward_score=0,
+            num_turns=0,
+            metrics={},
+            extra_fields={
+                "traj_masked": 1,
+                "traj_exit_reason": "build_failed",
+                "global_steps": 0,
+                "min_global_steps": 0,
+                "max_global_steps": 0,
+            },
+        )
 
     async def _build_empty_agent_output(self, exit_reason: str) -> AgentLoopOutput:
         self.chat_model.set_tools_schemas(self.tools_manager.tools_schemas)
