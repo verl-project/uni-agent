@@ -16,12 +16,16 @@ class SessionHandle:
 
     Attributes:
         session_id: Stable session identifier assigned by the caller.
-        base_url: Per-session OpenAI-compatible API root, or ``None`` when the
-            handle only needs to identify the session.
+        base_url: Per-session OpenAI-compatible ``/v1`` API root, or ``None``
+            when the handle only needs to identify the session.
+        complete_url: Per-session completion endpoint used by runners to mark
+            the session complete; this is a sibling of the OpenAI-compatible
+            ``/v1`` root rather than part of that API.
     """
 
     session_id: str
     base_url: str | None = None
+    complete_url: str | None = None
 
 
 @dataclass

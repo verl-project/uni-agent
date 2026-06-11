@@ -56,7 +56,7 @@ async def test_gateway_serving_runtime_owns_gateway_lifecycle_and_session_runtim
         assert response.json()["choices"][0]["message"]["content"] == "OWNER"
 
         complete = await client.post(
-            f"{session.base_url.removesuffix('/v1')}/complete",
+            session.complete_url,
             json={"reward_info": {"score": 0.5, "label": "owner"}},
         )
         assert complete.status_code == 200

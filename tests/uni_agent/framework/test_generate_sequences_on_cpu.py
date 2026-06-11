@@ -2,8 +2,114 @@ from __future__ import annotations
 
 import pytest
 
+from uni_agent.framework.framework import OpenAICompatibleAgentFramework
 from uni_agent.gateway.types import SessionHandle, Trajectory
 from verl.utils import tensordict_utils as tu
+
+
+_CONFIG_RUNNER_CALLS = []
+_CLASS_RUNNER_CALLS = []
+_TEST_INLINE_RUNNERS = {}
+
+
+async def _config_recording_runner(*, raw_prompt, session, sample_index, marker=None, **kwargs):
+    _CONFIG_RUNNER_CALLS.append(
+        {
+            "runner": marker,
+            "raw_prompt": raw_prompt,
+            "session_id": session.session_id,
+            "base_url": session.base_url,
+            "complete_url": session.complete_url,
+            "sample_index": sample_index,
+            "kwargs": dict(kwargs),
+        }
+    )
+
+
+class _ConfigRecordingClassRunner:
+    def __init__(self, marker=None):
+        self.marker = marker
+
+    async def __call__(self, *, raw_prompt, session, sample_index, tools_kwargs, **kwargs):
+        _CLASS_RUNNER_CALLS.append(
+            {
+                "runner": self.marker,
+                "raw_prompt": raw_prompt,
+                "complete_url": session.complete_url,
+                "sample_index": sample_index,
+                "tools_kwargs": tools_kwargs,
+                "kwargs": dict(kwargs),
+            }
+        )
+
+
+async def _ray_task_recording_runner(*, raw_prompt, session, sample_index, marker=None, **kwargs):
+    assert marker == "ray"
+    assert session.complete_url.endswith("/complete")
+    assert raw_prompt == [{"role": "user", "content": f"sample {sample_index}"}]
+
+
+async def _ray_task_failing_runner(**kwargs):
+    raise RuntimeError("ray runner failed")
+
+
+async def _async_noop_runner(**kwargs):
+    return None
+
+
+async def _inline_runner_proxy(*, runner_key, **kwargs):
+    runner = _TEST_INLINE_RUNNERS[runner_key]
+    await runner(**kwargs)
+
+
+def _inline_runner_config(
+    runner,
+    *,
+    dispatch_mode: str = "inline_async",
+    max_concurrent_sessions: int = 0,
+) -> dict[str, object]:
+    runner_key = f"runner-{len(_TEST_INLINE_RUNNERS)}"
+    _TEST_INLINE_RUNNERS[runner_key] = runner
+    config = {
+        "runner_fqn": f"{__name__}._inline_runner_proxy",
+        "runner_kwargs": {"runner_key": runner_key},
+        "dispatch_mode": dispatch_mode,
+    }
+    if max_concurrent_sessions:
+        config["max_concurrent_sessions"] = max_concurrent_sessions
+    return config
+
+
+async def _framework_from_agent_runners(
+    *,
+    agent_runners: dict[str, dict[str, object]],
+    session_runtime,
+    replay_buffer=None,
+    reward_loop_worker_handles=None,
+    n: int = 1,
+    val_n: int = 1,
+):
+    from omegaconf import OmegaConf
+
+    agent_framework_cfg: dict[str, object] = {"agent_runners": agent_runners}
+
+    config = OmegaConf.create(
+        {
+            "actor_rollout_ref": {
+                "rollout": {
+                    "n": n,
+                    "val_kwargs": {"n": val_n},
+                    "custom": {"agent_framework": agent_framework_cfg},
+                }
+            }
+        }
+    )
+    return await OpenAICompatibleAgentFramework.from_config(
+        config=config,
+        session_runtime=session_runtime,
+        replay_buffer=replay_buffer,
+        reward_loop_worker_handles=reward_loop_worker_handles,
+    )
 
 
 class _FakeTransferQueue:
@@ -51,7 +157,11 @@ class _FakeSessionRuntime:
 
     async def create_session(self, session_id: str, **kwargs):
         self.created_sessions.append(session_id)
-        return SessionHandle(session_id=session_id, base_url=f"http://fake/{session_id}/v1")
+        return SessionHandle(
+            session_id=session_id,
+            base_url=f"http://fake/{session_id}/v1",
+            complete_url=f"http://fake/{session_id}/complete",
+        )
 
     async def finalize_session(self, session_id: str):
         self.finalized_sessions.append(session_id)
@@ -124,10 +234,190 @@ def _install_fake_score(monkeypatch, *, score_from_sample_fields=None, default_s
 
 
 @pytest.mark.asyncio
-async def test_generate_sequences_writes_tq_schema_for_each_session(monkeypatch):
+async def test_class_runner_with_async_call_works_like_function_runner(monkeypatch):
+    from omegaconf import OmegaConf
+
     from uni_agent.framework import framework as framework_module
+    fake_tq = _FakeTransferQueue()
+    replay_buffer = _FakeReplayBuffer()
+    monkeypatch.setattr(framework_module, "tq", fake_tq)
+    runtime = _FakeSessionRuntime({"session-0-0": [_trajectory()]})
+    _CLASS_RUNNER_CALLS.clear()
+    config = OmegaConf.create(
+        {
+            "actor_rollout_ref": {
+                "rollout": {
+                    "n": 1,
+                    "val_kwargs": {"n": 1},
+                    "custom": {
+                        "agent_framework": {
+                            "agent_runners": {
+                                "deepeyes": {
+                                    "runner_fqn": f"{__name__}._ConfigRecordingClassRunner",
+                                    "runner_kwargs": {"marker": "class-runner"},
+                                    "dispatch_mode": "inline_async",
+                                }
+                            }
+                        }
+                    },
+                }
+            }
+        }
+    )
+
+    framework = await OpenAICompatibleAgentFramework.from_config(
+        config=config,
+        session_runtime=runtime,
+        replay_buffer=replay_buffer,
+    )
+
+    await framework.generate_sequences(_build_prompts(count=1, global_steps=6))
+
+    assert _CLASS_RUNNER_CALLS[0]["runner"] == "class-runner"
+    assert _CLASS_RUNNER_CALLS[0]["raw_prompt"] == [{"role": "user", "content": "sample 0"}]
+    assert _CLASS_RUNNER_CALLS[0]["complete_url"] == f"http://fake/{runtime.created_sessions[0]}/complete"
+    assert _CLASS_RUNNER_CALLS[0]["sample_index"] == 0
+    assert _CLASS_RUNNER_CALLS[0]["tools_kwargs"] == {"tool": 0}
+    assert "session_runtime" not in _CLASS_RUNNER_CALLS[0]["kwargs"]
+
+
+@pytest.mark.asyncio
+async def test_from_config_preserves_runner_fqn_and_kwargs_for_single_named_runner(monkeypatch):
+    from omegaconf import OmegaConf
+
+    from uni_agent.framework import framework as framework_module
+    fake_tq = _FakeTransferQueue()
+    replay_buffer = _FakeReplayBuffer()
+    monkeypatch.setattr(framework_module, "tq", fake_tq)
+    runtime = _FakeSessionRuntime({"session-0-0": [_trajectory()]})
+    _CONFIG_RUNNER_CALLS.clear()
+    runner_fqn = f"{__name__}._config_recording_runner"
+    config = OmegaConf.create(
+        {
+            "actor_rollout_ref": {
+                "rollout": {
+                    "n": 1,
+                    "val_kwargs": {"n": 1},
+                    "custom": {
+                        "agent_framework": {
+                            "agent_runners": {
+                                "deepeyes": {
+                                    "runner_fqn": runner_fqn,
+                                    "runner_kwargs": {"marker": "single-runner"},
+                                    "dispatch_mode": "inline_async",
+                                }
+                            }
+                        }
+                    },
+                }
+            }
+        }
+    )
+
+    framework = await OpenAICompatibleAgentFramework.from_config(
+        config=config,
+        session_runtime=runtime,
+        replay_buffer=replay_buffer,
+    )
+
+    await framework.generate_sequences(_build_prompts(count=1, global_steps=6))
+
+    assert [call["runner"] for call in _CONFIG_RUNNER_CALLS] == ["single-runner"]
+    assert _CONFIG_RUNNER_CALLS[0]["raw_prompt"] == [{"role": "user", "content": "sample 0"}]
+    assert _CONFIG_RUNNER_CALLS[0]["base_url"].endswith("/v1")
+    assert _CONFIG_RUNNER_CALLS[0]["complete_url"].endswith("/complete")
+    assert _CONFIG_RUNNER_CALLS[0]["kwargs"]["tools_kwargs"] == {"tool": 0}
+    assert "session_runtime" not in _CONFIG_RUNNER_CALLS[0]["kwargs"]
+
+
+@pytest.mark.asyncio
+async def test_from_config_requires_agent_runners_map():
+    from omegaconf import OmegaConf
+
     from uni_agent.framework.framework import OpenAICompatibleAgentFramework
 
+    config = OmegaConf.create(
+        {
+            "actor_rollout_ref": {
+                "rollout": {
+                    "n": 1,
+                    "val_kwargs": {"n": 1},
+                    "custom": {
+                        "agent_framework": {
+                            "agent_runner_fqn": f"{__name__}._config_recording_runner",
+                            "agent_runner_kwargs": {"marker": "legacy-default"},
+                        }
+                    },
+                }
+            }
+        }
+    )
+
+    with pytest.raises(ValueError, match="agent_framework.agent_runners is required"):
+        await OpenAICompatibleAgentFramework.from_config(
+            config=config,
+            session_runtime=_FakeSessionRuntime({}),
+            replay_buffer=_FakeReplayBuffer(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_agent_runners_registry_selects_runner_by_agent_name(monkeypatch):
+    from omegaconf import OmegaConf
+
+    from uni_agent.framework import framework as framework_module
+    fake_tq = _FakeTransferQueue()
+    replay_buffer = _FakeReplayBuffer()
+    monkeypatch.setattr(framework_module, "tq", fake_tq)
+    runtime = _FakeSessionRuntime({"session-0-0": [_trajectory()], "session-1-0": [_trajectory()]})
+    _CONFIG_RUNNER_CALLS.clear()
+    runner_fqn = f"{__name__}._config_recording_runner"
+    config = OmegaConf.create(
+        {
+            "actor_rollout_ref": {
+                "rollout": {
+                    "n": 1,
+                    "val_kwargs": {"n": 1},
+                    "custom": {
+                        "agent_framework": {
+                            "agent_runners": {
+                                "deepeyes": {
+                                    "runner_fqn": runner_fqn,
+                                    "runner_kwargs": {"marker": "deepeyes"},
+                                    "dispatch_mode": "inline_async",
+                                },
+                                "swe": {
+                                    "runner_fqn": runner_fqn,
+                                    "runner_kwargs": {"marker": "swe"},
+                                    "dispatch_mode": "inline_async",
+                                },
+                            }
+                        }
+                    },
+                }
+            }
+        }
+    )
+    prompts = _build_prompts(count=2, global_steps=6)
+    prompts["agent_name"] = tu.get_tensordict(
+        tensor_dict={"agent_name": ["deepeyes", "swe"]},
+        non_tensor_dict={},
+    )["agent_name"]
+
+    framework = await OpenAICompatibleAgentFramework.from_config(
+        config=config,
+        session_runtime=runtime,
+        replay_buffer=replay_buffer,
+    )
+
+    await framework.generate_sequences(prompts)
+
+    assert [call["runner"] for call in _CONFIG_RUNNER_CALLS] == ["deepeyes", "swe"]
+    assert [call["sample_index"] for call in _CONFIG_RUNNER_CALLS] == [0, 1]
+
+@pytest.mark.asyncio
+async def test_generate_sequences_writes_tq_schema_for_each_session(monkeypatch):
+    from uni_agent.framework import framework as framework_module
     fake_tq = _FakeTransferQueue()
     replay_buffer = _FakeReplayBuffer()
     monkeypatch.setattr(framework_module, "tq", fake_tq)
@@ -151,12 +441,13 @@ async def test_generate_sequences_writes_tq_schema_for_each_session(monkeypatch)
         score_from_sample_fields=lambda sf: sf["extra_info"]["index"] + 0.25,
     )
 
-    framework = OpenAICompatibleAgentFramework(
+    framework = await _framework_from_agent_runners(
+        agent_runners={"runner": _inline_runner_config(agent_runner)},
         session_runtime=runtime,
-        agent_runner=agent_runner,
         reward_loop_worker_handles=["sentinel"],
         replay_buffer=replay_buffer,
-        rollout_config={"n": 2, "val_kwargs": {"n": 2}},
+        n=2,
+        val_n=2,
     )
 
     await framework.generate_sequences(_build_prompts(global_steps=7))
@@ -212,8 +503,6 @@ async def test_generate_sequences_writes_tq_schema_for_each_session(monkeypatch)
 @pytest.mark.asyncio
 async def test_generate_sequences_keeps_successful_sessions_when_one_session_fails(monkeypatch):
     from uni_agent.framework import framework as framework_module
-    from uni_agent.framework.framework import OpenAICompatibleAgentFramework
-
     fake_tq = _FakeTransferQueue()
     replay_buffer = _FakeReplayBuffer()
     monkeypatch.setattr(framework_module, "tq", fake_tq)
@@ -230,12 +519,13 @@ async def test_generate_sequences_keeps_successful_sessions_when_one_session_fai
 
     _install_fake_score(monkeypatch, default_score=1.0)
 
-    framework = OpenAICompatibleAgentFramework(
+    framework = await _framework_from_agent_runners(
+        agent_runners={"runner": _inline_runner_config(agent_runner)},
         session_runtime=runtime,
-        agent_runner=agent_runner,
         reward_loop_worker_handles=["sentinel"],
         replay_buffer=replay_buffer,
-        rollout_config={"n": 2, "val_kwargs": {"n": 2}},
+        n=2,
+        val_n=2,
     )
 
     await framework.generate_sequences(_build_prompts(count=1, global_steps=8))
@@ -252,8 +542,6 @@ async def test_generate_sequences_keeps_successful_sessions_when_one_session_fai
 @pytest.mark.asyncio
 async def test_generate_sequences_marks_prompt_failure_when_all_sessions_fail(monkeypatch):
     from uni_agent.framework import framework as framework_module
-    from uni_agent.framework.framework import OpenAICompatibleAgentFramework
-
     fake_tq = _FakeTransferQueue()
     replay_buffer = _FakeReplayBuffer()
     monkeypatch.setattr(framework_module, "tq", fake_tq)
@@ -264,12 +552,13 @@ async def test_generate_sequences_marks_prompt_failure_when_all_sessions_fail(mo
 
     _install_fake_score(monkeypatch, default_score=1.0)
 
-    framework = OpenAICompatibleAgentFramework(
+    framework = await _framework_from_agent_runners(
+        agent_runners={"runner": _inline_runner_config(agent_runner)},
         session_runtime=runtime,
-        agent_runner=agent_runner,
         reward_loop_worker_handles=["sentinel"],
         replay_buffer=replay_buffer,
-        rollout_config={"n": 1, "val_kwargs": {"n": 2}},
+        n=1,
+        val_n=2,
     )
 
     with pytest.raises(RuntimeError, match="All rollouts failed at global_steps=9"):
@@ -283,8 +572,6 @@ async def test_generate_sequences_marks_prompt_failure_when_all_sessions_fail(mo
 @pytest.mark.asyncio
 async def test_generate_sequences_zero_fills_rm_scores_when_no_reward_handles(monkeypatch):
     from uni_agent.framework import framework as framework_module
-    from uni_agent.framework.framework import OpenAICompatibleAgentFramework
-
     fake_tq = _FakeTransferQueue()
     replay_buffer = _FakeReplayBuffer()
     monkeypatch.setattr(framework_module, "tq", fake_tq)
@@ -293,11 +580,12 @@ async def test_generate_sequences_zero_fills_rm_scores_when_no_reward_handles(mo
     async def agent_runner(*, raw_prompt, session, sample_index, tools_kwargs, **kwargs):
         return None
 
-    framework = OpenAICompatibleAgentFramework(
+    framework = await _framework_from_agent_runners(
+        agent_runners={"runner": _inline_runner_config(agent_runner)},
         session_runtime=runtime,
-        agent_runner=agent_runner,
         replay_buffer=replay_buffer,
-        rollout_config={"n": 1, "val_kwargs": {"n": 1}},
+        n=1,
+        val_n=1,
     )
 
     await framework.generate_sequences(_build_prompts(count=1, global_steps=10))
@@ -310,8 +598,6 @@ async def test_generate_sequences_zero_fills_rm_scores_when_no_reward_handles(mo
 
 @pytest.mark.asyncio
 async def test_generate_sequences_keeps_other_prompts_when_prompt_task_raises(monkeypatch, caplog):
-    from uni_agent.framework.framework import OpenAICompatibleAgentFramework
-
     replay_buffer = _FakeReplayBuffer()
     runtime = _FakeSessionRuntime(
         {
@@ -321,12 +607,13 @@ async def test_generate_sequences_keeps_other_prompts_when_prompt_task_raises(mo
 
     _install_fake_score(monkeypatch, default_score=1.0)
 
-    framework = OpenAICompatibleAgentFramework(
+    framework = await _framework_from_agent_runners(
+        agent_runners={"runner": _inline_runner_config(_async_noop_runner)},
         session_runtime=runtime,
-        agent_runner=lambda **_: None,
         reward_loop_worker_handles=["sentinel"],
         replay_buffer=replay_buffer,
-        rollout_config={"n": 1, "val_kwargs": {"n": 1}},
+        n=1,
+        val_n=1,
     )
 
     async def fake_run_prompt_sessions_to_tq(*, sample_index, **kwargs):
@@ -361,8 +648,6 @@ async def test_generate_sequences_keeps_other_prompts_when_prompt_task_raises(mo
 @pytest.mark.asyncio
 async def test_generate_sequences_zero_fills_rollout_log_probs_when_missing(monkeypatch):
     from uni_agent.framework import framework as framework_module
-    from uni_agent.framework.framework import OpenAICompatibleAgentFramework
-
     fake_tq = _FakeTransferQueue()
     replay_buffer = _FakeReplayBuffer()
     monkeypatch.setattr(framework_module, "tq", fake_tq)
@@ -372,11 +657,12 @@ async def test_generate_sequences_zero_fills_rollout_log_probs_when_missing(monk
     async def agent_runner(*, raw_prompt, session, sample_index, tools_kwargs, **kwargs):
         return None
 
-    framework = OpenAICompatibleAgentFramework(
+    framework = await _framework_from_agent_runners(
+        agent_runners={"runner": _inline_runner_config(agent_runner)},
         session_runtime=runtime,
-        agent_runner=agent_runner,
         replay_buffer=replay_buffer,
-        rollout_config={"n": 1, "val_kwargs": {"n": 1}},
+        n=1,
+        val_n=1,
     )
 
     await framework.generate_sequences(_build_prompts(count=1, global_steps=10))
@@ -388,48 +674,144 @@ async def test_generate_sequences_zero_fills_rollout_log_probs_when_missing(monk
 
 
 @pytest.mark.asyncio
-async def test_max_concurrent_sessions_caps_in_flight_sessions(monkeypatch):
+async def test_per_runner_max_concurrent_sessions_caps_only_selected_runner(monkeypatch):
     import asyncio
 
     from uni_agent.framework import framework as framework_module
-    from uni_agent.framework.framework import OpenAICompatibleAgentFramework
-
     fake_tq = _FakeTransferQueue()
     replay_buffer = _FakeReplayBuffer()
     monkeypatch.setattr(framework_module, "tq", fake_tq)
     runtime = _FakeSessionRuntime({f"session-{i}-0": [_trajectory()] for i in range(4)})
+    prompts = _build_prompts(count=4, global_steps=13)
+    prompts["agent_name"] = tu.get_tensordict(
+        tensor_dict={"agent_name": ["limited", "wide", "wide", "limited"]},
+        non_tensor_dict={},
+    )["agent_name"]
 
-    in_flight = 0
-    max_observed = 0
+    release = asyncio.Event()
+    in_flight = {"limited": 0, "wide": 0}
+    max_observed = {"limited": 0, "wide": 0}
+    started = {"limited": 0, "wide": 0}
+    limited_first_started = asyncio.Event()
+    wide_two_started = asyncio.Event()
 
-    async def agent_runner(*, raw_prompt, session, sample_index, tools_kwargs, **kwargs):
-        nonlocal in_flight, max_observed
-        in_flight += 1
-        max_observed = max(max_observed, in_flight)
-        await asyncio.sleep(0.01)
-        in_flight -= 1
-        return None
+    async def limited_runner(**kwargs):
+        started["limited"] += 1
+        limited_first_started.set()
+        in_flight["limited"] += 1
+        max_observed["limited"] = max(max_observed["limited"], in_flight["limited"])
+        await release.wait()
+        in_flight["limited"] -= 1
 
-    _install_fake_score(monkeypatch, default_score=1.0)
-    framework = OpenAICompatibleAgentFramework(
+    async def wide_runner(**kwargs):
+        started["wide"] += 1
+        if started["wide"] == 2:
+            wide_two_started.set()
+        in_flight["wide"] += 1
+        max_observed["wide"] = max(max_observed["wide"], in_flight["wide"])
+        await release.wait()
+        in_flight["wide"] -= 1
+
+    framework = await _framework_from_agent_runners(
+        agent_runners={
+            "limited": _inline_runner_config(
+                limited_runner,
+                max_concurrent_sessions=1,
+            ),
+            "wide": _inline_runner_config(
+                wide_runner,
+                max_concurrent_sessions=2,
+            ),
+        },
         session_runtime=runtime,
-        agent_runner=agent_runner,
         replay_buffer=replay_buffer,
-        rollout_config={"n": 1, "val_kwargs": {"n": 1}},
-        max_concurrent_sessions=2,
+        n=1,
+        val_n=1,
     )
 
-    await framework.generate_sequences(_build_prompts(count=4, global_steps=10))
+    task = asyncio.create_task(framework.generate_sequences(prompts))
+    try:
+        await asyncio.wait_for(limited_first_started.wait(), timeout=5)
+        await asyncio.wait_for(wide_two_started.wait(), timeout=5)
+        await asyncio.sleep(0)
+        release.set()
+        await asyncio.wait_for(task, timeout=5)
+    finally:
+        release.set()
+        if not task.done():
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
 
-    assert max_observed <= 2
+    assert max_observed == {"limited": 1, "wide": 2}
 
 
-def test_trajectory_to_tq_field_and_tag_copies_finish_reason():
-    from uni_agent.framework.framework import OpenAICompatibleAgentFramework
+@pytest.mark.asyncio
+async def test_ray_task_exception_aborts_only_that_session(monkeypatch, ray_runtime):
+    from omegaconf import OmegaConf
 
-    framework = OpenAICompatibleAgentFramework(
+    from uni_agent.framework import framework as framework_module
+    fake_tq = _FakeTransferQueue()
+    replay_buffer = _FakeReplayBuffer()
+    monkeypatch.setattr(framework_module, "tq", fake_tq)
+    runtime = _FakeSessionRuntime({"session-0-0": [_trajectory()], "session-1-0": [_trajectory()]})
+    success_fqn = "tests.uni_agent.framework.test_generate_sequences_on_cpu._ray_task_recording_runner"
+    failure_fqn = "tests.uni_agent.framework.test_generate_sequences_on_cpu._ray_task_failing_runner"
+    config = OmegaConf.create(
+        {
+            "actor_rollout_ref": {
+                "rollout": {
+                    "n": 1,
+                    "val_kwargs": {"n": 1},
+                    "custom": {
+                        "agent_framework": {
+                            "agent_runners": {
+                                "swe-ok": {
+                                    "runner_fqn": success_fqn,
+                                    "runner_kwargs": {"marker": "ray"},
+                                    "dispatch_mode": "ray_task",
+                                    "max_concurrent_sessions": 1,
+                                },
+                                "swe-fail": {
+                                    "runner_fqn": failure_fqn,
+                                    "dispatch_mode": "ray_task",
+                                    "max_concurrent_sessions": 1,
+                                },
+                            }
+                        }
+                    },
+                }
+            }
+        }
+    )
+    prompts = _build_prompts(count=2, global_steps=16)
+    prompts["agent_name"] = tu.get_tensordict(
+        tensor_dict={"agent_name": ["swe-ok", "swe-fail"]},
+        non_tensor_dict={},
+    )["agent_name"]
+    framework = await OpenAICompatibleAgentFramework.from_config(
+        config=config,
+        session_runtime=runtime,
+        replay_buffer=replay_buffer,
+    )
+
+    await framework.generate_sequences(prompts)
+
+    assert [put["keys"] for put in fake_tq.batch_puts] == [["uid-0_0_0"]]
+    assert sorted(fake_tq.puts, key=lambda put: put["key"]) == [
+        {"key": "uid-0", "partition_id": "train", "tag": {"status": "finished"}},
+        {"key": "uid-1", "partition_id": "train", "tag": {"status": "failure"}},
+    ]
+    assert len(runtime.aborted_sessions) == 1
+    assert runtime.aborted_sessions[0].startswith("session-1-0-")
+    assert all(not session_id.startswith("session-1-0-") for session_id in runtime.finalized_sessions)
+
+
+@pytest.mark.asyncio
+async def test_trajectory_to_tq_field_and_tag_copies_finish_reason():
+    framework = await _framework_from_agent_runners(
+        agent_runners={"runner": _inline_runner_config(_async_noop_runner)},
         session_runtime=_FakeSessionRuntime({}),
-        agent_runner=lambda **_: None,
     )
     trajectory = _trajectory(extra_fields={"finish_reason": "length"})
 
@@ -464,7 +846,6 @@ async def test_score_trajectories_dispatches_only_final_trajectory_and_broadcast
     """_score_trajectories scores trajectories[-1] only, broadcasts to all (matches AgentLoopWorkerTQ)."""
     import ray as ray_module
 
-    from uni_agent.framework.framework import OpenAICompatibleAgentFramework
     from uni_agent.gateway.types import Trajectory
 
     @ray_module.remote
@@ -482,12 +863,13 @@ async def test_score_trajectories_dispatches_only_final_trajectory_and_broadcast
     worker = _StubWorker.remote()
 
     runtime = _FakeSessionRuntime({})  # not used in this test
-    framework = OpenAICompatibleAgentFramework(
+    framework = await _framework_from_agent_runners(
+        agent_runners={"runner": _inline_runner_config(_async_noop_runner)},
         session_runtime=runtime,
-        agent_runner=lambda **_: None,
         reward_loop_worker_handles=[worker],
         replay_buffer=_FakeReplayBuffer(),
-        rollout_config={"n": 1, "val_kwargs": {"n": 1}},
+        n=1,
+        val_n=1,
     )
 
     trajectories = [

@@ -2,14 +2,8 @@
 
 These TypedDicts give the actor's HTTP layer a single source of truth
 for request / response shape so that ``_handle_chat_completions`` no
-longer constructs anonymous dicts. They are intentionally not pydantic
-models: runtime validation stays in :mod:`uni_agent.gateway.codec`
-and the actor capability gate so that the existing OpenAI-style 400
-error envelope is preserved verbatim. 
-
-These types are gateway-internal: ``MessageCodec`` and ``GatewaySession``
-operate on a normalized internal request context, not on these HTTP
-protocol shapes.
+longer constructs anonymous dicts. They also serve as documentation for
+the expected shape of these objects.
 """
 
 from __future__ import annotations

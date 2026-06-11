@@ -187,6 +187,7 @@ class _GatewayActor:
         handle = SessionHandle(
             session_id=session_id,
             base_url=f"{self._server_base_url}/sessions/{session_id}/v1",
+            complete_url=f"{self._server_base_url}/sessions/{session_id}/complete",
         )
         self._sessions[session_id] = GatewaySession(
             handle=handle,

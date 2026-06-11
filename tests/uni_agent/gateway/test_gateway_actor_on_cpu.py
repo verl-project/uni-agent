@@ -485,7 +485,7 @@ async def test_gateway_actor_complete_wait_and_finalize(ray_runtime):
         assert response.json()["choices"][0]["message"]["content"] == "ANSWER: A"
 
         complete = await client.post(
-            f"{session.base_url.removesuffix('/v1')}/complete",
+            session.complete_url,
             json={"reward_info": {"score": 1.0, "label": "A"}},
         )
         assert complete.status_code == 200
