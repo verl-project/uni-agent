@@ -82,7 +82,7 @@ We compare Uni-Agent with existing agent systems on parallel inference and verif
 | Qwen3-Coder-30B  | SWE-Bench Verified | -         | **49.2**  | Avg@4, 100 turns, 128K |
 | Qwen3-Coder-480B | SWE-Bench Verified | 62.4      | **64.2**  | Avg@4, 500 turns, 256K |
 | Qwen3-Coder-Next | SWE-Bench Verified | 66.6      | **67.6**  | Avg@4, 300 turns, 128K |
-| Qwen3.5-35B-A3B  | SWE-Bench Verified | 62.0      | **68.4**  | Avg@1, 300 turns, 128K |
+| Qwen3.5-35B-A3B  | SWE-Bench Verified | 62.0      | **68.4**  | Avg@1, 200 turns, 128K |
 | Qwen3.6-35B-A3B  | Terminal-Bench v2  | -         | **42.5**  | Avg@1, 200K |
 
 
@@ -125,7 +125,7 @@ The roadmap below highlights the next major directions for Uni-Agent.
 
 **Agent Integration**
 
-- [ ] Black-box integration of additional third-party agents (Ref: [RFC #5790](https://github.com/verl-project/verl/issues/5790)).
+- [x] Black-box integration of additional third-party agents (Ref: [RFC #5790](https://github.com/verl-project/verl/issues/5790)).
 
 **Performance Optimization**
 
@@ -144,11 +144,11 @@ If you find the project helpful, please cite:
 
 ```
 @misc{uniagent_github,
-  author       = {Yuyang Ding and Bo Wen and Guangming Sheng and Xibin Wu and Juntao Li and Min Zhang and Uni-Agent Contributors},
+  author       = {Yuyang Ding and Bo Wen and Xubo Cao and Zhiqiang Zhai and Guangming Sheng and Xibin Wu and Juntao Li and Min Zhang and Uni-Agent Contributors},
   title        = {Uni-Agent: Build, Run, and Train Agents at Scale},
   year         = {2026},
-  howpublished = {\url{https://github.com/yyDing1/uni-agent}},
-  note         = {GitHub repository. Supervisor: Xibin Wu and Juntao Li},
+  howpublished = {\url{https://github.com/verl-project/uni-agent}},
+  note         = {GitHub repository.},
   urldate      = {2026-03-27}
 }
 ```
