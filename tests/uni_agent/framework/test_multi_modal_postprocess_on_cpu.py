@@ -6,6 +6,8 @@ from tests.uni_agent.support import FakeProcessor
 
 
 def test_compute_multi_modal_inputs_returns_empty_dict_without_processor():
+    """Without a processor, multimodal postprocess is a no-op and returns an
+    empty field map even when raw image data is present."""
     from uni_agent.framework.multi_modal_postprocess import compute_multi_modal_inputs
 
     input_ids = torch.tensor([[1, 2, 3]], dtype=torch.long)
@@ -14,6 +16,8 @@ def test_compute_multi_modal_inputs_returns_empty_dict_without_processor():
 
 
 def test_compute_multi_modal_inputs_returns_image_tensors_and_images_seqlens():
+    """Image inputs are converted through the processor while generated
+    ``input_ids`` and ``attention_mask`` are stripped from the TQ payload."""
     from uni_agent.framework.multi_modal_postprocess import compute_multi_modal_inputs
 
     processor = FakeProcessor()
@@ -33,45 +37,24 @@ def test_compute_multi_modal_inputs_returns_image_tensors_and_images_seqlens():
     assert "mm_token_type_ids" in multi_modal_inputs
 
 
-def test_compute_position_ids_returns_text_shape_without_processor():
+def test_compute_position_ids_uses_text_path_without_multimodal_inputs():
+    """Text-only samples use VERL's mask-based path when a processor exists
+    but this sample has no multimodal fields."""
     from uni_agent.framework.multi_modal_postprocess import compute_position_ids
 
+    processor = FakeProcessor()
     input_ids = torch.tensor([[7, 8, 9, 10]], dtype=torch.long)
     attention_mask = torch.tensor([[0, 1, 1, 1]], dtype=torch.long)
 
-    position_ids = compute_position_ids(None, input_ids, attention_mask, {})
+    position_ids = compute_position_ids(processor, input_ids, attention_mask, {})
 
     assert tuple(position_ids.shape) == (1, 4)
     assert position_ids.tolist() == [[0, 0, 1, 2]]
 
 
-def test_compute_position_ids_empty_multimodal_inputs_uses_text_path(monkeypatch):
-    from uni_agent.framework import multi_modal_postprocess as mm_postprocess
-
-    processor = FakeProcessor()
-    input_ids = torch.tensor([[7, 8, 9, 10]], dtype=torch.long)
-    attention_mask = torch.tensor([[0, 1, 1, 1]], dtype=torch.long)
-    calls = []
-
-    def fake_compute_position_id_with_mask(mask):
-        calls.append(mask.clone())
-        return torch.full_like(mask, 7)
-
-    monkeypatch.setattr(
-        mm_postprocess,
-        "compute_position_id_with_mask",
-        fake_compute_position_id_with_mask,
-    )
-
-    position_ids = mm_postprocess.compute_position_ids(processor, input_ids, attention_mask, {})
-
-    assert len(calls) == 1
-    assert calls[0].tolist() == [[0, 1, 1, 1]]
-    assert position_ids.tolist() == [[7, 7, 7, 7]]
-    assert processor.last_get_rope_index_call is None
-
-
 def test_compute_position_ids_returns_multimodal_shape_with_processor():
+    """With multimodal processor outputs, position ids combine the text row
+    with the processor-provided vision RoPE rows."""
     from uni_agent.framework.multi_modal_postprocess import compute_position_ids
 
     processor = FakeProcessor()

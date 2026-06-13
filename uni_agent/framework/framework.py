@@ -5,7 +5,7 @@ import logging
 import random
 from dataclasses import dataclass, replace
 from functools import partial
-from typing import Any, Protocol
+from typing import Protocol
 from uuid import uuid4
 
 import ray
@@ -14,15 +14,15 @@ from omegaconf import OmegaConf
 from tensordict import TensorDict
 from tensordict.tensorclass import NonTensorData, NonTensorStack
 
+from uni_agent.gateway.types import SessionHandle, Trajectory
+from verl.tools.tool_registry import initialize_tools_from_config
 from verl.utils import tensordict_utils as tu
 from verl.utils.import_utils import load_class_from_fqn
 from verl.utils.model import compute_position_id_with_mask
-from verl.tools.tool_registry import initialize_tools_from_config
 from verl.utils.transferqueue_utils import tq
 
 from .base import AgentFramework
 from .multi_modal_postprocess import compute_multi_modal_inputs, compute_position_ids
-from uni_agent.gateway.types import SessionHandle, Trajectory
 
 logger = logging.getLogger(__name__)
 
