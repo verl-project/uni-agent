@@ -16,9 +16,15 @@ from swebench.harness.grading import get_eval_tests_report, get_resolution_statu
 from swebench.harness.log_parsers import MAP_REPO_TO_PARSER
 from swebench.harness.test_spec.python import get_test_directives
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from uni_agent.async_logging import get_logger
-from uni_agent.interaction import AgentEnv
 from uni_agent.reward.base import AbstractRewardSpec
+
+if TYPE_CHECKING:
+    from uni_agent.interaction import AgentEnv
 from uni_agent.reward.registry import register_reward_spec
 from uni_agent.utils import auto_await
 
