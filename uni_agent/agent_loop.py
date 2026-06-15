@@ -8,7 +8,7 @@ from typing import Any
 import numpy as np
 import yaml
 
-from uni_agent.async_logging import add_file_handler, get_logger
+from uni_agent.async_logging import add_file_handler, cleanup_handlers, get_logger
 from uni_agent.interaction import (
     AgentChatModel,
     AgentEnv,
@@ -132,6 +132,7 @@ class UniAgentLoop(AgentLoopBase):
                 output = await self._build_empty_agent_output(exit_reason="agent_loop_failed")
             finally:
                 await self.env.close()
+                cleanup_handlers(self.run_id)
             return output
 
     async def _build_empty_agent_output(self, exit_reason: str) -> AgentLoopOutput:
