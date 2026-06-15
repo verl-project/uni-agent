@@ -148,7 +148,7 @@ If you find the project helpful, please cite:
   title        = {Uni-Agent: Build, Run, and Train Agents at Scale},
   year         = {2026},
   howpublished = {\url{https://github.com/verl-project/uni-agent}},
-  note         = {GitHub repository.},
+  note         = {GitHub repository. Supervisor: Xibin Wu and Juntao Li},
   urldate      = {2026-03-27}
 }
 ```
