@@ -198,6 +198,7 @@ def build_swe_rebench_v2(languages: set[str] | None, max_instances: int | None):
         print(f"Capped to {len(dataset)} instances", flush=True)
 
     dataset = dataset.map(process, remove_columns=dataset.column_names)
+    dataset = dataset.filter(lambda ex: ex["extra_info"]["tools_kwargs"]["env"]["deployment"]["image"] is not None)
     return dataset
 
 

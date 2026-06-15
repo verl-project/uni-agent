@@ -102,6 +102,8 @@ A successful resolution means:
 - Edge cases are properly handled
 """.strip()
 
+SKIP_INSTANCES = []
+
 
 def build_swe_rebench():
     def process_swe_rebench(example):
@@ -123,13 +125,11 @@ def build_swe_rebench():
             "test_cmd": example["install_config"]["test_cmd"],
         }
         instance_id = metadata["instance_id"]
-        image_name = get_image_name(dataset_id, instance_id)
+        image_name = get_image_name(dataset_id, instance_id) if instance_id not in SKIP_INSTANCES else None
         reset_cmds = [
             "git tag -d $(git tag -l) || true",
             "git reflog expire --expire=now --all || true",
             "git gc --prune=now || true",
-            f"git checkout {metadata['base_commit']} || true",
-            "git clean -fdq || true",
         ]
         reset_script = " && ".join(reset_cmds)
         sample = {
@@ -153,10 +153,11 @@ def build_swe_rebench():
         }
         return sample
 
-    data_source = "dyyyyyyyy/swe-rebench-filtered"
+    data_source = "nebius/SWE-rebench"
     print(f"Loading the {data_source} dataset from huggingface...", flush=True)
-    dataset = load_dataset(data_source, split="train")
+    dataset = load_dataset(data_source, split="filtered")
     dataset = dataset.map(process_swe_rebench, remove_columns=dataset.column_names)
+    dataset = dataset.filter(lambda ex: ex["extra_info"]["tools_kwargs"]["env"]["deployment"]["image"] is not None)
     return dataset
 
 
@@ -167,4 +168,5 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     sbv_dataset = build_swe_rebench()
+    print(f"Capped to {len(sbv_dataset)} instances", flush=True)
     sbv_dataset.to_parquet(f"{args.local_save_dir}/swe_rebench_filtered_{impl}.parquet")

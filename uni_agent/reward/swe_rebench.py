@@ -29,7 +29,10 @@ def _make_eval_script_list(instance, specs, env_name, repo_directory, base_commi
     HEREDOC_DELIMITER = "EOF_114329324912"
     test_files = get_modified_files(test_patch)
     # Reset test files to the state they should be in before the patch.
-    reset_tests_command = f"git checkout {base_commit} {' '.join(test_files)}"
+    if test_files:
+        reset_tests_command = f"git checkout {base_commit} {' '.join(test_files)}"
+    else:
+        reset_tests_command = "echo 'skip reset'"
     apply_test_patch_command = f"git apply -v - <<'{HEREDOC_DELIMITER}'\n{test_patch}\n{HEREDOC_DELIMITER}"
 
     test_cmd = specs["test_cmd"]

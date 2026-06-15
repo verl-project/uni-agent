@@ -90,17 +90,16 @@ class UniAgentLoop(AgentLoopBase):
         else:
             self.reward_spec = None
 
-        add_file_handler(self.output_dir / "run.log", self.run_id)
-
-        self.logger.info(f"model name: {self.config.actor_rollout_ref.model.path}")
-        self.logger.info(f"sampling_params: {sampling_params}")
-        self.logger.info(f"environment config: {config_dict['env']}")
-        self.logger.info(f"tools config: {config_dict['tools']}")
-        self.logger.info(f"interaction config: {config_dict['interaction']}")
-        self.logger.info(f"mask_abnormal_exit_traj: {self.mask_abnormal_exit_traj}")
-        self.logger.info(f"output_dir: {self.output_dir}")
-
         async with self._semaphore:
+            add_file_handler(self.output_dir / "run.log", self.run_id)
+
+            self.logger.info(f"model name: {self.config.actor_rollout_ref.model.path}")
+            self.logger.info(f"sampling_params: {sampling_params}")
+            self.logger.info(f"environment config: {config_dict['env']}")
+            self.logger.info(f"tools config: {config_dict['tools']}")
+            self.logger.info(f"interaction config: {config_dict['interaction']}")
+            self.logger.info(f"mask_abnormal_exit_traj: {self.mask_abnormal_exit_traj}")
+            self.logger.info(f"output_dir: {self.output_dir}")
             try:
                 await self.env.start()
 
