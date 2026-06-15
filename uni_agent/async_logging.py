@@ -11,10 +11,15 @@ logger.remove()
 _LOG_FORMAT = "{time:YYYY-MM-DD HH:mm:ss} | {extra[name]: <12} | {level: <8} | {message}"
 
 
+def _env_flag(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def _debug_enabled() -> bool:
-    # os.getenv returns a string, so a naive truthiness check treats "0"/"false"/""
-    # as enabled. Parse the value explicitly instead.
-    return os.getenv("DEBUG_MODE", "").strip().lower() in ("1", "true", "yes", "on")
+    return _env_flag("DEBUG_MODE")
+
+
+_FLUSH_EACH_LINE = _env_flag("LOG_FLUSH_EACH_LINE")
 
 
 if _debug_enabled():
@@ -25,21 +30,14 @@ if _debug_enabled():
         filter=lambda record: "name" in record["extra"],
     )
 
-# run_id -> (open file object, min level no). Touched from loguru's background
-# (enqueue) writer thread and from the asyncio thread that adds/removes runs,
-# so guard access with a lock.
+
 _run_files: dict[str, tuple] = {}
 _lock = threading.Lock()
 
 
 def _dispatch(message) -> None:
-    """Single sink that routes each record to its run's file in O(1).
-
-    This replaces the previous "one loguru sink per run" design, where every
-    record fanned out across all live sinks (O(num_runs) filtering per message)
-    and each run leaked a sink + background thread + file descriptor when it
-    wasn't cleaned up -- the main reason logging fell over under large-scale
-    concurrent training.
+    """
+    Single sink that routes each record to its run's file in O(1).
     """
     record = message.record
     run_id = record["extra"].get("run_id")
@@ -52,12 +50,12 @@ def _dispatch(message) -> None:
         file_obj, min_no = entry
         if record["level"].no < min_no:
             return
-        try:
-            file_obj.write(message)
+    try:
+        file_obj.write(message)
+        if _FLUSH_EACH_LINE:
             file_obj.flush()
-        except (ValueError, OSError):
-            # File was closed/cleaned up between lookup and write; drop late records.
-            pass
+    except (ValueError, OSError):
+        pass
 
 
 # One global sink: O(1) dispatch by run_id, a single background writer thread.
