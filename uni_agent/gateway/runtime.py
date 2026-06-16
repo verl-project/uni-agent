@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any
 
 import ray
 
@@ -82,20 +81,15 @@ class GatewayServingRuntime:
         gateway_manager = self._require_session_runtime()
         return await gateway_manager.finalize_session(session_id=session_id)
 
-    async def complete_session(self, session_id: str, reward_info: dict[str, Any] | None = None) -> None:
-        """Mark a gateway session complete with optional reward metadata."""
+    async def set_reward_info(self, session_id: str, reward_info: dict | None = None) -> None:
+        """Attach reward metadata to a gateway session."""
         gateway_manager = self._require_session_runtime()
-        await gateway_manager.complete_session(session_id=session_id, reward_info=reward_info)
+        await gateway_manager.set_reward_info(session_id=session_id, reward_info=reward_info)
 
     async def abort_session(self, session_id: str) -> None:
         """Abort a gateway session through the session manager."""
         gateway_manager = self._require_session_runtime()
         await gateway_manager.abort_session(session_id=session_id)
-
-    async def wait_for_completion(self, session_id: str, timeout: float | None = None) -> None:
-        """Wait for a gateway session to reach a terminal state."""
-        gateway_manager = self._require_session_runtime()
-        await gateway_manager.wait_for_completion(session_id=session_id, timeout=timeout)
 
     async def shutdown(self) -> None:
         """Stop owned gateway actors and clear the session manager."""

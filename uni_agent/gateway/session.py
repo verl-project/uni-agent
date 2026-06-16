@@ -18,14 +18,12 @@ class SessionPhase(str, Enum):
     """Lifecycle state for a gateway session.
 
     Attributes:
-        ACTIVE: The session can accept generation and completion requests.
-        COMPLETED: The caller marked the session complete and may finalize it.
+        ACTIVE: The session can accept generation and reward-info requests.
         FINALIZED: Final trajectories were returned and the session is closed.
         ABORTED: The session was cancelled and should not produce trajectories.
     """
 
     ACTIVE = "ACTIVE"
-    COMPLETED = "COMPLETED"
     FINALIZED = "FINALIZED"
     ABORTED = "ABORTED"
 
@@ -133,7 +131,6 @@ class GatewaySession:
         self.active_trajectory: TrajectoryBuffer | None = None
         self.trajectories: list[Trajectory] = []
         self.reward_info: dict[str, Any] = {}
-        self.completed = asyncio.Event()
         self.phase = SessionPhase.ACTIVE
         self.created_at = time.time()
         self.updated_at = self.created_at
@@ -318,16 +315,14 @@ class GatewaySession:
             length_exhausted_trajectory=None,
         )
 
-    async def complete(self, reward_info: dict[str, Any] | None = None) -> None:
-        """Mark the session complete and store optional reward metadata."""
+    async def set_reward_info(self, reward_info: dict[str, Any] | None = None) -> None:
+        """Store session-level reward metadata without closing the session."""
         async with self.request_lock:
-            if self.phase not in {SessionPhase.COMPLETED, SessionPhase.ACTIVE}:
+            if self.phase != SessionPhase.ACTIVE:
                 raise RuntimeError(f"Session {self.handle.session_id} is {self.phase.value.lower()}")
             if reward_info is not None:
                 self.reward_info = dict(reward_info)
-            self.phase = SessionPhase.COMPLETED
             self._touch()
-            self.completed.set()
 
     async def finalize(self) -> list[Trajectory]:
         """Close the session and return its materialized trajectories with rewards."""
@@ -340,11 +335,10 @@ class GatewaySession:
             self._materialize_active_trajectory()
             self.phase = SessionPhase.FINALIZED
             self._touch()
-            self.completed.set()
             return [replace(trajectory, reward_info=dict(self.reward_info)) for trajectory in self.trajectories]
 
     async def abort(self) -> None:
-        """Abort the session and wake completion waiters."""
+        """Abort the session and prevent further generation."""
         async with self.request_lock:
             if self.phase == SessionPhase.ABORTED:
                 return
@@ -352,13 +346,6 @@ class GatewaySession:
                 raise RuntimeError(f"Session {self.handle.session_id} is finalized")
             self.phase = SessionPhase.ABORTED
             self._touch()
-            self.completed.set()
-
-    async def wait_for_completion(self, timeout: float | None = None) -> None:
-        """Wait until the session is completed, finalized, or aborted."""
-        await asyncio.wait_for(self.completed.wait(), timeout=timeout)
-        if self.phase == SessionPhase.ABORTED:
-            raise RuntimeError(f"Session {self.handle.session_id} is aborted")
 
     def snapshot_state(self) -> dict[str, Any]:
         """Return a JSON-serializable snapshot for actor state inspection."""

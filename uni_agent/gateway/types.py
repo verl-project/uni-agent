@@ -18,14 +18,14 @@ class SessionHandle:
         session_id: Stable session identifier assigned by the caller.
         base_url: Per-session OpenAI-compatible ``/v1`` API root, or ``None``
             when the handle only needs to identify the session.
-        complete_url: Per-session completion endpoint used by runners to mark
-            the session complete; this is a sibling of the OpenAI-compatible
-            ``/v1`` root rather than part of that API.
+        reward_info_url: Per-session endpoint used by runners to attach reward
+            metadata; this is a sibling of the OpenAI-compatible ``/v1`` root
+            rather than part of that API.
     """
 
     session_id: str
     base_url: str | None = None
-    complete_url: str | None = None
+    reward_info_url: str | None = None
 
 
 @dataclass
@@ -40,7 +40,8 @@ class Trajectory:
             output and ``0`` marks interstitial context tokens.
         response_logprobs: Optional log probabilities aligned with
             ``response_ids``; continuation context tokens use ``0.0``.
-        reward_info: Reward metadata attached by session completion.
+        reward_info: Reward metadata attached through the session reward-info
+            endpoint before finalization.
         reward_score: Optional scalar reward assigned by downstream training.
         num_turns: Chat-turn count materialized with the trajectory.
         routed_experts: Optional expert-routing data captured by the backend.

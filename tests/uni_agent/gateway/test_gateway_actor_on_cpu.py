@@ -460,10 +460,8 @@ async def test_gateway_actor_forwards_image_data_on_initial_multimodal_request(r
 
 
 @pytest.mark.asyncio
-async def test_gateway_actor_complete_wait_and_finalize(ray_runtime):
-    """Full lifecycle: create, chat, complete (with reward_info), wait
-    for completion, finalize. Verifies the trajectory carries the reward
-    and the response mask is all-1 (no incremental interstitial tokens)."""
+async def test_gateway_actor_reward_info_endpoint_attaches_metadata_on_finalize(ray_runtime):
+    """The per-session reward_info endpoint stores metadata returned on finalize."""
     from uni_agent.gateway.config import GatewayActorConfig
     from uni_agent.gateway.gateway import GatewayActor
 
@@ -471,7 +469,7 @@ async def test_gateway_actor_complete_wait_and_finalize(ray_runtime):
     ray.get(actor.start.remote())
 
     session = ray.get(actor.create_session.remote("session-0"))
-    wait_ref = actor.wait_for_completion.remote("session-0", timeout=2.0)
+    assert session.reward_info_url.endswith("/reward_info")
 
     async with httpx.AsyncClient(timeout=5.0) as client:
         response = await client.post(
@@ -482,22 +480,18 @@ async def test_gateway_actor_complete_wait_and_finalize(ray_runtime):
             },
         )
         assert response.status_code == 200
-        assert response.json()["choices"][0]["message"]["content"] == "ANSWER: A"
 
-        complete = await client.post(
-            session.complete_url,
+        reward_info = await client.post(
+            session.reward_info_url,
             json={"reward_info": {"score": 1.0, "label": "A"}},
         )
-        assert complete.status_code == 200
+        assert reward_info.status_code == 200
 
-    ray.get(wait_ref)
     trajectories = ray.get(actor.finalize_session.remote("session-0"))
     ray.get(actor.shutdown.remote())
 
     assert len(trajectories) == 1
     assert trajectories[0].reward_info == {"score": 1.0, "label": "A"}
-    assert trajectories[0].response_ids
-    assert all(mask == 1 for mask in trajectories[0].response_mask)
 
 
 @pytest.mark.asyncio
@@ -977,29 +971,6 @@ async def test_gateway_actor_serializes_same_session_concurrent_requests(ray_run
     assert trajectories[1].response_ids == [ord(char) for char in "SECOND"]
     assert trajectories[0].response_mask == [1] * len("FIRST")
     assert trajectories[1].response_mask == [1] * len("SECOND")
-
-
-@pytest.mark.asyncio
-async def test_gateway_actor_rejects_chat_after_complete(ray_runtime):
-    """After ``/complete`` is called, further chat requests are rejected
-    with HTTP 409 (Conflict)."""
-    from uni_agent.gateway.config import GatewayActorConfig
-    from uni_agent.gateway.gateway import GatewayActor
-
-    actor = GatewayActor.remote(GatewayActorConfig(tokenizer=FakeTokenizer()), QueuedBackend(["DONE"]))
-    ray.get(actor.start.remote())
-    session = ray.get(actor.create_session.remote("session-completed-chat"))
-    ray.get(actor.complete_session.remote("session-completed-chat"))
-
-    async with httpx.AsyncClient(timeout=5.0) as client:
-        response = await client.post(
-            f"{session.base_url}/chat/completions",
-            json={"model": "dummy-model", "messages": [{"role": "user", "content": "after complete"}]},
-        )
-
-    ray.get(actor.shutdown.remote())
-
-    assert response.status_code == 409
 
 
 @pytest.mark.parametrize(

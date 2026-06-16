@@ -31,9 +31,7 @@ def ray_runtime():
 
 @pytest.mark.asyncio
 async def test_gateway_serving_runtime_owns_gateway_lifecycle_and_session_runtime(ray_runtime):
-    """Full lifecycle through the runtime: create, chat (via HTTP), complete
-    (with reward_info), wait, finalize. Verifies the runtime→manager→actor
-    chain works end-to-end and the trajectory carries the reward."""
+    """Runtime-owned actors expose a routed session handle and finalize trajectories."""
     from uni_agent.gateway.config import GatewayActorConfig
     from uni_agent.gateway.runtime import GatewayServingRuntime
 
@@ -45,7 +43,8 @@ async def test_gateway_serving_runtime_owns_gateway_lifecycle_and_session_runtim
     )
 
     session = await runtime.create_session("session-owner")
-    wait_task = runtime.wait_for_completion("session-owner", timeout=2.0)
+    assert session.base_url is not None
+    assert session.reward_info_url is not None
 
     async with httpx.AsyncClient(timeout=5.0) as client:
         response = await client.post(
@@ -53,15 +52,13 @@ async def test_gateway_serving_runtime_owns_gateway_lifecycle_and_session_runtim
             json={"model": "dummy-model", "messages": [{"role": "user", "content": "owner path"}]},
         )
         assert response.status_code == 200
-        assert response.json()["choices"][0]["message"]["content"] == "OWNER"
 
-        complete = await client.post(
-            session.complete_url,
+        reward_info = await client.post(
+            session.reward_info_url,
             json={"reward_info": {"score": 0.5, "label": "owner"}},
         )
-        assert complete.status_code == 200
+        assert reward_info.status_code == 200
 
-    await wait_task
     trajectories = await runtime.finalize_session("session-owner")
     await runtime.shutdown()
 

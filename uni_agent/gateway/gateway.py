@@ -55,7 +55,7 @@ class _GatewayActor:
         self._register_routes()
 
     def _register_routes(self) -> None:
-        """Register HTTP handlers for chat completions and session completion."""
+        """Register HTTP handlers for chat completions and reward metadata."""
 
         @self._app.exception_handler(HTTPException)
         async def _http_exception_handler(_request: Request, exc: HTTPException):
@@ -83,12 +83,12 @@ class _GatewayActor:
             payload = await request.json()
             return await self._handle_chat_completions(session_id=session_id, payload=payload)
 
-        @self._app.post("/sessions/{session_id}/complete")
-        async def _complete(session_id: str, request: Request):
+        @self._app.post("/sessions/{session_id}/reward_info")
+        async def _reward_info(session_id: str, request: Request):
             payload = await request.json()
             reward_info = payload.get("reward_info")
             try:
-                await self.complete_session(session_id=session_id, reward_info=reward_info)
+                await self.set_reward_info(session_id=session_id, reward_info=reward_info)
             except KeyError as exc:
                 raise HTTPException(status_code=404, detail=str(exc)) from exc
             return JSONResponse({"status": "ok"})
@@ -187,7 +187,7 @@ class _GatewayActor:
         handle = SessionHandle(
             session_id=session_id,
             base_url=f"{self._server_base_url}/sessions/{session_id}/v1",
-            complete_url=f"{self._server_base_url}/sessions/{session_id}/complete",
+            reward_info_url=f"{self._server_base_url}/sessions/{session_id}/reward_info",
         )
         self._sessions[session_id] = GatewaySession(
             handle=handle,
@@ -197,18 +197,10 @@ class _GatewayActor:
         )
         return handle
 
-    async def complete_session(self, session_id: str, reward_info: dict[str, Any] | None = None) -> None:
-        """Mark a session complete and attach optional reward metadata."""
+    async def set_reward_info(self, session_id: str, reward_info: dict[str, Any] | None = None) -> None:
+        """Attach optional reward metadata to a live session."""
         session = self._get_session(session_id)
-        await session.complete(reward_info)
-
-    async def wait_for_completion(self, session_id: str, timeout: float | None = None) -> None:
-        """Wait for a live session, treating already-removed sessions as done."""
-        session = self._sessions.get(session_id)
-        if session is None:
-            # Already finalized or aborted by a concurrent caller — nothing to wait for.
-            return
-        await session.wait_for_completion(timeout=timeout)
+        await session.set_reward_info(reward_info)
 
     async def finalize_session(self, session_id: str) -> list[Trajectory]:
         """Finalize a session, remove it from the actor, and return its trajectories."""

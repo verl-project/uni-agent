@@ -29,7 +29,6 @@ logger = logging.getLogger(__name__)
 
 class _SessionRuntime(Protocol):
     async def create_session(self, session_id: str, **kwargs) -> SessionHandle: ...
-    async def wait_for_completion(self, session_id: str, timeout: float | None = None) -> None: ...
     async def finalize_session(self, session_id: str) -> list[Trajectory]: ...
     async def abort_session(self, session_id: str) -> None: ...
 
@@ -214,8 +213,6 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         processor=None,
         replay_buffer=None,
         rollout_config=None,
-        completion_timeout: float | None = 30.0,
-        wait_for_completion_after_agent_run: bool = False,
     ):
         self.session_runtime = session_runtime
         self.runner_registry = runner_registry
@@ -232,8 +229,6 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         # constructor-required and no transitional dual-path is needed.
         self._replay_buffer = replay_buffer
         self._rollout_config = rollout_config
-        self.completion_timeout = completion_timeout
-        self.wait_for_completion_after_agent_run = wait_for_completion_after_agent_run
         self._runner_semaphores: dict[str, asyncio.Semaphore] = {}
         self._semaphore_loop: asyncio.AbstractEventLoop | None = None
 
@@ -257,7 +252,6 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         for runner_name, runner_cfg in agent_runners_cfg.items():
             runner_registry[str(runner_name)] = _RunnerConfig.from_config(runner_name, runner_cfg)
 
-        completion_timeout = af_cfg.get("completion_timeout_seconds")
         return cls(
             session_runtime=session_runtime,
             runner_registry=runner_registry,
@@ -265,8 +259,6 @@ class OpenAICompatibleAgentFramework(AgentFramework):
             processor=processor,
             replay_buffer=replay_buffer,
             rollout_config=config.actor_rollout_ref.rollout,
-            completion_timeout=completion_timeout,
-            wait_for_completion_after_agent_run=completion_timeout is not None,
         )
 
     async def generate_sequences(self, prompts: TensorDict) -> None:
@@ -525,8 +517,6 @@ class OpenAICompatibleAgentFramework(AgentFramework):
                     sample_index=sample_index,
                     **({"tools_kwargs": tools_kwargs} if tools_kwargs is not None else {}),
                 )
-            if self.wait_for_completion_after_agent_run:
-                await self.session_runtime.wait_for_completion(session_id, timeout=self.completion_timeout)
             session_trajectories = await self.session_runtime.finalize_session(session_id)
         except Exception:
             await self.session_runtime.abort_session(session_id)
@@ -567,7 +557,13 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         assert session_trajectories, "expected non-empty session_trajectories"
 
         final_trajectory = session_trajectories[-1]
-        data = _trajectory_to_reward_dataproto(final_trajectory, sample_fields)
+        scoring_sample_fields = dict(sample_fields)
+        if final_trajectory.reward_info:
+            scoring_sample_fields["extra_info"] = {
+                **dict(sample_fields.get("extra_info") or {}),
+                **final_trajectory.reward_info,
+            }
+        data = _trajectory_to_reward_dataproto(final_trajectory, scoring_sample_fields)
         worker = random.choice(self.reward_loop_worker_handles)
         result = await worker.compute_score.remote(data)
 
@@ -693,7 +689,6 @@ class OpenAICompatibleAgentFramework(AgentFramework):
             "prompt_len": prompt_len,
             "response_len": response_len,
             "seq_len": prompt_len + response_len,
-            # Keep uid in response tags for fully-async TQ/RB consumers that group response keys by uid.
             "uid": uid,
         }
         finish_reason = trajectory.extra_fields.get("finish_reason")

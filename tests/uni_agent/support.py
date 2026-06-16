@@ -382,7 +382,6 @@ class TrackingGatewayActor:
         self.created = []
         self.finalized = []
         self.aborted = []
-        self.waited = []
 
     async def start(self):
         return None
@@ -412,15 +411,10 @@ class TrackingGatewayActor:
         self.sessions.pop(session_id, None)
         return None
 
-    async def wait_for_completion(self, session_id: str, timeout: float | None = None):
-        self.waited.append((session_id, timeout))
-        return None
-
     async def stats(self):
         return {
             "name": self.name,
             "created": list(self.created),
             "finalized": list(self.finalized),
             "aborted": list(self.aborted),
-            "waited": list(self.waited),
         }

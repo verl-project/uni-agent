@@ -17,7 +17,7 @@ async def _config_recording_runner(*, raw_prompt, session, sample_index, marker=
             "raw_prompt": raw_prompt,
             "session_id": session.session_id,
             "base_url": session.base_url,
-            "complete_url": session.complete_url,
+            "reward_info_url": session.reward_info_url,
             "sample_index": sample_index,
             "kwargs": dict(kwargs),
         }
@@ -35,7 +35,7 @@ class _ConfigRecordingClassRunner:
                 "raw_prompt": raw_prompt,
                 "session_id": session.session_id,
                 "base_url": session.base_url,
-                "complete_url": session.complete_url,
+                "reward_info_url": session.reward_info_url,
                 "sample_index": sample_index,
                 "kwargs": {**dict(kwargs), "tools_kwargs": tools_kwargs},
             }
@@ -160,7 +160,7 @@ class _FakeSessionRuntime:
         return SessionHandle(
             session_id=session_id,
             base_url=f"http://fake/{session_id}/v1",
-            complete_url=f"http://fake/{session_id}/complete",
+            reward_info_url=f"http://fake/{session_id}/reward_info",
         )
 
     async def finalize_session(self, session_id: str):
@@ -169,9 +169,6 @@ class _FakeSessionRuntime:
 
     async def abort_session(self, session_id: str) -> None:
         self.aborted_sessions.append(session_id)
-
-    async def wait_for_completion(self, session_id: str, timeout: float | None = None) -> None:
-        return None
 
 
 def _build_prompts(count: int = 2, *, global_steps: int = 7, validate: bool = False):
@@ -271,7 +268,7 @@ async def test_agent_runners_registry_materializes_runners_and_selects_by_agent_
         [{"role": "user", "content": "sample 1"}],
     ]
     assert all(call["base_url"].endswith("/v1") for call in calls)
-    assert all(call["complete_url"].endswith("/complete") for call in calls)
+    assert all(call["reward_info_url"].endswith("/reward_info") for call in calls)
     assert [call["sample_index"] for call in calls] == [0, 1]
     assert [call["kwargs"]["tools_kwargs"] for call in calls] == [{"tool": 0}, {"tool": 1}]
     assert all("session_runtime" not in call["kwargs"] for call in calls)
@@ -320,18 +317,21 @@ async def test_generate_sequences_writes_tq_schema_for_each_session(monkeypatch,
     first = fake_tq.batch_puts[0]
     fields = first["fields"]
     assert first["partition_id"] == "train"
-    assert first["tags"] == [
-        {
-            "global_steps": 7,
-            "status": "success",
-            "prompt_len": 2,
-            "response_len": 2,
-            "seq_len": 4,
-            "finish_reason": "length",
-        }
-    ]
-    assert "length_truncated" not in first["tags"][0]
-    assert "traj_exit_reason" not in first["tags"][0]
+    tag = first["tags"][0]
+    assert {
+        key: tag[key]
+        for key in ("global_steps", "status", "prompt_len", "response_len", "seq_len", "uid", "finish_reason")
+    } == {
+        "global_steps": 7,
+        "status": "success",
+        "prompt_len": 2,
+        "response_len": 2,
+        "seq_len": 4,
+        "uid": "uid-0",
+        "finish_reason": "length",
+    }
+    assert "length_truncated" not in tag
+    assert "traj_exit_reason" not in tag
     assert fields["input_ids"].is_nested
     assert fields["response_mask"].is_nested
     assert fields["position_ids"].is_nested
@@ -484,9 +484,14 @@ async def test_generate_sequences_keeps_other_prompts_when_one_prompt_fails(fake
 
 
 @pytest.mark.asyncio
-async def test_score_trajectories_dispatches_only_final_trajectory_and_broadcasts():
+async def test_score_trajectories_merges_final_reward_info_into_reward_extra_info():
     """Reward scoring dispatches only the final trajectory to the worker and
-    broadcasts that score and extra info to every trajectory in the session."""
+    broadcasts that score and extra info to every trajectory in the session.
+
+    Session-level reward_info submitted by the runner is merged into reward
+    extra_info for scoring, with reward_info taking precedence on key
+    collisions.
+    """
 
     class _ComputeScoreRemote:
         def __init__(self):
@@ -514,12 +519,19 @@ async def test_score_trajectories_dispatches_only_final_trajectory_and_broadcast
     trajectories = [
         Trajectory(prompt_ids=[1, 2], response_ids=[3, 4], response_mask=[1, 1], num_turns=1),
         Trajectory(prompt_ids=[5, 6], response_ids=[7, 8], response_mask=[1, 1], num_turns=2),
-        Trajectory(prompt_ids=[9, 10], response_ids=[11, 12], response_mask=[1, 1], num_turns=3),
+        Trajectory(
+            prompt_ids=[9, 10],
+            response_ids=[11, 12],
+            response_mask=[1, 1],
+            reward_info={"reward_score": 0.9, "index": "from-reward-info"},
+            num_turns=3,
+        ),
     ]
     sample_fields = {
         "data_source": "test",
         "raw_prompt": [{"role": "user", "content": "hi"}],
         "reward_model": {"ground_truth": "answer"},
+        "extra_info": {"index": "from-sample", "case_id": "case-1"},
         "tools_kwargs": {"tool": "search"},
         "agent_name": "deepeyes",
     }
@@ -534,6 +546,9 @@ async def test_score_trajectories_dispatches_only_final_trajectory_and_broadcast
     assert data.non_tensor_batch["data_source"].tolist() == ["test"]
     assert data.non_tensor_batch["raw_prompt"].tolist() == [[{"role": "user", "content": "hi"}]]
     assert data.non_tensor_batch["reward_model"].tolist() == [{"ground_truth": "answer"}]
+    assert data.non_tensor_batch["extra_info"].tolist() == [
+        {"index": "from-reward-info", "case_id": "case-1", "reward_score": 0.9}
+    ]
     assert data.non_tensor_batch["tools_kwargs"].tolist() == [{"tool": "search"}]
     assert data.non_tensor_batch["agent_name"].tolist() == ["deepeyes"]
     assert data.non_tensor_batch["__num_turns__"].tolist() == [3]

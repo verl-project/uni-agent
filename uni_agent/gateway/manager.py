@@ -51,10 +51,10 @@ class GatewayManager:
         self.active_sessions_per_gateway[gateway_index] -= 1
         return trajectories
 
-    async def complete_session(self, session_id: str, reward_info: dict[str, Any] | None = None) -> None:
-        """Mark a routed session complete on its owning actor with optional reward metadata."""
+    async def set_reward_info(self, session_id: str, reward_info: dict[str, Any] | None = None) -> None:
+        """Attach reward metadata to a routed session on its owning actor."""
         gateway, _ = self._get_gateway(session_id)
-        await gateway.complete_session.remote(session_id=session_id, reward_info=reward_info)
+        await gateway.set_reward_info.remote(session_id=session_id, reward_info=reward_info)
 
     async def abort_session(self, session_id: str) -> None:
         """Abort a routed session on its owning actor and release the route."""
@@ -62,8 +62,3 @@ class GatewayManager:
         await gateway.abort_session.remote(session_id=session_id)
         self._session_to_gateway_index.pop(session_id, None)
         self.active_sessions_per_gateway[gateway_index] -= 1
-
-    async def wait_for_completion(self, session_id: str, timeout: float | None = None) -> None:
-        """Wait for a routed session on its owning actor."""
-        gateway, _ = self._get_gateway(session_id)
-        await gateway.wait_for_completion.remote(session_id=session_id, timeout=timeout)
