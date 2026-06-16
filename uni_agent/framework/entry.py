@@ -31,7 +31,7 @@ async def build_agent_framework(
     *,
     config,
     llm_client,
-    replay_buffer,
+    replay_buffer=None,
     reward_loop_worker_handles=None,
 ) -> AgentFramework:
     """Build GatewayServingRuntime, then delegate subclass-specific wiring."""
@@ -93,7 +93,6 @@ class AgentFrameworkRolloutAdapter:
                 "AgentFrameworkRolloutAdapter does not support teacher_client yet; "
                 "disable teacher policy/distillation or use an AgentLoopManager that supports it."
             )
-        assert replay_buffer is not None, "AgentFrameworkRolloutAdapter requires replay_buffer"
 
         framework = await build_agent_framework(
             config=config,
@@ -108,6 +107,14 @@ class AgentFrameworkRolloutAdapter:
 
     @auto_await
     async def generate_sequences(self, prompts) -> None:
+        """TQ batch generation entry point for trainer-managed sampling."""
         if self.framework is None:
             raise RuntimeError("framework must be initialized before generate_sequences")
+        return await self.framework.generate_sequences(prompts)
+
+    @auto_await
+    async def generate_sequences_single(self, prompts) -> None:
+        """TQ single-sample compatibility entry for legacy fully-async rollouters."""
+        if self.framework is None:
+            raise RuntimeError("framework must be initialized before generate_sequences_single")
         return await self.framework.generate_sequences(prompts)
