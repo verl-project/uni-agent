@@ -353,6 +353,10 @@ class OpenAICompatibleAgentFramework(AgentFramework):
                 stats["num_failed_uids"] += 1
                 failure_reasons.append(_short_failure_reason(outcome))
                 continue
+            # Propagate control-flow exceptions such as CancelledError/SystemExit;
+            # only ordinary Exceptions are treated as isolated rollout failures.
+            if isinstance(outcome, BaseException):
+                raise outcome
             stats["num_success_sessions"] += outcome["num_success_sessions"]
             stats["num_failed_sessions"] += outcome["num_failed_sessions"]
             stats["num_success_outputs"] += outcome["num_success_outputs"]
@@ -395,6 +399,10 @@ class OpenAICompatibleAgentFramework(AgentFramework):
                 failed_sessions += 1
                 failure_reasons.append(_short_failure_reason(outcome))
                 continue
+            # Propagate control-flow exceptions such as CancelledError/SystemExit;
+            # only ordinary Exceptions are treated as isolated rollout failures.
+            if isinstance(outcome, BaseException):
+                raise outcome
 
             trajectories, session_sample_fields = outcome
             if not trajectories:
@@ -507,8 +515,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
                     sample_index=sample_index,
                     tools_kwargs=tools_kwargs,
                 )
-                loop = asyncio.get_running_loop()
-                await loop.run_in_executor(None, ray.get, object_ref)
+                await object_ref
             else:
                 runner = self._inline_runners[runner_name]
                 await runner(
@@ -567,8 +574,10 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         worker = random.choice(self.reward_loop_worker_handles)
         result = await worker.compute_score.remote(data)
 
-        if "reward_score" not in result:
-            raise ValueError(f"RewardLoopWorker result missing 'reward_score' key for uid={sample_fields.get('uid')}")
+        if not isinstance(result, dict) or "reward_score" not in result:
+            raise ValueError(
+                f"RewardLoopWorker result missing 'reward_score' key or invalid for uid={sample_fields.get('uid')}"
+            )
         score = float(result["reward_score"])
         extra = dict(result.get("reward_extra_info") or {})
         return [(score, extra)] * len(session_trajectories)
