@@ -211,7 +211,6 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         runner_registry: dict[str, _RunnerConfig],
         reward_loop_worker_handles=None,
         processor=None,
-        replay_buffer=None,
         rollout_config=None,
     ):
         self.session_runtime = session_runtime
@@ -225,21 +224,17 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         }
         self.reward_loop_worker_handles = list(reward_loop_worker_handles) if reward_loop_worker_handles else None
         self._processor = processor
-        # TODO(phase-b): once trainer constructs framework directly, these become
-        # constructor-required and no transitional dual-path is needed.
-        self._replay_buffer = replay_buffer
         self._rollout_config = rollout_config
         self._runner_semaphores: dict[str, asyncio.Semaphore] = {}
         self._semaphore_loop: asyncio.AbstractEventLoop | None = None
 
     @classmethod
-    async def from_config(
+    def from_config(
         cls,
         *,
         config,
         session_runtime,
         processor=None,
-        replay_buffer=None,
         reward_loop_worker_handles=None,
     ) -> OpenAICompatibleAgentFramework:
         # TODO(phase-b): switch this to actor_rollout_ref.rollout.agent_framework.*
@@ -257,7 +252,6 @@ class OpenAICompatibleAgentFramework(AgentFramework):
             runner_registry=runner_registry,
             reward_loop_worker_handles=reward_loop_worker_handles,
             processor=processor,
-            replay_buffer=replay_buffer,
             rollout_config=config.actor_rollout_ref.rollout,
         )
 
@@ -280,12 +274,6 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         uids = tu.get(prompts, "uid")
         if uids is None:
             raise ValueError("OpenAICompatibleAgentFramework requires prompts['uid'] for TransferQueue output")
-        if self._replay_buffer is not None:
-            uid_values = uids.tolist() if hasattr(uids, "tolist") else list(uids)
-            self._replay_buffer.add(
-                partition_id,
-                {str(uid): {"global_steps": global_steps, "status": "running"} for uid in uid_values},
-            )
 
         stats = await self._run_batch_to_tq(
             prompts,

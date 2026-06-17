@@ -10,11 +10,10 @@ class AgentFramework(ABC):
 
     @classmethod
     @abstractmethod
-    async def from_config(
+    def from_config(
         cls,
         *,
         config,
-        replay_buffer,
         **kwargs,
     ) -> AgentFramework: ...
 

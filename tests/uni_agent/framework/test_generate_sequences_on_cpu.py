@@ -70,7 +70,6 @@ async def _build_framework_with_agent_runners(
     *,
     agent_runners: dict[str, dict[str, object]],
     session_runtime,
-    replay_buffer=None,
     reward_loop_worker_handles=None,
     n: int = 1,
     val_n: int = 1,
@@ -90,10 +89,9 @@ async def _build_framework_with_agent_runners(
             }
         }
     )
-    return await OpenAICompatibleAgentFramework.from_config(
+    return OpenAICompatibleAgentFramework.from_config(
         config=config,
         session_runtime=session_runtime,
-        replay_buffer=replay_buffer,
         reward_loop_worker_handles=reward_loop_worker_handles,
     )
 
@@ -124,19 +122,6 @@ def fake_tq(monkeypatch):
     fake = _FakeTransferQueue()
     monkeypatch.setattr(framework_module, "tq", fake)
     return fake
-
-
-class _FakeReplayBuffer:
-    def __init__(self):
-        self.adds = []
-
-    def add(self, partition_id, items):
-        self.adds.append({"partition_id": partition_id, "items": dict(items)})
-
-
-@pytest.fixture
-def replay_buffer():
-    return _FakeReplayBuffer()
 
 
 class _FakeSessionRuntime:
@@ -230,7 +215,7 @@ def _install_fake_score(monkeypatch, *, score_from_sample_fields=None, default_s
 
 
 @pytest.mark.asyncio
-async def test_agent_runners_registry_materializes_runners_and_selects_by_agent_name(fake_tq, replay_buffer):
+async def test_agent_runners_registry_materializes_runners_and_selects_by_agent_name(fake_tq):
     """Function and class runners keep per-runner kwargs, and each prompt's
     ``agent_name`` selects the matching runner without leaking internals."""
     runtime = _FakeSessionRuntime({"session-0-0": [_trajectory()], "session-1-0": [_trajectory()]})
@@ -256,7 +241,6 @@ async def test_agent_runners_registry_materializes_runners_and_selects_by_agent_
             },
         },
         session_runtime=runtime,
-        replay_buffer=replay_buffer,
     )
 
     await framework.generate_sequences(prompts)
@@ -275,9 +259,9 @@ async def test_agent_runners_registry_materializes_runners_and_selects_by_agent_
 
 
 @pytest.mark.asyncio
-async def test_generate_sequences_writes_tq_schema_for_each_session(monkeypatch, fake_tq, replay_buffer):
-    """Full ``generate_sequences`` path writes replay-buffer status, one TQ
-    batch per successful session, and trainer-compatible trajectory fields."""
+async def test_generate_sequences_writes_tq_schema_for_each_session(monkeypatch, fake_tq):
+    """Full ``generate_sequences`` path writes one TQ batch per successful
+    session and trainer-compatible trajectory fields."""
     runtime = _FakeSessionRuntime(
         {
             "session-0-0": [_trajectory(response_logprobs=[-0.1, -0.2], extra_fields={"finish_reason": "length"})],
@@ -295,21 +279,12 @@ async def test_generate_sequences_writes_tq_schema_for_each_session(monkeypatch,
         agent_runners={"runner": _inline_runner_config(_async_noop_runner)},
         session_runtime=runtime,
         reward_loop_worker_handles=["sentinel"],
-        replay_buffer=replay_buffer,
         n=2,
         val_n=2,
     )
 
     await framework.generate_sequences(_build_prompts(count=1, global_steps=7))
 
-    assert replay_buffer.adds == [
-        {
-            "partition_id": "train",
-            "items": {
-                "uid-0": {"global_steps": 7, "status": "running"},
-            },
-        }
-    ]
     assert fake_tq.batch_puts[0]["keys"] == ["uid-0_0_0"]
     assert fake_tq.batch_puts[1]["keys"] == ["uid-0_1_0"]
     assert fake_tq.puts == [{"key": "uid-0", "partition_id": "train", "tag": {"status": "finished"}}]
@@ -359,7 +334,7 @@ async def test_generate_sequences_writes_tq_schema_for_each_session(monkeypatch,
 
 
 @pytest.mark.asyncio
-async def test_generate_sequences_keeps_successful_sessions_when_one_session_fails(fake_tq, replay_buffer):
+async def test_generate_sequences_keeps_successful_sessions_when_one_session_fails(fake_tq):
     """A failed rollout session aborts only that session; other successful
     sessions for the same prompt are still finalized and written to TQ."""
     runtime = _FakeSessionRuntime(
@@ -376,16 +351,12 @@ async def test_generate_sequences_keeps_successful_sessions_when_one_session_fai
     framework = await _build_framework_with_agent_runners(
         agent_runners={"runner": _inline_runner_config(agent_runner)},
         session_runtime=runtime,
-        replay_buffer=replay_buffer,
         n=2,
         val_n=2,
     )
 
     await framework.generate_sequences(_build_prompts(count=1, global_steps=8))
 
-    assert replay_buffer.adds == [
-        {"partition_id": "train", "items": {"uid-0": {"global_steps": 8, "status": "running"}}}
-    ]
     assert fake_tq.batch_puts[0]["keys"] == ["uid-0_0_0"]
     assert fake_tq.puts == [{"key": "uid-0", "partition_id": "train", "tag": {"status": "finished"}}]
     assert len(runtime.aborted_sessions) == 1
@@ -393,7 +364,7 @@ async def test_generate_sequences_keeps_successful_sessions_when_one_session_fai
 
 
 @pytest.mark.asyncio
-async def test_generate_sequences_marks_prompt_failure_when_all_sessions_fail(fake_tq, replay_buffer):
+async def test_generate_sequences_marks_prompt_failure_when_all_sessions_fail(fake_tq):
     """If every session for a validation prompt fails, the uid is marked
     failed in TQ and ``generate_sequences`` raises the all-rollouts failure."""
     runtime = _FakeSessionRuntime({"session-0-0": [], "session-0-1": []})
@@ -401,7 +372,6 @@ async def test_generate_sequences_marks_prompt_failure_when_all_sessions_fail(fa
     framework = await _build_framework_with_agent_runners(
         agent_runners={"runner": _inline_runner_config(_async_noop_runner)},
         session_runtime=runtime,
-        replay_buffer=replay_buffer,
         n=1,
         val_n=2,
     )
@@ -409,13 +379,12 @@ async def test_generate_sequences_marks_prompt_failure_when_all_sessions_fail(fa
     with pytest.raises(RuntimeError, match="All rollouts failed at global_steps=9"):
         await framework.generate_sequences(_build_prompts(count=1, global_steps=9, validate=True))
 
-    assert replay_buffer.adds == [{"partition_id": "val", "items": {"uid-0": {"global_steps": 9, "status": "running"}}}]
     assert fake_tq.batch_puts == []
     assert fake_tq.puts == [{"key": "uid-0", "partition_id": "val", "tag": {"status": "failure"}}]
 
 
 @pytest.mark.asyncio
-async def test_generate_sequences_zero_fills_missing_trainer_fields(fake_tq, replay_buffer):
+async def test_generate_sequences_zero_fills_missing_trainer_fields(fake_tq):
     """Without reward workers or backend logprobs, trainer-selected optional
     fields are still emitted as zeros."""
     runtime = _FakeSessionRuntime({"session-0-0": [_trajectory(response_logprobs=None)]})
@@ -423,7 +392,6 @@ async def test_generate_sequences_zero_fills_missing_trainer_fields(fake_tq, rep
     framework = await _build_framework_with_agent_runners(
         agent_runners={"runner": _inline_runner_config(_async_noop_runner)},
         session_runtime=runtime,
-        replay_buffer=replay_buffer,
         n=1,
         val_n=1,
     )
@@ -436,7 +404,7 @@ async def test_generate_sequences_zero_fills_missing_trainer_fields(fake_tq, rep
 
 
 @pytest.mark.asyncio
-async def test_generate_sequences_keeps_other_prompts_when_one_prompt_fails(fake_tq, replay_buffer):
+async def test_generate_sequences_keeps_other_prompts_when_one_prompt_fails(fake_tq):
     """Prompt-level failures are isolated: one uid can fail while another uid
     in the same batch still writes successful output."""
     runtime = _FakeSessionRuntime(
@@ -452,22 +420,12 @@ async def test_generate_sequences_keeps_other_prompts_when_one_prompt_fails(fake
     framework = await _build_framework_with_agent_runners(
         agent_runners={"runner": _inline_runner_config(agent_runner)},
         session_runtime=runtime,
-        replay_buffer=replay_buffer,
         n=1,
         val_n=1,
     )
 
     await framework.generate_sequences(_build_prompts(count=2, global_steps=11))
 
-    assert replay_buffer.adds == [
-        {
-            "partition_id": "train",
-            "items": {
-                "uid-0": {"global_steps": 11, "status": "running"},
-                "uid-1": {"global_steps": 11, "status": "running"},
-            },
-        }
-    ]
     assert [put["keys"] for put in fake_tq.batch_puts] == [["uid-1_0_0"]]
     assert sorted(fake_tq.puts, key=lambda put: put["key"]) == [
         {"key": "uid-0", "partition_id": "train", "tag": {"status": "failure"}},
@@ -511,7 +469,6 @@ async def test_score_trajectories_merges_final_reward_info_into_reward_extra_inf
         agent_runners={"runner": _inline_runner_config(_async_noop_runner)},
         session_runtime=_FakeSessionRuntime({}),
         reward_loop_worker_handles=[worker],
-        replay_buffer=_FakeReplayBuffer(),
         n=1,
         val_n=1,
     )
