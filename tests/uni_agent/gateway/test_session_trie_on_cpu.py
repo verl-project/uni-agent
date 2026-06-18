@@ -20,7 +20,12 @@ from __future__ import annotations
 
 import asyncio
 
-from tests.uni_agent.support import FakeTokenizer, SequencedBackend
+from tests.uni_agent.support import (
+    FakeProcessor,
+    FakeTokenizer,
+    SequencedBackend,
+    fake_vision_info_extractor,
+)
 from uni_agent.gateway.session.codec import MessageCodec
 from uni_agent.gateway.session.session import GatewaySession
 from uni_agent.gateway.session.types import SessionHandle
@@ -136,3 +141,38 @@ def test_trie_abandons_pending_node_when_encode_fails():
     raised, inflight = _run(scenario())
     assert raised
     assert inflight == 0, "pending node must be abandoned on encode failure"
+
+
+def test_trie_no_duplicate_multimodal_on_full_encode_midbranch():
+    """A tools change mid-branch forces a full re-encode; the committed node must
+    store only this turn's delta media, not the whole history, so finalize does
+    not double-count ancestor media (fails if the node stores the full lists)."""
+
+    async def scenario():
+        codec = MessageCodec(
+            FakeTokenizer(), processor=FakeProcessor(), vision_info_extractor=fake_vision_info_extractor
+        )
+        session = GatewaySession(SessionHandle(session_id="s"), codec, trie_enabled=True)
+        backend = SequencedBackend(["R0", "R1"])
+        img_a = {"type": "image_url", "image_url": {"url": "http://x/a.png"}}
+        img_b = {"type": "image_url", "image_url": {"url": "http://x/b.png"}}
+
+        # turn 1: image A, no tools
+        msgs1 = [SYS, {"role": "user", "content": [img_a, {"type": "text", "text": "a"}]}]
+        out1 = await session.run_generation({"messages": msgs1}, backend)
+        # turn 2: append assistant + a new user with image B AND change tools ->
+        # use_incremental=False -> full re-encode mid-branch
+        msgs2 = msgs1 + [
+            {"role": "assistant", "content": out1.assistant_msg["content"]},
+            {"role": "user", "content": [img_b, {"type": "text", "text": "b"}]},
+        ]
+        await session.run_generation(
+            {"messages": msgs2, "tools": [{"type": "function", "function": {"name": "f", "parameters": {}}}]},
+            backend,
+        )
+        return await session.finalize()
+
+    trajectories = _run(scenario())
+    assert len(trajectories) == 1
+    images = trajectories[0].multi_modal_data["images"]
+    assert images == ["http://x/a.png", "http://x/b.png"], f"no duplicate media expected, got {images}"

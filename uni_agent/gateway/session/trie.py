@@ -297,7 +297,9 @@ class PrefixTrie:
             key = make_message_key(message)
             child = attach.children.get(key)
             if child is None:
-                child = TrieNode(key=key, message=message, parent=attach)
+                # Shallow-copy so external mutation of the request payload cannot
+                # corrupt the stored node.
+                child = TrieNode(key=key, message=dict(message), parent=attach)
                 attach.children[key] = child
             attach = child
         return attach
@@ -397,11 +399,13 @@ class PrefixTrie:
         """
         key = make_message_key(assistant_msg)
         child = parent.children.get(key)
+        # Shallow-copy so later mutation of the assistant message cannot corrupt
+        # the stored node.
         if child is None:
-            child = TrieNode(key=key, message=assistant_msg, parent=parent)
+            child = TrieNode(key=key, message=dict(assistant_msg), parent=parent)
             parent.children[key] = child
         else:
-            child.message = assistant_msg
+            child.message = dict(assistant_msg)
         child.checkpoint = checkpoint
         # Mirror the checkpoint's multimodal payload onto the node, clearing any
         # stale data so a refresh (idempotent retry) stays consistent.
@@ -431,7 +435,7 @@ class PrefixTrie:
         # request prompt PLUS the generated assistant turn, so the stored prefix
         # must include ``assistant_msg`` (this is what the next turn's
         # ``checkpoint_messages`` slices against).
-        covered_messages = list(messages) + [assistant_msg] if messages is not None else None
+        covered_messages = [dict(m) for m in messages] + [dict(assistant_msg)] if messages is not None else None
         checkpoint = BranchCheckpoint(
             trajectory_buffer=trajectory_buffer,
             request_tools=request_tools,

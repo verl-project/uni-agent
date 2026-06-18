@@ -383,8 +383,10 @@ class GatewaySession:
                 request_chat_template_kwargs=request_chat_template_kwargs,
             )
             buffer = TrajectoryBuffer(prompt_ids=prompt_ids)
-            # Whole prompt is freshly encoded; the node owns all of its images.
-            new_image_data, new_video_data = image_data, video_data
+            # The backend gets the full prompt's media (image_data/video_data),
+            # but the node stores only this turn's delta media (already extracted
+            # above from delta_messages) so collect_multi_modal does not
+            # double-count media carried on ancestor checkpoints.
         else:
             buffer = prepared.trajectory_buffer
             image_data = list(prepared.image_data) if prepared.image_data is not None else None
