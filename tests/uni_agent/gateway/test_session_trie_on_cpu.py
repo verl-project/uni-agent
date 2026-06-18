@@ -32,11 +32,15 @@ from tests.uni_agent.support import (
 )
 from uni_agent.gateway.session.codec import MessageCodec
 from uni_agent.gateway.session.session import GatewaySession
-from uni_agent.gateway.session.types import SessionHandle
+from uni_agent.gateway.session.types import SessionHandle, Trajectory
 
 
 def _run(coro):
-    return asyncio.new_event_loop().run_until_complete(coro)
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
 
 
 def _session(trie_enabled, response_length=None):
@@ -52,6 +56,26 @@ SYS = {"role": "system", "content": "sys"}
 USER = {"role": "user", "content": "fix bug"}
 HELPFUL_SYS = {"role": "system", "content": "You are helpful. Reply in 1 short sentence."}
 SUBAGENT_SYS = {"role": "system", "content": "You are a sub-agent. Reply in 1 short sentence."}
+
+
+def _decode_response_ids(trajectory: Trajectory) -> str:
+    return "".join(chr(token_id) for token_id in trajectory.response_ids)
+
+
+def _assert_trajectory_parity(
+    on_trajs: list[Trajectory],
+    off_trajs: list[Trajectory],
+    *,
+    expected_count: int,
+    expected_reward_info: dict[str, float],
+) -> None:
+    assert len(on_trajs) == len(off_trajs) == expected_count
+    for on_traj, off_traj in zip(on_trajs, off_trajs, strict=True):
+        assert on_traj.prompt_ids == off_traj.prompt_ids
+        assert on_traj.response_ids == off_traj.response_ids
+        assert on_traj.response_mask == off_traj.response_mask
+        assert on_traj.response_logprobs == off_traj.response_logprobs
+        assert on_traj.reward_info == off_traj.reward_info == expected_reward_info
 
 
 async def _linear_conversation(trie_enabled):
@@ -114,13 +138,7 @@ def test_trie_flag_parity_linear_conversation():
     assert on_prompts == off_prompts
 
     # And the finalized linear trajectory must match token-for-token.
-    assert len(on_trajs) == len(off_trajs) == 1
-    a, b = on_trajs[0], off_trajs[0]
-    assert a.prompt_ids == b.prompt_ids
-    assert a.response_ids == b.response_ids
-    assert a.response_mask == b.response_mask
-    assert a.response_logprobs == b.response_logprobs
-    assert a.reward_info == b.reward_info == {"score": 1.0}
+    _assert_trajectory_parity(on_trajs, off_trajs, expected_count=1, expected_reward_info={"score": 1.0})
 
 
 def test_trie_flag_parity_repeated_prompt_multi_trajectory():
@@ -133,13 +151,7 @@ def test_trie_flag_parity_repeated_prompt_multi_trajectory():
     # Trie mode represents these as assistant siblings; legacy mode materializes
     # the previous active trajectory on each prefix mismatch. The exported token
     # buffers should still match one-for-one.
-    assert len(on_trajs) == len(off_trajs) == 3
-    for on_traj, off_traj in zip(on_trajs, off_trajs, strict=True):
-        assert on_traj.prompt_ids == off_traj.prompt_ids
-        assert on_traj.response_ids == off_traj.response_ids
-        assert on_traj.response_mask == off_traj.response_mask
-        assert on_traj.response_logprobs == off_traj.response_logprobs
-        assert on_traj.reward_info == off_traj.reward_info == {"score": 0.5}
+    _assert_trajectory_parity(on_trajs, off_trajs, expected_count=3, expected_reward_info={"score": 0.5})
 
 
 def test_trie_flag_parity_subagent_system_split_multi_trajectory():
@@ -151,16 +163,10 @@ def test_trie_flag_parity_subagent_system_split_multi_trajectory():
     # same backend prompts for the three generations.
     assert on_prompts == off_prompts
 
-    assert len(on_trajs) == len(off_trajs) == 2
-    for on_traj, off_traj in zip(on_trajs, off_trajs, strict=True):
-        assert on_traj.prompt_ids == off_traj.prompt_ids
-        assert on_traj.response_ids == off_traj.response_ids
-        assert on_traj.response_mask == off_traj.response_mask
-        assert on_traj.response_logprobs == off_traj.response_logprobs
-        assert on_traj.reward_info == off_traj.reward_info == {"score": 0.75}
+    _assert_trajectory_parity(on_trajs, off_trajs, expected_count=2, expected_reward_info={"score": 0.75})
 
-    main_text = "".join(chr(token_id) for token_id in on_trajs[0].response_ids)
-    subagent_text = "".join(chr(token_id) for token_id in on_trajs[1].response_ids)
+    main_text = _decode_response_ids(on_trajs[0])
+    subagent_text = _decode_response_ids(on_trajs[1])
     assert "Mango." in main_text
     assert "Apple." in main_text
     assert 0 in on_trajs[0].response_mask
@@ -175,7 +181,7 @@ def test_trie_best_of_n_fans_out_to_sibling_trajectories():
 
     trajectories = _run(scenario())
     assert len(trajectories) == 3
-    contents = sorted("".join(chr(t) for t in traj.response_ids) for traj in trajectories)
+    contents = sorted(_decode_response_ids(traj) for traj in trajectories)
     assert contents == ["ans-A", "ans-B", "ans-C"]
     assert all(traj.reward_info == {"score": 0.5} for traj in trajectories)
 
