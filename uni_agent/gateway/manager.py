@@ -76,10 +76,20 @@ class GatewayManager:
         """Create a session on the least-loaded actor, record the route, and return its handle."""
         gateway_index = self._select_gateway_index()
         gateway = self.gateways[gateway_index]
-        handle = await gateway.create_session.remote(session_id=session_id, **kwargs)
+        # Reserve the slot synchronously, before the await. Sessions are created
+        # concurrently on one event loop; if the counter were bumped after the
+        # await, every coroutine in a burst would read the same stale counts and
+        # ``min`` would funnel them all onto the lowest-index gateway. Roll back
+        # if the remote create fails so a failed session does not inflate the
+        # load estimate.
         self._session_to_gateway_index[session_id] = gateway_index
         self.active_sessions_per_gateway[gateway_index] += 1
-        return handle
+        try:
+            return await gateway.create_session.remote(session_id=session_id, **kwargs)
+        except BaseException:
+            self.active_sessions_per_gateway[gateway_index] -= 1
+            self._session_to_gateway_index.pop(session_id, None)
+            raise
 
     async def finalize_session(self, session_id: str):
         """Finalize a session on its owning actor, release the route, and return its trajectories."""

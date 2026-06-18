@@ -1,3 +1,5 @@
+import asyncio
+
 import httpx
 import pytest
 import ray
@@ -10,6 +12,57 @@ def ray_runtime():
     ray.init(ignore_reinit_error=True)
     yield
     ray.shutdown()
+
+
+class _FakeRemoteMethod:
+    def __init__(self, fn):
+        self._fn = fn
+
+    def remote(self, *args, **kwargs):
+        return self._fn(*args, **kwargs)
+
+
+class _FakeGateway:
+    """Minimal gateway stub whose create_session.remote yields at an await, so
+    concurrent creates interleave the way real Ray RPCs do."""
+
+    def __init__(self):
+        self.created = []
+
+    async def _create(self, session_id, **kwargs):
+        await asyncio.sleep(0)  # yield the loop mid-create to expose select/increment races
+        self.created.append(session_id)
+        return session_id
+
+    @property
+    def create_session(self):
+        return _FakeRemoteMethod(self._create)
+
+
+@pytest.mark.asyncio
+async def test_gateway_manager_balances_concurrent_session_creation():
+    """Concurrently created sessions must spread evenly across gateways. The
+    selection counter has to be reserved before the create await; otherwise a
+    burst of concurrent creates all read the same stale counts and pile onto the
+    lowest-index gateway. Builds over fake gateways (no real spawn) to drive the
+    routing logic deterministically.
+    """
+    from uni_agent.gateway.manager import GatewayManager
+
+    gateways = [_FakeGateway() for _ in range(4)]
+    # No real Ray spawn: drive the routing logic over injected fakes.
+    manager = GatewayManager.__new__(GatewayManager)
+    manager.gateways = gateways
+    manager.gateway_count = len(gateways)
+    manager.active_sessions_per_gateway = [0] * len(gateways)
+    manager._session_to_gateway_index = {}
+
+    await asyncio.gather(*(manager.create_session(f"session-{i}") for i in range(40)))
+
+    counts = manager.active_sessions_per_gateway
+    assert sum(counts) == 40
+    assert max(counts) - min(counts) <= 1, counts
+    assert [len(g.created) for g in gateways] == counts
 
 
 def test_gateway_manager_rejects_zero_gateway_count():
