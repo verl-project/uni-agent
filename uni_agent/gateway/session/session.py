@@ -343,10 +343,24 @@ class GatewaySession:
         encode paths as the legacy flow — only the state model differs.
         """
         messages = request_context["messages"]
+        prepared = self._trie.prepare(messages)
+        # ``prepare`` has registered a pending node; if encoding fails (or the
+        # request is cancelled) before we hand the buffer to the backend, abandon
+        # it so the in-flight bookkeeping does not leak.
+        try:
+            return await self._encode_prepared(payload, request_context, prepared)
+        except BaseException:
+            self._trie.abandon(prepared.branch_handle)
+            raise
+
+    async def _encode_prepared(
+        self, payload: dict[str, Any], request_context: dict[str, Any], prepared
+    ) -> EncodedData:
+        """Encode inputs for an already-prepared trie branch (see caller)."""
+        messages = request_context["messages"]
         tools = request_context["tools"]
         request_chat_template_kwargs = request_context["chat_template_kwargs"]
 
-        prepared = self._trie.prepare(messages)
         # Reuse the cloned checkpoint only when its tools match this request;
         # a tools change forces a full re-encode (mirrors the legacy
         # ``active_tool_schemas != tools`` gate).

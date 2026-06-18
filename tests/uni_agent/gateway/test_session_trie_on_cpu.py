@@ -113,3 +113,26 @@ def test_trie_multi_turn_reattaches_and_finalizes_single_branch():
     assert len(traj.response_ids) == len(traj.response_mask) == len(traj.response_logprobs)
     # mask has both generated (1) and continuation (0) tokens.
     assert set(traj.response_mask) == {0, 1}
+
+
+def test_trie_abandons_pending_node_when_encode_fails():
+    """An encode failure inside input prep must not leak the trie pending node
+    (fails if _prepare_generation_inputs_trie doesn't abandon on error)."""
+
+    async def scenario():
+        session = _session(trie_enabled=True)
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("encode failed")
+
+        session._codec.encode_full = boom  # force prep to raise after prepare()
+        raised = False
+        try:
+            await session.run_generation({"messages": [SYS, USER]}, SequencedBackend(["x"]))
+        except RuntimeError:
+            raised = True
+        return raised, session._trie.num_inflight()
+
+    raised, inflight = _run(scenario())
+    assert raised
+    assert inflight == 0, "pending node must be abandoned on encode failure"

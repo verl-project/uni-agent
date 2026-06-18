@@ -85,7 +85,9 @@ def _media_digest(value: Any) -> str:
         return value
     if isinstance(value, (bytes, bytearray)):
         return hashlib.sha256(bytes(value)).hexdigest()[:16]
-    return hashlib.sha256(repr(value).encode("utf-8")).hexdigest()[:16]
+    # _freeze canonicalizes nested dicts/lists so the repr is order-stable
+    # across processes (plain repr of a dict is not guaranteed canonical).
+    return hashlib.sha256(repr(_freeze(value)).encode("utf-8")).hexdigest()[:16]
 
 
 def canonicalize_content(content: Any) -> str | tuple | None:
