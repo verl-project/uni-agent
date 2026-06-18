@@ -183,7 +183,7 @@ async def test_unknown_session_raises_404():
 def test_message_normalization_tool_call_arguments(raw_arguments, expected_arguments):
     """``MessageCodec.normalize_request`` parses valid JSON tool-call arguments
     into a dict and leaves invalid JSON as the original string."""
-    from uni_agent.gateway.codec import MessageCodec
+    from uni_agent.gateway.session import MessageCodec
 
     result = MessageCodec(FakeTokenizer()).normalize_request(
         {
@@ -210,7 +210,7 @@ async def test_request_chat_template_kwargs_forwarded(monkeypatch):
     """Per-request ``chat_template_kwargs`` are forwarded to the chat-template
     call alongside the codec-level defaults, and per-request values take
     precedence over matching codec defaults."""
-    import uni_agent.gateway.codec as codec_mod
+    import uni_agent.gateway.session.codec as codec_mod
     from uni_agent.gateway.config import GatewayActorConfig
     from uni_agent.gateway.gateway import _GatewayActor
 
@@ -350,7 +350,7 @@ async def test_tool_choice_none_skips_tool_injection_and_parser(monkeypatch):
     """When ``tool_choice="none"``, tools are cleared before encoding so the
     chat template does not inject tool-call tokens, and the tool parser is
     not used during decode — the response comes back as plain text."""
-    import uni_agent.gateway.codec as codec_mod
+    import uni_agent.gateway.session.codec as codec_mod
     from uni_agent.gateway.config import GatewayActorConfig
     from uni_agent.gateway.gateway import _GatewayActor
 
@@ -395,9 +395,9 @@ async def test_gateway_actor_forwards_image_data_on_initial_multimodal_request(r
     """On the first turn of a multimodal session, ``image_data`` extracted
     from the request is forwarded to the backend and recorded in the
     resulting ``Trajectory.multi_modal_data``."""
-    from uni_agent.gateway.codec import MessageCodec
     from uni_agent.gateway.config import GatewayActorConfig
     from uni_agent.gateway.gateway import GatewayActor
+    from uni_agent.gateway.session import MessageCodec
 
     processor = FakeProcessor()
     actor = GatewayActor.remote(
@@ -915,7 +915,7 @@ def test_canonicalize_tool_call_arguments_for_prefix_comparison(arguments_a, arg
     """``MessageCodec.canonicalize_message_for_prefix_comparison`` normalizes
     tool-call arguments so that JSON-equivalent values match, and falls back to
     raw string comparison when the arguments are not valid JSON."""
-    from uni_agent.gateway.codec import MessageCodec
+    from uni_agent.gateway.session import MessageCodec
 
     def _message(arguments):
         return {

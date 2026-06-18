@@ -1,10 +1,8 @@
 import asyncio
 import json
 
-import ray
 import torch
 
-from uni_agent.gateway.types import SessionHandle, Trajectory
 from verl.workers.rollout.replica import TokenOutput
 
 
@@ -372,49 +370,3 @@ class RejectConcurrentSessionBackend:
             finished_at = asyncio.get_running_loop().time()
             self.call_windows.append((request_id, started_at, finished_at))
             self._active_request_ids.remove(request_id)
-
-
-@ray.remote
-class TrackingGatewayActor:
-    def __init__(self, name: str):
-        self.name = name
-        self.sessions = {}
-        self.created = []
-        self.finalized = []
-        self.aborted = []
-
-    async def start(self):
-        return None
-
-    async def shutdown(self):
-        return None
-
-    async def create_session(self, session_id: str, metadata: dict | None = None):
-        handle = SessionHandle(session_id=session_id, base_url=f"http://{self.name}/{session_id}/v1")
-        self.sessions[session_id] = {"metadata": metadata or {}}
-        self.created.append(session_id)
-        return handle
-
-    async def finalize_session(self, session_id: str):
-        self.finalized.append(session_id)
-        self.sessions.pop(session_id, None)
-        return [
-            Trajectory(
-                prompt_ids=[1],
-                response_ids=[2],
-                response_mask=[1],
-            )
-        ]
-
-    async def abort_session(self, session_id: str):
-        self.aborted.append(session_id)
-        self.sessions.pop(session_id, None)
-        return None
-
-    async def stats(self):
-        return {
-            "name": self.name,
-            "created": list(self.created),
-            "finalized": list(self.finalized),
-            "aborted": list(self.aborted),
-        }

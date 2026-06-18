@@ -1,7 +1,7 @@
 """Factory entry + trainer-facing adapter for the agent framework stack.
 
-`build_gateway_runtime` owns gateway-universal wiring (driver-side); the trainer
-adapter creates the runtime and injects it so the framework only handles its own
+`build_gateway_manager` owns gateway-universal wiring (driver-side); the trainer
+adapter creates the manager and injects it so the framework only handles its own
 agent runner, reward dispatch, and framework-specific config fields.
 
 `AgentFrameworkRolloutAdapter` satisfies the trainer's
@@ -19,7 +19,7 @@ from omegaconf import OmegaConf
 
 from uni_agent.framework.base import AgentFramework
 from uni_agent.gateway.config import GatewayActorConfig
-from uni_agent.gateway.runtime import GatewayServingRuntime
+from uni_agent.gateway.manager import GatewayManager
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.import_utils import load_class_from_fqn
 from verl.utils.transferqueue_utils import tq
@@ -28,8 +28,8 @@ from verl.workers.config.model import HFModelConfig
 _DEFAULT_FRAMEWORK_CLASS = "uni_agent.framework.framework.OpenAICompatibleAgentFramework"
 
 
-def build_gateway_runtime(*, config, llm_client) -> GatewayServingRuntime:
-    """Spawn the gateway actor pool (driver-side, driver-owned) and return its runtime."""
+def build_gateway_manager(*, config, llm_client) -> GatewayManager:
+    """Spawn the gateway actor pool (driver-side, driver-owned) and return its manager."""
     # TODO(phase-b): switch this to actor_rollout_ref.rollout.agent_framework.*
     af_cfg = OmegaConf.select(config, "actor_rollout_ref.rollout.custom.agent_framework", default={}) or {}
 
@@ -44,7 +44,7 @@ def build_gateway_runtime(*, config, llm_client) -> GatewayServingRuntime:
         response_length=config.actor_rollout_ref.rollout.response_length,
     )
 
-    return GatewayServingRuntime(
+    return GatewayManager(
         llm_client=llm_client,
         gateway_count=int(af_cfg["gateway_count"]),
         gateway_actor_config=gateway_actor_config,
@@ -54,10 +54,10 @@ def build_gateway_runtime(*, config, llm_client) -> GatewayServingRuntime:
 def build_agent_framework(
     *,
     config,
-    session_runtime,
+    gateway_manager,
     reward_loop_worker_handles=None,
 ) -> AgentFramework:
-    """Wire the configured framework subclass over an injected gateway runtime."""
+    """Wire the configured framework subclass over an injected gateway manager."""
     # TODO(phase-b): switch this to actor_rollout_ref.rollout.agent_framework.*
     af_cfg = OmegaConf.select(config, "actor_rollout_ref.rollout.custom.agent_framework", default={}) or {}
     model_config: HFModelConfig = omega_conf_to_dataclass(config.actor_rollout_ref.model)
@@ -65,7 +65,7 @@ def build_agent_framework(
     framework_cls = load_class_from_fqn(str(af_cfg.get("framework_class_fqn", _DEFAULT_FRAMEWORK_CLASS)))
     return framework_cls.from_config(
         config=config,
-        session_runtime=session_runtime,
+        gateway_manager=gateway_manager,
         processor=model_config.processor,
         reward_loop_worker_handles=reward_loop_worker_handles,
     )
@@ -75,15 +75,15 @@ def build_agent_framework(
 class AgentFrameworkWorker:
     """Ray actor host: initializes TQ in this process and owns one AgentFramework.
 
-    Construction is synchronous (no async setup round-trip); the gateway runtime
+    Construction is synchronous (no async setup round-trip); the gateway manager
     is created driver-side and injected so its actors are not owned by this worker.
     """
 
-    def __init__(self, *, config, session_runtime, reward_loop_worker_handles=None) -> None:
+    def __init__(self, *, config, gateway_manager, reward_loop_worker_handles=None) -> None:
         tq.init()
         self.framework = build_agent_framework(
             config=config,
-            session_runtime=session_runtime,
+            gateway_manager=gateway_manager,
             reward_loop_worker_handles=reward_loop_worker_handles,
         )
 
@@ -95,7 +95,7 @@ class AgentFrameworkRolloutAdapter:
     """Trainer-facing adapter satisfying the `agent_loop_manager_class` contract.
 
     Holds zero recipe-specific logic; every agent-framework recipe wires the
-    same class in yaml. The adapter owns the gateway runtime (driver-side) and
+    same class in yaml. The adapter owns the gateway manager (driver-side) and
     injects it into the framework worker.
     """
 
@@ -103,7 +103,7 @@ class AgentFrameworkRolloutAdapter:
         self.framework_worker = None
         # Driver-owned so the gateway actors outlive the framework worker; also
         # the handle through which teardown can be driven once a call site exists.
-        self.session_runtime = None
+        self.gateway_manager = None
 
     @classmethod
     def create(
@@ -121,16 +121,16 @@ class AgentFrameworkRolloutAdapter:
                 "disable teacher policy/distillation or use an AgentLoopManager that supports it."
             )
 
-        session_runtime = build_gateway_runtime(config=config, llm_client=llm_client)
+        gateway_manager = build_gateway_manager(config=config, llm_client=llm_client)
         framework_worker = AgentFrameworkWorker.remote(
             config=config,
-            session_runtime=session_runtime,
+            gateway_manager=gateway_manager,
             reward_loop_worker_handles=reward_loop_worker_handles,
         )
 
         instance = cls()
         instance.framework_worker = framework_worker
-        instance.session_runtime = session_runtime
+        instance.gateway_manager = gateway_manager
         return instance
 
     def generate_sequences(self, prompts) -> None:

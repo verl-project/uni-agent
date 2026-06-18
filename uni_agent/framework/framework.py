@@ -14,7 +14,7 @@ from omegaconf import OmegaConf
 from tensordict import TensorDict
 from tensordict.tensorclass import NonTensorData, NonTensorStack
 
-from uni_agent.gateway.types import SessionHandle, Trajectory
+from uni_agent.gateway.session import SessionHandle, Trajectory
 from verl.tools.tool_registry import initialize_tools_from_config
 from verl.utils import tensordict_utils as tu
 from verl.utils.import_utils import load_class_from_fqn
@@ -25,12 +25,6 @@ from .base import AgentFramework
 from .multi_modal_postprocess import compute_multi_modal_inputs, compute_position_ids
 
 logger = logging.getLogger(__name__)
-
-
-class _SessionRuntime(Protocol):
-    async def create_session(self, session_id: str, **kwargs) -> SessionHandle: ...
-    async def finalize_session(self, session_id: str) -> list[Trajectory]: ...
-    async def abort_session(self, session_id: str) -> None: ...
 
 
 class AgentRunner(Protocol):
@@ -206,14 +200,14 @@ class OpenAICompatibleAgentFramework(AgentFramework):
 
     def __init__(
         self,
-        session_runtime: _SessionRuntime,
+        gateway_manager,  # GatewayManager: framework calls create_session/finalize_session/abort_session
         *,
         runner_registry: dict[str, _RunnerConfig],
         reward_loop_worker_handles=None,
         processor=None,
         rollout_config=None,
     ):
-        self.session_runtime = session_runtime
+        self.gateway_manager = gateway_manager
         self.runner_registry = runner_registry
         # Materialize inline runners at construction since they run in-process and may maintain state;
         # ray_task runners are materialized per-run since they run remotely.
@@ -233,7 +227,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         cls,
         *,
         config,
-        session_runtime,
+        gateway_manager,
         processor=None,
         reward_loop_worker_handles=None,
     ) -> OpenAICompatibleAgentFramework:
@@ -248,7 +242,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
             runner_registry[str(runner_name)] = _RunnerConfig.from_config(runner_name, runner_cfg)
 
         return cls(
-            session_runtime=session_runtime,
+            gateway_manager=gateway_manager,
             runner_registry=runner_registry,
             reward_loop_worker_handles=reward_loop_worker_handles,
             processor=processor,
@@ -490,7 +484,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         session_id = f"session-{sample_index}-{session_index}-{uuid4().hex}"
         raw_prompt = sample_fields["raw_prompt"]
         tools_kwargs = sample_fields.get("tools_kwargs")
-        session = await self.session_runtime.create_session(session_id)
+        session = await self.gateway_manager.create_session(session_id)
         try:
             if runner_config.dispatch_mode == "ray_task":
                 # Ray workers run only the runner. Gateway token truth,
@@ -512,9 +506,9 @@ class OpenAICompatibleAgentFramework(AgentFramework):
                     sample_index=sample_index,
                     **({"tools_kwargs": tools_kwargs} if tools_kwargs is not None else {}),
                 )
-            session_trajectories = await self.session_runtime.finalize_session(session_id)
+            session_trajectories = await self.gateway_manager.finalize_session(session_id)
         except Exception:
-            await self.session_runtime.abort_session(session_id)
+            await self.gateway_manager.abort_session(session_id)
             raise
 
         # Score the session's trajectories immediately after finalization,

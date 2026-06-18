@@ -2,7 +2,7 @@
 
 Carries model, codec, and session knobs that entry.py forwards to the
 gateway actor. Backend is NOT in this
-config: it is injected separately by GatewayServingRuntime so the codec/
+config: it is injected separately by GatewayManager so the codec/
 session boundary has no view of the LLM client lifecycle.
 """
 

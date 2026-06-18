@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from uni_agent.framework.framework import OpenAICompatibleAgentFramework
-from uni_agent.gateway.types import SessionHandle, Trajectory
+from uni_agent.gateway.session import SessionHandle, Trajectory
 from verl.utils import tensordict_utils as tu
 
 _RUNNER_CALLS = []
@@ -69,7 +69,7 @@ def _inline_runner_config(
 async def _build_framework_with_agent_runners(
     *,
     agent_runners: dict[str, dict[str, object]],
-    session_runtime,
+    gateway_manager,
     reward_loop_worker_handles=None,
     n: int = 1,
     val_n: int = 1,
@@ -91,7 +91,7 @@ async def _build_framework_with_agent_runners(
     )
     return OpenAICompatibleAgentFramework.from_config(
         config=config,
-        session_runtime=session_runtime,
+        gateway_manager=gateway_manager,
         reward_loop_worker_handles=reward_loop_worker_handles,
     )
 
@@ -124,7 +124,7 @@ def fake_tq(monkeypatch):
     return fake
 
 
-class _FakeSessionRuntime:
+class _FakeGatewayManager:
     """Fake runtime that matches session IDs by prefix (``session-{sample}-{session}``)
     to support the real uuid-suffixed IDs produced by the framework."""
 
@@ -218,7 +218,7 @@ def _install_fake_score(monkeypatch, *, score_from_sample_fields=None, default_s
 async def test_agent_runners_registry_materializes_runners_and_selects_by_agent_name(fake_tq):
     """Function and class runners keep per-runner kwargs, and each prompt's
     ``agent_name`` selects the matching runner without leaking internals."""
-    runtime = _FakeSessionRuntime({"session-0-0": [_trajectory()], "session-1-0": [_trajectory()]})
+    runtime = _FakeGatewayManager({"session-0-0": [_trajectory()], "session-1-0": [_trajectory()]})
     _RUNNER_CALLS.clear()
     runner_fqn = f"{__name__}._config_recording_runner"
     prompts = _build_prompts(count=2, global_steps=6)
@@ -240,7 +240,7 @@ async def test_agent_runners_registry_materializes_runners_and_selects_by_agent_
                 "dispatch_mode": "inline_async",
             },
         },
-        session_runtime=runtime,
+        gateway_manager=runtime,
     )
 
     await framework.generate_sequences(prompts)
@@ -255,14 +255,14 @@ async def test_agent_runners_registry_materializes_runners_and_selects_by_agent_
     assert all(call["reward_info_url"].endswith("/reward_info") for call in calls)
     assert [call["sample_index"] for call in calls] == [0, 1]
     assert [call["kwargs"]["tools_kwargs"] for call in calls] == [{"tool": 0}, {"tool": 1}]
-    assert all("session_runtime" not in call["kwargs"] for call in calls)
+    assert all("gateway_manager" not in call["kwargs"] for call in calls)
 
 
 @pytest.mark.asyncio
 async def test_generate_sequences_writes_tq_schema_for_each_session(monkeypatch, fake_tq):
     """Full ``generate_sequences`` path writes one TQ batch per successful
     session and trainer-compatible trajectory fields."""
-    runtime = _FakeSessionRuntime(
+    runtime = _FakeGatewayManager(
         {
             "session-0-0": [_trajectory(response_logprobs=[-0.1, -0.2], extra_fields={"finish_reason": "length"})],
             "session-0-1": [_trajectory(response_logprobs=[-0.3, -0.4])],
@@ -277,7 +277,7 @@ async def test_generate_sequences_writes_tq_schema_for_each_session(monkeypatch,
 
     framework = await _build_framework_with_agent_runners(
         agent_runners={"runner": _inline_runner_config(_async_noop_runner)},
-        session_runtime=runtime,
+        gateway_manager=runtime,
         reward_loop_worker_handles=["sentinel"],
         n=2,
         val_n=2,
@@ -337,7 +337,7 @@ async def test_generate_sequences_writes_tq_schema_for_each_session(monkeypatch,
 async def test_generate_sequences_keeps_successful_sessions_when_one_session_fails(fake_tq):
     """A failed rollout session aborts only that session; other successful
     sessions for the same prompt are still finalized and written to TQ."""
-    runtime = _FakeSessionRuntime(
+    runtime = _FakeGatewayManager(
         {
             "session-0-0": [_trajectory()],
             "session-0-1": [_trajectory()],
@@ -350,7 +350,7 @@ async def test_generate_sequences_keeps_successful_sessions_when_one_session_fai
 
     framework = await _build_framework_with_agent_runners(
         agent_runners={"runner": _inline_runner_config(agent_runner)},
-        session_runtime=runtime,
+        gateway_manager=runtime,
         n=2,
         val_n=2,
     )
@@ -367,11 +367,11 @@ async def test_generate_sequences_keeps_successful_sessions_when_one_session_fai
 async def test_generate_sequences_marks_prompt_failure_when_all_sessions_fail(fake_tq):
     """If every session for a validation prompt fails, the uid is marked
     failed in TQ and ``generate_sequences`` raises the all-rollouts failure."""
-    runtime = _FakeSessionRuntime({"session-0-0": [], "session-0-1": []})
+    runtime = _FakeGatewayManager({"session-0-0": [], "session-0-1": []})
 
     framework = await _build_framework_with_agent_runners(
         agent_runners={"runner": _inline_runner_config(_async_noop_runner)},
-        session_runtime=runtime,
+        gateway_manager=runtime,
         n=1,
         val_n=2,
     )
@@ -387,11 +387,11 @@ async def test_generate_sequences_marks_prompt_failure_when_all_sessions_fail(fa
 async def test_generate_sequences_zero_fills_missing_trainer_fields(fake_tq):
     """Without reward workers or backend logprobs, trainer-selected optional
     fields are still emitted as zeros."""
-    runtime = _FakeSessionRuntime({"session-0-0": [_trajectory(response_logprobs=None)]})
+    runtime = _FakeGatewayManager({"session-0-0": [_trajectory(response_logprobs=None)]})
 
     framework = await _build_framework_with_agent_runners(
         agent_runners={"runner": _inline_runner_config(_async_noop_runner)},
-        session_runtime=runtime,
+        gateway_manager=runtime,
         n=1,
         val_n=1,
     )
@@ -407,7 +407,7 @@ async def test_generate_sequences_zero_fills_missing_trainer_fields(fake_tq):
 async def test_generate_sequences_keeps_other_prompts_when_one_prompt_fails(fake_tq):
     """Prompt-level failures are isolated: one uid can fail while another uid
     in the same batch still writes successful output."""
-    runtime = _FakeSessionRuntime(
+    runtime = _FakeGatewayManager(
         {
             "session-1-0": [_trajectory()],
         }
@@ -419,7 +419,7 @@ async def test_generate_sequences_keeps_other_prompts_when_one_prompt_fails(fake
 
     framework = await _build_framework_with_agent_runners(
         agent_runners={"runner": _inline_runner_config(agent_runner)},
-        session_runtime=runtime,
+        gateway_manager=runtime,
         n=1,
         val_n=1,
     )
@@ -467,7 +467,7 @@ async def test_score_trajectories_merges_final_reward_info_into_reward_extra_inf
 
     framework = await _build_framework_with_agent_runners(
         agent_runners={"runner": _inline_runner_config(_async_noop_runner)},
-        session_runtime=_FakeSessionRuntime({}),
+        gateway_manager=_FakeGatewayManager({}),
         reward_loop_worker_handles=[worker],
         n=1,
         val_n=1,

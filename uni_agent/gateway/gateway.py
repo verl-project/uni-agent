@@ -12,11 +12,15 @@ import ray
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from uni_agent.gateway.codec import MessageCodec
 from uni_agent.gateway.config import GatewayActorConfig
-from uni_agent.gateway.protocol import ChatCompletionRequest, ChatCompletionResponse
-from uni_agent.gateway.session import GatewaySession
-from uni_agent.gateway.types import SessionHandle, Trajectory
+from uni_agent.gateway.session import (
+    ChatCompletionRequest,
+    ChatCompletionResponse,
+    GatewaySession,
+    MessageCodec,
+    SessionHandle,
+    Trajectory,
+)
 from verl.workers.rollout.utils import run_uvicorn
 
 

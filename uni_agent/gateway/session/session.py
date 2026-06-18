@@ -10,8 +10,8 @@ from typing import Any
 
 from fastapi import HTTPException
 
-from uni_agent.gateway.codec import MalformedRequestError, MessageCodec
-from uni_agent.gateway.types import SessionHandle, Trajectory
+from uni_agent.gateway.session.codec import MalformedRequestError, MessageCodec
+from uni_agent.gateway.session.types import SessionHandle, Trajectory
 
 
 class SessionPhase(str, Enum):
