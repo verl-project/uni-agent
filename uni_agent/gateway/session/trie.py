@@ -25,6 +25,7 @@ run standalone. Tokenization stays in the codec (M1 reuses the existing
 from __future__ import annotations
 
 import hashlib
+import json
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Iterator
@@ -46,8 +47,6 @@ def canonicalize_tool_arguments(arguments: Any) -> tuple[str, Any]:
     if isinstance(arguments, (dict, list)):
         return ("json", _freeze(arguments))
     if isinstance(arguments, str):
-        import json
-
         try:
             return ("json", _freeze(json.loads(arguments)))
         except json.JSONDecodeError:

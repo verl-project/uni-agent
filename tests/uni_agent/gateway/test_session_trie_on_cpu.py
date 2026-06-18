@@ -176,3 +176,26 @@ def test_trie_no_duplicate_multimodal_on_full_encode_midbranch():
     assert len(trajectories) == 1
     images = trajectories[0].multi_modal_data["images"]
     assert images == ["http://x/a.png", "http://x/b.png"], f"no duplicate media expected, got {images}"
+
+
+def test_trie_abandons_pending_node_on_cancellation():
+    """A cancellation during backend.generate (CancelledError is BaseException,
+    not Exception) must still abandon the pending node (fails if only
+    ValueError/Exception are caught)."""
+
+    class CancellingBackend:
+        async def generate(self, request_id, *, prompt_ids, sampling_params, image_data=None, video_data=None):
+            raise asyncio.CancelledError()
+
+    async def scenario():
+        session = _session(trie_enabled=True)
+        cancelled = False
+        try:
+            await session.run_generation({"messages": [SYS, USER]}, CancellingBackend())
+        except asyncio.CancelledError:
+            cancelled = True
+        return cancelled, session._trie.num_inflight()
+
+    cancelled, inflight = _run(scenario())
+    assert cancelled
+    assert inflight == 0, "pending node must be abandoned on cancellation"

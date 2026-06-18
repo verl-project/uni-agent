@@ -193,6 +193,11 @@ class GatewaySession:
             except Exception as e:
                 self._abandon_pending(encoded)
                 raise HTTPException(status_code=500, detail=f"{e.__class__.__name__}: {e}") from e
+            except BaseException:
+                # e.g. asyncio.CancelledError (not an Exception) — still release
+                # the trie's pending node before propagating.
+                self._abandon_pending(encoded)
+                raise
 
             response_ids = list(output.token_ids)
             encoded.buffer.response_ids.extend(response_ids)
