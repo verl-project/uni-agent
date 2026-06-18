@@ -7,6 +7,10 @@ Drives a real ``GatewaySession`` (real ``MessageCodec`` + ``FakeTokenizer`` +
 - **flag parity**: a linear multi-turn conversation produces identical backend
   prompts and identical finalized trajectories whether the trie is on or off
   (the M1 compatibility gate);
+- **multi-trajectory flag parity**: repeated best-of-N style requests produce
+  identical per-trajectory token buffers whether the trie is on or off;
+- **sub-agent flag parity**: switching to a different system prompt produces a
+  sibling root branch with identical exported token buffers to legacy mode;
 - **best-of-N**: repeated requests with the same messages fan out into N sibling
   trajectories under the trie;
 - **multi-turn reuse**: a tool/assistant continuation reattaches to its branch.
@@ -46,6 +50,8 @@ def _session(trie_enabled, response_length=None):
 
 SYS = {"role": "system", "content": "sys"}
 USER = {"role": "user", "content": "fix bug"}
+HELPFUL_SYS = {"role": "system", "content": "You are helpful. Reply in 1 short sentence."}
+SUBAGENT_SYS = {"role": "system", "content": "You are a sub-agent. Reply in 1 short sentence."}
 
 
 async def _linear_conversation(trie_enabled):
@@ -59,6 +65,42 @@ async def _linear_conversation(trie_enabled):
     await session.run_generation({"messages": messages2}, backend)
 
     await session.set_reward_info({"score": 1.0})
+    trajectories = await session.finalize()
+    prompts = [call["prompt_ids"] for call in backend.calls]
+    return prompts, trajectories
+
+
+async def _repeated_prompt_samples(trie_enabled):
+    """Best-of-N style repeated prompt; returns (backend prompts, trajectories)."""
+    backend = SequencedBackend(["ans-A", "ans-B", "ans-C"])
+    session = _session(trie_enabled)
+
+    for _ in range(3):
+        await session.run_generation({"messages": [SYS, USER]}, backend)
+
+    await session.set_reward_info({"score": 0.5})
+    trajectories = await session.finalize()
+    prompts = [call["prompt_ids"] for call in backend.calls]
+    return prompts, trajectories
+
+
+async def _subagent_system_split(trie_enabled):
+    """Main-agent continuation followed by an independent sub-agent branch."""
+    backend = SequencedBackend(["Mango.", "Apple.", "Blue."])
+    session = _session(trie_enabled)
+
+    main_messages = [HELPFUL_SYS, {"role": "user", "content": "Pick a fruit name."}]
+    first = await session.run_generation({"messages": main_messages}, backend)
+    main_messages = main_messages + [
+        {"role": "assistant", "content": first.assistant_msg["content"]},
+        {"role": "user", "content": "Now pick another fruit."},
+    ]
+    await session.run_generation({"messages": main_messages}, backend)
+
+    subagent_messages = [SUBAGENT_SYS, {"role": "user", "content": "Pick a color."}]
+    await session.run_generation({"messages": subagent_messages}, backend)
+
+    await session.set_reward_info({"score": 0.75})
     trajectories = await session.finalize()
     prompts = [call["prompt_ids"] for call in backend.calls]
     return prompts, trajectories
@@ -81,14 +123,55 @@ def test_trie_flag_parity_linear_conversation():
     assert a.reward_info == b.reward_info == {"score": 1.0}
 
 
+def test_trie_flag_parity_repeated_prompt_multi_trajectory():
+    off_prompts, off_trajs = _run(_repeated_prompt_samples(trie_enabled=False))
+    on_prompts, on_trajs = _run(_repeated_prompt_samples(trie_enabled=True))
+
+    # The backend must see identical prompts for each repeated sample.
+    assert on_prompts == off_prompts
+
+    # Trie mode represents these as assistant siblings; legacy mode materializes
+    # the previous active trajectory on each prefix mismatch. The exported token
+    # buffers should still match one-for-one.
+    assert len(on_trajs) == len(off_trajs) == 3
+    for on_traj, off_traj in zip(on_trajs, off_trajs, strict=True):
+        assert on_traj.prompt_ids == off_traj.prompt_ids
+        assert on_traj.response_ids == off_traj.response_ids
+        assert on_traj.response_mask == off_traj.response_mask
+        assert on_traj.response_logprobs == off_traj.response_logprobs
+        assert on_traj.reward_info == off_traj.reward_info == {"score": 0.5}
+
+
+def test_trie_flag_parity_subagent_system_split_multi_trajectory():
+    off_prompts, off_trajs = _run(_subagent_system_split(trie_enabled=False))
+    on_prompts, on_trajs = _run(_subagent_system_split(trie_enabled=True))
+
+    # Main-agent turns should reuse their branch prefix, while the sub-agent
+    # request starts from a different system prompt. Both modes should send the
+    # same backend prompts for the three generations.
+    assert on_prompts == off_prompts
+
+    assert len(on_trajs) == len(off_trajs) == 2
+    for on_traj, off_traj in zip(on_trajs, off_trajs, strict=True):
+        assert on_traj.prompt_ids == off_traj.prompt_ids
+        assert on_traj.response_ids == off_traj.response_ids
+        assert on_traj.response_mask == off_traj.response_mask
+        assert on_traj.response_logprobs == off_traj.response_logprobs
+        assert on_traj.reward_info == off_traj.reward_info == {"score": 0.75}
+
+    main_text = "".join(chr(token_id) for token_id in on_trajs[0].response_ids)
+    subagent_text = "".join(chr(token_id) for token_id in on_trajs[1].response_ids)
+    assert "Mango." in main_text
+    assert "Apple." in main_text
+    assert 0 in on_trajs[0].response_mask
+    assert subagent_text == "Blue."
+    assert on_trajs[1].response_mask == [1] * len(on_trajs[1].response_ids)
+
+
 def test_trie_best_of_n_fans_out_to_sibling_trajectories():
     async def scenario():
-        backend = SequencedBackend(["ans-A", "ans-B", "ans-C"])
-        session = _session(trie_enabled=True)
-        for _ in range(3):
-            await session.run_generation({"messages": [SYS, USER]}, backend)
-        await session.set_reward_info({"score": 0.5})
-        return await session.finalize()
+        _, trajectories = await _repeated_prompt_samples(trie_enabled=True)
+        return trajectories
 
     trajectories = _run(scenario())
     assert len(trajectories) == 3
