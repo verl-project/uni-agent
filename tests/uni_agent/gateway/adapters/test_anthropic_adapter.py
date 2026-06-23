@@ -271,3 +271,55 @@ def test_redacted_thinking_skipped():
         **BASE,
     )
     assert req["messages"][-1]["content"] == "done"
+
+
+def test_anthropic_build_response_text():
+    from uni_agent.gateway.adapters.anthropic import anthropic_build_response
+    from uni_agent.gateway.session.session import GenerationOutcome
+
+    body = anthropic_build_response(
+        GenerationOutcome(assistant_msg={"role": "assistant", "content": "hi"},
+                          finish_reason="stop", prompt_tokens=3, completion_tokens=1),
+        model="claude-x",
+    )
+    assert body["type"] == "message"
+    assert body["role"] == "assistant"
+    assert body["content"] == [{"type": "text", "text": "hi"}]
+    assert body["stop_reason"] == "end_turn"
+    assert body["usage"] == {"input_tokens": 3, "output_tokens": 1}
+
+
+def test_anthropic_build_response_tool_use():
+    from uni_agent.gateway.adapters.anthropic import anthropic_build_response
+    from uni_agent.gateway.session.session import GenerationOutcome
+
+    body = anthropic_build_response(
+        GenerationOutcome(
+            assistant_msg={"role": "assistant", "content": "",
+                           "tool_calls": [{"id": "c1", "type": "function",
+                                           "function": {"name": "f", "arguments": {"a": 1}}}]},
+            finish_reason="tool_calls", prompt_tokens=2, completion_tokens=4),
+        model="claude-x",
+    )
+    tu = [b for b in body["content"] if b["type"] == "tool_use"][0]
+    assert tu["name"] == "f"
+    assert tu["input"] == {"a": 1}
+    assert body["stop_reason"] == "tool_use"
+
+
+def test_anthropic_build_response_parses_json_string_args():
+    """tool parser may emit JSON-string arguments; Anthropic tool_use.input must
+    be a dict (zqz A2: robust dict | JSON-string | invalid->{})."""
+    from uni_agent.gateway.adapters.anthropic import anthropic_build_response
+    from uni_agent.gateway.session.session import GenerationOutcome
+
+    body = anthropic_build_response(
+        GenerationOutcome(
+            assistant_msg={"role": "assistant", "content": "",
+                           "tool_calls": [{"id": "c1", "type": "function",
+                                           "function": {"name": "f", "arguments": '{"a": 1}'}}]},
+            finish_reason="tool_calls", prompt_tokens=2, completion_tokens=4),
+        model="claude-x",
+    )
+    tu = [b for b in body["content"] if b["type"] == "tool_use"][0]
+    assert tu["input"] == {"a": 1}

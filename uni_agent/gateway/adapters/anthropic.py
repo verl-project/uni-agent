@@ -2,14 +2,87 @@
 
 from __future__ import annotations
 
+import json
+import logging
 import re
+import secrets
 from typing import Any
 
 from uni_agent.gateway.session.codec import MalformedRequestError
 from uni_agent.gateway.session.request import InternalGenerationRequest
+from uni_agent.gateway.session.session import GenerationOutcome
 
 _BILLING_HEADER_RE = re.compile(r"^\s*x-anthropic-billing-header:[^\n]*\n?", re.IGNORECASE | re.MULTILINE)
 _SAME_NAME_SAMPLING_KEYS = ("max_tokens", "temperature", "top_p", "top_k")
+# content_filter/function_call are defensive: current backend only emits
+# stop/length/tool_calls.
+_STOP_REASON_MAP = {
+    "stop": "end_turn",
+    "length": "max_tokens",
+    "tool_calls": "tool_use",
+    "function_call": "tool_use",
+    "content_filter": "refusal",
+}
+
+logger = logging.getLogger("gateway")
+
+
+def _tool_call_input(arguments: Any) -> dict[str, Any]:
+    if isinstance(arguments, dict):
+        return arguments
+    if isinstance(arguments, str):
+        try:
+            parsed = json.loads(arguments)
+        except json.JSONDecodeError:
+            logger.warning("Invalid Anthropic tool call JSON arguments; using empty input")
+            return {}
+        if isinstance(parsed, dict):
+            return parsed
+        logger.warning("Anthropic tool call JSON arguments were not an object; using empty input")
+        return {}
+    logger.warning("Anthropic tool call arguments were not an object or JSON string; using empty input")
+    return {}
+
+
+def _outcome_to_blocks(assistant_msg: dict[str, Any]) -> list[dict[str, Any]]:
+    blocks: list[dict[str, Any]] = []
+    content = assistant_msg.get("content")
+    if isinstance(content, str) and content:
+        blocks.append({"type": "text", "text": content})
+
+    tool_calls = assistant_msg.get("tool_calls", [])
+    if isinstance(tool_calls, list):
+        for tool_call in tool_calls:
+            if not isinstance(tool_call, dict):
+                continue
+            function = tool_call.get("function", {})
+            if not isinstance(function, dict):
+                function = {}
+            blocks.append(
+                {
+                    "type": "tool_use",
+                    "id": tool_call.get("id") or f"toolu_{secrets.token_hex(8)}",
+                    "name": function.get("name", "tool"),
+                    "input": _tool_call_input(function.get("arguments")),
+                }
+            )
+
+    if not blocks:
+        blocks.append({"type": "text", "text": ""})
+    return blocks
+
+
+def anthropic_build_response(outcome: GenerationOutcome, *, model: str) -> dict[str, Any]:
+    return {
+        "id": f"msg_{secrets.token_hex(12)}",
+        "type": "message",
+        "role": "assistant",
+        "model": model,
+        "content": _outcome_to_blocks(outcome.assistant_msg),
+        "stop_reason": _STOP_REASON_MAP.get(outcome.finish_reason, "end_turn"),
+        "stop_sequence": None,
+        "usage": {"input_tokens": outcome.prompt_tokens, "output_tokens": outcome.completion_tokens},
+    }
 
 
 def _strip_billing_header(text: str) -> str:
