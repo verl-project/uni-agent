@@ -42,6 +42,13 @@ def build_gateway_manager(*, config, llm_client) -> GatewayManager:
         tool_parser_name=config.actor_rollout_ref.rollout.get("multi_turn", {}).get("format"),
         prompt_length=config.actor_rollout_ref.rollout.prompt_length,
         response_length=config.actor_rollout_ref.rollout.response_length,
+        enable_multiple_chains=bool(
+            OmegaConf.select(
+                config,
+                "actor_rollout_ref.rollout.custom.agent_framework.enable_multiple_chains",
+                default=False,
+            )
+        ),
     )
 
     return GatewayManager(

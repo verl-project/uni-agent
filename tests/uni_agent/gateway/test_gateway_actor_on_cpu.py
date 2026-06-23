@@ -205,6 +205,22 @@ def test_message_normalization_tool_call_arguments(raw_arguments, expected_argum
     assert result["tool_calls"][0]["function"]["arguments"] == expected_arguments
 
 
+def test_effective_chat_template_kwargs_merges_defaults_and_request_overrides():
+    from uni_agent.gateway.session import MessageCodec
+
+    codec = MessageCodec(
+        FakeTokenizer(),
+        apply_chat_template_kwargs={"enable_thinking": False, "default_only": "kept"},
+    )
+
+    assert codec.effective_chat_template_kwargs({"enable_thinking": True, "request_only": "added"}) == {
+        "enable_thinking": True,
+        "default_only": "kept",
+        "request_only": "added",
+    }
+    assert codec.effective_chat_template_kwargs() == {"enable_thinking": False, "default_only": "kept"}
+
+
 @pytest.mark.asyncio
 async def test_request_chat_template_kwargs_forwarded(monkeypatch):
     """Per-request ``chat_template_kwargs`` are forwarded to the chat-template
@@ -245,6 +261,190 @@ async def test_request_chat_template_kwargs_forwarded(monkeypatch):
         assert captured_kwargs["extra_flag"] == "x"
     finally:
         await actor.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_gateway_actor_passes_enable_multiple_chains_to_session(monkeypatch):
+    from uni_agent.gateway import gateway as gateway_mod
+    from uni_agent.gateway.config import GatewayActorConfig
+
+    captured = {}
+
+    class _RecordingGatewaySession:
+        def __init__(
+            self,
+            *,
+            handle,
+            codec,
+            prompt_length=None,
+            response_length=None,
+            enable_multiple_chains=False,
+        ):
+            captured["handle"] = handle
+            captured["codec"] = codec
+            captured["prompt_length"] = prompt_length
+            captured["response_length"] = response_length
+            captured["enable_multiple_chains"] = enable_multiple_chains
+
+    monkeypatch.setattr(gateway_mod, "GatewaySession", _RecordingGatewaySession)
+    actor = gateway_mod._GatewayActor(
+        GatewayActorConfig(
+            tokenizer=FakeTokenizer(),
+            prompt_length=128,
+            response_length=64,
+            enable_multiple_chains=True,
+        ),
+        InspectingBackend(),
+    )
+    actor._server_base_url = "http://gateway.local"
+
+    await actor.create_session("s1")
+
+    assert captured["handle"].session_id == "s1"
+    assert captured["prompt_length"] == 128
+    assert captured["response_length"] == 64
+    assert captured["enable_multiple_chains"] is True
+
+
+@pytest.mark.asyncio
+async def test_gateway_actor_multiple_chains_subagent_return_to_main_finalizes_main_last():
+    from uni_agent.gateway.config import GatewayActorConfig
+    from uni_agent.gateway.gateway import _GatewayActor
+
+    actor = _GatewayActor(
+        GatewayActorConfig(tokenizer=FakeTokenizer(), enable_multiple_chains=True),
+        SequencedBackend(["Mango", "Blue", "Apple"]),
+    )
+    actor._server_base_url = "http://gateway.local"
+    session_id = "session-actor-subagent-return"
+
+    await actor.create_session(session_id)
+    main_first = [
+        {"role": "system", "content": "You are helpful."},
+        {"role": "user", "content": "name a fruit"},
+    ]
+    subagent = [
+        {"role": "system", "content": "You are a focused subagent."},
+        {"role": "user", "content": "name a color"},
+    ]
+    main_continuation = [
+        {"role": "system", "content": "You are helpful."},
+        {"role": "user", "content": "name a fruit"},
+        {"role": "assistant", "content": "Mango"},
+        {"role": "user", "content": "name another fruit"},
+    ]
+
+    first = await actor._handle_chat_completions(session_id, {"model": "dummy-model", "messages": main_first})
+    second = await actor._handle_chat_completions(session_id, {"model": "dummy-model", "messages": subagent})
+    third = await actor._handle_chat_completions(
+        session_id,
+        {"model": "dummy-model", "messages": main_continuation},
+    )
+    trajectories = await actor.finalize_session(session_id)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert third.status_code == 200
+    assert len(trajectories) == 2
+    decoded = [FakeTokenizer().decode(trajectory.response_ids) for trajectory in trajectories]
+    assert decoded[0] == "Blue"
+    assert decoded[1].startswith("Mango")
+    assert decoded[1].endswith("Apple")
+    assert "Blue" not in decoded[1]
+    assert 0 in trajectories[1].response_mask
+
+
+@pytest.mark.asyncio
+async def test_gateway_actor_multiple_chains_repeated_same_prompt_continues_latest_sibling():
+    from uni_agent.gateway.config import GatewayActorConfig
+    from uni_agent.gateway.gateway import _GatewayActor
+
+    actor = _GatewayActor(
+        GatewayActorConfig(tokenizer=FakeTokenizer(), enable_multiple_chains=True),
+        SequencedBackend(["SAME", "SAME", "SAME", "NEXT"]),
+    )
+    actor._server_base_url = "http://gateway.local"
+    session_id = "session-actor-sibling-tie-break"
+    prompt = [{"role": "user", "content": "try the same prompt"}]
+
+    await actor.create_session(session_id)
+    await actor._handle_chat_completions(session_id, {"model": "dummy-model", "messages": prompt})
+    await actor._handle_chat_completions(session_id, {"model": "dummy-model", "messages": prompt})
+    await actor._handle_chat_completions(session_id, {"model": "dummy-model", "messages": prompt})
+    state_before = await actor.get_session_state(session_id)
+    latest_chain_id = state_before["active_chain_ids"][-1]
+    tip_hashes_before = dict(state_before["active_chain_tip_hashes"])
+
+    response = await actor._handle_chat_completions(
+        session_id,
+        {
+            "model": "dummy-model",
+            "messages": [
+                {"role": "user", "content": "try the same prompt"},
+                {"role": "assistant", "content": "SAME"},
+                {"role": "user", "content": "continue the latest sibling"},
+            ],
+        },
+    )
+    state_after = await actor.get_session_state(session_id)
+    trajectories = await actor.finalize_session(session_id)
+
+    assert response.status_code == 200
+    assert state_before["active_chain_ids"] == [1, 2, 3]
+    assert state_after["active_chain_ids"] == [1, 2, 3]
+    assert state_after["active_chain_tip_hashes"][latest_chain_id] != tip_hashes_before[latest_chain_id]
+    assert state_after["active_chain_tip_hashes"][1] == tip_hashes_before[1]
+    assert state_after["active_chain_tip_hashes"][2] == tip_hashes_before[2]
+    assert len(trajectories) == 3
+    decoded = [FakeTokenizer().decode(trajectory.response_ids) for trajectory in trajectories]
+    assert decoded.count("SAME") == 2
+    assert decoded[-1].startswith("SAME")
+    assert decoded[-1].endswith("NEXT")
+    assert 0 in trajectories[-1].response_mask
+
+
+@pytest.mark.asyncio
+async def test_gateway_actor_get_session_state_multiple_chains_reports_active_chain_tips():
+    from uni_agent.gateway.config import GatewayActorConfig
+    from uni_agent.gateway.gateway import _GatewayActor
+
+    actor = _GatewayActor(
+        GatewayActorConfig(tokenizer=FakeTokenizer(), enable_multiple_chains=True),
+        SequencedBackend(["ONE", "TWO"]),
+    )
+    actor._server_base_url = "http://gateway.local"
+    session_id = "session-actor-state-multiple-chains"
+
+    await actor.create_session(session_id)
+    await actor._handle_chat_completions(
+        session_id,
+        {"model": "dummy-model", "messages": [{"role": "user", "content": "first branch"}]},
+    )
+    state_after_first = await actor.get_session_state(session_id)
+    first_tip_hash = state_after_first["active_chain_tip_hashes"][1]
+
+    await actor._handle_chat_completions(
+        session_id,
+        {"model": "dummy-model", "messages": [{"role": "user", "content": "second branch"}]},
+    )
+    state_after_second = await actor.get_session_state(session_id)
+    trajectories = await actor.finalize_session(session_id)
+
+    assert state_after_first["session_id"] == session_id
+    assert state_after_first["num_active_chains"] == 1
+    assert state_after_first["active_chain_ids"] == [1]
+    assert set(state_after_first["active_chain_tip_hashes"]) == {1}
+    assert isinstance(first_tip_hash, str)
+    assert len(first_tip_hash) == 64
+    assert state_after_second["num_active_chains"] == 2
+    assert state_after_second["active_chain_ids"] == [1, 2]
+    assert set(state_after_second["active_chain_tip_hashes"]) == {1, 2}
+    assert state_after_second["active_chain_tip_hashes"][1] == first_tip_hash
+    assert all(
+        isinstance(tip_hash, str) and len(tip_hash) == 64
+        for tip_hash in state_after_second["active_chain_tip_hashes"].values()
+    )
+    assert len(trajectories) == 2
 
 
 @pytest.mark.asyncio

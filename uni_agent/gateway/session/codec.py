@@ -217,7 +217,7 @@ class MessageCodec:
         request_chat_template_kwargs: dict[str, Any] | None = None,
     ) -> list[int]:
         """Encode a full chat history into prompt token IDs."""
-        chat_template_kwargs = {**self._apply_chat_template_kwargs, **(request_chat_template_kwargs or {})}
+        chat_template_kwargs = self.effective_chat_template_kwargs(request_chat_template_kwargs)
         if self._processor is not None:
             raw_prompt = _apply_chat_template(
                 self._processor,
@@ -261,7 +261,7 @@ class MessageCodec:
         request_chat_template_kwargs: dict[str, Any] | None = None,
     ) -> list[int]:
         """Encode continuation messages without the cached system prompt prefix."""
-        chat_template_kwargs = {**self._apply_chat_template_kwargs, **(request_chat_template_kwargs or {})}
+        chat_template_kwargs = self.effective_chat_template_kwargs(request_chat_template_kwargs)
         if self._processor is not None:
             raw_prompt = _apply_chat_template(
                 self._processor,
@@ -294,6 +294,13 @@ class MessageCodec:
                 )
             )
         return ids[len(self._system_prompt) :]
+
+    def effective_chat_template_kwargs(
+        self,
+        request_chat_template_kwargs: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Return codec defaults merged with per-request chat-template kwargs."""
+        return {**self._apply_chat_template_kwargs, **(request_chat_template_kwargs or {})}
 
     async def decode_response(
         self,

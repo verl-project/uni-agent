@@ -96,6 +96,59 @@ async def _build_framework_with_agent_runners(
     )
 
 
+@pytest.mark.parametrize(
+    ("agent_framework_cfg", "expected"),
+    [
+        ({"gateway_count": 2, "enable_multiple_chains": True}, True),
+        ({"gateway_count": 2}, False),
+    ],
+)
+def test_build_gateway_manager_wires_enable_multiple_chains(monkeypatch, agent_framework_cfg, expected):
+    from omegaconf import OmegaConf
+
+    from uni_agent.framework import entry as entry_module
+
+    class _ModelConfig:
+        tokenizer = object()
+        processor = None
+
+    captured = {}
+
+    class _FakeGatewayManager:
+        def __init__(self, *, llm_client, gateway_count, gateway_actor_config):
+            captured["llm_client"] = llm_client
+            captured["gateway_count"] = gateway_count
+            captured["gateway_actor_config"] = gateway_actor_config
+
+    monkeypatch.setattr(entry_module, "omega_conf_to_dataclass", lambda _config: _ModelConfig())
+    monkeypatch.setattr(entry_module, "GatewayManager", _FakeGatewayManager)
+
+    llm_client = object()
+    config = OmegaConf.create(
+        {
+            "actor_rollout_ref": {
+                "model": {},
+                "rollout": {
+                    "prompt_length": 128,
+                    "response_length": 64,
+                    "multi_turn": {"format": "hermes"},
+                    "custom": {"agent_framework": agent_framework_cfg},
+                },
+            }
+        }
+    )
+
+    manager = entry_module.build_gateway_manager(config=config, llm_client=llm_client)
+
+    assert isinstance(manager, _FakeGatewayManager)
+    assert captured["llm_client"] is llm_client
+    assert captured["gateway_count"] == 2
+    assert captured["gateway_actor_config"].prompt_length == 128
+    assert captured["gateway_actor_config"].response_length == 64
+    assert captured["gateway_actor_config"].tool_parser_name == "hermes"
+    assert captured["gateway_actor_config"].enable_multiple_chains is expected
+
+
 class _FakeTransferQueue:
     def __init__(self):
         self.puts = []
@@ -179,6 +232,7 @@ def _trajectory(
     prompt_ids: list[int] | None = None,
     response_ids: list[int] | None = None,
     response_logprobs: list[float] | None = None,
+    reward_info: dict[str, object] | None = None,
     num_turns: int = 2,
     extra_fields: dict[str, object] | None = None,
 ):
@@ -189,6 +243,7 @@ def _trajectory(
         response_ids=response_ids,
         response_mask=[1] * len(response_ids),
         response_logprobs=response_logprobs,
+        reward_info=dict(reward_info or {}),
         reward_score=None,
         num_turns=num_turns,
         multi_modal_data={"images": ["raw-image-should-not-be-written"]},
@@ -331,6 +386,88 @@ async def test_generate_sequences_writes_tq_schema_for_each_session(monkeypatch,
     assert tu.get(fields, "global_steps") == [7]
     assert fields["num_turns"].tolist() == [2]
     assert "multi_modal_data" not in fields.keys()
+
+
+@pytest.mark.asyncio
+async def test_generate_sequences_preserves_sorted_trajectory_order_and_rewards_final_target(fake_tq):
+    class _ComputeScoreRemote:
+        def __init__(self):
+            self.calls = []
+
+        async def remote(self, data):
+            self.calls.append(data)
+            return {"reward_score": 0.5, "reward_extra_info": {"target": "final-main"}}
+
+    class _StubWorker:
+        def __init__(self):
+            self.compute_score = _ComputeScoreRemote()
+
+    worker = _StubWorker()
+    trajectories = [
+        _trajectory(
+            prompt_ids=[100],
+            response_ids=[101, 102],
+            response_logprobs=[-0.1, -0.2],
+            reward_info={"branch": "subagent"},
+            num_turns=1,
+        ),
+        _trajectory(
+            prompt_ids=[200, 201],
+            response_ids=[202],
+            response_logprobs=[-0.3],
+            reward_info={"branch": "main", "segment": "tool"},
+            num_turns=2,
+        ),
+        _trajectory(
+            prompt_ids=[300, 301],
+            response_ids=[302, 303, 304],
+            response_logprobs=[-0.4, -0.5, -0.6],
+            reward_info={"branch": "main", "finish_reason": "length"},
+            num_turns=3,
+            extra_fields={"finish_reason": "length"},
+        ),
+    ]
+    runtime = _FakeGatewayManager({"session-0-0": trajectories})
+    framework = await _build_framework_with_agent_runners(
+        agent_runners={"runner": _inline_runner_config(_async_noop_runner)},
+        gateway_manager=runtime,
+        reward_loop_worker_handles=[worker],
+        n=1,
+        val_n=1,
+    )
+
+    await framework.generate_sequences(_build_prompts(count=1, global_steps=12))
+
+    assert len(worker.compute_score.calls) == 1
+    data = worker.compute_score.calls[0]
+    assert data.batch["prompts"].tolist() == [[300, 301]]
+    assert data.batch["responses"].tolist() == [[302, 303, 304]]
+    assert data.non_tensor_batch["extra_info"].tolist() == [
+        {"index": 0, "branch": "main", "finish_reason": "length"}
+    ]
+    assert data.non_tensor_batch["__num_turns__"].tolist() == [3]
+
+    assert len(fake_tq.batch_puts) == 1
+    batch_put = fake_tq.batch_puts[0]
+    assert batch_put["keys"] == ["uid-0_0_0", "uid-0_0_1", "uid-0_0_2"]
+    assert [tag.get("finish_reason") for tag in batch_put["tags"]] == [None, None, "length"]
+    fields = batch_put["fields"]
+    assert [fields["prompts"][i].tolist() for i in range(3)] == [[100], [200, 201], [300, 301]]
+    assert [fields["responses"][i].tolist() for i in range(3)] == [[101, 102], [202], [302, 303, 304]]
+    assert fields["rollout_log_probs"][0].tolist() == pytest.approx([-0.1, -0.2])
+    assert fields["rollout_log_probs"][1].tolist() == pytest.approx([-0.3])
+    assert fields["rollout_log_probs"][2].tolist() == pytest.approx([-0.4, -0.5, -0.6])
+    assert [fields["rm_scores"][i].tolist() for i in range(3)] == [
+        [0.0, 0.5],
+        [0.5],
+        [0.0, 0.0, 0.5],
+    ]
+    assert tu.get(fields, "reward_extra_info") == [
+        {"target": "final-main"},
+        {"target": "final-main"},
+        {"target": "final-main"},
+    ]
+    assert fake_tq.puts == [{"key": "uid-0", "partition_id": "train", "tag": {"status": "finished"}}]
 
 
 @pytest.mark.asyncio
@@ -514,3 +651,55 @@ async def test_score_trajectories_merges_final_reward_info_into_reward_extra_inf
         (0.42, {"acc": 1.0, "format": 0.8}),
         (0.42, {"acc": 1.0, "format": 0.8}),
     ]
+
+
+@pytest.mark.asyncio
+async def test_score_trajectories_uses_last_finalized_trajectory_as_reward_target():
+    class _ComputeScoreRemote:
+        def __init__(self):
+            self.calls = []
+
+        async def remote(self, data):
+            self.calls.append(data)
+            return {"reward_score": 0.7, "reward_extra_info": {"target": "main"}}
+
+    class _StubWorker:
+        def __init__(self):
+            self.compute_score = _ComputeScoreRemote()
+
+    worker = _StubWorker()
+    framework = await _build_framework_with_agent_runners(
+        agent_runners={"runner": _inline_runner_config(_async_noop_runner)},
+        gateway_manager=_FakeGatewayManager({}),
+        reward_loop_worker_handles=[worker],
+        n=1,
+        val_n=1,
+    )
+
+    subagent_trajectory = Trajectory(
+        prompt_ids=[1],
+        response_ids=[2],
+        response_mask=[1],
+        reward_info={"branch": "subagent"},
+    )
+    last_main_trajectory = Trajectory(
+        prompt_ids=[10],
+        response_ids=[20],
+        response_mask=[1],
+        reward_info={"branch": "main", "finish_reason": "length"},
+        extra_fields={"finish_reason": "length"},
+    )
+
+    annotations = await framework._score_trajectories(
+        [subagent_trajectory, last_main_trajectory],
+        {"data_source": "test", "extra_info": {"branch": "sample"}},
+    )
+
+    assert len(worker.compute_score.calls) == 1
+    data = worker.compute_score.calls[0]
+    assert data.batch["prompts"].tolist() == [[10]]
+    assert data.batch["responses"].tolist() == [[20]]
+    assert data.non_tensor_batch["extra_info"].tolist() == [
+        {"branch": "main", "finish_reason": "length"}
+    ]
+    assert annotations == [(0.7, {"target": "main"}), (0.7, {"target": "main"})]

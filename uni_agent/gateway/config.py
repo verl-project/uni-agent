@@ -29,6 +29,8 @@ class GatewayActorConfig:
         vision_info_extractor_kwargs: Static kwargs forwarded to the extractor.
         prompt_length: Optional prompt-token budget stored on gateway sessions.
         response_length: Optional response-token budget stored on gateway sessions.
+        enable_multiple_chains: Enable multiple active linear trajectory chains
+            per gateway session.
     """
 
     tokenizer: Any
@@ -41,3 +43,4 @@ class GatewayActorConfig:
     vision_info_extractor_kwargs: dict[str, Any] | None = None
     prompt_length: int | None = None
     response_length: int | None = None
+    enable_multiple_chains: bool = False
