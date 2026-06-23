@@ -302,9 +302,36 @@ def test_anthropic_build_response_tool_use():
         model="claude-x",
     )
     tu = [b for b in body["content"] if b["type"] == "tool_use"][0]
-    assert tu["name"] == "f"
-    assert tu["input"] == {"a": 1}
+    assert tu == {"type": "tool_use", "id": "c1", "name": "f", "input": {"a": 1}}
     assert body["stop_reason"] == "tool_use"
+
+
+def test_anthropic_build_response_invalid_json_args_becomes_empty_input():
+    from uni_agent.gateway.adapters.anthropic import anthropic_build_response
+    from uni_agent.gateway.session.session import GenerationOutcome
+
+    body = anthropic_build_response(
+        GenerationOutcome(
+            assistant_msg={"role": "assistant", "content": "",
+                           "tool_calls": [{"id": "c1", "type": "function",
+                                           "function": {"name": "f", "arguments": "not json"}}]},
+            finish_reason="tool_calls", prompt_tokens=2, completion_tokens=4),
+        model="claude-x",
+    )
+    tu = [b for b in body["content"] if b["type"] == "tool_use"][0]
+    assert tu["input"] == {}
+
+
+def test_anthropic_build_response_length_maps_to_max_tokens():
+    from uni_agent.gateway.adapters.anthropic import anthropic_build_response
+    from uni_agent.gateway.session.session import GenerationOutcome
+
+    body = anthropic_build_response(
+        GenerationOutcome(assistant_msg={"role": "assistant", "content": ""},
+                          finish_reason="length", prompt_tokens=1, completion_tokens=0),
+        model="claude-x",
+    )
+    assert body["stop_reason"] == "max_tokens"
 
 
 def test_anthropic_build_response_parses_json_string_args():

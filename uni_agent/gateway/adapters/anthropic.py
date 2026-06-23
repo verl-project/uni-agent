@@ -27,6 +27,29 @@ _STOP_REASON_MAP = {
 logger = logging.getLogger("gateway")
 
 
+ANTHROPIC_ERROR_TYPE_BY_STATUS = {
+    400: "invalid_request_error",
+    401: "authentication_error",
+    403: "permission_error",
+    404: "not_found_error",
+    409: "invalid_request_error",
+    413: "request_too_large",
+    429: "rate_limit_error",
+    500: "api_error",
+    529: "overloaded_error",
+}
+
+
+def anthropic_error_body(status_code: int, message: str) -> dict[str, Any]:
+    return {
+        "type": "error",
+        "error": {
+            "type": ANTHROPIC_ERROR_TYPE_BY_STATUS.get(status_code, "api_error"),
+            "message": message,
+        },
+    }
+
+
 def _tool_call_input(arguments: Any) -> dict[str, Any]:
     if isinstance(arguments, dict):
         return arguments

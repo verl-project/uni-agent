@@ -1233,3 +1233,152 @@ async def test_run_generation_consumes_internal_request(monkeypatch):
         assert outcome.completion_tokens > 0
     finally:
         await actor.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_anthropic_messages_end_to_end():
+    from uni_agent.gateway.config import GatewayActorConfig
+    from uni_agent.gateway.gateway import _GatewayActor
+
+    actor = _GatewayActor(GatewayActorConfig(tokenizer=FakeTokenizer()), InspectingBackend())
+    await actor.start()
+    try:
+        await actor.create_session("s-anth")
+        resp = await actor._handle_anthropic_messages(
+            "s-anth",
+            {"model": "claude-x", "max_tokens": 16,
+             "messages": [{"role": "user", "content": "hi"}]},
+        )
+        body = json.loads(resp.body)
+        assert body["type"] == "message"
+        assert body["content"][0]["type"] == "text"
+        assert "input_tokens" in body["usage"]
+    finally:
+        await actor.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_anthropic_and_openai_produce_identical_trajectory():
+    """An Anthropic request and its equivalent OpenAI request yield identical
+    token-truth (prompt_ids/response_ids/response_mask/response_logprobs)."""
+    from uni_agent.gateway.config import GatewayActorConfig
+    from uni_agent.gateway.gateway import _GatewayActor
+
+    actor = _GatewayActor(GatewayActorConfig(tokenizer=FakeTokenizer()), QueuedBackend(["same", "same"]))
+    await actor.start()
+    try:
+        await actor.create_session("s-oa")
+        await actor._handle_chat_completions(
+            "s-oa", {"messages": [{"role": "system", "content": "Be brief."},
+                                  {"role": "user", "content": "hi"}], "max_tokens": 16})
+        oa = (await actor.finalize_session("s-oa"))[0]
+
+        await actor.create_session("s-an")
+        await actor._handle_anthropic_messages(
+            "s-an", {"system": "Be brief.", "max_tokens": 16,
+                     "messages": [{"role": "user", "content": "hi"}]})
+        an = (await actor.finalize_session("s-an"))[0]
+
+        assert oa.prompt_ids == an.prompt_ids
+        assert oa.response_ids == an.response_ids
+        assert oa.response_mask == an.response_mask
+        assert oa.response_logprobs == an.response_logprobs
+    finally:
+        await actor.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_anthropic_tool_turn_round_trip_extends_not_reencodes():
+    """When an Anthropic agent echoes a previous assistant tool_use turn back as
+    history, conversion must reproduce stored normalized message sufficiently for
+    prefix check to pass and extend one trajectory instead of re-encoding a new one."""
+    from uni_agent.gateway.config import GatewayActorConfig
+    from uni_agent.gateway.gateway import _GatewayActor
+
+    tool_call_text = '<tool_call>\n{"name": "search", "arguments": {"query": "weather"}}\n</tool_call>'
+    actor = _GatewayActor(
+        GatewayActorConfig(
+            tokenizer=FakeTokenizer(),
+            tool_parser_name="hermes",
+        ),
+        QueuedBackend([tool_call_text, "sunny today"]),
+    )
+    await actor.start()
+    try:
+        await actor.create_session("s-rt")
+        first = await actor._handle_anthropic_messages(
+            "s-rt",
+            {
+                "max_tokens": 16,
+                "tools": [{"name": "search", "input_schema": {"type": "object"}}],
+                "messages": [{"role": "user", "content": "go"}],
+            },
+        )
+        first_body = json.loads(first.body)
+        assert first_body["content"][0]["type"] == "tool_use"
+        echoed = [
+            {"role": "user", "content": "go"},
+            {"role": "assistant", "content": first_body["content"]},
+            {"role": "user", "content": "next"},
+        ]
+        await actor._handle_anthropic_messages(
+            "s-rt",
+            {
+                "max_tokens": 16,
+                "tools": [{"name": "search", "input_schema": {"type": "object"}}],
+                "messages": echoed,
+            },
+        )
+        trajectories = await actor.finalize_session("s-rt")
+        assert len(trajectories) == 1
+    finally:
+        await actor.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_anthropic_error_envelope_shape():
+    from uni_agent.gateway.config import GatewayActorConfig
+    from uni_agent.gateway.gateway import _GatewayActor
+
+    actor = _GatewayActor(GatewayActorConfig(tokenizer=FakeTokenizer()), InspectingBackend())
+    await actor.start()
+    try:
+        await actor.create_session("s-err")
+        transport = httpx.ASGITransport(app=actor._app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            r = await client.post(
+                "/sessions/s-err/v1/messages",
+                json={"max_tokens": 8, "messages": [{"role": "user", "content": "hi"}],
+                      "tool_choice": {"type": "any"}})
+        assert r.status_code == 400
+        body = r.json()
+        assert body["type"] == "error"
+        assert body["error"]["type"] == "invalid_request_error"
+        assert "message" in body["error"]
+    finally:
+        await actor.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_anthropic_malformed_json_uses_error_envelope():
+    from uni_agent.gateway.config import GatewayActorConfig
+    from uni_agent.gateway.gateway import _GatewayActor
+
+    actor = _GatewayActor(GatewayActorConfig(tokenizer=FakeTokenizer()), InspectingBackend())
+    await actor.start()
+    try:
+        await actor.create_session("s-json")
+        transport = httpx.ASGITransport(app=actor._app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            r = await client.post(
+                "/sessions/s-json/v1/messages",
+                content="{bad",
+                headers={"content-type": "application/json"},
+            )
+        assert r.status_code == 400
+        body = r.json()
+        assert body["type"] == "error"
+        assert body["error"]["type"] == "invalid_request_error"
+        assert "message" in body["error"]
+    finally:
+        await actor.shutdown()

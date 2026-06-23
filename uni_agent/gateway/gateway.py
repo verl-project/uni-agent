@@ -10,6 +10,11 @@ import ray
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from uni_agent.gateway.adapters.anthropic import (
+    anthropic_build_response,
+    anthropic_error_body,
+    anthropic_to_internal,
+)
 from uni_agent.gateway.adapters.openai import openai_build_response, openai_to_internal
 from uni_agent.gateway.config import GatewayActorConfig
 from uni_agent.gateway.session import (
@@ -61,13 +66,18 @@ class _GatewayActor:
         """Register HTTP handlers for chat completions and reward metadata."""
 
         @self._app.exception_handler(HTTPException)
-        async def _http_exception_handler(_request: Request, exc: HTTPException):
+        async def _http_exception_handler(request: Request, exc: HTTPException):
             if isinstance(exc.detail, str):
                 message = exc.detail
             elif isinstance(exc.detail, dict) and "message" in exc.detail:
                 message = str(exc.detail["message"])
             else:
                 message = str(exc.detail)
+            if request.url.path.endswith("/v1/messages"):
+                return JSONResponse(
+                    status_code=exc.status_code,
+                    content=anthropic_error_body(exc.status_code, message),
+                )
             error_type = "invalid_request_error" if 400 <= exc.status_code < 500 else "internal_server_error"
             return JSONResponse(
                 status_code=exc.status_code,
@@ -85,6 +95,14 @@ class _GatewayActor:
         async def _chat_completions(session_id: str, request: Request):
             payload = await request.json()
             return await self._handle_chat_completions(session_id=session_id, payload=payload)
+
+        @self._app.post("/sessions/{session_id}/v1/messages")
+        async def _messages(session_id: str, request: Request):
+            try:
+                payload = await request.json()
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
+            return await self._handle_anthropic_messages(session_id=session_id, payload=payload)
 
         @self._app.post("/sessions/{session_id}/reward_info")
         async def _reward_info(session_id: str, request: Request):
@@ -151,6 +169,28 @@ class _GatewayActor:
 
         outcome = await session.run_generation(internal, self._backend)
         return JSONResponse(openai_build_response(outcome, model=str(payload.get("model") or "unknown")))
+
+    async def _handle_anthropic_messages(
+        self,
+        session_id: str,
+        payload: dict[str, Any],
+    ) -> JSONResponse:
+        """Validate an Anthropic Messages payload and serialize the session outcome."""
+        session = self._sessions.get(session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail=f"Unknown session_id: {session_id}")
+
+        try:
+            internal = anthropic_to_internal(
+                payload,
+                base_sampling_params=self._codec.base_sampling_params,
+                allowed_sampling_keys=self._codec.allowed_request_sampling_param_keys,
+            )
+        except MalformedRequestError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        outcome = await session.run_generation(internal, self._backend)
+        return JSONResponse(anthropic_build_response(outcome, model=str(payload.get("model") or "unknown")))
 
     async def start(self) -> None:
         """Start the FastAPI server backing this gateway actor."""
