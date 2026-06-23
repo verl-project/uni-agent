@@ -1,0 +1,273 @@
+import pytest
+
+from uni_agent.gateway.adapters.anthropic import anthropic_to_internal
+from uni_agent.gateway.adapters.openai import OPENAI_ALLOWED_SAMPLING_KEYS
+from uni_agent.gateway.session.codec import MalformedRequestError
+
+BASE = dict(base_sampling_params={}, allowed_sampling_keys=OPENAI_ALLOWED_SAMPLING_KEYS)
+
+
+def test_system_string_becomes_first_message():
+    req = anthropic_to_internal(
+        {"system": "Be concise.", "messages": [{"role": "user", "content": "hi"}], "max_tokens": 16},
+        **BASE,
+    )
+    assert req["messages"][0] == {"role": "system", "content": "Be concise."}
+    assert req["sampling_params"]["max_tokens"] == 16
+
+
+def test_user_image_block_to_image_url():
+    req = anthropic_to_internal(
+        {
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": "look"},
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}},
+            ]}],
+            "max_tokens": 8,
+        },
+        **BASE,
+    )
+    parts = req["messages"][0]["content"]
+    assert {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}} in parts
+
+
+def test_user_text_image_text_order_preserved():
+    req = anthropic_to_internal(
+        {
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": "a"},
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}},
+                {"type": "text", "text": "b"},
+            ]}],
+            "max_tokens": 8,
+        },
+        **BASE,
+    )
+    assert req["messages"][0]["content"] == [
+        {"type": "text", "text": "a"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+        {"type": "text", "text": "b"},
+    ]
+
+
+def test_unknown_user_block_rejected():
+    with pytest.raises(MalformedRequestError):
+        anthropic_to_internal(
+            {"messages": [{"role": "user", "content": [{"type": "audio", "data": "x"}]}], "max_tokens": 8},
+            **BASE,
+        )
+
+
+def test_assistant_tool_use_to_tool_calls_dict_args():
+    req = anthropic_to_internal(
+        {"messages": [
+            {"role": "user", "content": "go"},
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "toolu_1", "name": "lookup", "input": {"q": "x"}}]},
+        ], "max_tokens": 8},
+        **BASE,
+    )
+    tc = req["messages"][-1]["tool_calls"][0]
+    assert tc["function"]["name"] == "lookup"
+    assert tc["function"]["arguments"] == {"q": "x"}
+
+
+@pytest.mark.parametrize("tool_id", [None, 123])
+def test_assistant_tool_use_requires_string_id(tool_id):
+    block = {"type": "tool_use", "name": "lookup", "input": {"q": "x"}}
+    if tool_id is not None:
+        block["id"] = tool_id
+    with pytest.raises(MalformedRequestError):
+        anthropic_to_internal(
+            {"messages": [{"role": "assistant", "content": [block]}], "max_tokens": 8},
+            **BASE,
+        )
+
+
+def test_assistant_tool_use_input_must_be_object():
+    with pytest.raises(MalformedRequestError):
+        anthropic_to_internal(
+            {"messages": [{"role": "assistant", "content": [
+                {"type": "tool_use", "id": "toolu_1", "name": "lookup", "input": "bad"}]}],
+             "max_tokens": 8},
+            **BASE,
+        )
+
+
+def test_unknown_assistant_block_rejected():
+    with pytest.raises(MalformedRequestError):
+        anthropic_to_internal(
+            {"messages": [{"role": "assistant", "content": [{"type": "citation", "text": "x"}]}], "max_tokens": 8},
+            **BASE,
+        )
+
+
+def test_user_tool_result_text_becomes_tool_message():
+    req = anthropic_to_internal(
+        {"messages": [{"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "toolu_1", "content": [{"type": "text", "text": "found"}]}]}],
+         "max_tokens": 8},
+        **BASE,
+    )
+    assert req["messages"][0]["role"] == "tool"
+    assert req["messages"][0]["content"] == "found"
+
+
+def test_tool_result_requires_non_empty_tool_use_id():
+    with pytest.raises(MalformedRequestError):
+        anthropic_to_internal(
+            {"messages": [{"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "", "content": [{"type": "text", "text": "found"}]}]}],
+             "max_tokens": 8},
+            **BASE,
+        )
+
+
+def test_unknown_tool_result_block_rejected():
+    with pytest.raises(MalformedRequestError):
+        anthropic_to_internal(
+            {"messages": [{"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "toolu_1", "content": [{"type": "json", "value": {}}]}]}],
+             "max_tokens": 8},
+            **BASE,
+        )
+
+
+def test_tool_result_image_appends_user_message():
+    req = anthropic_to_internal(
+        {"messages": [{"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "t", "content": [
+                {"type": "text", "text": "see"},
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "BBBB"}}]}]}],
+         "max_tokens": 8},
+        **BASE,
+    )
+    assert req["messages"][0]["role"] == "tool"
+    assert req["messages"][1]["role"] == "user"
+    assert req["messages"][1]["content"][0]["type"] == "image_url"
+
+
+def test_tool_result_image_only_preserves_empty_tool_message():
+    req = anthropic_to_internal(
+        {"messages": [{"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "t", "content": [
+                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "BBBB"}}]}]}],
+         "max_tokens": 8},
+        **BASE,
+    )
+    assert req["messages"][0] == {"role": "tool", "tool_call_id": "t", "content": ""}
+    assert req["messages"][1]["role"] == "user"
+    assert req["messages"][1]["content"][0]["type"] == "image_url"
+
+
+def test_tool_choice_any_rejected():
+    with pytest.raises(MalformedRequestError):
+        anthropic_to_internal(
+            {"messages": [{"role": "user", "content": "hi"}], "tool_choice": {"type": "any"}, "max_tokens": 8},
+            **BASE,
+        )
+
+
+def test_stop_sequences_mapped_to_stop():
+    req = anthropic_to_internal(
+        {"messages": [{"role": "user", "content": "hi"}], "stop_sequences": ["</s>"], "max_tokens": 8},
+        **BASE,
+    )
+    assert req["sampling_params"]["stop"] == ["</s>"]
+
+
+def test_mid_list_system_folded_into_user():
+    req = anthropic_to_internal(
+        {"messages": [
+            {"role": "user", "content": "a"},
+            {"role": "system", "content": "reminder"},
+            {"role": "user", "content": "b"}],
+         "max_tokens": 8},
+        **BASE,
+    )
+    roles = [m["role"] for m in req["messages"]]
+    assert len(req["messages"]) == 2
+    assert roles == ["user", "user"]
+    assert "system" not in roles[1:]
+    assert any("reminder" in str(m.get("content")) for m in req["messages"])
+    assert not any(m.get("content") == "<system-reminder>\nreminder\n</system-reminder>" for m in req["messages"])
+
+
+def test_mid_list_system_before_tool_result_does_not_cross_tool_message():
+    req = anthropic_to_internal(
+        {"messages": [
+            {"role": "user", "content": "a"},
+            {"role": "assistant", "content": [
+                {"type": "tool_use", "id": "toolu_1", "name": "lookup", "input": {"q": "x"}}]},
+            {"role": "system", "content": "reminder"},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "toolu_1", "content": [{"type": "text", "text": "found"}]}]}],
+         "max_tokens": 8},
+        **BASE,
+    )
+    assert req["messages"][0]["role"] == "user"
+    assert "reminder" in req["messages"][0]["content"]
+    assert req["messages"][-1]["role"] == "tool"
+    assert not any(
+        m["role"] == "user" and m.get("content") == "<system-reminder>\nreminder\n</system-reminder>"
+        for m in req["messages"][1:]
+    )
+
+
+def test_billing_header_stripped_from_system():
+    req = anthropic_to_internal(
+        {"system": "x-anthropic-billing-header: cch=abc\nBe concise.",
+         "messages": [{"role": "user", "content": "hi"}], "max_tokens": 8},
+        **BASE,
+    )
+    assert req["messages"][0] == {"role": "system", "content": "Be concise."}
+
+
+def test_unknown_system_block_rejected():
+    with pytest.raises(MalformedRequestError):
+        anthropic_to_internal(
+            {"system": [{"type": "audio", "data": "x"}],
+             "messages": [{"role": "user", "content": "hi"}], "max_tokens": 8},
+            **BASE,
+        )
+
+
+def test_server_tool_rejected():
+    with pytest.raises(MalformedRequestError):
+        anthropic_to_internal(
+            {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 8,
+             "tools": [{"type": "web_search_20250305", "name": "web_search"}]},
+            **BASE,
+        )
+
+
+def test_tool_input_schema_passed_through_unchanged():
+    schema = {
+        "type": "object",
+        "properties": {
+            "target": {"anyOf": [{"const": "file"}, {"type": "string"}]},
+            "nested": {"type": "object", "properties": {"x": {"type": "integer"}}},
+        },
+        "required": ["target"],
+    }
+    req = anthropic_to_internal(
+        {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 8,
+         "tools": [{"name": "edit", "description": "edit files", "input_schema": schema}]},
+        **BASE,
+    )
+    params = req["tools"][0]["function"]["parameters"]
+    assert params is schema
+    assert params == schema
+
+
+def test_redacted_thinking_skipped():
+    req = anthropic_to_internal(
+        {"messages": [
+            {"role": "user", "content": "go"},
+            {"role": "assistant", "content": [
+                {"type": "redacted_thinking", "data": "xxx"},
+                {"type": "text", "text": "done"}]}],
+         "max_tokens": 8},
+        **BASE,
+    )
+    assert req["messages"][-1]["content"] == "done"
