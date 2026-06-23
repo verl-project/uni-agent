@@ -68,6 +68,7 @@ class ChatCompletionRequest(TypedDict, total=False):
     top_p: float
     top_k: int
     max_tokens: int
+    stop: str | list[str]
 
 
 class ChatCompletionUsage(TypedDict):

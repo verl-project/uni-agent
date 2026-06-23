@@ -3,20 +3,19 @@
 from __future__ import annotations
 
 import asyncio
-import time
 from logging import getLogger
 from typing import Any
-from uuid import uuid4
 
 import ray
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
+from uni_agent.gateway.adapters.openai import openai_build_response, openai_to_internal
 from uni_agent.gateway.config import GatewayActorConfig
 from uni_agent.gateway.session import (
     ChatCompletionRequest,
-    ChatCompletionResponse,
     GatewaySession,
+    MalformedRequestError,
     MessageCodec,
     SessionHandle,
     Trajectory,
@@ -141,26 +140,17 @@ class _GatewayActor:
                 detail='tool_choice="required" is not supported (only "auto" / "none" are supported)',
             )
 
-        outcome = await session.run_generation(payload, self._backend)
-        response: ChatCompletionResponse = {
-            "id": f"chatcmpl-{uuid4().hex}",
-            "object": "chat.completion",
-            "created": int(time.time()),
-            "model": str(payload.get("model") or "unknown"),
-            "choices": [
-                {
-                    "index": 0,
-                    "message": outcome.assistant_msg,
-                    "finish_reason": outcome.finish_reason,
-                }
-            ],
-            "usage": {
-                "prompt_tokens": outcome.prompt_tokens,
-                "completion_tokens": outcome.completion_tokens,
-                "total_tokens": outcome.prompt_tokens + outcome.completion_tokens,
-            },
-        }
-        return JSONResponse(response)
+        try:
+            internal = openai_to_internal(
+                payload,
+                base_sampling_params=self._codec.base_sampling_params,
+                allowed_sampling_keys=self._codec.allowed_request_sampling_param_keys,
+            )
+        except MalformedRequestError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        outcome = await session.run_generation(internal, self._backend)
+        return JSONResponse(openai_build_response(outcome, model=str(payload.get("model") or "unknown")))
 
     async def start(self) -> None:
         """Start the FastAPI server backing this gateway actor."""

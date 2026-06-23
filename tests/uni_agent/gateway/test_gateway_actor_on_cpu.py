@@ -181,11 +181,11 @@ async def test_unknown_session_raises_404():
     ],
 )
 def test_message_normalization_tool_call_arguments(raw_arguments, expected_arguments):
-    """``MessageCodec.normalize_request`` parses valid JSON tool-call arguments
+    """``openai_to_internal`` parses valid JSON tool-call arguments
     into a dict and leaves invalid JSON as the original string."""
-    from uni_agent.gateway.session import MessageCodec
+    from uni_agent.gateway.adapters.openai import OPENAI_ALLOWED_SAMPLING_KEYS, openai_to_internal
 
-    result = MessageCodec(FakeTokenizer()).normalize_request(
+    result = openai_to_internal(
         {
             "messages": [
                 {
@@ -199,10 +199,47 @@ def test_message_normalization_tool_call_arguments(raw_arguments, expected_argum
                     ],
                 }
             ]
-        }
+        },
+        base_sampling_params={},
+        allowed_sampling_keys=OPENAI_ALLOWED_SAMPLING_KEYS,
     )["messages"][0]
 
     assert result["tool_calls"][0]["function"]["arguments"] == expected_arguments
+
+
+def test_prefix_canonicalization_ignores_tool_call_id():
+    from uni_agent.gateway.session.codec import MessageCodec
+
+    codec = MessageCodec(FakeTokenizer())
+    a = {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+            {
+                "id": "call_AAA",
+                "type": "function",
+                "function": {"name": "f", "arguments": {"x": 1}},
+            }
+        ],
+    }
+    b = {
+        "role": "assistant",
+        "content": "",
+        "tool_call_id": "call_top_BBB",
+        "tool_calls": [
+            {
+                "id": "call_BBB",
+                "type": "function",
+                "function": {"name": "f", "arguments": {"x": 1}},
+            }
+        ],
+    }
+    assert codec.canonicalize_message_for_prefix_comparison(
+        a
+    ) == codec.canonicalize_message_for_prefix_comparison(b)
+    tc = codec.canonicalize_message_for_prefix_comparison(a)["tool_calls"][0]
+    assert "id" not in tc
+    assert "tool_call_id" not in codec.canonicalize_message_for_prefix_comparison(b)
 
 
 @pytest.mark.asyncio
@@ -397,7 +434,7 @@ async def test_gateway_actor_forwards_image_data_on_initial_multimodal_request(r
     resulting ``Trajectory.multi_modal_data``."""
     from uni_agent.gateway.config import GatewayActorConfig
     from uni_agent.gateway.gateway import GatewayActor
-    from uni_agent.gateway.session import MessageCodec
+    from uni_agent.gateway.adapters.openai import OPENAI_ALLOWED_SAMPLING_KEYS, openai_to_internal
 
     processor = FakeProcessor()
     actor = GatewayActor.remote(
@@ -425,7 +462,11 @@ async def test_gateway_actor_forwards_image_data_on_initial_multimodal_request(r
         ],
     }
 
-    normalized = MessageCodec(FakeTokenizer()).normalize_request(payload)
+    normalized = openai_to_internal(
+        payload,
+        base_sampling_params={},
+        allowed_sampling_keys=OPENAI_ALLOWED_SAMPLING_KEYS,
+    )
     raw_prompt = processor.apply_chat_template(
         normalized["messages"],
         tokenize=False,
@@ -1185,16 +1226,8 @@ async def test_run_generation_consumes_internal_request(monkeypatch):
             "chat_template_kwargs": {},
             "sampling_params": {"max_tokens": 8},
         }
-        monkeypatch.setattr(
-            session._codec,
-            "normalize_request",
-            lambda _payload: pytest.fail("session should consume InternalGenerationRequest directly"),
-        )
-        monkeypatch.setattr(
-            session._codec,
-            "build_sampling_params",
-            lambda _payload: pytest.fail("session should use InternalGenerationRequest sampling_params directly"),
-        )
+        assert not hasattr(session._codec, "normalize_request")
+        assert not hasattr(session._codec, "build_sampling_params")
         outcome = await session.run_generation(request, actor._backend)
         assert outcome.assistant_msg["role"] == "assistant"
         assert outcome.completion_tokens > 0

@@ -7,12 +7,30 @@ tasks.
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
+from uuid import uuid4
 
 from uni_agent.gateway.session.codec import MalformedRequestError
 from uni_agent.gateway.session.request import InternalGenerationRequest
+from uni_agent.gateway.session.session import GenerationOutcome
 
 OPENAI_ALLOWED_SAMPLING_KEYS = frozenset({"temperature", "top_p", "top_k", "max_tokens", "stop"})
+
+
+def openai_build_response(outcome: GenerationOutcome, *, model: str) -> dict[str, Any]:
+    return {
+        "id": f"chatcmpl-{uuid4().hex}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [{"index": 0, "message": outcome.assistant_msg, "finish_reason": outcome.finish_reason}],
+        "usage": {
+            "prompt_tokens": outcome.prompt_tokens,
+            "completion_tokens": outcome.completion_tokens,
+            "total_tokens": outcome.prompt_tokens + outcome.completion_tokens,
+        },
+    }
 
 
 def _normalize_message_content(content: Any) -> Any:

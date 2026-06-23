@@ -18,6 +18,26 @@ def test_internal_generation_request_shape():
     assert req["sampling_params"]["max_tokens"] == 16
 
 
+def test_openai_build_response_shape():
+    from uni_agent.gateway.adapters.openai import openai_build_response
+    from uni_agent.gateway.session.session import GenerationOutcome
+
+    outcome = GenerationOutcome(
+        assistant_msg={"role": "assistant", "content": "hello"},
+        finish_reason="stop",
+        prompt_tokens=3,
+        completion_tokens=2,
+    )
+    body = openai_build_response(outcome, model="m")
+    assert body["id"].startswith("chatcmpl-")
+    assert body["object"] == "chat.completion"
+    assert isinstance(body["created"], int)
+    assert body["choices"][0]["message"]["content"] == "hello"
+    assert body["choices"][0]["finish_reason"] == "stop"
+    assert body["usage"]["total_tokens"] == 5
+    assert body["model"] == "m"
+
+
 def test_openai_to_internal_normalizes_messages_and_sampling():
     from uni_agent.gateway.adapters.openai import (
         OPENAI_ALLOWED_SAMPLING_KEYS,
@@ -59,3 +79,20 @@ def test_openai_to_internal_tool_choice_none_drops_tools():
         allowed_sampling_keys=OPENAI_ALLOWED_SAMPLING_KEYS,
     )
     assert req["tools"] is None
+
+
+def test_openai_to_internal_passes_stop():
+    from uni_agent.gateway.adapters.openai import OPENAI_ALLOWED_SAMPLING_KEYS, openai_to_internal
+
+    req = openai_to_internal(
+        {"messages": [{"role": "user", "content": "hi"}], "stop": ["X"]},
+        base_sampling_params={},
+        allowed_sampling_keys=OPENAI_ALLOWED_SAMPLING_KEYS,
+    )
+    assert req["sampling_params"]["stop"] == ["X"]
+
+
+def test_chat_completion_request_declares_stop():
+    from uni_agent.gateway.session.protocol import ChatCompletionRequest
+
+    assert "stop" in ChatCompletionRequest.__annotations__
