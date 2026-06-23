@@ -3,19 +3,18 @@
 from __future__ import annotations
 
 import asyncio
-from logging import getLogger
 from typing import Any
 
 import ray
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from uni_agent.gateway.adapters.anthropic import (
     anthropic_build_response,
     anthropic_error_body,
     anthropic_to_internal,
 )
-from uni_agent.gateway.adapters.openai import openai_build_response, openai_to_internal
+from uni_agent.gateway.adapters.openai import openai_build_response, openai_stream_response, openai_to_internal
 from uni_agent.gateway.config import GatewayActorConfig
 from uni_agent.gateway.session import (
     ChatCompletionRequest,
@@ -130,17 +129,12 @@ class _GatewayActor:
         self,
         session_id: str,
         payload: ChatCompletionRequest,
-    ) -> JSONResponse:
+    ) -> JSONResponse | StreamingResponse:
         """Validate a chat-completion payload and serialize the session outcome."""
         session = self._sessions.get(session_id)
         if session is None:
             raise HTTPException(status_code=404, detail=f"Unknown session_id: {session_id}")
 
-        if payload.get("stream") is True:
-            getLogger("gateway").warning(
-                "session=%s stream=true requested; gateway returns non-streaming response",
-                session_id,
-            )
         n_value = payload.get("n", 1)
         if n_value != 1:
             raise HTTPException(status_code=400, detail=f"n={n_value} is not supported (only n=1)")
@@ -168,7 +162,10 @@ class _GatewayActor:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         outcome = await session.run_generation(internal, self._backend)
-        return JSONResponse(openai_build_response(outcome, model=str(payload.get("model") or "unknown")))
+        model = str(payload.get("model") or "unknown")
+        if payload.get("stream") is True:
+            return openai_stream_response(outcome, model=model)
+        return JSONResponse(openai_build_response(outcome, model=model))
 
     async def _handle_anthropic_messages(
         self,

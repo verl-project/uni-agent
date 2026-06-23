@@ -8,8 +8,11 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import AsyncIterator
 from typing import Any
 from uuid import uuid4
+
+from fastapi.responses import StreamingResponse
 
 from uni_agent.gateway.session.codec import MalformedRequestError
 from uni_agent.gateway.session.request import InternalGenerationRequest
@@ -31,6 +34,34 @@ def openai_build_response(outcome: GenerationOutcome, *, model: str) -> dict[str
             "total_tokens": outcome.prompt_tokens + outcome.completion_tokens,
         },
     }
+
+
+def openai_stream_response(outcome: GenerationOutcome, *, model: str) -> StreamingResponse:
+    """Synthesize an OpenAI chat.completion.chunk SSE stream from a completed outcome."""
+    chunk_id = f"chatcmpl-{uuid4().hex}"
+    created = int(time.time())
+
+    def _chunk(delta: dict[str, Any], finish: str | None) -> str:
+        body = {
+            "id": chunk_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": model,
+            "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
+        }
+        return f"data: {json.dumps(body, ensure_ascii=False)}\n\n"
+
+    async def _gen() -> AsyncIterator[bytes]:
+        msg = outcome.assistant_msg
+        yield _chunk({"role": "assistant"}, None).encode()
+        if isinstance(msg.get("content"), str) and msg["content"]:
+            yield _chunk({"content": msg["content"]}, None).encode()
+        if msg.get("tool_calls"):
+            yield _chunk({"tool_calls": msg["tool_calls"]}, None).encode()
+        yield _chunk({}, outcome.finish_reason).encode()
+        yield b"data: [DONE]\n\n"
+
+    return StreamingResponse(_gen(), media_type="text/event-stream")
 
 
 def _normalize_message_content(content: Any) -> Any:

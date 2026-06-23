@@ -323,9 +323,9 @@ async def test_unsupported_capabilities_rejected_with_400(payload_extra, expecte
 
 
 @pytest.mark.asyncio
-async def test_stream_true_softly_falls_back_to_non_streaming(caplog):
-    """``stream=true`` is not supported; the gateway logs a warning and
-    returns a non-streaming response (soft fallback)."""
+async def test_openai_stream_true_returns_sse():
+    from fastapi.responses import StreamingResponse
+
     from uni_agent.gateway.config import GatewayActorConfig
     from uni_agent.gateway.gateway import _GatewayActor
 
@@ -333,13 +333,14 @@ async def test_stream_true_softly_falls_back_to_non_streaming(caplog):
     await actor.start()
     try:
         await actor.create_session("s1")
-        with caplog.at_level("WARNING", logger="gateway"):
-            response = await actor._handle_chat_completions(
-                "s1", {"messages": [{"role": "user", "content": "hi"}], "stream": True}
-            )
-
-        assert response.status_code == 200
-        assert any("stream=true" in record.getMessage() for record in caplog.records)
+        resp = await actor._handle_chat_completions(
+            "s1", {"messages": [{"role": "user", "content": "hi"}], "stream": True}
+        )
+        assert isinstance(resp, StreamingResponse)
+        body = b"".join([chunk async for chunk in resp.body_iterator])
+        text = body.decode()
+        assert "chat.completion.chunk" in text
+        assert "data: [DONE]" in text
     finally:
         await actor.shutdown()
 
