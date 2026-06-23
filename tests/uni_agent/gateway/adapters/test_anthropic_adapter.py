@@ -241,7 +241,9 @@ def test_server_tool_rejected():
         )
 
 
-def test_tool_input_schema_passed_through_unchanged():
+def test_tool_input_schema_minimally_normalized_for_qwen_parser():
+    from verl.tools.schemas import OpenAIFunctionToolSchema
+
     schema = {
         "type": "object",
         "properties": {
@@ -256,8 +258,27 @@ def test_tool_input_schema_passed_through_unchanged():
         **BASE,
     )
     params = req["tools"][0]["function"]["parameters"]
-    assert params is schema
-    assert params == schema
+    assert params is not schema
+    assert params["properties"]["target"]["type"] == "string"
+    assert params["properties"]["target"]["enum"] == ["file"]
+    assert params["properties"]["target"]["anyOf"] == [{"const": "file"}, {"type": "string"}]
+    assert params["properties"]["nested"]["properties"] == {"x": {"type": "integer"}}
+    OpenAIFunctionToolSchema(**req["tools"][0])
+
+
+def test_tool_input_schema_anyof_preserves_heterogeneous_types():
+    schema = {
+        "type": "object",
+        "properties": {
+            "value": {"anyOf": [{"type": "integer"}, {"type": "number"}]},
+        },
+    }
+    req = anthropic_to_internal(
+        {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 8,
+         "tools": [{"name": "edit", "description": "edit files", "input_schema": schema}]},
+        **BASE,
+    )
+    assert req["tools"][0]["function"]["parameters"]["properties"]["value"]["type"] == ["integer", "number"]
 
 
 def test_redacted_thinking_skipped():
@@ -350,3 +371,23 @@ def test_anthropic_build_response_parses_json_string_args():
     )
     tu = [b for b in body["content"] if b["type"] == "tool_use"][0]
     assert tu["input"] == {"a": 1}
+
+
+@pytest.mark.asyncio
+async def test_anthropic_stream_event_sequence():
+    from uni_agent.gateway.adapters.anthropic import anthropic_stream_response
+    from uni_agent.gateway.session.session import GenerationOutcome
+
+    resp = anthropic_stream_response(
+        GenerationOutcome(assistant_msg={"role": "assistant", "content": "hi"},
+                          finish_reason="stop", prompt_tokens=3, completion_tokens=1),
+        model="claude-x",
+    )
+    text = (b"".join([c async for c in resp.body_iterator])).decode()
+    assert "event: message_start" in text
+    assert "event: content_block_start" in text
+    assert "text_delta" in text
+    assert "event: content_block_stop" in text
+    assert "event: message_delta" in text
+    assert '"stop_reason": "end_turn"' in text or '"stop_reason":"end_turn"' in text
+    assert "event: message_stop" in text

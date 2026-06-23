@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import re
 import secrets
+from collections.abc import AsyncIterator
 from typing import Any
+
+from fastapi.responses import StreamingResponse
 
 from uni_agent.gateway.session.codec import MalformedRequestError
 from uni_agent.gateway.session.request import InternalGenerationRequest
@@ -106,6 +110,60 @@ def anthropic_build_response(outcome: GenerationOutcome, *, model: str) -> dict[
         "stop_sequence": None,
         "usage": {"input_tokens": outcome.prompt_tokens, "output_tokens": outcome.completion_tokens},
     }
+
+
+def anthropic_stream_response(outcome: GenerationOutcome, *, model: str) -> StreamingResponse:
+    """Synthesize an Anthropic Messages SSE stream from a completed outcome.
+
+    Whole-turn synthesis (backend is not token-streaming): message_start,
+    per-block start/delta/stop, message_delta with stop_reason+usage,
+    message_stop.
+    """
+    blocks = _outcome_to_blocks(outcome.assistant_msg)
+    stop_reason = _STOP_REASON_MAP.get(outcome.finish_reason, "end_turn")
+    msg_id = f"msg_{secrets.token_hex(12)}"
+
+    def _event(name: str, data: dict[str, Any]) -> bytes:
+        return f"event: {name}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n".encode()
+
+    async def _gen() -> AsyncIterator[bytes]:
+        yield _event(
+            "message_start",
+            {
+                "type": "message_start",
+                "message": {
+                    "id": msg_id,
+                    "type": "message",
+                    "role": "assistant",
+                    "model": model,
+                    "content": [],
+                    "stop_reason": None,
+                    "stop_sequence": None,
+                    "usage": {"input_tokens": outcome.prompt_tokens, "output_tokens": 0},
+                },
+            },
+        )
+        for idx, block in enumerate(blocks):
+            if block["type"] == "text":
+                start = {"type": "text", "text": ""}
+                delta = {"type": "text_delta", "text": block["text"]}
+            else:
+                start = {"type": "tool_use", "id": block["id"], "name": block["name"], "input": {}}
+                delta = {"type": "input_json_delta", "partial_json": json.dumps(block["input"], ensure_ascii=False)}
+            yield _event("content_block_start", {"type": "content_block_start", "index": idx, "content_block": start})
+            yield _event("content_block_delta", {"type": "content_block_delta", "index": idx, "delta": delta})
+            yield _event("content_block_stop", {"type": "content_block_stop", "index": idx})
+        yield _event(
+            "message_delta",
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": stop_reason, "stop_sequence": None},
+                "usage": {"input_tokens": outcome.prompt_tokens, "output_tokens": outcome.completion_tokens},
+            },
+        )
+        yield _event("message_stop", {"type": "message_stop"})
+
+    return StreamingResponse(_gen(), media_type="text/event-stream")
 
 
 def _strip_billing_header(text: str) -> str:
@@ -367,6 +425,74 @@ def _messages_to_internal(messages: Any) -> list[dict[str, Any]]:
     return result
 
 
+def _normalize_tool_schema_for_qwen_parser(schema: dict[str, Any]) -> dict[str, Any]:
+    def infer_type(value: Any) -> str:
+        if isinstance(value, bool):
+            return "boolean"
+        if isinstance(value, int) and not isinstance(value, bool):
+            return "integer"
+        if isinstance(value, float):
+            return "number"
+        if isinstance(value, dict):
+            return "object"
+        if isinstance(value, list):
+            return "array"
+        if value is None:
+            return "null"
+        return "string"
+
+    def infer_any_of_type(branches: Any) -> str | list[str] | None:
+        if not isinstance(branches, list):
+            return None
+        inferred: list[str] = []
+        for branch in branches:
+            if not isinstance(branch, dict):
+                continue
+            branch_type = branch.get("type")
+            if isinstance(branch_type, str):
+                inferred.append(branch_type)
+            elif isinstance(branch_type, list):
+                inferred.extend(t for t in branch_type if isinstance(t, str))
+            elif "const" in branch:
+                inferred.append(infer_type(branch["const"]))
+        if not inferred:
+            return None
+        first = inferred[0]
+        if all(t == first for t in inferred):
+            return first
+        return list(dict.fromkeys(inferred))
+
+    normalized: dict[str, Any] = {}
+    for key, value in schema.items():
+        if key == "properties" and isinstance(value, dict):
+            normalized[key] = {
+                prop_name: _normalize_tool_schema_for_qwen_parser(prop_schema)
+                if isinstance(prop_schema, dict)
+                else copy.deepcopy(prop_schema)
+                for prop_name, prop_schema in value.items()
+            }
+        elif key == "items" and isinstance(value, dict):
+            normalized[key] = _normalize_tool_schema_for_qwen_parser(value)
+        else:
+            normalized[key] = copy.deepcopy(value)
+
+    if "const" in normalized:
+        normalized.setdefault("enum", [normalized["const"]])
+        normalized.setdefault("type", infer_type(normalized["const"]))
+    if "anyOf" in normalized:
+        any_of_consts = [
+            branch["const"]
+            for branch in normalized["anyOf"]
+            if isinstance(branch, dict) and "const" in branch
+        ]
+        if any_of_consts:
+            normalized.setdefault("enum", any_of_consts)
+        any_of_type = infer_any_of_type(normalized["anyOf"])
+        if any_of_type is not None:
+            normalized.setdefault("type", any_of_type)
+    return normalized
+
+
 def _convert_tools(tools: Any) -> list[dict[str, Any]] | None:
     if tools is None:
         return None
@@ -383,7 +509,14 @@ def _convert_tools(tools: Any) -> list[dict[str, Any]] | None:
         name = tool.get("name")
         if not isinstance(name, str):
             raise MalformedRequestError("tool.name must be a string")
-        function: dict[str, Any] = {"name": name, "parameters": tool.get("input_schema", {})}
+        input_schema = tool.get("input_schema", {})
+        if isinstance(input_schema, dict):
+            # Qwen3.5 can render Anthropic JSON schema directly, but VERL's
+            # OpenAI tool schema parser requires property-level ``type``. Add
+            # only the missing type/enum hints for const/anyOf nodes without
+            # flattening nested properties/items.
+            input_schema = _normalize_tool_schema_for_qwen_parser(input_schema)
+        function: dict[str, Any] = {"name": name, "parameters": input_schema}
         description = tool.get("description")
         if isinstance(description, str):
             function["description"] = description

@@ -1259,6 +1259,28 @@ async def test_anthropic_messages_end_to_end():
 
 
 @pytest.mark.asyncio
+async def test_anthropic_stream_true_returns_sse():
+    from fastapi.responses import StreamingResponse
+    from uni_agent.gateway.config import GatewayActorConfig
+    from uni_agent.gateway.gateway import _GatewayActor
+
+    actor = _GatewayActor(GatewayActorConfig(tokenizer=FakeTokenizer()), InspectingBackend())
+    await actor.start()
+    try:
+        await actor.create_session("s-an-stream")
+        resp = await actor._handle_anthropic_messages(
+            "s-an-stream",
+            {"max_tokens": 8, "stream": True, "messages": [{"role": "user", "content": "hi"}]},
+        )
+        assert isinstance(resp, StreamingResponse)
+        text = (b"".join([c async for c in resp.body_iterator])).decode()
+        assert "event: message_start" in text
+        assert "event: message_stop" in text
+    finally:
+        await actor.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_anthropic_and_openai_produce_identical_trajectory():
     """An Anthropic request and its equivalent OpenAI request yield identical
     token-truth (prompt_ids/response_ids/response_mask/response_logprobs)."""

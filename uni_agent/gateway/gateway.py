@@ -12,6 +12,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from uni_agent.gateway.adapters.anthropic import (
     anthropic_build_response,
     anthropic_error_body,
+    anthropic_stream_response,
     anthropic_to_internal,
 )
 from uni_agent.gateway.adapters.openai import openai_build_response, openai_stream_response, openai_to_internal
@@ -171,7 +172,7 @@ class _GatewayActor:
         self,
         session_id: str,
         payload: dict[str, Any],
-    ) -> JSONResponse:
+    ) -> JSONResponse | StreamingResponse:
         """Validate an Anthropic Messages payload and serialize the session outcome."""
         session = self._sessions.get(session_id)
         if session is None:
@@ -187,7 +188,10 @@ class _GatewayActor:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         outcome = await session.run_generation(internal, self._backend)
-        return JSONResponse(anthropic_build_response(outcome, model=str(payload.get("model") or "unknown")))
+        model = str(payload.get("model") or "unknown")
+        if payload.get("stream") is True:
+            return anthropic_stream_response(outcome, model=model)
+        return JSONResponse(anthropic_build_response(outcome, model=model))
 
     async def start(self) -> None:
         """Start the FastAPI server backing this gateway actor."""
