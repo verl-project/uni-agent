@@ -1167,3 +1167,36 @@ async def test_gateway_actor_tool_call_decode_returns_openai_format(ray_runtime)
     # Should have both mask=0 (incremental) and mask=1 (model output) tokens
     assert 0 in trajectories[0].response_mask
     assert 1 in trajectories[0].response_mask
+
+
+@pytest.mark.asyncio
+async def test_run_generation_consumes_internal_request(monkeypatch):
+    from uni_agent.gateway.config import GatewayActorConfig
+    from uni_agent.gateway.gateway import _GatewayActor
+
+    actor = _GatewayActor(GatewayActorConfig(tokenizer=FakeTokenizer()), InspectingBackend())
+    await actor.start()
+    try:
+        await actor.create_session("s-int")
+        session = actor._sessions["s-int"]
+        request = {
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": None,
+            "chat_template_kwargs": {},
+            "sampling_params": {"max_tokens": 8},
+        }
+        monkeypatch.setattr(
+            session._codec,
+            "normalize_request",
+            lambda _payload: pytest.fail("session should consume InternalGenerationRequest directly"),
+        )
+        monkeypatch.setattr(
+            session._codec,
+            "build_sampling_params",
+            lambda _payload: pytest.fail("session should use InternalGenerationRequest sampling_params directly"),
+        )
+        outcome = await session.run_generation(request, actor._backend)
+        assert outcome.assistant_msg["role"] == "assistant"
+        assert outcome.completion_tokens > 0
+    finally:
+        await actor.shutdown()
