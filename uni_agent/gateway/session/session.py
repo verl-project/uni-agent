@@ -371,7 +371,7 @@ class GatewaySession:
         context_ids = buffer.prompt_ids + buffer.response_ids
         sampling_params = self._codec.build_sampling_params(payload)
         remaining_response_budget = (
-            self._response_length - len(buffer.response_mask) if self._response_length is not None else None
+            max(0, self._response_length - len(buffer.response_mask)) if self._response_length is not None else None
         )
         if remaining_response_budget is not None and "max_tokens" in sampling_params:
             sampling_params["max_tokens"] = min(sampling_params["max_tokens"], remaining_response_budget)
@@ -473,7 +473,7 @@ class GatewaySession:
         context_ids = buffer.prompt_ids + buffer.response_ids
         sampling_params = self._codec.build_sampling_params(payload)
         remaining_response_budget = (
-            self._response_length - len(buffer.response_mask) if self._response_length is not None else None
+            max(0, self._response_length - len(buffer.response_mask)) if self._response_length is not None else None
         )
         if remaining_response_budget is not None and "max_tokens" in sampling_params:
             sampling_params["max_tokens"] = min(sampling_params["max_tokens"], remaining_response_budget)

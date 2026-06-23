@@ -48,6 +48,49 @@ async def _run(session: GatewaySession, backend: SequencedBackend, messages: lis
     return await session.run_generation({"model": "dummy-model", "messages": messages, **payload_extra}, backend)
 
 
+def test_encode_incremental_uses_request_chat_template_kwargs_for_prefix_slice(monkeypatch):
+    import uni_agent.gateway.session.codec as codec_mod
+
+    class PrefixChangingTokenizer:
+        @staticmethod
+        def _prefix(prefix_style: str = "short") -> str:
+            return "<s>" if prefix_style == "short" else "<long-system-prefix>"
+
+        def system_prompt(self, **kwargs) -> list[int]:
+            return _ids(self._prefix(**kwargs))
+
+        def apply_chat_template(self, messages, tokenize=True, add_generation_prompt=True, tools=None, **kwargs):
+            text = self._prefix(**kwargs)
+            for message in messages:
+                text += f"{message['role']}:{message.get('content', '')}\n"
+            if add_generation_prompt:
+                text += "assistant:"
+            if tokenize:
+                return _ids(text)
+            return text
+
+        def decode(self, token_ids, skip_special_tokens=True):
+            return "".join(chr(token_id) for token_id in token_ids)
+
+    def apply_chat_template(tokenizer, messages, **kwargs):
+        return tokenizer.apply_chat_template(messages, **kwargs)
+
+    def initialize_system_prompt(tokenizer, **kwargs):
+        return tokenizer.system_prompt(**kwargs)
+
+    monkeypatch.setattr(codec_mod, "_apply_chat_template", apply_chat_template)
+    monkeypatch.setattr(codec_mod, "initialize_system_prompt", initialize_system_prompt)
+
+    tokenizer = PrefixChangingTokenizer()
+    codec = MessageCodec(tokenizer, apply_chat_template_kwargs={"prefix_style": "short"})
+    incremental_ids = codec.encode_incremental(
+        [{"role": "user", "content": "delta"}],
+        request_chat_template_kwargs={"prefix_style": "long"},
+    )
+
+    assert tokenizer.decode(incremental_ids) == "user:delta\nassistant:"
+
+
 class _LogprobBackend:
     def __init__(self, steps):
         self.steps = list(steps)
@@ -389,6 +432,19 @@ async def test_multiple_chains_new_chain_over_budget_clamps_not_early_returns():
 
 
 @pytest.mark.asyncio
+async def test_multiple_chains_existing_chain_over_budget_clamps_to_zero():
+    session = _session("existing-chain-clamp", enable_multiple_chains=True, response_length=0)
+    backend = SequencedBackend(["NORMAL", "SECOND"])
+    messages = [{"role": "user", "content": "request that already exceeded budget"}]
+
+    await _run(session, backend, messages, max_tokens=8)
+    await _run(session, backend, list(session.active_chains[0].message_history), max_tokens=8)
+
+    assert len(backend.calls) == 2
+    assert backend.calls[-1]["sampling_params"]["max_tokens"] == 0
+
+
+@pytest.mark.asyncio
 async def test_multiple_chains_multimodal_media_stays_chain_local_flag_on():
     session = _session(
         "mm-chain-local",
@@ -452,6 +508,7 @@ async def test_multiple_chains_length_exhaustion_with_incremental_media_does_not
     assert _decode_response_ids(trajectories[0].response_ids) == "FIRST"
     assert trajectories[0].multi_modal_data == {"images": ["image://sent-a.png"]}
     assert trajectories[0].extra_fields["finish_reason"] == "length"
+    assert trajectories[0].num_turns == 3
 
 
 @pytest.mark.asyncio

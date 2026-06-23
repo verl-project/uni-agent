@@ -293,7 +293,10 @@ class MessageCodec:
                     **chat_template_kwargs,
                 )
             )
-        return ids[len(self._system_prompt) :]
+        system_prompt = self._system_prompt
+        if chat_template_kwargs != self._apply_chat_template_kwargs:
+            system_prompt = initialize_system_prompt(self._tokenizer, **chat_template_kwargs)
+        return ids[len(system_prompt) :]
 
     def effective_chat_template_kwargs(
         self,

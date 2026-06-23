@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from uni_agent.framework.framework import OpenAICompatibleAgentFramework
-from uni_agent.gateway.session import SessionHandle, Trajectory
+from uni_agent.gateway.session import GatewaySession, MessageCodec, SessionHandle, Trajectory
 from verl.utils import tensordict_utils as tu
 
 _RUNNER_CALLS = []
@@ -390,6 +392,43 @@ async def test_generate_sequences_writes_tq_schema_for_each_session(monkeypatch,
 
 @pytest.mark.asyncio
 async def test_generate_sequences_preserves_sorted_trajectory_order_and_rewards_final_target(fake_tq):
+    class _Tokenizer:
+        def apply_chat_template(self, messages, tokenize=True, add_generation_prompt=True, tools=None, **kwargs):
+            parts = []
+            for message in messages:
+                content = message.get("content", "")
+                if content is None:
+                    content = ""
+                parts.append(f"{message['role']}:{content}\n")
+            if add_generation_prompt:
+                parts.append("assistant:")
+            text = "".join(parts)
+            if tokenize:
+                return [ord(char) for char in text]
+            return text
+
+        def decode(self, token_ids, skip_special_tokens=True):
+            if hasattr(token_ids, "tolist"):
+                token_ids = token_ids.tolist()
+            return "".join(chr(int(token_id.item() if hasattr(token_id, "item") else token_id)) for token_id in token_ids)
+
+        def encode(self, text, add_special_tokens=False):
+            return [ord(char) for char in text]
+
+    class _Backend:
+        def __init__(self, steps):
+            self.steps = list(steps)
+
+        async def generate(self, request_id, *, prompt_ids, sampling_params, image_data=None, video_data=None):
+            del request_id, prompt_ids, sampling_params, image_data, video_data
+            text = self.steps.pop(0)
+            token_ids = [ord(char) for char in text]
+            return SimpleNamespace(
+                token_ids=token_ids,
+                log_probs=[-0.1] * len(token_ids),
+                stop_reason="completed",
+            )
+
     class _ComputeScoreRemote:
         def __init__(self):
             self.calls = []
@@ -403,30 +442,39 @@ async def test_generate_sequences_preserves_sorted_trajectory_order_and_rewards_
             self.compute_score = _ComputeScoreRemote()
 
     worker = _StubWorker()
-    trajectories = [
-        _trajectory(
-            prompt_ids=[100],
-            response_ids=[101, 102],
-            response_logprobs=[-0.1, -0.2],
-            reward_info={"branch": "subagent"},
-            num_turns=1,
-        ),
-        _trajectory(
-            prompt_ids=[200, 201],
-            response_ids=[202],
-            response_logprobs=[-0.3],
-            reward_info={"branch": "main", "segment": "tool"},
-            num_turns=2,
-        ),
-        _trajectory(
-            prompt_ids=[300, 301],
-            response_ids=[302, 303, 304],
-            response_logprobs=[-0.4, -0.5, -0.6],
-            reward_info={"branch": "main", "finish_reason": "length"},
-            num_turns=3,
-            extra_fields={"finish_reason": "length"},
-        ),
+    tokenizer = _Tokenizer()
+    real_session = GatewaySession(
+        SessionHandle(session_id="real-sorted-order"),
+        MessageCodec(tokenizer),
+        enable_multiple_chains=True,
+        response_length=len("MAIN1") + 1,
+    )
+    backend = _Backend(["MAIN1", "SUB"])
+    main_first = [
+        {"role": "system", "content": "You are helpful."},
+        {"role": "user", "content": "main"},
     ]
+    subagent = [
+        {"role": "system", "content": "You are a focused subagent."},
+        {"role": "user", "content": "sub"},
+    ]
+    main_too_long = [
+        {"role": "system", "content": "You are helpful."},
+        {"role": "user", "content": "main"},
+        {"role": "assistant", "content": "MAIN1"},
+        {"role": "user", "content": "too long"},
+    ]
+
+    await real_session.run_generation({"model": "dummy-model", "messages": main_first}, backend)
+    await real_session.run_generation({"model": "dummy-model", "messages": subagent}, backend)
+    outcome = await real_session.run_generation({"model": "dummy-model", "messages": main_too_long}, backend)
+    await real_session.set_reward_info({"branch": "main", "target": "final-main"})
+    trajectories = await real_session.finalize()
+
+    assert outcome.finish_reason == "length"
+    assert backend.steps == []
+    assert [tokenizer.decode(trajectory.response_ids) for trajectory in trajectories] == ["SUB", "MAIN1"]
+    assert trajectories[-1].extra_fields == {"finish_reason": "length"}
     runtime = _FakeGatewayManager({"session-0-0": trajectories})
     framework = await _build_framework_with_agent_runners(
         agent_runners={"runner": _inline_runner_config(_async_noop_runner)},
@@ -440,30 +488,32 @@ async def test_generate_sequences_preserves_sorted_trajectory_order_and_rewards_
 
     assert len(worker.compute_score.calls) == 1
     data = worker.compute_score.calls[0]
-    assert data.batch["prompts"].tolist() == [[300, 301]]
-    assert data.batch["responses"].tolist() == [[302, 303, 304]]
+    final_trajectory = trajectories[-1]
+    assert data.batch["prompts"].tolist() == [final_trajectory.prompt_ids]
+    assert data.batch["responses"].tolist() == [final_trajectory.response_ids]
     assert data.non_tensor_batch["extra_info"].tolist() == [
-        {"index": 0, "branch": "main", "finish_reason": "length"}
+        {"index": 0, "branch": "main", "target": "final-main"}
     ]
-    assert data.non_tensor_batch["__num_turns__"].tolist() == [3]
+    assert data.non_tensor_batch["__num_turns__"].tolist() == [final_trajectory.num_turns]
 
     assert len(fake_tq.batch_puts) == 1
     batch_put = fake_tq.batch_puts[0]
-    assert batch_put["keys"] == ["uid-0_0_0", "uid-0_0_1", "uid-0_0_2"]
-    assert [tag.get("finish_reason") for tag in batch_put["tags"]] == [None, None, "length"]
+    assert batch_put["keys"] == ["uid-0_0_0", "uid-0_0_1"]
+    assert [tag.get("finish_reason") for tag in batch_put["tags"]] == [None, "length"]
     fields = batch_put["fields"]
-    assert [fields["prompts"][i].tolist() for i in range(3)] == [[100], [200, 201], [300, 301]]
-    assert [fields["responses"][i].tolist() for i in range(3)] == [[101, 102], [202], [302, 303, 304]]
-    assert fields["rollout_log_probs"][0].tolist() == pytest.approx([-0.1, -0.2])
-    assert fields["rollout_log_probs"][1].tolist() == pytest.approx([-0.3])
-    assert fields["rollout_log_probs"][2].tolist() == pytest.approx([-0.4, -0.5, -0.6])
-    assert [fields["rm_scores"][i].tolist() for i in range(3)] == [
-        [0.0, 0.5],
-        [0.5],
-        [0.0, 0.0, 0.5],
+    assert [fields["prompts"][i].tolist() for i in range(len(trajectories))] == [
+        trajectory.prompt_ids for trajectory in trajectories
+    ]
+    assert [fields["responses"][i].tolist() for i in range(len(trajectories))] == [
+        trajectory.response_ids for trajectory in trajectories
+    ]
+    assert [tokenizer.decode(fields["responses"][i]) for i in range(len(trajectories))] == ["SUB", "MAIN1"]
+    for index, trajectory in enumerate(trajectories):
+        assert fields["rollout_log_probs"][index].tolist() == pytest.approx(trajectory.response_logprobs)
+    assert [fields["rm_scores"][i].tolist() for i in range(len(trajectories))] == [
+        [0.0] * (len(trajectory.response_ids) - 1) + [0.5] for trajectory in trajectories
     ]
     assert tu.get(fields, "reward_extra_info") == [
-        {"target": "final-main"},
         {"target": "final-main"},
         {"target": "final-main"},
     ]

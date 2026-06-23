@@ -65,6 +65,38 @@ async def test_gateway_actor_max_tokens_clamped_to_remaining_response_budget():
 
 
 @pytest.mark.asyncio
+async def test_gateway_actor_over_budget_clamps_remaining_response_budget_to_zero():
+    from uni_agent.gateway.config import GatewayActorConfig
+    from uni_agent.gateway.gateway import _GatewayActor
+    from uni_agent.gateway.session import TrajectoryBuffer
+
+    actor = _GatewayActor(
+        GatewayActorConfig(
+            tokenizer=FakeTokenizer(),
+            prompt_length=2048,
+            response_length=50,
+        ),
+        InspectingBackend(),
+    )
+    await actor.start()
+    try:
+        await actor.create_session("s1")
+        actor._sessions["s1"].active_trajectory = TrajectoryBuffer(
+            prompt_ids=[1, 2, 3],
+            response_ids=[10] * 60,
+            response_mask=[1] * 60,
+        )
+
+        payload = {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 200}
+        actor._sessions["s1"].message_history = list(payload["messages"])
+        await actor._handle_chat_completions("s1", payload)
+
+        assert actor._backend.calls[-1]["sampling_params"]["max_tokens"] == 0
+    finally:
+        await actor.shutdown()
+
+
+@pytest.mark.asyncio
 async def test_gateway_actor_continuation_budget_exhausted_materializes_length_stop():
     """When a continuation request would push the total response tokens past
     ``response_length``, the gateway skips the backend call, commits the
