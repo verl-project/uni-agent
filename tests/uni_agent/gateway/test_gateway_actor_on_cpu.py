@@ -301,11 +301,15 @@ async def test_gateway_actor_create_session_forwards_session_budget(monkeypatch)
             codec,
             prompt_length=None,
             response_length=None,
+            enable_parallel_session_generation=False,
+            ignore_cch_for_prefix_hash=False,
         ):
             captured["handle"] = handle
             captured["codec"] = codec
             captured["prompt_length"] = prompt_length
             captured["response_length"] = response_length
+            captured["enable_parallel_session_generation"] = enable_parallel_session_generation
+            captured["ignore_cch_for_prefix_hash"] = ignore_cch_for_prefix_hash
 
     monkeypatch.setattr(gateway_mod, "GatewaySession", _RecordingGatewaySession)
     actor = gateway_mod._GatewayActor(
@@ -313,6 +317,8 @@ async def test_gateway_actor_create_session_forwards_session_budget(monkeypatch)
             tokenizer=FakeTokenizer(),
             prompt_length=128,
             response_length=64,
+            enable_parallel_session_generation=True,
+            ignore_cch_for_prefix_hash=True,
         ),
         InspectingBackend(),
     )
@@ -323,6 +329,8 @@ async def test_gateway_actor_create_session_forwards_session_budget(monkeypatch)
     assert captured["handle"].session_id == "s1"
     assert captured["prompt_length"] == 128
     assert captured["response_length"] == 64
+    assert captured["enable_parallel_session_generation"] is True
+    assert captured["ignore_cch_for_prefix_hash"] is True
 
 
 @pytest.mark.asyncio
@@ -1197,6 +1205,43 @@ async def test_gateway_actor_serializes_same_session_concurrent_requests(ray_run
     assert trajectories[1].response_ids == [ord(char) for char in "SECOND"]
     assert trajectories[0].response_mask == [1] * len("FIRST")
     assert trajectories[1].response_mask == [1] * len("SECOND")
+
+
+@pytest.mark.asyncio
+async def test_gateway_actor_parallel_same_session_requests_when_flag_enabled():
+    from uni_agent.gateway.config import GatewayActorConfig
+    from uni_agent.gateway.gateway import _GatewayActor
+
+    backend = RejectConcurrentSessionBackend(["FIRST", "SECOND"], delay=0.05)
+    actor = _GatewayActor(
+        GatewayActorConfig(
+            tokenizer=FakeTokenizer(),
+            enable_parallel_session_generation=True,
+        ),
+        backend,
+    )
+    actor._server_base_url = "http://gateway.local"
+    await actor.create_session("session-parallel")
+
+    async def send_request():
+        return await actor._handle_chat_completions(
+            "session-parallel",
+            {"model": "dummy-model", "messages": [{"role": "user", "content": "same session prompt"}]},
+        )
+
+    first, second = await asyncio.gather(send_request(), send_request())
+    trajectories = await actor.finalize_session("session-parallel")
+
+    assert json.loads(first.body)["choices"][0]["finish_reason"] == "stop"
+    assert json.loads(second.body)["choices"][0]["finish_reason"] == "stop"
+    request_ids = [window[0] for window in backend.call_windows]
+    assert len(request_ids) == len(set(request_ids)) == 2
+    assert all(request_id.startswith("session-parallel:") for request_id in request_ids)
+    assert max(start for _, start, _ in backend.call_windows) < min(finish for _, _, finish in backend.call_windows)
+    assert sorted(FakeTokenizer().decode(trajectory.response_ids) for trajectory in trajectories) == [
+        "FIRST",
+        "SECOND",
+    ]
 
 
 @pytest.mark.parametrize(

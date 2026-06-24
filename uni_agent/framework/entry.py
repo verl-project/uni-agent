@@ -28,10 +28,22 @@ from verl.workers.config.model import HFModelConfig
 _DEFAULT_FRAMEWORK_CLASS = "uni_agent.framework.framework.OpenAICompatibleAgentFramework"
 
 
+def _get_bool_flag(cfg, key: str) -> bool:
+    value = cfg.get(key, False)
+    if type(value) is not bool:
+        raise ValueError(
+            f"actor_rollout_ref.rollout.custom.agent_framework.{key} must be a bool, "
+            f"got {type(value).__name__}"
+        )
+    return value
+
+
 def build_gateway_manager(*, config, llm_client) -> GatewayManager:
     """Spawn the gateway actor pool (driver-side, driver-owned) and return its manager."""
     # TODO(phase-b): switch this to actor_rollout_ref.rollout.agent_framework.*
     af_cfg = OmegaConf.select(config, "actor_rollout_ref.rollout.custom.agent_framework", default={}) or {}
+    enable_parallel_session_generation = _get_bool_flag(af_cfg, "enable_parallel_session_generation")
+    ignore_cch_for_prefix_hash = _get_bool_flag(af_cfg, "ignore_cch_for_prefix_hash")
 
     # Match AgentLoopWorker pattern: self-load tokenizer/processor via HFModelConfig.
     model_config: HFModelConfig = omega_conf_to_dataclass(config.actor_rollout_ref.model)
@@ -42,6 +54,8 @@ def build_gateway_manager(*, config, llm_client) -> GatewayManager:
         tool_parser_name=config.actor_rollout_ref.rollout.get("multi_turn", {}).get("format"),
         prompt_length=config.actor_rollout_ref.rollout.prompt_length,
         response_length=config.actor_rollout_ref.rollout.response_length,
+        enable_parallel_session_generation=enable_parallel_session_generation,
+        ignore_cch_for_prefix_hash=ignore_cch_for_prefix_hash,
     )
 
     return GatewayManager(

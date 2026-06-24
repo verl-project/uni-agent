@@ -141,6 +141,137 @@ def test_build_gateway_manager_wires_gateway_config_defaults(monkeypatch):
     assert captured["gateway_actor_config"].prompt_length == 128
     assert captured["gateway_actor_config"].response_length == 64
     assert captured["gateway_actor_config"].tool_parser_name == "hermes"
+    assert captured["gateway_actor_config"].enable_parallel_session_generation is False
+    assert captured["gateway_actor_config"].ignore_cch_for_prefix_hash is False
+
+
+def test_build_gateway_manager_wires_ignore_cch_for_prefix_hash(monkeypatch):
+    from omegaconf import OmegaConf
+
+    from uni_agent.framework import entry as entry_module
+
+    class _ModelConfig:
+        tokenizer = object()
+        processor = None
+
+    captured = {}
+
+    class _FakeGatewayManager:
+        def __init__(self, *, llm_client, gateway_count, gateway_actor_config):
+            captured["llm_client"] = llm_client
+            captured["gateway_count"] = gateway_count
+            captured["gateway_actor_config"] = gateway_actor_config
+
+    monkeypatch.setattr(entry_module, "omega_conf_to_dataclass", lambda _config: _ModelConfig())
+    monkeypatch.setattr(entry_module, "GatewayManager", _FakeGatewayManager)
+
+    config = OmegaConf.create(
+        {
+            "actor_rollout_ref": {
+                "model": {},
+                "rollout": {
+                    "prompt_length": 128,
+                    "response_length": 64,
+                    "multi_turn": {"format": None},
+                    "custom": {
+                        "agent_framework": {
+                            "gateway_count": 2,
+                            "ignore_cch_for_prefix_hash": True,
+                        }
+                    },
+                },
+            }
+        }
+    )
+
+    manager = entry_module.build_gateway_manager(config=config, llm_client=object())
+
+    assert isinstance(manager, _FakeGatewayManager)
+    assert captured["gateway_actor_config"].enable_parallel_session_generation is False
+    assert captured["gateway_actor_config"].ignore_cch_for_prefix_hash is True
+
+
+def test_build_gateway_manager_wires_enable_parallel_session_generation(monkeypatch):
+    from omegaconf import OmegaConf
+
+    from uni_agent.framework import entry as entry_module
+
+    class _ModelConfig:
+        tokenizer = object()
+        processor = None
+
+    captured = {}
+
+    class _FakeGatewayManager:
+        def __init__(self, *, llm_client, gateway_count, gateway_actor_config):
+            captured["llm_client"] = llm_client
+            captured["gateway_count"] = gateway_count
+            captured["gateway_actor_config"] = gateway_actor_config
+
+    monkeypatch.setattr(entry_module, "omega_conf_to_dataclass", lambda _config: _ModelConfig())
+    monkeypatch.setattr(entry_module, "GatewayManager", _FakeGatewayManager)
+
+    config = OmegaConf.create(
+        {
+            "actor_rollout_ref": {
+                "model": {},
+                "rollout": {
+                    "prompt_length": 128,
+                    "response_length": 64,
+                    "multi_turn": {"format": None},
+                    "custom": {
+                        "agent_framework": {
+                            "gateway_count": 2,
+                            "enable_parallel_session_generation": True,
+                        }
+                    },
+                },
+            }
+        }
+    )
+
+    manager = entry_module.build_gateway_manager(config=config, llm_client=object())
+
+    assert isinstance(manager, _FakeGatewayManager)
+    assert captured["gateway_actor_config"].enable_parallel_session_generation is True
+    assert captured["gateway_actor_config"].ignore_cch_for_prefix_hash is False
+
+
+@pytest.mark.parametrize(
+    ("flag_name", "bad_value"),
+    [
+        ("enable_parallel_session_generation", "true"),
+        ("enable_parallel_session_generation", 1),
+        ("ignore_cch_for_prefix_hash", "true"),
+        ("ignore_cch_for_prefix_hash", 1),
+    ],
+)
+def test_build_gateway_manager_rejects_non_bool_m2_flags(flag_name, bad_value):
+    from omegaconf import OmegaConf
+
+    from uni_agent.framework import entry as entry_module
+
+    config = OmegaConf.create(
+        {
+            "actor_rollout_ref": {
+                "model": {},
+                "rollout": {
+                    "prompt_length": 128,
+                    "response_length": 64,
+                    "multi_turn": {"format": None},
+                    "custom": {
+                        "agent_framework": {
+                            "gateway_count": 2,
+                            flag_name: bad_value,
+                        }
+                    },
+                },
+            }
+        }
+    )
+
+    with pytest.raises(ValueError, match=f"agent_framework.{flag_name} must be a bool"):
+        entry_module.build_gateway_manager(config=config, llm_client=object())
 
 
 class _FakeTransferQueue:

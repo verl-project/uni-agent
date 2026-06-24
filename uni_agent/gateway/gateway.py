@@ -51,6 +51,8 @@ class _GatewayActor:
         )
         self._prompt_length = config.prompt_length
         self._response_length = config.response_length
+        self._enable_parallel_session_generation = config.enable_parallel_session_generation
+        self._ignore_cch_for_prefix_hash = config.ignore_cch_for_prefix_hash
         self._sessions: dict[str, GatewaySession] = {}
         self._app = FastAPI()
         self._server_port: int | None = None
@@ -198,6 +200,8 @@ class _GatewayActor:
             codec=self._codec,
             prompt_length=self._prompt_length,
             response_length=self._response_length,
+            enable_parallel_session_generation=self._enable_parallel_session_generation,
+            ignore_cch_for_prefix_hash=self._ignore_cch_for_prefix_hash,
         )
         return handle
 

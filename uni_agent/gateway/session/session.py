@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import time
 from dataclasses import dataclass, field, replace
 from enum import Enum
@@ -17,6 +18,8 @@ from uni_agent.gateway.session.types import SessionHandle, Trajectory
 
 
 _EMPTY_PREFIX_HASH = hashlib.sha256(b"uni-agent-prefix-v1\0empty").hexdigest()
+_CCH_PATTERN = re.compile(r"(?<![A-Za-z0-9_])cch=[A-Za-z0-9_-]+")
+_IGNORED_CCH = "cch=<ignored>"
 
 
 class SessionPhase(str, Enum):
@@ -81,6 +84,20 @@ class MaterializedChain:
 
 
 @dataclass
+class InflightGenerationDebug:
+    """Debug metadata for a prepared backend request that has not resolved."""
+
+    generation_id: int
+    selected_chain_id: int | None
+    selected_tip_hash: str | None
+    selected_history_len: int | None
+    selected_updated_seq: int | None
+    selected_created_seq: int | None
+    started_at: float
+    is_new_chain: bool
+
+
+@dataclass
 class EncodedData:
     """Session-private data prepared before backend generation.
 
@@ -99,7 +116,14 @@ class EncodedData:
             materialization.
         length_exhausted_trajectory: Materialized trajectory for a length-budget
             early return, or ``None`` on the normal path.
-        chain_id: Selected active chain id.
+        generation_id: Session-local in-flight generation id, allocated only
+            when backend generation is needed.
+        selected_chain_id: Selected active chain id at prepare time.
+        selected_tip_hash: Selected active chain tip hash at prepare time.
+        selected_history_len: Selected active chain history length at prepare time.
+        selected_updated_seq: Selected active chain updated sequence at prepare time.
+        selected_created_seq: Selected active chain created sequence at prepare time.
+        prepared_order_seq: Observation-only session order at prepare time.
         is_new_chain: Whether commit should append a new chain.
         effective_chat_template_kwargs: Effective chat-template kwargs used for
             chain compatibility and encoding.
@@ -107,8 +131,6 @@ class EncodedData:
             request history.
         logprobs_complete: Whether response logprobs are still complete for the
             working chain.
-        length_exhausted_chain_id: Selected chain to close on a multiple-chain
-            length-budget early return.
     """
 
     buffer: TrajectoryBuffer
@@ -119,12 +141,17 @@ class EncodedData:
     image_data: list[Any] | None
     video_data: list[Any] | None
     length_exhausted_trajectory: Trajectory | None
-    chain_id: int | None = None
+    generation_id: int | None = None
+    selected_chain_id: int | None = None
+    selected_tip_hash: str | None = None
+    selected_history_len: int | None = None
+    selected_updated_seq: int | None = None
+    selected_created_seq: int | None = None
+    prepared_order_seq: int | None = None
     is_new_chain: bool = False
     effective_chat_template_kwargs: dict[str, Any] = field(default_factory=dict)
     incoming_message_prefix_hashes: list[str] = field(default_factory=list)
     logprobs_complete: bool = True
-    length_exhausted_chain_id: int | None = None
 
 
 @dataclass
@@ -164,23 +191,35 @@ class GatewaySession:
         *,
         prompt_length: int | None = None,
         response_length: int | None = None,
+        enable_parallel_session_generation: bool = False,
+        ignore_cch_for_prefix_hash: bool = False,
     ):
         """Create an active session bound to a handle and model codec."""
+        for name, value in (
+            ("enable_parallel_session_generation", enable_parallel_session_generation),
+            ("ignore_cch_for_prefix_hash", ignore_cch_for_prefix_hash),
+        ):
+            if type(value) is not bool:
+                raise ValueError(f"{name} must be a bool, got {type(value).__name__}")
+
         self.handle = handle
         self._codec = codec
         self._prompt_length = prompt_length
         self._response_length = response_length
+        self._enable_parallel_session_generation = enable_parallel_session_generation
+        self._ignore_cch_for_prefix_hash = ignore_cch_for_prefix_hash
         self.active_chains: list[ChainState] = []
         self.materialized_chains: list[MaterializedChain] = []
         self._next_chain_id = 1
         self._order_seq = 0
+        self._next_generation_id = 1
+        self._inflight_generations: dict[int, InflightGenerationDebug] = {}
         self.reward_info: dict[str, Any] = {}
         self.phase = SessionPhase.ACTIVE
         self.created_at = time.time()
         self.updated_at = self.created_at
         self.request_lock = asyncio.Lock()
-        # M1 intentionally serializes same-session generation; M2 may narrow this lock.
-        # This is an implementation detail, not GatewaySession's public contract.
+        # Default runtime keeps M1 serialization. M2 parallelism is opt-in.
         self.generation_lock = asyncio.Lock()
 
     async def run_generation(self, payload: dict[str, Any], backend) -> GenerationOutcome:
@@ -196,13 +235,33 @@ class GatewaySession:
         except MalformedRequestError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+        # M2 parallel mode commits in backend completion order, so same-session
+        # concurrent sampling can produce unstable trajectory ordering even for
+        # best-of-N-style workloads. The framework currently scores
+        # session_trajectories[-1] and broadcasts that reward, so enable this
+        # only when same-session siblings can safely share one reward target.
+        if self._enable_parallel_session_generation:
+            return await self._run_generation_prepared(payload, request_context, backend)
+
         async with self.generation_lock:
+            return await self._run_generation_prepared(payload, request_context, backend)
+
+    async def _run_generation_prepared(
+        self,
+        payload: dict[str, Any],
+        request_context: dict[str, Any],
+        backend,
+    ) -> GenerationOutcome:
+        encoded: EncodedData | None = None
+        try:
             async with self.request_lock:
                 if self.phase != SessionPhase.ACTIVE:
                     raise HTTPException(
                         status_code=409,
                         detail=f"Session {self.handle.session_id} is {self.phase.value.lower()}",
                     )
+                # Prepare can touch codec and multimodal extractor state; M2 only
+                # parallelizes backend generation, not request preparation.
                 encoded = await self._prepare_generation_inputs(payload, request_context)
                 if encoded.length_exhausted_trajectory is not None:
                     empty_msg = {"role": "assistant", "content": ""}
@@ -214,10 +273,12 @@ class GatewaySession:
                         prompt_tokens=len(encoded.context_ids),
                         completion_tokens=0,
                     )
+                if self._enable_parallel_session_generation:
+                    self._register_inflight_generation(encoded)
 
             try:
                 output = await backend.generate(
-                    request_id=self.handle.session_id,
+                    request_id=self._backend_request_id(encoded),
                     prompt_ids=encoded.context_ids,
                     sampling_params=encoded.sampling_params,
                     image_data=self._copy_media_list(encoded.image_data),
@@ -233,18 +294,19 @@ class GatewaySession:
             encoded.buffer.response_mask.extend([1] * len(response_ids))
             self._append_output_logprobs(encoded, output.log_probs, response_ids)
 
-            assistant_msg, finish_reason = await self._codec.decode_response(
-                response_ids,
-                tools=encoded.tools,
-                stop_reason=output.stop_reason,
-            )
-
             async with self.request_lock:
                 if self.phase != SessionPhase.ACTIVE:
                     raise HTTPException(
                         status_code=409,
                         detail=f"Session {self.handle.session_id} is {self.phase.value.lower()}",
                     )
+                # Decode is serialized under request_lock to avoid concurrent access
+                # to tokenizer/tool-parser internals shared by the actor codec.
+                assistant_msg, finish_reason = await self._codec.decode_response(
+                    response_ids,
+                    tools=encoded.tools,
+                    stop_reason=output.stop_reason,
+                )
                 self._commit_generation_to_chain(encoded, assistant_msg)
                 self._touch()
                 return GenerationOutcome(
@@ -253,6 +315,9 @@ class GatewaySession:
                     prompt_tokens=len(encoded.context_ids),
                     completion_tokens=len(response_ids),
                 )
+        finally:
+            if encoded is not None and encoded.generation_id is not None:
+                await asyncio.shield(self._cleanup_inflight_generation(encoded.generation_id))
 
     async def _prepare_generation_inputs(
         self,
@@ -281,15 +346,25 @@ class GatewaySession:
                 request_chat_template_kwargs=request_chat_template_kwargs,
             )
             buffer = TrajectoryBuffer(prompt_ids=prompt_ids)
-            chain_id = None
             is_new_chain = True
             logprobs_complete = True
+            selected_chain_id = None
+            selected_tip_hash = None
+            selected_history_len = None
+            selected_updated_seq = None
+            selected_created_seq = None
         else:
             buffer = self._copy_trajectory_buffer(selected_chain.buffer)
             image_data, video_data = self._copy_chain_media(selected_chain)
-            chain_id = selected_chain.chain_id
             is_new_chain = False
             logprobs_complete = selected_chain.logprobs_complete
+            selected_chain_id = selected_chain.chain_id
+            selected_tip_hash = (
+                selected_chain.message_prefix_hashes[-1] if selected_chain.message_prefix_hashes else _EMPTY_PREFIX_HASH
+            )
+            selected_history_len = len(selected_chain.message_history)
+            selected_updated_seq = selected_chain.updated_seq
+            selected_created_seq = selected_chain.created_seq
             incremental_messages = messages[len(selected_chain.message_history) :]
             if incremental_messages:
                 new_image_data, new_video_data = await self._codec.extract_multi_modal_data(incremental_messages)
@@ -316,12 +391,16 @@ class GatewaySession:
                             chain=selected_chain,
                             extra_fields={"finish_reason": "length"},
                         ),
-                        chain_id=selected_chain.chain_id,
+                        selected_chain_id=selected_chain.chain_id,
+                        selected_tip_hash=selected_tip_hash,
+                        selected_history_len=selected_history_len,
+                        selected_updated_seq=selected_updated_seq,
+                        selected_created_seq=selected_created_seq,
+                        prepared_order_seq=self._order_seq,
                         is_new_chain=False,
                         effective_chat_template_kwargs=effective_chat_template_kwargs,
                         incoming_message_prefix_hashes=list(incoming_message_prefix_hashes),
                         logprobs_complete=logprobs_complete,
-                        length_exhausted_chain_id=selected_chain.chain_id,
                     )
                 buffer.response_ids.extend(incremental_ids)
                 buffer.response_mask.extend([0] * len(incremental_ids))
@@ -352,7 +431,12 @@ class GatewaySession:
             image_data=image_data,
             video_data=video_data,
             length_exhausted_trajectory=None,
-            chain_id=chain_id,
+            selected_chain_id=selected_chain_id,
+            selected_tip_hash=selected_tip_hash,
+            selected_history_len=selected_history_len,
+            selected_updated_seq=selected_updated_seq,
+            selected_created_seq=selected_created_seq,
+            prepared_order_seq=self._order_seq,
             is_new_chain=is_new_chain,
             effective_chat_template_kwargs=effective_chat_template_kwargs,
             incoming_message_prefix_hashes=list(incoming_message_prefix_hashes),
@@ -414,6 +498,9 @@ class GatewaySession:
                 )
                 for chain in self.active_chains
             },
+            "active_chain_updated_seq": {chain.chain_id: chain.updated_seq for chain in self.active_chains},
+            "num_inflight_generations": len(self._inflight_generations),
+            "inflight_generation_ids": sorted(self._inflight_generations),
         }
 
     def _select_chain(
@@ -505,6 +592,8 @@ class GatewaySession:
 
     def _compute_message_hash(self, message: dict[str, Any]) -> str:
         canonical = self._codec.canonicalize_message_for_prefix_comparison(message)
+        if self._ignore_cch_for_prefix_hash:
+            canonical = self._normalize_cch_in_hash_input(canonical)
         canonical_json = json.dumps(
             canonical,
             sort_keys=True,
@@ -512,6 +601,17 @@ class GatewaySession:
             ensure_ascii=False,
         ).encode("utf-8")
         return hashlib.sha256(b"uni-agent-message-v1\0" + canonical_json).hexdigest()
+
+    def _normalize_cch_in_hash_input(self, value: Any) -> Any:
+        if isinstance(value, str):
+            return _CCH_PATTERN.sub(_IGNORED_CCH, value)
+        if isinstance(value, dict):
+            return {key: self._normalize_cch_in_hash_input(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [self._normalize_cch_in_hash_input(item) for item in value]
+        if isinstance(value, tuple):
+            return tuple(self._normalize_cch_in_hash_input(item) for item in value)
+        return value
 
     def _copy_trajectory_buffer(self, buffer: TrajectoryBuffer) -> TrajectoryBuffer:
         return TrajectoryBuffer(
@@ -574,10 +674,29 @@ class GatewaySession:
             )
             return
 
-        if encoded.chain_id is None:
+        if encoded.selected_chain_id is None:
             raise RuntimeError("selected chain id is missing")
-        chain_index, previous_chain = self._find_active_chain(encoded.chain_id)
+        chain_index, previous_chain = self._find_active_chain_or_none(encoded.selected_chain_id)
         order_seq = self._next_order_seq()
+        if previous_chain is None or not self._selected_chain_tip_is_unchanged(encoded, previous_chain):
+            self.active_chains.append(
+                ChainState(
+                    chain_id=self._allocate_chain_id(),
+                    message_history=message_history,
+                    message_prefix_hashes=message_prefix_hashes,
+                    active_tool_schemas=encoded.tools,
+                    effective_chat_template_kwargs=dict(encoded.effective_chat_template_kwargs),
+                    buffer=encoded.buffer,
+                    image_data=self._copy_media_list(encoded.image_data),
+                    video_data=self._copy_media_list(encoded.video_data),
+                    logprobs_complete=encoded.logprobs_complete,
+                    created_seq=order_seq,
+                    updated_seq=order_seq,
+                )
+            )
+            return
+
+        assert chain_index is not None
         self.active_chains[chain_index] = ChainState(
             chain_id=previous_chain.chain_id,
             message_history=message_history,
@@ -593,9 +712,9 @@ class GatewaySession:
         )
 
     def _close_length_exhausted_chain(self, encoded: EncodedData) -> None:
-        if encoded.length_exhausted_chain_id is None or encoded.length_exhausted_trajectory is None:
+        if encoded.selected_chain_id is None or encoded.length_exhausted_trajectory is None:
             raise RuntimeError("length-exhausted chain metadata is missing")
-        chain_index, chain = self._find_active_chain(encoded.length_exhausted_chain_id)
+        chain_index, chain = self._find_active_chain(encoded.selected_chain_id)
         order_seq = self._next_order_seq()
         self.materialized_chains.append(
             MaterializedChain(
@@ -608,16 +727,61 @@ class GatewaySession:
         )
         del self.active_chains[chain_index]
 
+    def _selected_chain_tip_is_unchanged(self, encoded: EncodedData, chain: ChainState) -> bool:
+        current_tip_hash = chain.message_prefix_hashes[-1] if chain.message_prefix_hashes else _EMPTY_PREFIX_HASH
+        return (
+            chain.chain_id == encoded.selected_chain_id
+            and current_tip_hash == encoded.selected_tip_hash
+            and len(chain.message_history) == encoded.selected_history_len
+            and chain.updated_seq == encoded.selected_updated_seq
+        )
+
     def _find_active_chain(self, chain_id: int) -> tuple[int, ChainState]:
         for index, chain in enumerate(self.active_chains):
             if chain.chain_id == chain_id:
                 return index, chain
         raise RuntimeError(f"active chain {chain_id} not found")
 
+    def _find_active_chain_or_none(self, chain_id: int) -> tuple[int | None, ChainState | None]:
+        for index, chain in enumerate(self.active_chains):
+            if chain.chain_id == chain_id:
+                return index, chain
+        return None, None
+
     def _allocate_chain_id(self) -> int:
         chain_id = self._next_chain_id
         self._next_chain_id += 1
         return chain_id
+
+    def _allocate_generation_id(self) -> int:
+        generation_id = self._next_generation_id
+        self._next_generation_id += 1
+        return generation_id
+
+    def _register_inflight_generation(self, encoded: EncodedData) -> None:
+        generation_id = self._allocate_generation_id()
+        encoded.generation_id = generation_id
+        self._inflight_generations[generation_id] = InflightGenerationDebug(
+            generation_id=generation_id,
+            selected_chain_id=encoded.selected_chain_id,
+            selected_tip_hash=encoded.selected_tip_hash,
+            selected_history_len=encoded.selected_history_len,
+            selected_updated_seq=encoded.selected_updated_seq,
+            selected_created_seq=encoded.selected_created_seq,
+            started_at=time.time(),
+            is_new_chain=encoded.is_new_chain,
+        )
+
+    async def _cleanup_inflight_generation(self, generation_id: int) -> None:
+        async with self.request_lock:
+            self._inflight_generations.pop(generation_id, None)
+
+    def _backend_request_id(self, encoded: EncodedData) -> str:
+        if not self._enable_parallel_session_generation:
+            return self.handle.session_id
+        if encoded.generation_id is None:
+            raise RuntimeError("parallel generation id is missing")
+        return f"{self.handle.session_id}:{encoded.generation_id}"
 
     def _next_order_seq(self) -> int:
         self._order_seq += 1
