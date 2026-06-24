@@ -1,15 +1,18 @@
 import asyncio
+import os
+
+os.environ["RAY_ENABLE_UV_RUN_RUNTIME_ENV"] = "0"
 
 import httpx
 import pytest
 import ray
 
-from tests.uni_agent.support import FakeTokenizer, RecordingLLMClient
+from tests.uni_agent.support import FakeTokenizer, RecordingLLMClient, SequencedBackend
 
 
 @pytest.fixture(scope="session")
 def ray_runtime():
-    ray.init(ignore_reinit_error=True)
+    ray.init(ignore_reinit_error=True, include_dashboard=False)
     yield
     ray.shutdown()
 
@@ -151,7 +154,7 @@ async def test_gateway_manager_finalizes_each_session_on_its_owning_gateway(ray_
     # mis-routed finalize would hit the other session's gateway.
     assert session_a.base_url != session_b.base_url
 
-    async with httpx.AsyncClient(timeout=5.0) as client:
+    async with httpx.AsyncClient(timeout=5.0, trust_env=False) as client:
         for session, label in ((session_a, "a"), (session_b, "b")):
             chat = await client.post(
                 f"{session.base_url}/chat/completions",
@@ -168,3 +171,82 @@ async def test_gateway_manager_finalizes_each_session_on_its_owning_gateway(ray_
     assert [t.reward_info["label"] for t in trajectories_b] == ["b"]
 
     await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_gateway_manager_default_chains_config_to_http_finalizes_subagent_before_updated_main(
+    ray_runtime,
+    monkeypatch,
+):
+    """Exercise default multi-chain behavior from config wiring through HTTP routes."""
+    from omegaconf import OmegaConf
+
+    from uni_agent.framework import entry as entry_module
+
+    class _ModelConfig:
+        tokenizer = FakeTokenizer()
+        processor = None
+
+    monkeypatch.setattr(entry_module, "omega_conf_to_dataclass", lambda _config: _ModelConfig())
+    config = OmegaConf.create(
+        {
+            "actor_rollout_ref": {
+                "model": {},
+                "rollout": {
+                    "prompt_length": 2048,
+                    "response_length": 2048,
+                    "multi_turn": {"format": None},
+                    "custom": {"agent_framework": {"gateway_count": 1}},
+                },
+            }
+        }
+    )
+    manager = entry_module.build_gateway_manager(
+        config=config,
+        llm_client=SequencedBackend(["Mango", "Blue", "Apple"]),
+    )
+
+    try:
+        session = await manager.create_session("session-manager-multiple-chains")
+        main_first = [
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "name a fruit"},
+        ]
+        subagent = [
+            {"role": "system", "content": "You are a focused subagent."},
+            {"role": "user", "content": "name a color"},
+        ]
+        main_continuation = [
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "name a fruit"},
+            {"role": "assistant", "content": "Mango"},
+            {"role": "user", "content": "name another fruit"},
+        ]
+
+        async with httpx.AsyncClient(timeout=5.0, trust_env=False) as client:
+            for messages in (main_first, subagent, main_continuation):
+                chat = await client.post(
+                    f"{session.base_url}/chat/completions",
+                    json={"model": "m", "messages": messages},
+                )
+                assert chat.status_code == 200
+
+            reward = await client.post(
+                session.reward_info_url,
+                json={"reward_info": {"label": "manager-multiple-chains"}},
+            )
+            assert reward.status_code == 200
+
+        trajectories = await manager.finalize_session("session-manager-multiple-chains")
+
+        assert len(trajectories) == 2
+        decoded = [FakeTokenizer().decode(trajectory.response_ids) for trajectory in trajectories]
+        assert decoded[0] == "Blue"
+        assert decoded[1].startswith("Mango")
+        assert decoded[1].endswith("Apple")
+        assert [trajectory.reward_info["label"] for trajectory in trajectories] == [
+            "manager-multiple-chains",
+            "manager-multiple-chains",
+        ]
+    finally:
+        await manager.shutdown()

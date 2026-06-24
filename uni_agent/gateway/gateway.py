@@ -51,7 +51,6 @@ class _GatewayActor:
         )
         self._prompt_length = config.prompt_length
         self._response_length = config.response_length
-        self._enable_multiple_chains = config.enable_multiple_chains
         self._sessions: dict[str, GatewaySession] = {}
         self._app = FastAPI()
         self._server_port: int | None = None
@@ -199,7 +198,6 @@ class _GatewayActor:
             codec=self._codec,
             prompt_length=self._prompt_length,
             response_length=self._response_length,
-            enable_multiple_chains=self._enable_multiple_chains,
         )
         return handle
 

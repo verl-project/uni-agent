@@ -97,11 +97,9 @@ class EncodedData:
             materialization.
         video_data: Video inputs carried into backend generation and trajectory
             materialization.
-        materialized_trajectory: Previous active trajectory to append when the
-            request changes context.
         length_exhausted_trajectory: Materialized trajectory for a length-budget
             early return, or ``None`` on the normal path.
-        chain_id: Selected active chain id in multiple-chain mode.
+        chain_id: Selected active chain id.
         is_new_chain: Whether commit should append a new chain.
         effective_chat_template_kwargs: Effective chat-template kwargs used for
             chain compatibility and encoding.
@@ -120,7 +118,6 @@ class EncodedData:
     tools: list[dict[str, Any]] | None
     image_data: list[Any] | None
     video_data: list[Any] | None
-    materialized_trajectory: Trajectory | None
     length_exhausted_trajectory: Trajectory | None
     chain_id: int | None = None
     is_new_chain: bool = False
@@ -167,20 +164,12 @@ class GatewaySession:
         *,
         prompt_length: int | None = None,
         response_length: int | None = None,
-        enable_multiple_chains: bool = False,
     ):
         """Create an active session bound to a handle and model codec."""
         self.handle = handle
         self._codec = codec
         self._prompt_length = prompt_length
         self._response_length = response_length
-        self.enable_multiple_chains = enable_multiple_chains
-        self.active_tool_schemas: list[dict[str, Any]] | None = None
-        self.message_history: list[dict[str, Any]] = []
-        self.image_data: list[Any] | None = None
-        self.video_data: list[Any] | None = None
-        self.active_trajectory: TrajectoryBuffer | None = None
-        self.trajectories: list[Trajectory] = []
         self.active_chains: list[ChainState] = []
         self.materialized_chains: list[MaterializedChain] = []
         self._next_chain_id = 1
@@ -190,7 +179,7 @@ class GatewaySession:
         self.created_at = time.time()
         self.updated_at = self.created_at
         self.request_lock = asyncio.Lock()
-        # Serializes in-flight generation against the single-active state model.
+        # M1 intentionally serializes same-session generation; M2 may narrow this lock.
         # This is an implementation detail, not GatewaySession's public contract.
         self.generation_lock = asyncio.Lock()
 
@@ -214,21 +203,10 @@ class GatewaySession:
                         status_code=409,
                         detail=f"Session {self.handle.session_id} is {self.phase.value.lower()}",
                     )
-                if self.enable_multiple_chains:
-                    encoded = await self._prepare_generation_inputs_multiple_chains(payload, request_context)
-                else:
-                    encoded = await self._prepare_generation_inputs(payload, request_context)
+                encoded = await self._prepare_generation_inputs(payload, request_context)
                 if encoded.length_exhausted_trajectory is not None:
                     empty_msg = {"role": "assistant", "content": ""}
-                    if self.enable_multiple_chains:
-                        self._close_length_exhausted_chain(encoded)
-                    else:
-                        self.trajectories.append(encoded.length_exhausted_trajectory)
-                        self.active_trajectory = None
-                        self.message_history = list(encoded.messages) + [empty_msg]
-                        self.image_data = list(encoded.image_data) if encoded.image_data is not None else None
-                        self.video_data = list(encoded.video_data) if encoded.video_data is not None else None
-                        self.active_tool_schemas = encoded.tools
+                    self._close_length_exhausted_chain(encoded)
                     self._touch()
                     return GenerationOutcome(
                         assistant_msg=empty_msg,
@@ -238,18 +216,12 @@ class GatewaySession:
                     )
 
             try:
-                backend_image_data = encoded.image_data
-                backend_video_data = encoded.video_data
-                if self.enable_multiple_chains:
-                    backend_image_data = self._copy_media_list(encoded.image_data)
-                    backend_video_data = self._copy_media_list(encoded.video_data)
-
                 output = await backend.generate(
                     request_id=self.handle.session_id,
                     prompt_ids=encoded.context_ids,
                     sampling_params=encoded.sampling_params,
-                    image_data=backend_image_data,
-                    video_data=backend_video_data,
+                    image_data=self._copy_media_list(encoded.image_data),
+                    video_data=self._copy_media_list(encoded.video_data),
                 )
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e)) from e
@@ -259,10 +231,7 @@ class GatewaySession:
             response_ids = list(output.token_ids)
             encoded.buffer.response_ids.extend(response_ids)
             encoded.buffer.response_mask.extend([1] * len(response_ids))
-            if self.enable_multiple_chains:
-                self._append_output_logprobs_multiple_chains(encoded, output.log_probs, response_ids)
-            elif output.log_probs is not None:
-                encoded.buffer.response_logprobs.extend(list(output.log_probs))
+            self._append_output_logprobs(encoded, output.log_probs, response_ids)
 
             assistant_msg, finish_reason = await self._codec.decode_response(
                 response_ids,
@@ -276,16 +245,7 @@ class GatewaySession:
                         status_code=409,
                         detail=f"Session {self.handle.session_id} is {self.phase.value.lower()}",
                     )
-                if self.enable_multiple_chains:
-                    self._commit_generation_to_chain(encoded, assistant_msg)
-                else:
-                    if encoded.materialized_trajectory is not None:
-                        self.trajectories.append(encoded.materialized_trajectory)
-                    self.active_trajectory = encoded.buffer
-                    self.message_history = list(encoded.messages) + [assistant_msg]
-                    self.image_data = list(encoded.image_data) if encoded.image_data is not None else None
-                    self.video_data = list(encoded.video_data) if encoded.video_data is not None else None
-                    self.active_tool_schemas = encoded.tools
+                self._commit_generation_to_chain(encoded, assistant_msg)
                 self._touch()
                 return GenerationOutcome(
                     assistant_msg=assistant_msg,
@@ -294,100 +254,7 @@ class GatewaySession:
                     completion_tokens=len(response_ids),
                 )
 
-    async def _prepare_generation_inputs(self, payload: dict[str, Any], request_context: dict[str, Any]) -> EncodedData:
-        messages = request_context["messages"]
-        tools = request_context["tools"]
-        request_chat_template_kwargs = request_context["chat_template_kwargs"]
-        materialized_trajectory = None
-        image_data = None
-        video_data = None
-
-        if self.active_trajectory is None:
-            image_data, video_data = await self._codec.extract_multi_modal_data(messages)
-            prompt_ids = self._codec.encode_full(
-                messages,
-                tools=tools,
-                image_data=image_data,
-                video_data=video_data,
-                request_chat_template_kwargs=request_chat_template_kwargs,
-            )
-            buffer = TrajectoryBuffer(prompt_ids=prompt_ids)
-        elif self._is_request_context_prefix(messages=messages, tools=tools):
-            buffer = self._copy_trajectory_buffer(self.active_trajectory)
-            image_data = list(self.image_data) if self.image_data is not None else None
-            video_data = list(self.video_data) if self.video_data is not None else None
-            incremental_messages = messages[len(self.message_history) :]
-            if incremental_messages:
-                new_image_data, new_video_data = await self._codec.extract_multi_modal_data(incremental_messages)
-                if new_image_data:
-                    if image_data is None:
-                        image_data = []
-                    image_data.extend(new_image_data)
-                if new_video_data:
-                    if video_data is None:
-                        video_data = []
-                    video_data.extend(new_video_data)
-                incremental_ids = self._codec.encode_incremental(
-                    incremental_messages,
-                    image_data=new_image_data,
-                    video_data=new_video_data,
-                    request_chat_template_kwargs=request_chat_template_kwargs,
-                )
-                if (
-                    self._response_length is not None
-                    and len(buffer.response_mask) + len(incremental_ids) >= self._response_length
-                ):
-                    context_ids = buffer.prompt_ids + buffer.response_ids
-                    return EncodedData(
-                        buffer=buffer,
-                        context_ids=context_ids,
-                        sampling_params={},
-                        messages=list(messages),
-                        tools=tools,
-                        image_data=image_data,
-                        video_data=video_data,
-                        materialized_trajectory=None,
-                        length_exhausted_trajectory=self._build_materialized_trajectory(
-                            active=buffer,
-                            extra_fields={"finish_reason": "length"},
-                        ),
-                    )
-                buffer.response_ids.extend(incremental_ids)
-                buffer.response_mask.extend([0] * len(incremental_ids))
-                if buffer.response_logprobs:
-                    buffer.response_logprobs.extend([0.0] * len(incremental_ids))
-        else:
-            materialized_trajectory = self._build_materialized_trajectory(active=self.active_trajectory)
-            image_data, video_data = await self._codec.extract_multi_modal_data(messages)
-            prompt_ids = self._codec.encode_full(
-                messages,
-                tools=tools,
-                image_data=image_data,
-                video_data=video_data,
-                request_chat_template_kwargs=request_chat_template_kwargs,
-            )
-            buffer = TrajectoryBuffer(prompt_ids=prompt_ids)
-
-        context_ids = buffer.prompt_ids + buffer.response_ids
-        sampling_params = self._codec.build_sampling_params(payload)
-        remaining_response_budget = (
-            max(0, self._response_length - len(buffer.response_mask)) if self._response_length is not None else None
-        )
-        if remaining_response_budget is not None and "max_tokens" in sampling_params:
-            sampling_params["max_tokens"] = min(sampling_params["max_tokens"], remaining_response_budget)
-        return EncodedData(
-            buffer=buffer,
-            context_ids=context_ids,
-            sampling_params=sampling_params,
-            messages=list(messages),
-            tools=tools,
-            image_data=image_data,
-            video_data=video_data,
-            materialized_trajectory=materialized_trajectory,
-            length_exhausted_trajectory=None,
-        )
-
-    async def _prepare_generation_inputs_multiple_chains(
+    async def _prepare_generation_inputs(
         self,
         payload: dict[str, Any],
         request_context: dict[str, Any],
@@ -445,8 +312,7 @@ class GatewaySession:
                         tools=tools,
                         image_data=image_data,
                         video_data=video_data,
-                        materialized_trajectory=None,
-                        length_exhausted_trajectory=self._build_materialized_chain_trajectory(
+                        length_exhausted_trajectory=self._build_materialized_trajectory(
                             chain=selected_chain,
                             extra_fields={"finish_reason": "length"},
                         ),
@@ -485,7 +351,6 @@ class GatewaySession:
             tools=tools,
             image_data=image_data,
             video_data=video_data,
-            materialized_trajectory=None,
             length_exhausted_trajectory=None,
             chain_id=chain_id,
             is_new_chain=is_new_chain,
@@ -511,19 +376,13 @@ class GatewaySession:
             if self.phase == SessionPhase.FINALIZED:
                 raise RuntimeError(f"Session {self.handle.session_id} is finalized")
             self._touch()
-            if self.enable_multiple_chains:
-                self._materialize_active_chains()
-            else:
-                self._materialize_active_trajectory()
+            self._materialize_active_chains()
             self.phase = SessionPhase.FINALIZED
             self._touch()
-            if self.enable_multiple_chains:
-                ordered_trajectories = [
-                    materialized.trajectory
-                    for materialized in sorted(self.materialized_chains, key=lambda chain: chain.order_seq)
-                ]
-            else:
-                ordered_trajectories = self.trajectories
+            ordered_trajectories = [
+                materialized.trajectory
+                for materialized in sorted(self.materialized_chains, key=lambda chain: chain.order_seq)
+            ]
             return [replace(trajectory, reward_info=dict(self.reward_info)) for trajectory in ordered_trajectories]
 
     async def abort(self) -> None:
@@ -534,55 +393,28 @@ class GatewaySession:
             if self.phase == SessionPhase.FINALIZED:
                 raise RuntimeError(f"Session {self.handle.session_id} is finalized")
             self.phase = SessionPhase.ABORTED
-            if self.enable_multiple_chains:
-                self.active_chains = []
+            self.active_chains = []
+            self.materialized_chains = []
             self._touch()
 
     def snapshot_state(self) -> dict[str, Any]:
         """Return a JSON-serializable snapshot for actor state inspection."""
-        if self.enable_multiple_chains:
-            return {
-                "session_id": self.handle.session_id,
-                "phase": self.phase.value,
-                "created_at": self.created_at,
-                "updated_at": self.updated_at,
-                "num_trajectories": len(self.materialized_chains),
-                "has_active_trajectory": bool(self.active_chains),
-                "num_active_chains": len(self.active_chains),
-                "active_chain_ids": [chain.chain_id for chain in self.active_chains],
-                "active_chain_tip_hashes": {
-                    chain.chain_id: (
-                        chain.message_prefix_hashes[-1] if chain.message_prefix_hashes else _EMPTY_PREFIX_HASH
-                    )
-                    for chain in self.active_chains
-                },
-            }
         return {
             "session_id": self.handle.session_id,
             "phase": self.phase.value,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
-            "num_trajectories": len(self.trajectories),
-            "has_active_trajectory": self.active_trajectory is not None,
-            "num_active_chains": 0,
-            "active_chain_ids": [],
-            "active_chain_tip_hashes": {},
+            "num_trajectories": len(self.materialized_chains),
+            "has_active_trajectory": bool(self.active_chains),
+            "num_active_chains": len(self.active_chains),
+            "active_chain_ids": [chain.chain_id for chain in self.active_chains],
+            "active_chain_tip_hashes": {
+                chain.chain_id: (
+                    chain.message_prefix_hashes[-1] if chain.message_prefix_hashes else _EMPTY_PREFIX_HASH
+                )
+                for chain in self.active_chains
+            },
         }
-
-    def _is_request_context_prefix(
-        self,
-        *,
-        messages: list[dict[str, Any]],
-        tools: list[dict[str, Any]] | None,
-    ) -> bool:
-        if self.active_tool_schemas != tools:
-            return False
-        history = self.message_history
-        if len(history) > len(messages):
-            return False
-        return [self._codec.canonicalize_message_for_prefix_comparison(m) for m in history] == [
-            self._codec.canonicalize_message_for_prefix_comparison(m) for m in messages[: len(history)]
-        ]
 
     def _select_chain(
         self,
@@ -696,9 +528,10 @@ class GatewaySession:
         )
 
     def _copy_media_list(self, media: list[Any] | None) -> list[Any] | None:
+        # Copy only the container; media payloads may not be deepcopyable.
         return list(media) if media is not None else None
 
-    def _append_output_logprobs_multiple_chains(
+    def _append_output_logprobs(
         self,
         encoded: EncodedData,
         output_log_probs: list[float] | None,
@@ -790,21 +623,12 @@ class GatewaySession:
         self._order_seq += 1
         return self._order_seq
 
-    def _materialize_active_trajectory(self) -> None:
-        active = self.active_trajectory
-        if active is None:
-            return
-
-        self._touch()
-        self.trajectories.append(self._build_materialized_trajectory(active=active))
-        self.active_trajectory = None
-
     def _materialize_active_chains(self) -> None:
         for chain in self.active_chains:
             self.materialized_chains.append(
                 MaterializedChain(
                     chain_id=chain.chain_id,
-                    trajectory=self._build_materialized_chain_trajectory(chain=chain),
+                    trajectory=self._build_materialized_trajectory(chain=chain),
                     created_seq=chain.created_seq,
                     updated_seq=chain.updated_seq,
                     order_seq=chain.updated_seq,
@@ -813,23 +637,6 @@ class GatewaySession:
         self.active_chains = []
 
     def _build_materialized_trajectory(
-        self,
-        *,
-        active: TrajectoryBuffer,
-        extra_fields: dict[str, Any] | None = None,
-    ) -> Trajectory:
-        return Trajectory(
-            prompt_ids=list(active.prompt_ids),
-            response_ids=list(active.response_ids),
-            response_mask=list(active.response_mask),
-            response_logprobs=list(active.response_logprobs) if active.response_logprobs else None,
-            reward_info={},
-            num_turns=self._count_chat_turns(self.message_history),
-            multi_modal_data=self._build_multi_modal_trajectory_data(self.image_data, self.video_data),
-            extra_fields=dict(extra_fields) if extra_fields else {},
-        )
-
-    def _build_materialized_chain_trajectory(
         self,
         *,
         chain: ChainState,

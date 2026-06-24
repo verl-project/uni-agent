@@ -157,8 +157,13 @@ class MessageCodec:
             if allowed_request_sampling_param_keys is None
             else frozenset(allowed_request_sampling_param_keys)
         )
+        # Derive the cached default-kwargs system prompt from the processor when one is
+        # present: encode_incremental() slices processor-produced ids by this length on the
+        # default path, and a tokenizer-derived prefix would mis-slice the continuation delta
+        # whenever the processor adds BOS / multimodal-aware prefix tokens the bare tokenizer
+        # never emits.
         self._system_prompt = initialize_system_prompt(
-            tokenizer,
+            self._processor if self._processor is not None else tokenizer,
             **self._apply_chat_template_kwargs,
         )
         self._tool_parser = ToolParser.get_tool_parser(tool_parser_name, tokenizer) if tool_parser_name else None
@@ -293,9 +298,17 @@ class MessageCodec:
                     **chat_template_kwargs,
                 )
             )
+        # Default path: self._system_prompt is already encoder-matched (processor-derived when
+        # a processor is present; see __init__), so it correctly measures the processor's
+        # default-kwargs prefix here too.
         system_prompt = self._system_prompt
         if chat_template_kwargs != self._apply_chat_template_kwargs:
-            system_prompt = initialize_system_prompt(self._tokenizer, **chat_template_kwargs)
+            # Measure the strip prefix with the same encoder that produced `ids`: a processor
+            # renders multimodal-aware token ids whose system-prompt prefix length can differ
+            # from the bare tokenizer's, so slicing by a tokenizer-derived length would
+            # misalign the continuation delta. Fall back to the tokenizer when no processor.
+            prefix_encoder = self._processor if self._processor is not None else self._tokenizer
+            system_prompt = initialize_system_prompt(prefix_encoder, **chat_template_kwargs)
         return ids[len(system_prompt) :]
 
     def effective_chat_template_kwargs(
