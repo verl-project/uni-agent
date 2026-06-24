@@ -79,6 +79,22 @@ trigger_parameter_sync_step=4
 require_batches=1
 partial_rollout=True
 
+# ============================================================================
+# Decoupled PPO (bypass_mode=False) + Rollout Correction (Rollout IS)
+# ============================================================================
+bypass_mode=${BYPASS_MODE:-False}                                # False => decoupled PPO (recompute old_log_prob as proximal anchor)
+rollout_is=${ROLLOUT_IS:-token}                                  # token | sequence | null  (IS aggregation level)
+rollout_is_threshold=${ROLLOUT_IS_THRESHOLD:-2.0}                # single float => TIS upper clamp; "lo_hi" string => IcePop
+rollout_is_batch_normalize=${ROLLOUT_IS_BATCH_NORMALIZE:-False}  # normalize IS weights to mean=1.0 within a batch
+rollout_rs=${ROLLOUT_RS:-seq_mean_k1}                            # seq_mean_k1 | seq_mean_k3 | token_k1 | null
+rollout_rs_threshold=${ROLLOUT_RS_THRESHOLD:-"0.999_1.001"}      # k1: "lo_hi" ratio band; k3: single upper bound
+
+# ============================================================================
+# 30B MoE Router Replay (R3)
+# ============================================================================
+router_replay_mode=${ROUTER_REPLAY_MODE:-R3}                          # disabled | R2 | R3
+enable_rollout_routing_replay=${ENABLE_ROLLOUT_ROUTING_REPLAY:-True}  # required for R3 (rollout-side replay)
+
 ray job submit --no-wait --runtime-env $RUNTIME_ENV \
     -- python3 -m verl.experimental.fully_async_policy.fully_async_main \
     --config-name='fully_async_ppo_megatron_trainer.yaml' \
@@ -140,10 +156,17 @@ ray job submit --no-wait --runtime-env $RUNTIME_ENV \
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform \
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity=full \
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_num_layers=1 \
-    actor_rollout_ref.actor.router_replay.mode="R3" \
-    actor_rollout_ref.rollout.enable_rollout_routing_replay=True \
+    algorithm.rollout_correction.bypass_mode=${bypass_mode} \
+    algorithm.rollout_correction.rollout_is=${rollout_is} \
+    algorithm.rollout_correction.rollout_is_threshold=${rollout_is_threshold} \
+    algorithm.rollout_correction.rollout_is_batch_normalize=${rollout_is_batch_normalize} \
+    algorithm.rollout_correction.rollout_rs=${rollout_rs} \
+    algorithm.rollout_correction.rollout_rs_threshold="${rollout_rs_threshold}" \
+    actor_rollout_ref.actor.router_replay.mode=${router_replay_mode} \
+    actor_rollout_ref.rollout.enable_rollout_routing_replay=${enable_rollout_routing_replay} \
     actor_rollout_ref.actor.entropy_coeff=0 \
     actor_rollout_ref.actor.loss_agg_mode=${loss_agg_mode} \
+    +actor_rollout_ref.actor.checkpoint.save_contents=['model','hf_model'] \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${infer_ppo_max_token_len} \
     actor_rollout_ref.rollout.multi_turn.enable=True \
     actor_rollout_ref.rollout.multi_turn.max_parallel_calls=1 \
@@ -153,6 +176,7 @@ ray job submit --no-wait --runtime-env $RUNTIME_ENV \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp} \
     actor_rollout_ref.rollout.enable_chunked_prefill=True \
     actor_rollout_ref.rollout.max_num_batched_tokens=$((max_prompt_length + max_response_length)) \
+    actor_rollout_ref.rollout.max_model_len=$((max_prompt_length + max_response_length)) \
     actor_rollout_ref.rollout.temperature=${temperature} \
     actor_rollout_ref.rollout.top_p=${top_p} \
     actor_rollout_ref.rollout.top_k=${top_k} \
@@ -165,6 +189,7 @@ ray job submit --no-wait --runtime-env $RUNTIME_ENV \
     actor_rollout_ref.rollout.mode=${rollout_mode} \
     actor_rollout_ref.rollout.calculate_log_probs=True \
     actor_rollout_ref.hybrid_engine=False \
+    actor_rollout_ref.nccl_timeout=9600 \
     actor_rollout_ref.rollout.enforce_eager=False \
     actor_rollout_ref.rollout.free_cache_engine=True \
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=${infer_ppo_max_token_len} \

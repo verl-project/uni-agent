@@ -153,9 +153,9 @@ def build_swe_rebench():
         }
         return sample
 
-    data_source = "dyyyyyyyy/swe-rebench-filtered"
+    data_source = "nebius/SWE-rebench"
     print(f"Loading the {data_source} dataset from huggingface...", flush=True)
-    dataset = load_dataset(data_source, split="train")
+    dataset = load_dataset(data_source, split="filtered")
     dataset = dataset.map(process_swe_rebench, remove_columns=dataset.column_names)
     dataset = dataset.filter(lambda ex: ex["extra_info"]["tools_kwargs"]["env"]["deployment"]["image"] is not None)
     return dataset
