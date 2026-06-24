@@ -1,4 +1,9 @@
-"""Thin FastAPI/Ray actor layer for gateway routing and JSON serialization."""
+"""Thin FastAPI/Ray actor layer for routing and session ownership.
+
+The actor owns routing, capability gates, and per-session ``GatewaySession``
+instances. Provider adapters own wire-to-internal translation and the response
+or SSE envelopes returned to clients.
+"""
 
 from __future__ import annotations
 
@@ -15,10 +20,15 @@ from uni_agent.gateway.adapters.anthropic import (
     anthropic_stream_response,
     anthropic_to_internal,
 )
-from uni_agent.gateway.adapters.openai import openai_build_response, openai_stream_response, openai_to_internal
+from uni_agent.gateway.adapters.openai import (
+    openai_build_response,
+    openai_error_body,
+    openai_stream_response,
+    openai_to_internal,
+)
+from uni_agent.gateway.adapters.protocol import AnthropicRequest, OpenAIChatCompletionRequest
 from uni_agent.gateway.config import GatewayActorConfig
 from uni_agent.gateway.session import (
-    ChatCompletionRequest,
     GatewaySession,
     MalformedRequestError,
     MessageCodec,
@@ -27,14 +37,16 @@ from uni_agent.gateway.session import (
 )
 from verl.workers.rollout.utils import run_uvicorn
 
+DEFAULT_ALLOWED_REQUEST_SAMPLING_KEYS = frozenset({"temperature", "top_p", "top_k", "max_tokens", "stop"})
+
 
 class _GatewayActor:
     """Ray actor implementation exposed as ``GatewayActor = ray.remote(...)``.
 
     Runtime and manager callers invoke public methods with
-    ``actor.method.remote(...)``. The actor owns FastAPI routing, OpenAI
-    capability gates, JSON response envelopes, and per-session
-    ``GatewaySession`` instances.
+    ``actor.method.remote(...)``. The actor owns FastAPI routing, provider
+    capability gates, response envelopes, and per-session ``GatewaySession``
+    instances.
     """
 
     def __init__(self, config: GatewayActorConfig, backend):
@@ -50,8 +62,12 @@ class _GatewayActor:
             vision_info_extractor_kwargs=config.vision_info_extractor_kwargs,
             tool_parser_name=config.tool_parser_name,
             apply_chat_template_kwargs=config.apply_chat_template_kwargs,
-            base_sampling_params=config.base_sampling_params,
-            allowed_request_sampling_param_keys=config.allowed_request_sampling_param_keys,
+        )
+        self._base_sampling_params = dict(config.base_sampling_params or {})
+        self._allowed_request_sampling_param_keys = (
+            DEFAULT_ALLOWED_REQUEST_SAMPLING_KEYS
+            if config.allowed_request_sampling_param_keys is None
+            else frozenset(config.allowed_request_sampling_param_keys)
         )
         self._prompt_length = config.prompt_length
         self._response_length = config.response_length
@@ -63,7 +79,7 @@ class _GatewayActor:
         self._register_routes()
 
     def _register_routes(self) -> None:
-        """Register HTTP handlers for chat completions and reward metadata."""
+        """Register provider HTTP handlers and reward metadata."""
 
         @self._app.exception_handler(HTTPException)
         async def _http_exception_handler(request: Request, exc: HTTPException):
@@ -78,26 +94,21 @@ class _GatewayActor:
                     status_code=exc.status_code,
                     content=anthropic_error_body(exc.status_code, message),
                 )
-            error_type = "invalid_request_error" if 400 <= exc.status_code < 500 else "internal_server_error"
             return JSONResponse(
                 status_code=exc.status_code,
-                content={
-                    "error": {
-                        "message": message,
-                        "type": error_type,
-                        "code": None,
-                        "param": None,
-                    }
-                },
+                content=openai_error_body(exc.status_code, message),
             )
 
         @self._app.post("/sessions/{session_id}/v1/chat/completions")
-        async def _chat_completions(session_id: str, request: Request):
-            payload = await request.json()
-            return await self._handle_chat_completions(session_id=session_id, payload=payload)
+        async def _openai_chat_completions(session_id: str, request: Request):
+            try:
+                payload = await request.json()
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
+            return await self._handle_openai_chat_completions(session_id=session_id, payload=payload)
 
         @self._app.post("/sessions/{session_id}/v1/messages")
-        async def _messages(session_id: str, request: Request):
+        async def _anthropic_messages(session_id: str, request: Request):
             try:
                 payload = await request.json()
             except ValueError as exc:
@@ -126,38 +137,21 @@ class _GatewayActor:
             raise KeyError(f"Unknown session_id: {session_id}")
         return session
 
-    async def _handle_chat_completions(
+    async def _handle_openai_chat_completions(
         self,
         session_id: str,
-        payload: ChatCompletionRequest,
+        payload: OpenAIChatCompletionRequest,
     ) -> JSONResponse | StreamingResponse:
-        """Validate a chat-completion payload and serialize the session outcome."""
+        """Validate an OpenAI Chat Completions payload and serialize the session outcome."""
         session = self._sessions.get(session_id)
         if session is None:
             raise HTTPException(status_code=404, detail=f"Unknown session_id: {session_id}")
 
-        n_value = payload.get("n", 1)
-        if n_value != 1:
-            raise HTTPException(status_code=400, detail=f"n={n_value} is not supported (only n=1)")
-        if payload.get("response_format") is not None:
-            raise HTTPException(status_code=400, detail="response_format is not supported")
-        tool_choice_payload = payload.get("tool_choice")
-        if isinstance(tool_choice_payload, dict):
-            raise HTTPException(
-                status_code=400,
-                detail='tool_choice with a specific function is not supported (only "auto" / "none" are supported)',
-            )
-        if isinstance(tool_choice_payload, str) and tool_choice_payload.lower() == "required":
-            raise HTTPException(
-                status_code=400,
-                detail='tool_choice="required" is not supported (only "auto" / "none" are supported)',
-            )
-
         try:
             internal = openai_to_internal(
                 payload,
-                base_sampling_params=self._codec.base_sampling_params,
-                allowed_sampling_keys=self._codec.allowed_request_sampling_param_keys,
+                base_sampling_params=self._base_sampling_params,
+                allowed_sampling_keys=self._allowed_request_sampling_param_keys,
             )
         except MalformedRequestError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -171,7 +165,7 @@ class _GatewayActor:
     async def _handle_anthropic_messages(
         self,
         session_id: str,
-        payload: dict[str, Any],
+        payload: AnthropicRequest,
     ) -> JSONResponse | StreamingResponse:
         """Validate an Anthropic Messages payload and serialize the session outcome."""
         session = self._sessions.get(session_id)
@@ -181,8 +175,8 @@ class _GatewayActor:
         try:
             internal = anthropic_to_internal(
                 payload,
-                base_sampling_params=self._codec.base_sampling_params,
-                allowed_sampling_keys=self._codec.allowed_request_sampling_param_keys,
+                base_sampling_params=self._base_sampling_params,
+                allowed_sampling_keys=self._allowed_request_sampling_param_keys,
             )
         except MalformedRequestError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -214,7 +208,7 @@ class _GatewayActor:
         self._server_base_url = None
 
     async def create_session(self, session_id: str, metadata: dict[str, Any] | None = None) -> SessionHandle:
-        """Create an actor-owned session and return its OpenAI-compatible handle."""
+        """Create an actor-owned session and return its provider-compatible handle."""
         self._require_started()
         if session_id in self._sessions:
             raise RuntimeError(f"Session {session_id} already exists")

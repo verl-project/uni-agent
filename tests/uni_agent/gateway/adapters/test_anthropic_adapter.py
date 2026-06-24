@@ -1,10 +1,10 @@
 import pytest
 
 from uni_agent.gateway.adapters.anthropic import anthropic_to_internal
-from uni_agent.gateway.adapters.openai import OPENAI_ALLOWED_SAMPLING_KEYS
 from uni_agent.gateway.session.codec import MalformedRequestError
 
-BASE = dict(base_sampling_params={}, allowed_sampling_keys=OPENAI_ALLOWED_SAMPLING_KEYS)
+ALLOWED_SAMPLING_KEYS = frozenset({"temperature", "top_p", "top_k", "max_tokens", "stop"})
+BASE = dict(base_sampling_params={}, allowed_sampling_keys=ALLOWED_SAMPLING_KEYS)
 
 
 def test_system_string_becomes_first_message():

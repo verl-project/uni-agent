@@ -1,7 +1,6 @@
 """OpenAI Chat Completions wire <-> InternalGenerationRequest.
 
-Actor calls this before session; MessageCodec never sees wire shape after later
-tasks.
+Actor calls this before session; MessageCodec never sees wire shape.
 """
 
 from __future__ import annotations
@@ -18,7 +17,17 @@ from uni_agent.gateway.session.codec import MalformedRequestError
 from uni_agent.gateway.session.request import InternalGenerationRequest
 from uni_agent.gateway.session.session import GenerationOutcome
 
-OPENAI_ALLOWED_SAMPLING_KEYS = frozenset({"temperature", "top_p", "top_k", "max_tokens", "stop"})
+
+def openai_error_body(status_code: int, message: str) -> dict[str, Any]:
+    error_type = "invalid_request_error" if 400 <= status_code < 500 else "internal_server_error"
+    return {
+        "error": {
+            "message": message,
+            "type": error_type,
+            "code": None,
+            "param": None,
+        }
+    }
 
 
 def openai_build_response(outcome: GenerationOutcome, *, model: str) -> dict[str, Any]:
@@ -144,6 +153,19 @@ def openai_to_internal(
     allowed_sampling_keys: frozenset[str],
 ) -> InternalGenerationRequest:
     """Lower an OpenAI chat-completions request into the internal request shape."""
+    n_value = payload.get("n", 1)
+    if n_value != 1:
+        raise MalformedRequestError(f"n={n_value} is not supported (only n=1)")
+    if payload.get("response_format") is not None:
+        raise MalformedRequestError("response_format is not supported")
+    tool_choice_payload = payload.get("tool_choice")
+    if isinstance(tool_choice_payload, dict):
+        raise MalformedRequestError(
+            'tool_choice with a specific function is not supported (only "auto" / "none" are supported)'
+        )
+    if isinstance(tool_choice_payload, str) and tool_choice_payload.lower() == "required":
+        raise MalformedRequestError('tool_choice="required" is not supported (only "auto" / "none" are supported)')
+
     messages = payload.get("messages")
     if not isinstance(messages, list) or not messages:
         raise MalformedRequestError("messages must be non-empty")
@@ -151,7 +173,6 @@ def openai_to_internal(
     if chat_template_kwargs is not None and not isinstance(chat_template_kwargs, dict):
         raise MalformedRequestError("chat_template_kwargs must be an object")
 
-    tool_choice_payload = payload.get("tool_choice")
     tool_choice = tool_choice_payload.lower() if isinstance(tool_choice_payload, str) else "auto"
     tools = _validate_tools(payload.get("tools"))
     if tool_choice == "none":

@@ -1,4 +1,8 @@
-"""Model-scoped codec for tokenizer, processor, tool-parser, and sampling boundaries."""
+"""Model-scoped codec for tokenizer, processor, tool-parser, and decode paths.
+
+This layer stays within the model boundary: it applies chat templates, handles
+processor-backed multimodal inputs, parses tools, and decodes backend outputs.
+"""
 
 from __future__ import annotations
 
@@ -16,17 +20,6 @@ class MalformedRequestError(ValueError):
     """Raised when request payload normalization finds unsupported input."""
 
     pass
-
-
-_DEFAULT_ALLOWED_REQUEST_SAMPLING_PARAM_KEYS = frozenset(
-    {
-        "temperature",
-        "top_p",
-        "top_k",
-        "max_tokens",
-        "stop",
-    }
-)
 
 
 # Map backend stop_reason values to OpenAI-spec finish_reason values.
@@ -54,7 +47,7 @@ def _canonicalize_tool_arguments_for_comparison(arguments: Any) -> tuple[str, An
 
 
 class MessageCodec:
-    """Model-scoped request codec used by gateway sessions and actors.
+    """Model-scoped request codec used by gateway sessions.
 
     ``_GatewayActor`` owns one codec per actor and injects it into
     ``GatewaySession`` instances. The codec renders chat templates, handles
@@ -71,33 +64,17 @@ class MessageCodec:
         vision_info_extractor_kwargs: dict[str, Any] | None = None,
         tool_parser_name: str | None = None,
         apply_chat_template_kwargs: dict[str, Any] | None = None,
-        base_sampling_params: dict[str, Any] | None = None,
-        allowed_request_sampling_param_keys: set[str] | frozenset[str] | None = None,
     ):
         self._tokenizer = tokenizer
         self._processor = processor
         self._vision_info_extractor = vision_info_extractor or self._default_vision_info_extractor
         self._vision_info_extractor_kwargs = dict(vision_info_extractor_kwargs or {})
         self._apply_chat_template_kwargs = apply_chat_template_kwargs or {}
-        self._base_sampling_params = dict(base_sampling_params or {})
-        self._allowed_request_sampling_param_keys = (
-            _DEFAULT_ALLOWED_REQUEST_SAMPLING_PARAM_KEYS
-            if allowed_request_sampling_param_keys is None
-            else frozenset(allowed_request_sampling_param_keys)
-        )
         self._system_prompt = initialize_system_prompt(
             tokenizer,
             **self._apply_chat_template_kwargs,
         )
         self._tool_parser = ToolParser.get_tool_parser(tool_parser_name, tokenizer) if tool_parser_name else None
-
-    @property
-    def base_sampling_params(self) -> dict[str, Any]:
-        return dict(self._base_sampling_params)
-
-    @property
-    def allowed_request_sampling_param_keys(self) -> frozenset[str]:
-        return self._allowed_request_sampling_param_keys
 
     async def _default_vision_info_extractor(
         self,

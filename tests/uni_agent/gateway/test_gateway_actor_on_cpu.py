@@ -6,6 +6,8 @@ import httpx
 import pytest
 import ray
 
+ALLOWED_SAMPLING_KEYS = frozenset({"temperature", "top_p", "top_k", "max_tokens", "stop"})
+
 from tests.uni_agent.support import (
     FailingBackend,
     FakeProcessor,
@@ -43,9 +45,13 @@ async def test_gateway_actor_max_tokens_clamped_to_remaining_response_budget():
             tokenizer=FakeTokenizer(),
             prompt_length=2048,
             response_length=100,
+            base_sampling_params={"top_p": 0.8},
+            allowed_request_sampling_param_keys={"max_tokens"},
         ),
         InspectingBackend(),
     )
+    assert not hasattr(actor._codec, "base_sampling_params")
+    assert not hasattr(actor._codec, "allowed_request_sampling_param_keys")
     await actor.start()
     try:
         await actor.create_session("s1")
@@ -57,9 +63,10 @@ async def test_gateway_actor_max_tokens_clamped_to_remaining_response_budget():
 
         payload = {"messages": [{"role": "user", "content": "hi"}], "max_tokens": 200}
         actor._sessions["s1"].message_history = list(payload["messages"])
-        await actor._handle_chat_completions("s1", payload)
+        await actor._handle_openai_chat_completions("s1", payload)
 
         assert actor._backend.calls[-1]["sampling_params"]["max_tokens"] == 40
+        assert actor._backend.calls[-1]["sampling_params"]["top_p"] == 0.8
     finally:
         await actor.shutdown()
 
@@ -108,7 +115,7 @@ async def test_gateway_actor_continuation_budget_exhausted_materializes_length_s
         }
         backend.calls.clear()
 
-        response = await actor._handle_chat_completions("s1", payload)
+        response = await actor._handle_openai_chat_completions("s1", payload)
 
         body = json.loads(response.body)
         assert body["choices"][0]["finish_reason"] == "length"
@@ -141,7 +148,7 @@ async def test_backend_value_error_raises_400():
         await actor.create_session("s1")
         backend.next_error = ValueError("Prompt length (123456) exceeds the model's maximum context length (8192).")
         with pytest.raises(HTTPException) as exc_info:
-            await actor._handle_chat_completions("s1", {"messages": [{"role": "user", "content": "hi"}]})
+            await actor._handle_openai_chat_completions("s1", {"messages": [{"role": "user", "content": "hi"}]})
 
         assert exc_info.value.status_code == 400
         assert "exceeds the model's maximum context length" in str(exc_info.value.detail)
@@ -162,7 +169,7 @@ async def test_unknown_session_raises_404():
     await actor.start()
     try:
         with pytest.raises(HTTPException) as exc_info:
-            await actor._handle_chat_completions("does-not-exist", {"messages": [{"role": "user", "content": "hi"}]})
+            await actor._handle_openai_chat_completions("does-not-exist", {"messages": [{"role": "user", "content": "hi"}]})
 
         assert exc_info.value.status_code == 404
     finally:
@@ -183,7 +190,7 @@ async def test_unknown_session_raises_404():
 def test_message_normalization_tool_call_arguments(raw_arguments, expected_arguments):
     """``openai_to_internal`` parses valid JSON tool-call arguments
     into a dict and leaves invalid JSON as the original string."""
-    from uni_agent.gateway.adapters.openai import OPENAI_ALLOWED_SAMPLING_KEYS, openai_to_internal
+    from uni_agent.gateway.adapters.openai import openai_to_internal
 
     result = openai_to_internal(
         {
@@ -201,7 +208,7 @@ def test_message_normalization_tool_call_arguments(raw_arguments, expected_argum
             ]
         },
         base_sampling_params={},
-        allowed_sampling_keys=OPENAI_ALLOWED_SAMPLING_KEYS,
+        allowed_sampling_keys=ALLOWED_SAMPLING_KEYS,
     )["messages"][0]
 
     assert result["tool_calls"][0]["function"]["arguments"] == expected_arguments
@@ -270,7 +277,7 @@ async def test_request_chat_template_kwargs_forwarded(monkeypatch):
     await actor.start()
     try:
         await actor.create_session("s1")
-        await actor._handle_chat_completions(
+        await actor._handle_openai_chat_completions(
             "s1",
             {
                 "messages": [{"role": "user", "content": "hi"}],
@@ -312,7 +319,7 @@ async def test_unsupported_capabilities_rejected_with_400(payload_extra, expecte
     try:
         await actor.create_session("s1")
         with pytest.raises(HTTPException) as exc_info:
-            await actor._handle_chat_completions(
+            await actor._handle_openai_chat_completions(
                 "s1", {"messages": [{"role": "user", "content": "hi"}], **payload_extra}
             )
 
@@ -333,7 +340,7 @@ async def test_openai_stream_true_returns_sse():
     await actor.start()
     try:
         await actor.create_session("s1")
-        resp = await actor._handle_chat_completions(
+        resp = await actor._handle_openai_chat_completions(
             "s1", {"messages": [{"role": "user", "content": "hi"}], "stream": True}
         )
         assert isinstance(resp, StreamingResponse)
@@ -346,7 +353,7 @@ async def test_openai_stream_true_returns_sse():
 
 
 @pytest.mark.asyncio
-async def test_chat_completion_response_includes_created_and_model_fields():
+async def test_openai_chat_completion_response_includes_created_and_model_fields():
     """Response body carries OpenAI-standard ``created`` and ``model`` fields."""
     from uni_agent.gateway.config import GatewayActorConfig
     from uni_agent.gateway.gateway import _GatewayActor
@@ -356,7 +363,7 @@ async def test_chat_completion_response_includes_created_and_model_fields():
     try:
         await actor.create_session("s-model")
         before = int(time.time())
-        response = await actor._handle_chat_completions(
+        response = await actor._handle_openai_chat_completions(
             "s-model",
             {"model": "dummy-model", "messages": [{"role": "user", "content": "hi"}]},
         )
@@ -372,7 +379,7 @@ async def test_chat_completion_response_includes_created_and_model_fields():
         assert body["usage"]["total_tokens"] == body["usage"]["prompt_tokens"] + body["usage"]["completion_tokens"]
 
         await actor.create_session("s-fallback")
-        fallback_response = await actor._handle_chat_completions(
+        fallback_response = await actor._handle_openai_chat_completions(
             "s-fallback",
             {"messages": [{"role": "user", "content": "hi"}]},
         )
@@ -411,7 +418,7 @@ async def test_tool_choice_none_skips_tool_injection_and_parser(monkeypatch):
     await actor.start()
     try:
         await actor.create_session("s1")
-        response = await actor._handle_chat_completions(
+        response = await actor._handle_openai_chat_completions(
             "s1",
             {
                 "messages": [{"role": "user", "content": "hi"}],
@@ -435,7 +442,7 @@ async def test_gateway_actor_forwards_image_data_on_initial_multimodal_request(r
     resulting ``Trajectory.multi_modal_data``."""
     from uni_agent.gateway.config import GatewayActorConfig
     from uni_agent.gateway.gateway import GatewayActor
-    from uni_agent.gateway.adapters.openai import OPENAI_ALLOWED_SAMPLING_KEYS, openai_to_internal
+    from uni_agent.gateway.adapters.openai import openai_to_internal
 
     processor = FakeProcessor()
     actor = GatewayActor.remote(
@@ -466,7 +473,7 @@ async def test_gateway_actor_forwards_image_data_on_initial_multimodal_request(r
     normalized = openai_to_internal(
         payload,
         base_sampling_params={},
-        allowed_sampling_keys=OPENAI_ALLOWED_SAMPLING_KEYS,
+        allowed_sampling_keys=ALLOWED_SAMPLING_KEYS,
     )
     raw_prompt = processor.apply_chat_template(
         normalized["messages"],
@@ -1212,31 +1219,6 @@ async def test_gateway_actor_tool_call_decode_returns_openai_format(ray_runtime)
 
 
 @pytest.mark.asyncio
-async def test_run_generation_consumes_internal_request(monkeypatch):
-    from uni_agent.gateway.config import GatewayActorConfig
-    from uni_agent.gateway.gateway import _GatewayActor
-
-    actor = _GatewayActor(GatewayActorConfig(tokenizer=FakeTokenizer()), InspectingBackend())
-    await actor.start()
-    try:
-        await actor.create_session("s-int")
-        session = actor._sessions["s-int"]
-        request = {
-            "messages": [{"role": "user", "content": "hi"}],
-            "tools": None,
-            "chat_template_kwargs": {},
-            "sampling_params": {"max_tokens": 8},
-        }
-        assert not hasattr(session._codec, "normalize_request")
-        assert not hasattr(session._codec, "build_sampling_params")
-        outcome = await session.run_generation(request, actor._backend)
-        assert outcome.assistant_msg["role"] == "assistant"
-        assert outcome.completion_tokens > 0
-    finally:
-        await actor.shutdown()
-
-
-@pytest.mark.asyncio
 async def test_anthropic_messages_end_to_end():
     from uni_agent.gateway.config import GatewayActorConfig
     from uni_agent.gateway.gateway import _GatewayActor
@@ -1291,7 +1273,7 @@ async def test_anthropic_and_openai_produce_identical_trajectory():
     await actor.start()
     try:
         await actor.create_session("s-oa")
-        await actor._handle_chat_completions(
+        await actor._handle_openai_chat_completions(
             "s-oa", {"messages": [{"role": "system", "content": "Be brief."},
                                   {"role": "user", "content": "hi"}], "max_tokens": 16})
         oa = (await actor.finalize_session("s-oa"))[0]
@@ -1401,6 +1383,30 @@ async def test_anthropic_malformed_json_uses_error_envelope():
         assert r.status_code == 400
         body = r.json()
         assert body["type"] == "error"
+        assert body["error"]["type"] == "invalid_request_error"
+        assert "message" in body["error"]
+    finally:
+        await actor.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_openai_malformed_json_uses_error_envelope():
+    from uni_agent.gateway.config import GatewayActorConfig
+    from uni_agent.gateway.gateway import _GatewayActor
+
+    actor = _GatewayActor(GatewayActorConfig(tokenizer=FakeTokenizer()), InspectingBackend())
+    await actor.start()
+    try:
+        await actor.create_session("s-json-openai")
+        transport = httpx.ASGITransport(app=actor._app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            r = await client.post(
+                "/sessions/s-json-openai/v1/chat/completions",
+                content="{bad",
+                headers={"content-type": "application/json"},
+            )
+        assert r.status_code == 400
+        body = r.json()
         assert body["error"]["type"] == "invalid_request_error"
         assert "message" in body["error"]
     finally:

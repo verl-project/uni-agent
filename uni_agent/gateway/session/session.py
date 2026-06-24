@@ -87,7 +87,7 @@ class GenerationOutcome:
     """Business result returned by ``GatewaySession.run_generation``.
 
     The session emits this instead of an HTTP response dict. ``_GatewayActor``
-    converts it into the OpenAI chat-completion JSON envelope.
+    passes it to the provider adapter for wire response serialization.
 
     Attributes:
         assistant_msg: Decoded assistant message, or an empty assistant message
@@ -108,8 +108,8 @@ class GatewaySession:
 
     ``_GatewayActor`` owns instances of this class, calls ``run_generation`` for
     chat requests, and delegates lifecycle operations here. The session owns the
-    conversation state and trajectory materialization, while the actor owns HTTP
-    routing and OpenAI response serialization.
+    conversation state and trajectory materialization, while the actor owns
+    HTTP routing and provider response serialization.
     """
 
     def __init__(
@@ -141,7 +141,7 @@ class GatewaySession:
         self.generation_lock = asyncio.Lock()
 
     async def run_generation(self, request: InternalGenerationRequest, backend) -> GenerationOutcome:
-        """Run one chat-completion request and return its business outcome.
+        """Run one provider-normalized generation request and return its business outcome.
 
         The backend is passed in for this call only; the session does not own the
         backend lifecycle. The actor/provider adapter has already lowered the
