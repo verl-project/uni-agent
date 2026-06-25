@@ -1,9 +1,12 @@
 import asyncio
+from pathlib import Path
+from types import SimpleNamespace
 
 from uni_agent.deployment.local import deployment as local_deployment
 from uni_agent.deployment.local.deployment import (
     LocalDeployment,
     _is_apptainer_runtime,
+    _is_running_in_container,
     _normalize_apptainer_image,
 )
 
@@ -49,6 +52,36 @@ def test_default_container_runtime_falls_back_to_apptainer_name(monkeypatch):
     monkeypatch.setattr(local_deployment.shutil, "which", lambda runtime: None)
 
     assert local_deployment._default_container_runtime() == "apptainer"
+
+
+def test_running_in_container_detects_docker_or_podman_markers(monkeypatch):
+    marker_paths = {
+        "/.dockerenv": True,
+        "/run/.containerenv": False,
+    }
+
+    original_exists = Path.exists
+
+    def fake_exists(path):
+        normalized_path = path.as_posix()
+        if normalized_path.endswith("/.dockerenv"):
+            return marker_paths["/.dockerenv"]
+        if normalized_path.endswith("/run/.containerenv"):
+            return marker_paths["/run/.containerenv"]
+        return original_exists(path)
+
+    monkeypatch.setattr(Path, "exists", fake_exists)
+
+    assert _is_running_in_container()
+
+    marker_paths["/.dockerenv"] = False
+    marker_paths["/run/.containerenv"] = True
+
+    assert _is_running_in_container()
+
+    marker_paths["/run/.containerenv"] = False
+
+    assert not _is_running_in_container()
 
 
 def test_apptainer_runtime_detection_accepts_paths_and_singularity_alias():
@@ -113,9 +146,8 @@ def test_docker_command_keeps_published_to_runtime_port_mapping():
         shell="/bin/bash",
         extra_run_args=["--cpus", "1"],
     )
-    deployment._get_current_container_network = lambda: None
 
-    command = deployment._build_run_command("sandbox-name", 4567, "server")
+    command = deployment._build_run_command("sandbox-name", 4567, "server", network=None)
 
     assert command == [
         "docker",
@@ -134,6 +166,339 @@ def test_docker_command_keeps_published_to_runtime_port_mapping():
         "-lc",
         "server",
     ]
+
+
+class _CapturingRuntime:
+    configs = []
+
+    @classmethod
+    def from_config(cls, config, run_id=None):
+        cls.configs.append((config, run_id))
+        return cls()
+
+
+def _capture_exec(commands):
+    def fake_exec(args, check=True):
+        commands.append(args)
+        return _completed_container()
+
+    return fake_exec
+
+
+def _completed_container(container_id="container-id"):
+    return SimpleNamespace(stdout=f"{container_id}\n")
+
+
+def test_oci_runtime_uses_published_port_when_connecting_from_host(monkeypatch):
+    deployment = LocalDeployment(
+        run_id="test",
+        type="local",
+        container_runtime="docker",
+        image="python:3.12",
+        runtime_port=8000,
+    )
+    deployment._runtime_exec = lambda args, check=True: _completed_container()
+    deployment._get_current_container_network = lambda: None
+    monkeypatch.setattr(local_deployment, "_is_running_in_container", lambda: False)
+    monkeypatch.setattr(local_deployment, "LocalRuntime", _CapturingRuntime)
+    _CapturingRuntime.configs = []
+
+    asyncio.run(deployment._start_oci_container(token="secret", container_name="sandbox-name", published_port=4567))
+
+    runtime_config, run_id = _CapturingRuntime.configs[-1]
+    assert run_id == "test"
+    assert runtime_config.host == "http://127.0.0.1"
+    assert runtime_config.port == 4567
+
+
+def test_oci_runtime_uses_published_port_with_explicit_host(monkeypatch):
+    deployment = LocalDeployment(
+        run_id="test",
+        type="local",
+        container_runtime="docker",
+        image="python:3.12",
+        host="http://docker-host.example",
+        runtime_port=8000,
+    )
+    deployment._runtime_exec = lambda args, check=True: _completed_container()
+    monkeypatch.setattr(local_deployment, "LocalRuntime", _CapturingRuntime)
+    _CapturingRuntime.configs = []
+
+    asyncio.run(deployment._start_oci_container(token="secret", container_name="sandbox-name", published_port=4567))
+
+    runtime_config, run_id = _CapturingRuntime.configs[-1]
+    assert run_id == "test"
+    assert runtime_config.host == "http://docker-host.example"
+    assert runtime_config.port == 4567
+
+
+def test_oci_runtime_uses_container_port_with_explicit_host_from_container(monkeypatch):
+    deployment = LocalDeployment(
+        run_id="test",
+        type="local",
+        container_runtime="docker",
+        image="python:3.12",
+        host="http://sandbox",
+        runtime_port=8000,
+        network="agent-net",
+    )
+    deployment._runtime_exec = lambda args, check=True: _completed_container()
+    monkeypatch.setattr(local_deployment, "_is_running_in_container", lambda: True)
+    monkeypatch.setattr(local_deployment, "LocalRuntime", _CapturingRuntime)
+    _CapturingRuntime.configs = []
+
+    asyncio.run(deployment._start_oci_container(token="secret", container_name="sandbox-name", published_port=4567))
+
+    runtime_config, run_id = _CapturingRuntime.configs[-1]
+    assert run_id == "test"
+    assert runtime_config.host == "http://sandbox"
+    assert runtime_config.port == 8000
+
+
+def test_oci_runtime_uses_published_port_with_host_gateway_from_container(monkeypatch):
+    for host in ("http://host.docker.internal", "http://host.containers.internal"):
+        deployment = LocalDeployment(
+            run_id="test",
+            type="local",
+            container_runtime="docker",
+            image="python:3.12",
+            host=host,
+            runtime_port=8000,
+            network="agent-net",
+        )
+        deployment._runtime_exec = lambda args, check=True: _completed_container()
+        monkeypatch.setattr(local_deployment, "_is_running_in_container", lambda: True)
+        monkeypatch.setattr(local_deployment, "LocalRuntime", _CapturingRuntime)
+        _CapturingRuntime.configs = []
+
+        asyncio.run(deployment._start_oci_container(token="secret", container_name="sandbox-name", published_port=4567))
+
+        runtime_config, run_id = _CapturingRuntime.configs[-1]
+        assert run_id == "test"
+        assert runtime_config.host == host
+        assert runtime_config.port == 4567
+
+
+def test_oci_runtime_uses_container_port_with_explicit_host_and_host_network(monkeypatch):
+    deployment = LocalDeployment(
+        run_id="test",
+        type="local",
+        container_runtime="docker",
+        image="python:3.12",
+        host="http://docker-host.example",
+        runtime_port=8000,
+        network="host",
+    )
+    deployment._runtime_exec = lambda args, check=True: _completed_container()
+    monkeypatch.setattr(local_deployment, "LocalRuntime", _CapturingRuntime)
+    _CapturingRuntime.configs = []
+
+    asyncio.run(deployment._start_oci_container(token="secret", container_name="sandbox-name", published_port=4567))
+
+    runtime_config, run_id = _CapturingRuntime.configs[-1]
+    assert run_id == "test"
+    assert runtime_config.host == "http://docker-host.example"
+    assert runtime_config.port == 8000
+
+
+def test_oci_runtime_uses_container_port_with_host_network(monkeypatch):
+    deployment = LocalDeployment(
+        run_id="test",
+        type="local",
+        container_runtime="docker",
+        image="python:3.12",
+        runtime_port=8000,
+        network="host",
+    )
+    deployment._runtime_exec = lambda args, check=True: _completed_container()
+    monkeypatch.setattr(local_deployment, "LocalRuntime", _CapturingRuntime)
+    _CapturingRuntime.configs = []
+
+    asyncio.run(deployment._start_oci_container(token="secret", container_name="sandbox-name", published_port=4567))
+
+    runtime_config, run_id = _CapturingRuntime.configs[-1]
+    assert run_id == "test"
+    assert runtime_config.host == "http://127.0.0.1"
+    assert runtime_config.port == 8000
+
+
+def test_oci_command_omits_port_publish_with_host_network():
+    deployment = LocalDeployment(
+        run_id="test",
+        type="local",
+        container_runtime="docker",
+        image="python:3.12",
+        runtime_port=8000,
+        shell="/bin/bash",
+    )
+
+    command = deployment._build_run_command("sandbox-name", 4567, "server", network="host")
+
+    assert command == [
+        "docker",
+        "run",
+        "--rm",
+        "-d",
+        "--name",
+        "sandbox-name",
+        "--entrypoint",
+        "/bin/bash",
+        "--network",
+        "host",
+        "python:3.12",
+        "-lc",
+        "server",
+    ]
+
+
+def test_oci_runtime_uses_container_port_when_connecting_over_container_network(monkeypatch):
+    commands = []
+    deployment = LocalDeployment(
+        run_id="test",
+        type="local",
+        container_runtime="docker",
+        image="python:3.12",
+        runtime_port=8000,
+        network="agent-net",
+    )
+    deployment._runtime_exec = _capture_exec(commands)
+    deployment._get_container_ip = lambda container_name: "172.18.0.9"
+    monkeypatch.setattr(local_deployment, "_is_running_in_container", lambda: True)
+    monkeypatch.setattr(local_deployment, "LocalRuntime", _CapturingRuntime)
+    _CapturingRuntime.configs = []
+
+    asyncio.run(deployment._start_oci_container(token="secret", container_name="sandbox-name", published_port=4567))
+
+    runtime_config, run_id = _CapturingRuntime.configs[-1]
+    assert run_id == "test"
+    assert runtime_config.host == "http://172.18.0.9"
+    assert runtime_config.port == 8000
+    assert commands[0] == [
+        "docker",
+        "run",
+        "--rm",
+        "-d",
+        "--name",
+        "sandbox-name",
+        "--entrypoint",
+        "/bin/bash",
+        "--network",
+        "agent-net",
+        "-p",
+        "4567:8000",
+        "python:3.12",
+        "-lc",
+        "python3 -m pip install -q swe-rex && python3 -m swerex.server --host 0.0.0.0 --port 8000 --auth-token secret",
+    ]
+
+
+def test_oci_runtime_uses_published_port_with_custom_network_from_host(monkeypatch):
+    deployment = LocalDeployment(
+        run_id="test",
+        type="local",
+        container_runtime="docker",
+        image="python:3.12",
+        runtime_port=8000,
+        network="agent-net",
+    )
+    deployment._runtime_exec = lambda args, check=True: _completed_container()
+    deployment._get_container_ip = lambda container_name: "172.18.0.9"
+    monkeypatch.setattr(local_deployment, "_is_running_in_container", lambda: False)
+    monkeypatch.setattr(local_deployment, "LocalRuntime", _CapturingRuntime)
+    _CapturingRuntime.configs = []
+
+    asyncio.run(deployment._start_oci_container(token="secret", container_name="sandbox-name", published_port=4567))
+
+    runtime_config, run_id = _CapturingRuntime.configs[-1]
+    assert run_id == "test"
+    assert runtime_config.host == "http://127.0.0.1"
+    assert runtime_config.port == 4567
+
+
+def test_oci_runtime_uses_container_port_when_inheriting_current_container_network(monkeypatch):
+    commands = []
+    deployment = LocalDeployment(
+        run_id="test",
+        type="local",
+        container_runtime="docker",
+        image="python:3.12",
+        runtime_port=8000,
+    )
+    deployment._runtime_exec = _capture_exec(commands)
+    deployment._get_current_container_network = lambda: "agent-net"
+    deployment._get_container_ip = lambda container_name: "172.18.0.9"
+    monkeypatch.setattr(local_deployment, "_is_running_in_container", lambda: True)
+    monkeypatch.setattr(local_deployment, "LocalRuntime", _CapturingRuntime)
+    _CapturingRuntime.configs = []
+
+    asyncio.run(deployment._start_oci_container(token="secret", container_name="sandbox-name", published_port=4567))
+
+    runtime_config, run_id = _CapturingRuntime.configs[-1]
+    assert run_id == "test"
+    assert runtime_config.host == "http://172.18.0.9"
+    assert runtime_config.port == 8000
+    assert commands[0] == [
+        "docker",
+        "run",
+        "--rm",
+        "-d",
+        "--name",
+        "sandbox-name",
+        "--entrypoint",
+        "/bin/bash",
+        "--network",
+        "agent-net",
+        "-p",
+        "4567:8000",
+        "python:3.12",
+        "-lc",
+        "python3 -m pip install -q swe-rex && python3 -m swerex.server --host 0.0.0.0 --port 8000 --auth-token secret",
+    ]
+
+
+def test_oci_runtime_uses_container_port_when_inheriting_host_network(monkeypatch):
+    deployment = LocalDeployment(
+        run_id="test",
+        type="local",
+        container_runtime="docker",
+        image="python:3.12",
+        runtime_port=8000,
+    )
+    deployment._runtime_exec = lambda args, check=True: _completed_container()
+    deployment._get_current_container_network = lambda: "host"
+    monkeypatch.setattr(local_deployment, "_is_running_in_container", lambda: True)
+    monkeypatch.setattr(local_deployment, "LocalRuntime", _CapturingRuntime)
+    _CapturingRuntime.configs = []
+
+    asyncio.run(deployment._start_oci_container(token="secret", container_name="sandbox-name", published_port=4567))
+
+    runtime_config, run_id = _CapturingRuntime.configs[-1]
+    assert run_id == "test"
+    assert runtime_config.host == "http://127.0.0.1"
+    assert runtime_config.port == 8000
+
+
+def test_oci_runtime_falls_back_to_published_port_when_container_ip_is_unavailable(monkeypatch):
+    deployment = LocalDeployment(
+        run_id="test",
+        type="local",
+        container_runtime="docker",
+        image="python:3.12",
+        runtime_port=8000,
+        network="agent-net",
+    )
+    deployment._runtime_exec = lambda args, check=True: _completed_container()
+    deployment._get_container_ip = lambda container_name: None
+    monkeypatch.setattr(local_deployment, "_is_running_in_container", lambda: True)
+    monkeypatch.setattr(local_deployment, "LocalRuntime", _CapturingRuntime)
+    _CapturingRuntime.configs = []
+
+    asyncio.run(deployment._start_oci_container(token="secret", container_name="sandbox-name", published_port=4567))
+
+    runtime_config, run_id = _CapturingRuntime.configs[-1]
+    assert run_id == "test"
+    assert runtime_config.host == "http://127.0.0.1"
+    assert runtime_config.port == 4567
 
 
 class _FakeRuntime:
