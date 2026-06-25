@@ -1289,7 +1289,7 @@ async def test_multiple_chains_parallel_decode_failure_clears_inflight_without_c
 
     monkeypatch.setattr(session._codec, "decode_response", decode_response_raises)
 
-    with pytest.raises(RuntimeError, match="decode boom"):
+    with pytest.raises(HTTPException) as exc_info:
         await _run(
             session,
             SequencedBackend(["SECOND"]),
@@ -1299,6 +1299,8 @@ async def test_multiple_chains_parallel_decode_failure_clears_inflight_without_c
                 {"role": "user", "content": "follow up"},
             ],
         )
+    assert exc_info.value.status_code == 500
+    assert "decode boom" in str(exc_info.value.detail)
 
     after_failure = session.snapshot_state()
     assert after_failure["num_inflight_generations"] == 0

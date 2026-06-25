@@ -123,7 +123,6 @@ class EncodedData:
         selected_history_len: Selected active chain history length at prepare time.
         selected_updated_seq: Selected active chain updated sequence at prepare time.
         selected_created_seq: Selected active chain created sequence at prepare time.
-        prepared_order_seq: Observation-only session order at prepare time.
         is_new_chain: Whether commit should append a new chain.
         effective_chat_template_kwargs: Effective chat-template kwargs used for
             chain compatibility and encoding.
@@ -147,7 +146,6 @@ class EncodedData:
     selected_history_len: int | None = None
     selected_updated_seq: int | None = None
     selected_created_seq: int | None = None
-    prepared_order_seq: int | None = None
     is_new_chain: bool = False
     effective_chat_template_kwargs: dict[str, Any] = field(default_factory=dict)
     incoming_message_prefix_hashes: list[str] = field(default_factory=list)
@@ -204,6 +202,8 @@ class GatewaySession:
 
         self.handle = handle
         self._codec = codec
+        # Stored for parity with the actor config; only the response budget is
+        # enforced during generation today (see _prepare_generation_inputs).
         self._prompt_length = prompt_length
         self._response_length = response_length
         self._enable_parallel_session_generation = enable_parallel_session_generation
@@ -300,13 +300,17 @@ class GatewaySession:
                         status_code=409,
                         detail=f"Session {self.handle.session_id} is {self.phase.value.lower()}",
                     )
-                # Decode is serialized under request_lock to avoid concurrent access
-                # to tokenizer/tool-parser internals shared by the actor codec.
-                assistant_msg, finish_reason = await self._codec.decode_response(
-                    response_ids,
-                    tools=encoded.tools,
-                    stop_reason=output.stop_reason,
-                )
+                # Decode runs under request_lock so this session's prepare/commit and
+                # decode stay serialized. It does not serialize decode across sessions,
+                # which share the actor codec.
+                try:
+                    assistant_msg, finish_reason = await self._codec.decode_response(
+                        response_ids,
+                        tools=encoded.tools,
+                        stop_reason=output.stop_reason,
+                    )
+                except Exception as e:
+                    raise HTTPException(status_code=500, detail=f"{e.__class__.__name__}: {e}") from e
                 self._commit_generation_to_chain(encoded, assistant_msg)
                 self._touch()
                 return GenerationOutcome(
@@ -396,7 +400,6 @@ class GatewaySession:
                         selected_history_len=selected_history_len,
                         selected_updated_seq=selected_updated_seq,
                         selected_created_seq=selected_created_seq,
-                        prepared_order_seq=self._order_seq,
                         is_new_chain=False,
                         effective_chat_template_kwargs=effective_chat_template_kwargs,
                         incoming_message_prefix_hashes=list(incoming_message_prefix_hashes),
@@ -436,7 +439,6 @@ class GatewaySession:
             selected_history_len=selected_history_len,
             selected_updated_seq=selected_updated_seq,
             selected_created_seq=selected_created_seq,
-            prepared_order_seq=self._order_seq,
             is_new_chain=is_new_chain,
             effective_chat_template_kwargs=effective_chat_template_kwargs,
             incoming_message_prefix_hashes=list(incoming_message_prefix_hashes),
@@ -557,19 +559,7 @@ class GatewaySession:
         return chain.message_prefix_hashes[-1] == incoming_message_prefix_hashes[history_len - 1]
 
     def _compute_message_prefix_hashes(self, messages: list[dict[str, Any]]) -> list[str]:
-        prefix_hashes: list[str] = []
-        previous_prefix_hash = _EMPTY_PREFIX_HASH
-        for message in messages:
-            message_hash = self._compute_message_hash(message)
-            prefix_hash = hashlib.sha256(
-                b"uni-agent-prefix-v1\0"
-                + previous_prefix_hash.encode("ascii")
-                + b"\0"
-                + message_hash.encode("ascii")
-            ).hexdigest()
-            prefix_hashes.append(prefix_hash)
-            previous_prefix_hash = prefix_hash
-        return prefix_hashes
+        return self._extend_message_prefix_hashes([], messages)
 
     def _extend_message_prefix_hashes(
         self,
