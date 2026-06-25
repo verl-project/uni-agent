@@ -89,10 +89,7 @@ def openai_stream_response(outcome: GenerationOutcome, *, model: str) -> Streami
         if isinstance(msg.get("content"), str) and msg["content"]:
             yield _chunk({"content": msg["content"]}, None).encode()
         if msg.get("tool_calls"):
-            tool_calls = [
-                {**tool_call, "index": idx}
-                for idx, tool_call in enumerate(msg["tool_calls"])
-            ]
+            tool_calls = [{**tool_call, "index": idx} for idx, tool_call in enumerate(msg["tool_calls"])]
             yield _chunk({"tool_calls": tool_calls}, None).encode()
         usage = {
             "prompt_tokens": outcome.prompt_tokens,

@@ -21,7 +21,6 @@ from uni_agent.gateway.gateway import _GatewayActor
 from uni_agent.gateway.session import SessionHandle, Trajectory
 from verl.workers.rollout.replica import TokenOutput
 
-
 DEFAULT_CLAUDE_PROMPT = "Reply with OK only."
 DEFAULT_CLAUDE_MODEL = "claude-sonnet-4-5"
 DEFAULT_ANTHROPIC_API_KEY = "dummy-local-key"
@@ -172,8 +171,7 @@ class OpenAICompletionsBackend:
                 status_code = getattr(response, "status_code", "unknown")
                 body = getattr(response, "text", "")
                 raise RuntimeError(
-                    f"OpenAI completions backend request {request_id} failed with "
-                    f"HTTP {status_code}: {body}"
+                    f"OpenAI completions backend request {request_id} failed with HTTP {status_code}: {body}"
                 )
             response.raise_for_status()
         body = response.json()

@@ -21,7 +21,9 @@ def test_gateway_public_exports_match_package_contracts():
         "openai_stream_response",
         "openai_to_internal",
     }
-    assert gateway.DEFAULT_ALLOWED_REQUEST_SAMPLING_KEYS == frozenset({"temperature", "top_p", "top_k", "max_tokens", "stop"})
+    assert gateway.DEFAULT_ALLOWED_REQUEST_SAMPLING_KEYS == frozenset(
+        {"temperature", "top_p", "top_k", "max_tokens", "stop"}
+    )
     assert {"messages", "stream", "stop_sequences"} <= set(AnthropicRequest.__annotations__)
     assert issubclass(MalformedRequestError, ValueError)
     assert "stop" in OpenAIChatCompletionRequest.__annotations__

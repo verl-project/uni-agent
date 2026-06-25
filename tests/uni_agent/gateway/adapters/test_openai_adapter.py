@@ -2,7 +2,6 @@ import json
 
 import pytest
 
-
 ALLOWED_SAMPLING_KEYS = frozenset({"temperature", "top_p", "top_k", "max_tokens", "stop"})
 
 
@@ -41,7 +40,7 @@ async def test_openai_stream_response_emits_compatible_sse_chunks():
                     {
                         "id": "call-1",
                         "type": "function",
-                        "function": {"name": "f", "arguments": "{\"a\":1}"},
+                        "function": {"name": "f", "arguments": '{"a":1}'},
                     }
                 ],
             },
@@ -57,11 +56,7 @@ async def test_openai_stream_response_emits_compatible_sse_chunks():
     assert resp.headers["x-accel-buffering"] == "no"
 
     text = (b"".join([chunk async for chunk in resp.body_iterator])).decode()
-    data_lines = [
-        line.removeprefix("data: ")
-        for line in text.splitlines()
-        if line.startswith("data: ")
-    ]
+    data_lines = [line.removeprefix("data: ") for line in text.splitlines() if line.startswith("data: ")]
     assert data_lines[-1] == "[DONE]"
     chunks = [json.loads(line) for line in data_lines[:-1]]
 

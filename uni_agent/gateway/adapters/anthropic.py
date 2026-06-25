@@ -513,9 +513,7 @@ def _normalize_tool_schema_for_qwen_parser(schema: dict[str, Any]) -> dict[str, 
         normalized.setdefault("type", _infer_json_type(normalized["const"]))
     if "anyOf" in normalized:
         any_of_consts = [
-            branch["const"]
-            for branch in normalized["anyOf"]
-            if isinstance(branch, dict) and "const" in branch
+            branch["const"] for branch in normalized["anyOf"] if isinstance(branch, dict) and "const" in branch
         ]
         if any_of_consts:
             normalized.setdefault("enum", any_of_consts)

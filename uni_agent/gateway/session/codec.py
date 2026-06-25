@@ -15,7 +15,6 @@ from verl.utils.chat_template import apply_chat_template as _apply_chat_template
 from verl.utils.chat_template import initialize_system_prompt
 from verl.utils.tokenizer import normalize_token_ids
 
-
 # Map backend stop_reason values into the gateway's internal finish_reason vocabulary.
 _FINISH_REASON_MAP = {
     "completed": "stop",

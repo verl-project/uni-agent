@@ -6,8 +6,6 @@ import httpx
 import pytest
 import ray
 
-ALLOWED_SAMPLING_KEYS = frozenset({"temperature", "top_p", "top_k", "max_tokens", "stop"})
-
 from tests.uni_agent.support import (
     FailingBackend,
     FakeProcessor,
@@ -21,6 +19,8 @@ from tests.uni_agent.support import (
     SingleUseVisionInfoExtractor,
     fake_vision_info_extractor,
 )
+
+ALLOWED_SAMPLING_KEYS = frozenset({"temperature", "top_p", "top_k", "max_tokens", "stop"})
 
 
 @pytest.fixture(scope="session")
@@ -167,7 +167,9 @@ async def test_unknown_session_raises_404():
     await actor.start()
     try:
         with pytest.raises(HTTPException) as exc_info:
-            await actor._handle_openai_chat_completions("does-not-exist", {"messages": [{"role": "user", "content": "hi"}]})
+            await actor._handle_openai_chat_completions(
+                "does-not-exist", {"messages": [{"role": "user", "content": "hi"}]}
+            )
 
         assert exc_info.value.status_code == 404
     finally:
@@ -238,9 +240,7 @@ def test_prefix_canonicalization_ignores_assistant_tool_call_ids():
             }
         ],
     }
-    assert codec.canonicalize_message_for_prefix_comparison(
-        a
-    ) == codec.canonicalize_message_for_prefix_comparison(b)
+    assert codec.canonicalize_message_for_prefix_comparison(a) == codec.canonicalize_message_for_prefix_comparison(b)
     tc = codec.canonicalize_message_for_prefix_comparison(a)["tool_calls"][0]
     assert "id" not in tc
 
@@ -450,9 +450,9 @@ async def test_gateway_actor_forwards_image_data_on_initial_multimodal_request(r
     """On the first turn of a multimodal session, ``image_data`` extracted
     from the request is forwarded to the backend and recorded in the
     resulting ``Trajectory.multi_modal_data``."""
+    from uni_agent.gateway.adapters.openai import openai_to_internal
     from uni_agent.gateway.config import GatewayActorConfig
     from uni_agent.gateway.gateway import GatewayActor
-    from uni_agent.gateway.adapters.openai import openai_to_internal
 
     processor = FakeProcessor()
     actor = GatewayActor.remote(
@@ -1244,8 +1244,7 @@ async def test_anthropic_messages_end_to_end():
         await actor.create_session("s-anth")
         resp = await actor._handle_anthropic_messages(
             "s-anth",
-            {"model": "claude-x", "max_tokens": 16,
-             "messages": [{"role": "user", "content": "hi"}]},
+            {"model": "claude-x", "max_tokens": 16, "messages": [{"role": "user", "content": "hi"}]},
         )
         body = json.loads(resp.body)
         assert body["type"] == "message"
@@ -1258,6 +1257,7 @@ async def test_anthropic_messages_end_to_end():
 @pytest.mark.asyncio
 async def test_anthropic_stream_true_returns_sse():
     from fastapi.responses import StreamingResponse
+
     from uni_agent.gateway.config import GatewayActorConfig
     from uni_agent.gateway.gateway import _GatewayActor
 
@@ -1289,14 +1289,18 @@ async def test_anthropic_and_openai_produce_identical_trajectory():
     try:
         await actor.create_session("s-oa")
         await actor._handle_openai_chat_completions(
-            "s-oa", {"messages": [{"role": "system", "content": "Be brief."},
-                                  {"role": "user", "content": "hi"}], "max_tokens": 16})
+            "s-oa",
+            {
+                "messages": [{"role": "system", "content": "Be brief."}, {"role": "user", "content": "hi"}],
+                "max_tokens": 16,
+            },
+        )
         oa = (await actor.finalize_session("s-oa"))[0]
 
         await actor.create_session("s-an")
         await actor._handle_anthropic_messages(
-            "s-an", {"system": "Be brief.", "max_tokens": 16,
-                     "messages": [{"role": "user", "content": "hi"}]})
+            "s-an", {"system": "Be brief.", "max_tokens": 16, "messages": [{"role": "user", "content": "hi"}]}
+        )
         an = (await actor.finalize_session("s-an"))[0]
 
         assert oa.prompt_ids == an.prompt_ids
@@ -1368,8 +1372,8 @@ async def test_anthropic_error_envelope_shape():
         async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
             r = await client.post(
                 "/sessions/s-err/v1/messages",
-                json={"max_tokens": 8, "messages": [{"role": "user", "content": "hi"}],
-                      "tool_choice": {"type": "any"}})
+                json={"max_tokens": 8, "messages": [{"role": "user", "content": "hi"}], "tool_choice": {"type": "any"}},
+            )
         assert r.status_code == 400
         body = r.json()
         assert body["type"] == "error"
