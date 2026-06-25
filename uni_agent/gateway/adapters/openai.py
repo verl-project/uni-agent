@@ -13,13 +13,32 @@ from uuid import uuid4
 
 from fastapi.responses import StreamingResponse
 
-from uni_agent.gateway.session.codec import MalformedRequestError
-from uni_agent.gateway.session.request import InternalGenerationRequest
 from uni_agent.gateway.session.session import GenerationOutcome
+from uni_agent.gateway.session.types import InternalGenerationRequest
+
+from .types import MalformedRequestError
+
+_SSE_HEADERS = {
+    "Cache-Control": "no-cache",
+    "Connection": "keep-alive",
+    "X-Accel-Buffering": "no",
+}
+
+_OPENAI_ERROR_TYPE_BY_STATUS = {
+    # Only status codes the gateway actually emits today (gateway.py /
+    # session.py: 400 malformed/JSON, 409 concurrent session generation,
+    # 500 internal). 401/403/404/422/429 are intentionally omitted: this
+    # gateway has no auth / rate-limit / routing paths that surface them.
+    400: "invalid_request_error",
+    409: "conflict_error",
+}
 
 
 def openai_error_body(status_code: int, message: str) -> dict[str, Any]:
-    error_type = "invalid_request_error" if 400 <= status_code < 500 else "internal_server_error"
+    error_type = _OPENAI_ERROR_TYPE_BY_STATUS.get(
+        status_code,
+        "invalid_request_error" if 400 <= status_code < 500 else "internal_server_error",
+    )
     return {
         "error": {
             "message": message,
@@ -50,7 +69,7 @@ def openai_stream_response(outcome: GenerationOutcome, *, model: str) -> Streami
     chunk_id = f"chatcmpl-{uuid4().hex}"
     created = int(time.time())
 
-    def _chunk(delta: dict[str, Any], finish: str | None) -> str:
+    def _chunk(delta: dict[str, Any], finish: str | None, usage: dict[str, int] | None = None) -> str:
         body = {
             "id": chunk_id,
             "object": "chat.completion.chunk",
@@ -58,19 +77,32 @@ def openai_stream_response(outcome: GenerationOutcome, *, model: str) -> Streami
             "model": model,
             "choices": [{"index": 0, "delta": delta, "finish_reason": finish}],
         }
+        if usage is not None:
+            body["usage"] = usage
         return f"data: {json.dumps(body, ensure_ascii=False)}\n\n"
 
     async def _gen() -> AsyncIterator[bytes]:
         msg = outcome.assistant_msg
         yield _chunk({"role": "assistant"}, None).encode()
+        if isinstance(msg.get("reasoning_content"), str) and msg["reasoning_content"]:
+            yield _chunk({"reasoning_content": msg["reasoning_content"]}, None).encode()
         if isinstance(msg.get("content"), str) and msg["content"]:
             yield _chunk({"content": msg["content"]}, None).encode()
         if msg.get("tool_calls"):
-            yield _chunk({"tool_calls": msg["tool_calls"]}, None).encode()
-        yield _chunk({}, outcome.finish_reason).encode()
+            tool_calls = [
+                {**tool_call, "index": idx}
+                for idx, tool_call in enumerate(msg["tool_calls"])
+            ]
+            yield _chunk({"tool_calls": tool_calls}, None).encode()
+        usage = {
+            "prompt_tokens": outcome.prompt_tokens,
+            "completion_tokens": outcome.completion_tokens,
+            "total_tokens": outcome.prompt_tokens + outcome.completion_tokens,
+        }
+        yield _chunk({}, outcome.finish_reason, usage).encode()
         yield b"data: [DONE]\n\n"
 
-    return StreamingResponse(_gen(), media_type="text/event-stream")
+    return StreamingResponse(_gen(), media_type="text/event-stream", headers=_SSE_HEADERS)
 
 
 def _normalize_message_content(content: Any) -> Any:
@@ -137,15 +169,6 @@ def _normalize_message(message: Any) -> dict[str, Any]:
     return normalized
 
 
-def _validate_tools(tools: Any) -> list[Any] | None:
-    """Validate tools structure. Does not modify content."""
-    if tools is None:
-        return None
-    if not isinstance(tools, list):
-        raise MalformedRequestError("tools must be a list")
-    return tools
-
-
 def openai_to_internal(
     payload: dict,
     *,
@@ -153,11 +176,14 @@ def openai_to_internal(
     allowed_sampling_keys: frozenset[str],
 ) -> InternalGenerationRequest:
     """Lower an OpenAI chat-completions request into the internal request shape."""
+    # Capability gates: these OpenAI request features have no gateway/session
+    # equivalent yet, so reject them before building the internal request.
     n_value = payload.get("n", 1)
     if n_value != 1:
         raise MalformedRequestError(f"n={n_value} is not supported (only n=1)")
     if payload.get("response_format") is not None:
         raise MalformedRequestError("response_format is not supported")
+
     tool_choice_payload = payload.get("tool_choice")
     if isinstance(tool_choice_payload, dict):
         raise MalformedRequestError(
@@ -166,18 +192,24 @@ def openai_to_internal(
     if isinstance(tool_choice_payload, str) and tool_choice_payload.lower() == "required":
         raise MalformedRequestError('tool_choice="required" is not supported (only "auto" / "none" are supported)')
 
+    # Required payload fields and template kwargs.
     messages = payload.get("messages")
     if not isinstance(messages, list) or not messages:
         raise MalformedRequestError("messages must be non-empty")
+
     chat_template_kwargs = payload.get("chat_template_kwargs")
     if chat_template_kwargs is not None and not isinstance(chat_template_kwargs, dict):
         raise MalformedRequestError("chat_template_kwargs must be an object")
 
+    # Tool injection policy.
     tool_choice = tool_choice_payload.lower() if isinstance(tool_choice_payload, str) else "auto"
-    tools = _validate_tools(payload.get("tools"))
+    tools = payload.get("tools")
+    if tools is not None and not isinstance(tools, list):
+        raise MalformedRequestError("tools must be a list")
     if tool_choice == "none":
         tools = None
 
+    # Sampling params are gateway-owned allowlist merges, not message canonicalization.
     sampling_params = dict(base_sampling_params)
     for key in allowed_sampling_keys:
         if key in payload:

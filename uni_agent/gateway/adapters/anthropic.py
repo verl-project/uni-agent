@@ -12,14 +12,15 @@ from typing import Any
 
 from fastapi.responses import StreamingResponse
 
-from uni_agent.gateway.session.codec import MalformedRequestError
-from uni_agent.gateway.session.request import InternalGenerationRequest
 from uni_agent.gateway.session.session import GenerationOutcome
+from uni_agent.gateway.session.types import InternalGenerationRequest
+
+from .types import MalformedRequestError
 
 _BILLING_HEADER_RE = re.compile(r"^\s*x-anthropic-billing-header:[^\n]*\n?", re.IGNORECASE | re.MULTILINE)
 _SAME_NAME_SAMPLING_KEYS = ("max_tokens", "temperature", "top_p", "top_k")
-# content_filter/function_call are defensive: current backend only emits
-# stop/length/tool_calls.
+# content_filter/function_call are defensive: current internal finish_reason
+# values are stop/length/tool_calls.
 _STOP_REASON_MAP = {
     "stop": "end_turn",
     "length": "max_tokens",
@@ -30,17 +31,24 @@ _STOP_REASON_MAP = {
 
 logger = logging.getLogger("gateway")
 
+_SSE_HEADERS = {
+    "Cache-Control": "no-cache",
+    "Connection": "keep-alive",
+    "X-Accel-Buffering": "no",
+}
 
+
+# Only status codes the gateway actually emits today (gateway.py / session.py:
+# 400 malformed/JSON, 409 concurrent session generation, 500 internal). Other
+# Anthropic types (authentication_error / permission_error / not_found_error /
+# request_too_large / rate_limit_error / overloaded_error) are intentionally
+# omitted: this gateway is not an Anthropic proxy and has no auth / rate-limit
+# / capacity paths that would surface those codes. Anything not listed falls
+# back to "api_error" via .get() default.
 ANTHROPIC_ERROR_TYPE_BY_STATUS = {
     400: "invalid_request_error",
-    401: "authentication_error",
-    403: "permission_error",
-    404: "not_found_error",
     409: "invalid_request_error",
-    413: "request_too_large",
-    429: "rate_limit_error",
     500: "api_error",
-    529: "overloaded_error",
 }
 
 
@@ -73,6 +81,12 @@ def _tool_call_input(arguments: Any) -> dict[str, Any]:
 
 def _outcome_to_blocks(assistant_msg: dict[str, Any]) -> list[dict[str, Any]]:
     blocks: list[dict[str, Any]] = []
+    # Outbound thinking/reasoning is intentionally not synthesized here:
+    # `assistant_msg` from session/decode currently has no `reasoning_content`
+    # field, and adding outbound wrapping before there is a producer would be
+    # defensive code at a trusted boundary (AGENTS §4 rule 3). When session
+    # decode grows reasoning_content, mirror OpenAI streaming and emit Anthropic
+    # thinking blocks at that point.
     content = assistant_msg.get("content")
     if isinstance(content, str) and content:
         blocks.append({"type": "text", "text": content})
@@ -163,7 +177,7 @@ def anthropic_stream_response(outcome: GenerationOutcome, *, model: str) -> Stre
         )
         yield _event("message_stop", {"type": "message_stop"})
 
-    return StreamingResponse(_gen(), media_type="text/event-stream")
+    return StreamingResponse(_gen(), media_type="text/event-stream", headers=_SSE_HEADERS)
 
 
 def _strip_billing_header(text: str) -> str:
@@ -339,10 +353,18 @@ def _assistant_message_from_content(content: Any) -> dict[str, Any]:
                     "function": {"name": name, "arguments": arguments},
                 }
             )
-        elif block_type in {"thinking", "redacted_thinking"}:
-            # Full Anthropic thinking signature semantics have no faithful chat
-            # template representation here, so these blocks are skipped.
+        elif block_type == "thinking":
+            # Self-hosted SGLang never emits Anthropic thinking blocks, so seeing
+            # one in inbound history means the client mixed sources. Drop with a
+            # warning rather than crash; <think>...</think> tokens, if present,
+            # are already preserved as plain text on the same assistant message.
+            logger.warning("Dropping Anthropic thinking block from assistant history; multi-turn prefix may drift")
             continue
+        elif block_type == "redacted_thinking":
+            # Anthropic-encrypted reasoning signature with byte-level fidelity;
+            # no faithful representation in our chat-template path, and silently
+            # mapping it to plain text would corrupt training distribution.
+            raise MalformedRequestError("redacted_thinking blocks are not supported")
         else:
             raise MalformedRequestError(f"Unsupported assistant block type: {block_type}")
 
@@ -352,6 +374,31 @@ def _assistant_message_from_content(content: Any) -> dict[str, Any]:
     return message
 
 
+def _fold_reminder_into_user(message: dict[str, Any], text: str, *, prepend: bool = False) -> None:
+    """Fold a system-text reminder into an existing user message in place.
+
+    Used to anchor mid-conversation system blocks near their original user
+    message rather than hoisting them to index 0 (many chat templates reject
+    system messages beyond index 0). Content is always str | list because the
+    caller only invokes this on user messages produced by
+    `_user_messages_from_content`.
+    """
+    content = message.get("content", "")
+    if isinstance(content, list):
+        part = _text_part(text)
+        if prepend:
+            content.insert(0, part)
+        else:
+            content.append(part)
+        return
+    if not content:
+        message["content"] = text
+    elif prepend:
+        message["content"] = f"{text}\n{content}"
+    else:
+        message["content"] = f"{content}\n{text}"
+
+
 def _messages_to_internal(messages: Any) -> list[dict[str, Any]]:
     if not isinstance(messages, list) or not messages:
         raise MalformedRequestError("messages must be non-empty")
@@ -359,36 +406,35 @@ def _messages_to_internal(messages: Any) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     pending_reminder = ""
 
-    def fold_reminder_into_user(message: dict[str, Any], text: str, *, prepend: bool = False) -> None:
-        content = message.get("content", "")
-        if isinstance(content, str):
-            if not content:
-                message["content"] = text
-            elif prepend:
-                message["content"] = f"{text}\n{content}"
-            else:
-                message["content"] = f"{content}\n{text}"
-        elif isinstance(content, list):
-            part = _text_part(text)
-            if prepend:
-                content.insert(0, part)
-            else:
-                content.append(part)
-        else:
-            message["content"] = text
-
     for message in messages:
         if not isinstance(message, dict):
             raise MalformedRequestError("messages entries must be objects")
         role = message.get("role")
         content = message.get("content", "")
-        if role == "user":
+        if role == "system":
+            # Many chat templates reject system messages beyond index 0. Folding
+            # mid-list system text into an adjacent user message preserves position
+            # better than hoisting it to the top. Reminder is consumed by the
+            # next user message (or flushed at end of loop).
+            system_text = _system_to_text(content)
+            reminder = f"<system-reminder>\n{system_text}\n</system-reminder>" if system_text else ""
+            if not reminder:
+                continue
+            folded = False
+            for previous_message in reversed(result):
+                if previous_message.get("role") == "user":
+                    _fold_reminder_into_user(previous_message, reminder)
+                    folded = True
+                    break
+            if not folded:
+                pending_reminder = f"{pending_reminder}\n{reminder}" if pending_reminder else reminder
+        elif role == "user":
             user_messages = _user_messages_from_content(content)
             if pending_reminder:
                 folded = False
                 for user_message in user_messages:
                     if user_message.get("role") == "user":
-                        fold_reminder_into_user(user_message, pending_reminder, prepend=True)
+                        _fold_reminder_into_user(user_message, pending_reminder, prepend=True)
                         folded = True
                         break
                 if folded:
@@ -402,22 +448,6 @@ def _messages_to_internal(messages: Any) -> list[dict[str, Any]]:
             result.extend(user_messages)
         elif role == "assistant":
             result.append(_assistant_message_from_content(content))
-        elif role == "system":
-            # Many chat templates reject system messages beyond index 0. Folding
-            # mid-list system text as a Slime-style reminder preserves position
-            # better than hoisting it to the top.
-            system_text = _system_to_text(content)
-            reminder = f"<system-reminder>\n{system_text}\n</system-reminder>" if system_text else ""
-            if not reminder:
-                continue
-            folded = False
-            for previous_message in reversed(result):
-                if previous_message.get("role") == "user":
-                    fold_reminder_into_user(previous_message, reminder)
-                    folded = True
-                    break
-            if not folded:
-                pending_reminder = f"{pending_reminder}\n{reminder}" if pending_reminder else reminder
         else:
             raise MalformedRequestError(f"Unsupported message role: {role}")
     if pending_reminder:
@@ -425,43 +455,45 @@ def _messages_to_internal(messages: Any) -> list[dict[str, Any]]:
     return result
 
 
+def _infer_json_type(value: Any) -> str:
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, int) and not isinstance(value, bool):
+        return "integer"
+    if isinstance(value, float):
+        return "number"
+    if isinstance(value, dict):
+        return "object"
+    if isinstance(value, list):
+        return "array"
+    if value is None:
+        return "null"
+    return "string"
+
+
+def _infer_any_of_type(branches: Any) -> str | list[str] | None:
+    if not isinstance(branches, list):
+        return None
+    inferred: list[str] = []
+    for branch in branches:
+        if not isinstance(branch, dict):
+            continue
+        branch_type = branch.get("type")
+        if isinstance(branch_type, str):
+            inferred.append(branch_type)
+        elif isinstance(branch_type, list):
+            inferred.extend(t for t in branch_type if isinstance(t, str))
+        elif "const" in branch:
+            inferred.append(_infer_json_type(branch["const"]))
+    if not inferred:
+        return None
+    first = inferred[0]
+    if all(t == first for t in inferred):
+        return first
+    return list(dict.fromkeys(inferred))
+
+
 def _normalize_tool_schema_for_qwen_parser(schema: dict[str, Any]) -> dict[str, Any]:
-    def infer_type(value: Any) -> str:
-        if isinstance(value, bool):
-            return "boolean"
-        if isinstance(value, int) and not isinstance(value, bool):
-            return "integer"
-        if isinstance(value, float):
-            return "number"
-        if isinstance(value, dict):
-            return "object"
-        if isinstance(value, list):
-            return "array"
-        if value is None:
-            return "null"
-        return "string"
-
-    def infer_any_of_type(branches: Any) -> str | list[str] | None:
-        if not isinstance(branches, list):
-            return None
-        inferred: list[str] = []
-        for branch in branches:
-            if not isinstance(branch, dict):
-                continue
-            branch_type = branch.get("type")
-            if isinstance(branch_type, str):
-                inferred.append(branch_type)
-            elif isinstance(branch_type, list):
-                inferred.extend(t for t in branch_type if isinstance(t, str))
-            elif "const" in branch:
-                inferred.append(infer_type(branch["const"]))
-        if not inferred:
-            return None
-        first = inferred[0]
-        if all(t == first for t in inferred):
-            return first
-        return list(dict.fromkeys(inferred))
-
     normalized: dict[str, Any] = {}
     for key, value in schema.items():
         if key == "properties" and isinstance(value, dict):
@@ -478,7 +510,7 @@ def _normalize_tool_schema_for_qwen_parser(schema: dict[str, Any]) -> dict[str, 
 
     if "const" in normalized:
         normalized.setdefault("enum", [normalized["const"]])
-        normalized.setdefault("type", infer_type(normalized["const"]))
+        normalized.setdefault("type", _infer_json_type(normalized["const"]))
     if "anyOf" in normalized:
         any_of_consts = [
             branch["const"]
@@ -487,7 +519,7 @@ def _normalize_tool_schema_for_qwen_parser(schema: dict[str, Any]) -> dict[str, 
         ]
         if any_of_consts:
             normalized.setdefault("enum", any_of_consts)
-        any_of_type = infer_any_of_type(normalized["anyOf"])
+        any_of_type = _infer_any_of_type(normalized["anyOf"])
         if any_of_type is not None:
             normalized.setdefault("type", any_of_type)
     return normalized
@@ -521,7 +553,7 @@ def _convert_tools(tools: Any) -> list[dict[str, Any]] | None:
         if isinstance(description, str):
             function["description"] = description
         # cache_control is request/cache metadata; internal tools keep only the
-        # OpenAI function schema and pass input_schema through unchanged.
+        # OpenAI function schema with minimally normalized parameters.
         converted.append({"type": "function", "function": function})
     return converted
 
@@ -571,11 +603,15 @@ def anthropic_to_internal(
     if not isinstance(payload, dict):
         raise MalformedRequestError("payload must be an object")
 
+    # Message/system lowering handles Anthropic-specific compatibility downgrades
+    # before the session sees the OpenAI-like template-facing canonical.
     messages = _messages_to_internal(payload.get("messages"))
     system_text = _system_to_text(payload.get("system"))
     if system_text:
         messages.insert(0, {"role": "system", "content": system_text})
 
+    # Tool conversion and sampling stay adapter-owned; the session consumes only
+    # internal tools plus codec-keyed sampling params.
     tools = _apply_tool_choice(payload, _convert_tools(payload.get("tools")))
     return {
         "messages": messages,

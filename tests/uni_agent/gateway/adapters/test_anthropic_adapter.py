@@ -1,7 +1,7 @@
 import pytest
 
 from uni_agent.gateway.adapters.anthropic import anthropic_to_internal
-from uni_agent.gateway.session.codec import MalformedRequestError
+from uni_agent.gateway.adapters.types import MalformedRequestError
 
 ALLOWED_SAMPLING_KEYS = frozenset({"temperature", "top_p", "top_k", "max_tokens", "stop"})
 BASE = dict(base_sampling_params={}, allowed_sampling_keys=ALLOWED_SAMPLING_KEYS)
@@ -281,17 +281,32 @@ def test_tool_input_schema_anyof_preserves_heterogeneous_types():
     assert req["tools"][0]["function"]["parameters"]["properties"]["value"]["type"] == ["integer", "number"]
 
 
-def test_redacted_thinking_skipped():
-    req = anthropic_to_internal(
-        {"messages": [
-            {"role": "user", "content": "go"},
-            {"role": "assistant", "content": [
-                {"type": "redacted_thinking", "data": "xxx"},
-                {"type": "text", "text": "done"}]}],
-         "max_tokens": 8},
-        **BASE,
-    )
+def test_thinking_block_dropped_with_warning(caplog):
+    with caplog.at_level("WARNING", logger="gateway"):
+        req = anthropic_to_internal(
+            {"messages": [
+                {"role": "user", "content": "go"},
+                {"role": "assistant", "content": [
+                    {"type": "thinking", "thinking": "reasoning..."},
+                    {"type": "text", "text": "done"}]}],
+             "max_tokens": 8},
+            **BASE,
+        )
     assert req["messages"][-1]["content"] == "done"
+    assert any("thinking" in r.message for r in caplog.records)
+
+
+def test_redacted_thinking_rejected():
+    with pytest.raises(MalformedRequestError):
+        anthropic_to_internal(
+            {"messages": [
+                {"role": "user", "content": "go"},
+                {"role": "assistant", "content": [
+                    {"type": "redacted_thinking", "data": "xxx"},
+                    {"type": "text", "text": "done"}]}],
+             "max_tokens": 8},
+            **BASE,
+        )
 
 
 def test_anthropic_build_response_text():
@@ -383,6 +398,10 @@ async def test_anthropic_stream_event_sequence():
                           finish_reason="stop", prompt_tokens=3, completion_tokens=1),
         model="claude-x",
     )
+    assert resp.headers["cache-control"] == "no-cache"
+    assert resp.headers["connection"] == "keep-alive"
+    assert resp.headers["x-accel-buffering"] == "no"
+
     text = (b"".join([c async for c in resp.body_iterator])).decode()
     assert "event: message_start" in text
     assert "event: content_block_start" in text
@@ -390,4 +409,8 @@ async def test_anthropic_stream_event_sequence():
     assert "event: content_block_stop" in text
     assert "event: message_delta" in text
     assert '"stop_reason": "end_turn"' in text or '"stop_reason":"end_turn"' in text
+    assert (
+        '"usage": {"input_tokens": 3, "output_tokens": 1}' in text
+        or '"usage":{"input_tokens":3,"output_tokens":1}' in text
+    )
     assert "event: message_stop" in text

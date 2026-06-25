@@ -11,8 +11,7 @@ from typing import Any
 from fastapi import HTTPException
 
 from uni_agent.gateway.session.codec import MessageCodec
-from uni_agent.gateway.session.request import InternalGenerationRequest
-from uni_agent.gateway.session.types import SessionHandle, Trajectory
+from uni_agent.gateway.session.types import InternalGenerationRequest, SessionHandle, Trajectory
 
 
 class SessionPhase(str, Enum):

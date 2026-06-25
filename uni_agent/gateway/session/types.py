@@ -1,13 +1,27 @@
-"""Shared gateway-owned dataclasses passed across session boundaries."""
+"""Shared gateway-owned types passed across session boundaries."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypedDict
 
 if TYPE_CHECKING:
     import numpy as np
     import torch
+
+
+class InternalGenerationRequest(TypedDict):
+    """Lowered request consumed by GatewaySession.run_generation.
+
+    Provider adapters lower OpenAI / Anthropic wire requests into this
+    template-facing canonical before the session sees them. It is not a
+    provider-neutral block model.
+    """
+
+    messages: list[dict[str, Any]]
+    tools: list[dict[str, Any]] | None
+    chat_template_kwargs: dict[str, Any]
+    sampling_params: dict[str, Any]
 
 
 @dataclass

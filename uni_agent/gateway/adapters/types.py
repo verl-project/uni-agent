@@ -1,4 +1,4 @@
-"""Lightweight adapter-side wire protocol typing.
+"""Adapter-side wire protocol typing and request-lowering errors.
 
 These types document the provider wire fragments the adapters lower. They are
 intentionally partial: validation remains in each adapter and the internal
@@ -8,6 +8,12 @@ shape stays OpenAI-like for chat templates.
 from __future__ import annotations
 
 from typing import Any, Literal, NotRequired, TypedDict
+
+
+class MalformedRequestError(ValueError):
+    """Raised when adapter request lowering rejects a client payload."""
+
+    pass
 
 
 class OpenAIChatCompletionFunction(TypedDict, total=False):
@@ -81,8 +87,8 @@ class OpenAIChatCompletionUsage(TypedDict):
 class OpenAIChatCompletionChoice(TypedDict):
     """One entry in an OpenAI response ``choices`` array.
 
-    ``finish_reason`` is the OpenAI-spec value mapped from the backend's raw
-    stop reason by the OpenAI adapter.
+    ``finish_reason`` is the gateway's internal value; the OpenAI adapter passes
+    it through as the OpenAI-compatible response value.
     """
 
     index: int

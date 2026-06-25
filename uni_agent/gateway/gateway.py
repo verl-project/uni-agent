@@ -26,11 +26,10 @@ from uni_agent.gateway.adapters.openai import (
     openai_stream_response,
     openai_to_internal,
 )
-from uni_agent.gateway.adapters.protocol import AnthropicRequest, OpenAIChatCompletionRequest
+from uni_agent.gateway.adapters.types import AnthropicRequest, MalformedRequestError, OpenAIChatCompletionRequest
 from uni_agent.gateway.config import GatewayActorConfig
 from uni_agent.gateway.session import (
     GatewaySession,
-    MalformedRequestError,
     MessageCodec,
     SessionHandle,
     Trajectory,

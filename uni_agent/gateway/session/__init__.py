@@ -6,15 +6,13 @@ serves: trajectory buffering and message encoding/decoding.
 ``InternalGenerationRequest`` is the adapter-to-session request boundary.
 """
 
-from .codec import MalformedRequestError, MessageCodec
-from .request import InternalGenerationRequest
+from .codec import MessageCodec
 from .session import GatewaySession, TrajectoryBuffer
-from .types import SessionHandle, Trajectory
+from .types import InternalGenerationRequest, SessionHandle, Trajectory
 
 __all__ = [
     "InternalGenerationRequest",
     "GatewaySession",
-    "MalformedRequestError",
     "MessageCodec",
     "SessionHandle",
     "Trajectory",

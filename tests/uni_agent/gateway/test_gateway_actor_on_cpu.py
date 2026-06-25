@@ -50,8 +50,6 @@ async def test_gateway_actor_max_tokens_clamped_to_remaining_response_budget():
         ),
         InspectingBackend(),
     )
-    assert not hasattr(actor._codec, "base_sampling_params")
-    assert not hasattr(actor._codec, "allowed_request_sampling_param_keys")
     await actor.start()
     try:
         await actor.create_session("s1")
@@ -214,7 +212,7 @@ def test_message_normalization_tool_call_arguments(raw_arguments, expected_argum
     assert result["tool_calls"][0]["function"]["arguments"] == expected_arguments
 
 
-def test_prefix_canonicalization_ignores_tool_call_id():
+def test_prefix_canonicalization_ignores_assistant_tool_call_ids():
     from uni_agent.gateway.session.codec import MessageCodec
 
     codec = MessageCodec(FakeTokenizer())
@@ -232,7 +230,6 @@ def test_prefix_canonicalization_ignores_tool_call_id():
     b = {
         "role": "assistant",
         "content": "",
-        "tool_call_id": "call_top_BBB",
         "tool_calls": [
             {
                 "id": "call_BBB",
@@ -246,7 +243,20 @@ def test_prefix_canonicalization_ignores_tool_call_id():
     ) == codec.canonicalize_message_for_prefix_comparison(b)
     tc = codec.canonicalize_message_for_prefix_comparison(a)["tool_calls"][0]
     assert "id" not in tc
-    assert "tool_call_id" not in codec.canonicalize_message_for_prefix_comparison(b)
+
+
+def test_prefix_canonicalization_ignores_tool_message_tool_call_id():
+    from uni_agent.gateway.session.codec import MessageCodec
+
+    codec = MessageCodec(FakeTokenizer())
+    assert codec.canonicalize_message_for_prefix_comparison(
+        {"role": "tool", "tool_call_id": "call_AAA", "content": "found"}
+    ) == codec.canonicalize_message_for_prefix_comparison(
+        {"role": "tool", "tool_call_id": "call_BBB", "content": "found"}
+    )
+    assert codec.canonicalize_message_for_prefix_comparison(
+        {"role": "assistant", "tool_call_id": "call_AAA", "content": ""}
+    ) == {"role": "assistant", "tool_call_id": "call_AAA", "content": ""}
 
 
 @pytest.mark.asyncio
@@ -1072,7 +1082,11 @@ async def test_gateway_actor_rejects_malformed_requests_with_bad_request(ray_run
     ray.get(actor.shutdown.remote())
 
     assert response.status_code == 400
-    assert detail_fragment in response.text
+    body = response.json()
+    assert body["error"]["type"] == "invalid_request_error"
+    assert body["error"]["code"] is None
+    assert body["error"]["param"] is None
+    assert detail_fragment in body["error"]["message"]
 
 
 @pytest.mark.asyncio
@@ -1098,6 +1112,7 @@ async def test_gateway_actor_backend_failure_does_not_commit_partial_state(ray_r
     ray.get(actor.shutdown.remote())
 
     assert response.status_code == 500
+    assert response.json()["error"]["type"] == "internal_server_error"
     assert state["num_trajectories"] == 0
     assert state["has_active_trajectory"] is False
 

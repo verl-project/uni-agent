@@ -16,13 +16,7 @@ from verl.utils.chat_template import initialize_system_prompt
 from verl.utils.tokenizer import normalize_token_ids
 
 
-class MalformedRequestError(ValueError):
-    """Raised when request payload normalization finds unsupported input."""
-
-    pass
-
-
-# Map backend stop_reason values to OpenAI-spec finish_reason values.
+# Map backend stop_reason values into the gateway's internal finish_reason vocabulary.
 _FINISH_REASON_MAP = {
     "completed": "stop",
     "stop": "stop",
@@ -247,8 +241,10 @@ class MessageCodec:
     def canonicalize_message_for_prefix_comparison(self, message: dict[str, Any]) -> dict[str, Any]:
         """Canonicalize one message before session prefix comparison."""
         normalized = dict(message)
-        # Wire ids are provider noise; prefix comparison must ignore them.
-        normalized.pop("tool_call_id", None)
+        # Tool-result correlation ids are wire noise; prefix comparison ignores
+        # them while preserving unexpected top-level fields on other roles.
+        if normalized.get("role") == "tool":
+            normalized.pop("tool_call_id", None)
         tool_calls = normalized.get("tool_calls")
         if not isinstance(tool_calls, list):
             return normalized
