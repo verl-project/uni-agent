@@ -339,16 +339,17 @@ def test_unknown_system_block_rejected():
         )
 
 
-def test_server_tool_rejected():
-    with pytest.raises(MalformedRequestError):
-        anthropic_to_internal(
-            {
-                "messages": [{"role": "user", "content": "hi"}],
-                "max_tokens": 8,
-                "tools": [{"type": "web_search_20250305", "name": "web_search"}],
-            },
-            **BASE,
-        )
+def test_non_custom_tool_type_converts_to_function_schema():
+    req = anthropic_to_internal(
+        {
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_tokens": 8,
+            "tools": [{"type": "web_search_20250305", "name": "web_search"}],
+        },
+        **BASE,
+    )
+
+    assert req["tools"] == [{"type": "function", "function": {"name": "web_search", "parameters": {}}}]
 
 
 def test_tool_input_schema_minimally_normalized_for_qwen_parser():
@@ -358,6 +359,7 @@ def test_tool_input_schema_minimally_normalized_for_qwen_parser():
         "type": "object",
         "properties": {
             "target": {"anyOf": [{"const": "file"}, {"type": "string"}]},
+            "mode": {"anyOf": [{"const": "read"}, {"const": "write"}]},
             "nested": {"type": "object", "properties": {"x": {"type": "integer"}}},
         },
         "required": ["target"],
@@ -373,8 +375,10 @@ def test_tool_input_schema_minimally_normalized_for_qwen_parser():
     params = req["tools"][0]["function"]["parameters"]
     assert params is not schema
     assert params["properties"]["target"]["type"] == "string"
-    assert params["properties"]["target"]["enum"] == ["file"]
+    assert "enum" not in params["properties"]["target"]
     assert params["properties"]["target"]["anyOf"] == [{"const": "file"}, {"type": "string"}]
+    assert params["properties"]["mode"]["type"] == "string"
+    assert params["properties"]["mode"]["enum"] == ["read", "write"]
     assert params["properties"]["nested"]["properties"] == {"x": {"type": "integer"}}
     OpenAIFunctionToolSchema(**req["tools"][0])
 

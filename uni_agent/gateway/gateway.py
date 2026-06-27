@@ -8,6 +8,7 @@ or SSE envelopes returned to clients.
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import Any
 
 import ray
@@ -37,6 +38,8 @@ from uni_agent.gateway.session import (
 from verl.workers.rollout.utils import run_uvicorn
 
 DEFAULT_ALLOWED_REQUEST_SAMPLING_KEYS = frozenset({"temperature", "top_p", "top_k", "max_tokens", "stop"})
+
+logger = logging.getLogger("gateway")
 
 
 class _GatewayActor:
@@ -80,6 +83,11 @@ class _GatewayActor:
     def _register_routes(self) -> None:
         """Register provider HTTP handlers and reward metadata."""
 
+        def _error_body_for_path(path: str, status_code: int, message: str) -> dict[str, Any]:
+            if path.endswith("/v1/messages"):
+                return anthropic_error_body(status_code, message)
+            return openai_error_body(status_code, message)
+
         @self._app.exception_handler(HTTPException)
         async def _http_exception_handler(request: Request, exc: HTTPException):
             if isinstance(exc.detail, str):
@@ -88,14 +96,21 @@ class _GatewayActor:
                 message = str(exc.detail["message"])
             else:
                 message = str(exc.detail)
-            if request.url.path.endswith("/v1/messages"):
-                return JSONResponse(
-                    status_code=exc.status_code,
-                    content=anthropic_error_body(exc.status_code, message),
-                )
             return JSONResponse(
                 status_code=exc.status_code,
-                content=openai_error_body(exc.status_code, message),
+                content=_error_body_for_path(request.url.path, exc.status_code, message),
+            )
+
+        @self._app.exception_handler(Exception)
+        async def _unhandled_exception_handler(request: Request, exc: Exception):
+            # Any exception that escapes the route handlers (programmer bugs,
+            # ungraceful third-party failures, etc.) reaches here. We log the
+            # full traceback for diagnosis but return a provider-shaped error
+            # body so client SDKs can still parse it.
+            logger.exception("Unhandled exception in gateway route %s", request.url.path)
+            return JSONResponse(
+                status_code=500,
+                content=_error_body_for_path(request.url.path, 500, "Internal server error"),
             )
 
         @self._app.post("/sessions/{session_id}/v1/chat/completions")

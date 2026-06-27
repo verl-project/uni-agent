@@ -18,7 +18,6 @@ from uni_agent.gateway.session.types import InternalGenerationRequest
 from .types import MalformedRequestError
 
 _BILLING_HEADER_RE = re.compile(r"^\s*x-anthropic-billing-header:[^\n]*\n?", re.IGNORECASE | re.MULTILINE)
-_SAME_NAME_SAMPLING_KEYS = ("max_tokens", "temperature", "top_p", "top_k")
 # content_filter/function_call are defensive: current internal finish_reason
 # values are stop/length/tool_calls.
 _STOP_REASON_MAP = {
@@ -283,7 +282,7 @@ def _user_messages_from_content(content: Any) -> list[dict[str, Any]]:
         raise MalformedRequestError("user content must be a string or block list")
 
     messages: list[dict[str, Any]] = []
-    parts: list[dict[str, Any]] = [] # A single openai message can carry multiple text/image parts.
+    parts: list[dict[str, Any]] = []  # A single openai message can carry multiple text/image parts.
 
     def flush_user() -> None:
         # Collapse pure-text parts to a single string so downstream chat
@@ -533,11 +532,11 @@ def _normalize_tool_schema_for_qwen_parser(schema: dict[str, Any]) -> dict[str, 
         normalized.setdefault("enum", [normalized["const"]])
         normalized.setdefault("type", _infer_json_type(normalized["const"]))
     if "anyOf" in normalized:
-        any_of_consts = [
-            branch["const"] for branch in normalized["anyOf"] if isinstance(branch, dict) and "const" in branch
-        ]
-        if any_of_consts:
-            normalized.setdefault("enum", any_of_consts)
+        any_of_branches = normalized["anyOf"]
+        if isinstance(any_of_branches, list) and all(
+            isinstance(branch, dict) and "const" in branch for branch in any_of_branches
+        ):
+            normalized.setdefault("enum", [branch["const"] for branch in any_of_branches])
         any_of_type = _infer_any_of_type(normalized["anyOf"])
         if any_of_type is not None:
             normalized.setdefault("type", any_of_type)
@@ -554,9 +553,6 @@ def _convert_tools(tools: Any) -> list[dict[str, Any]] | None:
     for tool in tools:
         if not isinstance(tool, dict):
             raise MalformedRequestError("tools entries must be objects")
-        tool_type = tool.get("type")
-        if tool_type not in (None, "custom"):
-            raise MalformedRequestError(f"Unsupported Anthropic tool type: {tool_type}")
         name = tool.get("name")
         if not isinstance(name, str):
             raise MalformedRequestError("tool.name must be a string")
@@ -595,23 +591,6 @@ def _apply_tool_choice(payload: dict[str, Any], tools: list[dict[str, Any]] | No
     raise MalformedRequestError("tool_choice must be a string or object")
 
 
-def _sampling_params(
-    payload: dict[str, Any],
-    *,
-    base_sampling_params: dict[str, Any],
-    allowed_sampling_keys: frozenset[str],
-) -> dict[str, Any]:
-    sampling_params = dict(base_sampling_params)
-    for key in _SAME_NAME_SAMPLING_KEYS:
-        if key in allowed_sampling_keys and key in payload:
-            sampling_params[key] = payload[key]
-    if "stop" in allowed_sampling_keys and "stop_sequences" in payload:
-        sampling_params["stop"] = payload["stop_sequences"]
-    # Anthropic cache_control can appear on request blocks; it is intentionally
-    # ignored because generation sampling params have no equivalent field.
-    return sampling_params
-
-
 def anthropic_to_internal(
     payload: dict,
     *,
@@ -632,13 +611,17 @@ def anthropic_to_internal(
     # Tool conversion and sampling stay adapter-owned; the session consumes only
     # internal tools plus codec-keyed sampling params.
     tools = _apply_tool_choice(payload, _convert_tools(payload.get("tools")))
+    sampling_params = dict(base_sampling_params)
+    for key in ("max_tokens", "temperature", "top_p", "top_k"):
+        if key in allowed_sampling_keys and key in payload:
+            sampling_params[key] = payload[key]
+    if "stop" in allowed_sampling_keys and "stop_sequences" in payload:
+        sampling_params["stop"] = payload["stop_sequences"]
+    # Anthropic cache_control can appear on request blocks; it is intentionally
+    # ignored because generation sampling params have no equivalent field.
     return {
         "messages": messages,
         "tools": tools,
         "chat_template_kwargs": {},
-        "sampling_params": _sampling_params(
-            payload,
-            base_sampling_params=base_sampling_params,
-            allowed_sampling_keys=allowed_sampling_keys,
-        ),
+        "sampling_params": sampling_params,
     }

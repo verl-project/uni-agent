@@ -1430,3 +1430,63 @@ async def test_openai_malformed_json_uses_error_envelope():
         assert "message" in body["error"]
     finally:
         await actor.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_anthropic_unhandled_exception_uses_error_envelope(monkeypatch):
+    """An unhandled exception in the Anthropic route still produces a
+    provider-shaped error body (not FastAPI's default {"detail": ...})."""
+    from uni_agent.gateway.config import GatewayActorConfig
+    from uni_agent.gateway.gateway import _GatewayActor
+
+    def _explode(*args, **kwargs):
+        raise KeyError("simulated programmer bug")
+
+    monkeypatch.setattr("uni_agent.gateway.gateway.anthropic_to_internal", _explode)
+
+    actor = _GatewayActor(GatewayActorConfig(tokenizer=FakeTokenizer()), InspectingBackend())
+    await actor.start()
+    try:
+        await actor.create_session("s-unhandled-anth")
+        transport = httpx.ASGITransport(app=actor._app, raise_app_exceptions=False)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            r = await client.post(
+                "/sessions/s-unhandled-anth/v1/messages",
+                json={"max_tokens": 8, "messages": [{"role": "user", "content": "hi"}]},
+            )
+        assert r.status_code == 500
+        body = r.json()
+        assert body["type"] == "error"
+        assert body["error"]["type"] == "api_error"
+        assert body["error"]["message"] == "Internal server error"
+    finally:
+        await actor.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_openai_unhandled_exception_uses_error_envelope(monkeypatch):
+    """Same as the Anthropic case for the OpenAI chat-completions route."""
+    from uni_agent.gateway.config import GatewayActorConfig
+    from uni_agent.gateway.gateway import _GatewayActor
+
+    def _explode(*args, **kwargs):
+        raise KeyError("simulated programmer bug")
+
+    monkeypatch.setattr("uni_agent.gateway.gateway.openai_to_internal", _explode)
+
+    actor = _GatewayActor(GatewayActorConfig(tokenizer=FakeTokenizer()), InspectingBackend())
+    await actor.start()
+    try:
+        await actor.create_session("s-unhandled-oa")
+        transport = httpx.ASGITransport(app=actor._app, raise_app_exceptions=False)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            r = await client.post(
+                "/sessions/s-unhandled-oa/v1/chat/completions",
+                json={"messages": [{"role": "user", "content": "hi"}]},
+            )
+        assert r.status_code == 500
+        body = r.json()
+        assert body["error"]["type"] == "internal_server_error"
+        assert body["error"]["message"] == "Internal server error"
+    finally:
+        await actor.shutdown()

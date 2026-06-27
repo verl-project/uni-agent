@@ -181,13 +181,19 @@ def openai_to_internal(
     if payload.get("response_format") is not None:
         raise MalformedRequestError("response_format is not supported")
 
-    tool_choice_payload = payload.get("tool_choice")
-    if isinstance(tool_choice_payload, dict):
+    tool_choice_payload = payload.get("tool_choice", "auto")
+    if isinstance(tool_choice_payload, str):
+        tool_choice = tool_choice_payload.lower()
+        if tool_choice not in {"auto", "none"}:
+            raise MalformedRequestError(
+                f'tool_choice="{tool_choice_payload}" is not supported (only "auto" / "none" are supported)'
+            )
+    elif isinstance(tool_choice_payload, dict):
         raise MalformedRequestError(
             'tool_choice with a specific function is not supported (only "auto" / "none" are supported)'
         )
-    if isinstance(tool_choice_payload, str) and tool_choice_payload.lower() == "required":
-        raise MalformedRequestError('tool_choice="required" is not supported (only "auto" / "none" are supported)')
+    else:
+        raise MalformedRequestError("tool_choice must be a string or object")
 
     # Required payload fields and template kwargs.
     messages = payload.get("messages")
@@ -199,7 +205,6 @@ def openai_to_internal(
         raise MalformedRequestError("chat_template_kwargs must be an object")
 
     # Tool injection policy.
-    tool_choice = tool_choice_payload.lower() if isinstance(tool_choice_payload, str) else "auto"
     tools = payload.get("tools")
     if tools is not None and not isinstance(tools, list):
         raise MalformedRequestError("tools must be a list")
