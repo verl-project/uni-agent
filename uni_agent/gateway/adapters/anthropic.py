@@ -228,16 +228,6 @@ def _image_block_to_openai_part(block: dict[str, Any]) -> dict[str, Any]:
     return {"type": "image_url", "image_url": {"url": url}}
 
 
-def _text_part(text: str) -> dict[str, str]:
-    return {"type": "text", "text": text}
-
-
-def _content_parts_or_text(parts: list[dict[str, Any]]) -> str | list[dict[str, Any]]:
-    if any(part.get("type") != "text" for part in parts):
-        return list(parts)
-    return "".join(part["text"] for part in parts)
-
-
 def _tool_result_messages(tool_call_id: str, content: Any) -> list[dict[str, Any]]:
     if isinstance(content, str):
         return [{"role": "tool", "tool_call_id": tool_call_id, "content": content}]
@@ -252,10 +242,11 @@ def _tool_result_messages(tool_call_id: str, content: Any) -> list[dict[str, Any
 
     def flush_text() -> None:
         nonlocal emitted_tool_message
-        if texts:
-            messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": "".join(texts)})
-            emitted_tool_message = True
-            texts.clear()
+        if not texts:
+            return
+        messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": "\n".join(texts)})
+        emitted_tool_message = True
+        texts.clear()
 
     for block in content:
         if not isinstance(block, dict):
@@ -267,12 +258,15 @@ def _tool_result_messages(tool_call_id: str, content: Any) -> list[dict[str, Any
                 raise MalformedRequestError("tool_result text must be a string")
             texts.append(text)
         elif block_type == "image":
+            # OpenAI/vLLM tool-role messages cannot carry images, so preserve
+            # visual payloads as a following user message downgrade. The
+            # assistant's tool_calls must be closed by at least one tool
+            # message before any user follows; emit an empty tool sentinel if
+            # neither buffered text nor a prior tool message has done that.
             if not texts and not emitted_tool_message:
                 messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": ""})
                 emitted_tool_message = True
             flush_text()
-            # OpenAI/vLLM tool-role messages cannot carry images, so preserve
-            # visual payloads as a following user message downgrade.
             messages.append({"role": "user", "content": [_image_block_to_openai_part(block)]})
         else:
             raise MalformedRequestError(f"Unsupported tool_result block type: {block_type}")
@@ -289,12 +283,23 @@ def _user_messages_from_content(content: Any) -> list[dict[str, Any]]:
         raise MalformedRequestError("user content must be a string or block list")
 
     messages: list[dict[str, Any]] = []
-    parts: list[dict[str, Any]] = []
+    parts: list[dict[str, Any]] = [] # A single openai message can carry multiple text/image parts.
 
     def flush_user() -> None:
-        if parts:
-            messages.append({"role": "user", "content": _content_parts_or_text(parts)})
-            parts.clear()
+        # Collapse pure-text parts to a single string so downstream chat
+        # templates take their well-trodden string path; keep list form only
+        # when an image is present (image_url has no string fallback in the
+        # OpenAI protocol). Claude Code splits content into multiple text
+        # blocks to attach cache_control per block, so join with \n to keep
+        # those blocks from running together.
+        if not parts:
+            return
+        if any(part.get("type") != "text" for part in parts):
+            content = list(parts)
+        else:
+            content = "\n".join(part["text"] for part in parts)
+        messages.append({"role": "user", "content": content})
+        parts.clear()
 
     for block in content:
         if not isinstance(block, dict):
@@ -304,7 +309,7 @@ def _user_messages_from_content(content: Any) -> list[dict[str, Any]]:
             text = block.get("text", "")
             if not isinstance(text, str):
                 raise MalformedRequestError("user text must be a string")
-            parts.append(_text_part(text))
+            parts.append({"type": "text", "text": text})
         elif block_type == "image":
             parts.append(_image_block_to_openai_part(block))
         elif block_type == "tool_result":
@@ -368,7 +373,7 @@ def _assistant_message_from_content(content: Any) -> dict[str, Any]:
         else:
             raise MalformedRequestError(f"Unsupported assistant block type: {block_type}")
 
-    message: dict[str, Any] = {"role": "assistant", "content": "".join(texts)}
+    message: dict[str, Any] = {"role": "assistant", "content": "\n".join(texts)}
     if tool_calls:
         message["tool_calls"] = tool_calls
     return message
@@ -377,15 +382,16 @@ def _assistant_message_from_content(content: Any) -> dict[str, Any]:
 def _fold_reminder_into_user(message: dict[str, Any], text: str, *, prepend: bool = False) -> None:
     """Fold a system-text reminder into an existing user message in place.
 
-    Used to anchor mid-conversation system blocks near their original user
-    message rather than hoisting them to index 0 (many chat templates reject
-    system messages beyond index 0). Content is always str | list because the
-    caller only invokes this on user messages produced by
-    `_user_messages_from_content`.
+    Content is str | list of Anthropic blocks; both forms are handled. Mid-list
+    `<system-reminder>` text is anchored to a neighbouring user message rather
+    than hoisted to index 0, since many chat templates reject system messages
+    beyond index 0. `text` is the fully-wrapped reminder string — the caller is
+    responsible for adding the `<system-reminder>...</system-reminder>` envelope
+    before passing it in.
     """
     content = message.get("content", "")
     if isinstance(content, list):
-        part = _text_part(text)
+        part = {"type": "text", "text": text}
         if prepend:
             content.insert(0, part)
         else:
@@ -399,59 +405,74 @@ def _fold_reminder_into_user(message: dict[str, Any], text: str, *, prepend: boo
         message["content"] = f"{content}\n{text}"
 
 
+def _fold_mid_list_system_into_user(messages: Any) -> Any:
+    """Fold every `messages[]`-level system entry into a neighbouring user
+    message as a `<system-reminder>` block, returning a system-free list.
+
+    Anthropic carries the real system prompt in the top-level `system` field; a
+    `role: system` entry inside `messages` is a mid-conversation reminder that
+    clients like Claude Code inject. Many chat templates reject any system
+    message past index 0 *and* reject consecutive same-role messages, so a
+    reminder must be merged into an adjacent user message rather than emitted
+    standalone. We fold index-0 too: keeping it as a leading system would be
+    pushed to index 1 by the top-level system prompt, which is exactly what
+    templates reject. Non-list input is passed through for the caller to reject.
+
+    Strategy: single forward pass, preferring the preceding user (append). When
+    no preceding user exists yet, buffer the reminder and prepend it into the
+    next user; if neither exists, emit a standalone user at the end (last
+    resort: violates same-role-adjacency only when the whole conversation has
+    no user message, which is itself ill-formed).
+    """
+    if not isinstance(messages, list):
+        return messages
+    if not any(isinstance(m, dict) and m.get("role") == "system" for m in messages):
+        return messages
+
+    out: list[Any] = []
+    pending = ""
+    for message in messages:
+        if isinstance(message, dict) and message.get("role") == "system":
+            system_text = _system_to_text(message.get("content", ""))
+            if not system_text:
+                continue
+            reminder = f"<system-reminder>\n{system_text}\n</system-reminder>"
+            prev_user = next(
+                (m for m in reversed(out) if isinstance(m, dict) and m.get("role") == "user"),
+                None,
+            )
+            if prev_user is not None:
+                _fold_reminder_into_user(prev_user, reminder)
+            else:
+                pending = f"{pending}\n{reminder}" if pending else reminder
+            continue
+        if pending and isinstance(message, dict) and message.get("role") == "user":
+            _fold_reminder_into_user(message, pending, prepend=True)
+            pending = ""
+        out.append(message)
+    if pending:
+        out.append({"role": "user", "content": pending})
+    return out
+
+
 def _messages_to_internal(messages: Any) -> list[dict[str, Any]]:
+    # Caller folds mid-list system into user first, so only user/assistant
+    # remain here (a stray system role is therefore unsupported).
     if not isinstance(messages, list) or not messages:
         raise MalformedRequestError("messages must be non-empty")
 
     result: list[dict[str, Any]] = []
-    pending_reminder = ""
-
     for message in messages:
         if not isinstance(message, dict):
             raise MalformedRequestError("messages entries must be objects")
         role = message.get("role")
         content = message.get("content", "")
-        if role == "system":
-            # Many chat templates reject system messages beyond index 0. Folding
-            # mid-list system text into an adjacent user message preserves position
-            # better than hoisting it to the top. Reminder is consumed by the
-            # next user message (or flushed at end of loop).
-            system_text = _system_to_text(content)
-            reminder = f"<system-reminder>\n{system_text}\n</system-reminder>" if system_text else ""
-            if not reminder:
-                continue
-            folded = False
-            for previous_message in reversed(result):
-                if previous_message.get("role") == "user":
-                    _fold_reminder_into_user(previous_message, reminder)
-                    folded = True
-                    break
-            if not folded:
-                pending_reminder = f"{pending_reminder}\n{reminder}" if pending_reminder else reminder
-        elif role == "user":
-            user_messages = _user_messages_from_content(content)
-            if pending_reminder:
-                folded = False
-                for user_message in user_messages:
-                    if user_message.get("role") == "user":
-                        _fold_reminder_into_user(user_message, pending_reminder, prepend=True)
-                        folded = True
-                        break
-                if folded:
-                    pending_reminder = ""
-                else:
-                    # A tool_result-only Anthropic user message converts to tool
-                    # role messages; emit the reminder before it instead of
-                    # letting system text leap over the tool result.
-                    result.append({"role": "user", "content": pending_reminder})
-                    pending_reminder = ""
-            result.extend(user_messages)
+        if role == "user":
+            result.extend(_user_messages_from_content(content))
         elif role == "assistant":
             result.append(_assistant_message_from_content(content))
         else:
             raise MalformedRequestError(f"Unsupported message role: {role}")
-    if pending_reminder:
-        result.append({"role": "user", "content": pending_reminder})
     return result
 
 
@@ -603,7 +624,7 @@ def anthropic_to_internal(
 
     # Message/system lowering handles Anthropic-specific compatibility downgrades
     # before the session sees the OpenAI-like template-facing canonical.
-    messages = _messages_to_internal(payload.get("messages"))
+    messages = _messages_to_internal(_fold_mid_list_system_into_user(payload.get("messages")))
     system_text = _system_to_text(payload.get("system"))
     if system_text:
         messages.insert(0, {"role": "system", "content": system_text})
