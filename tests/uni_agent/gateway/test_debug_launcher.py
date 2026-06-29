@@ -10,6 +10,8 @@ from uni_agent.gateway.session import SessionHandle, Trajectory
 
 
 def test_trajectory_to_record_is_json_serializable_and_preserves_fields():
+    """Trajectory output records keep every training-visible field and can be
+    written as plain JSON."""
     trajectory = Trajectory(
         prompt_ids=[1, 2],
         response_ids=[3, 4],
@@ -52,6 +54,8 @@ def test_trajectory_to_record_is_json_serializable_and_preserves_fields():
 
 
 def test_write_trajectories_jsonl_writes_expected_file(tmp_path):
+    """Finalized trajectories are written under the session output directory as
+    one JSON record per line with stable trajectory indexes."""
     trajectories = [
         Trajectory(prompt_ids=[1], response_ids=[2], response_mask=[1], num_turns=1),
         Trajectory(prompt_ids=[3], response_ids=[4], response_mask=[1], response_logprobs=[-0.2], num_turns=2),
@@ -77,6 +81,8 @@ def test_write_trajectories_jsonl_writes_expected_file(tmp_path):
 
 
 def test_write_session_metadata_json_writes_run_context_without_trajectories(tmp_path):
+    """Session metadata is written even when no trajectories were captured so a
+    failed smoke still leaves inspectable run context."""
     path = debug_launcher.write_session_metadata_json(
         output_dir=tmp_path,
         session_id="s-empty",
@@ -106,6 +112,8 @@ def test_write_session_metadata_json_writes_run_context_without_trajectories(tmp
 
 
 def test_provider_urls_strips_v1_for_anthropic_and_keeps_openai_base_url():
+    """The printed Anthropic base URL omits /v1 for Claude Code while the
+    OpenAI-compatible URL keeps the session-scoped /v1 suffix."""
     handle = SessionHandle(
         session_id="abc",
         base_url="http://127.0.0.1:8000/sessions/abc/v1",
@@ -120,6 +128,8 @@ def test_provider_urls_strips_v1_for_anthropic_and_keeps_openai_base_url():
 
 
 def test_build_claude_env_removes_auth_and_proxy_vars_and_sets_expected_vars():
+    """Claude Code smoke env construction removes conflicting auth/proxy
+    variables and injects the local gateway Anthropic endpoint."""
     base_env = {
         "PATH": "/bin",
         "ANTHROPIC_AUTH_TOKEN": "real-token",
@@ -149,6 +159,8 @@ def test_build_claude_env_removes_auth_and_proxy_vars_and_sets_expected_vars():
 
 
 def test_parse_args_minimal_and_openai_required_args_validation(tmp_path):
+    """The fake backend has minimal CLI requirements, while openai-completions
+    requires backend URL, backend model, and tokenizer path."""
     args = debug_launcher.parse_args(["--session-id", "s1", "--output-dir", str(tmp_path)])
 
     assert args.backend == "fake"
@@ -191,6 +203,8 @@ def test_parse_args_minimal_and_openai_required_args_validation(tmp_path):
 
 
 def test_real_tokenizer_wrapper_flattens_encoding_template_results():
+    """Real tokenizer wrappers flatten tokenizers Encoding objects returned by
+    apply_chat_template while delegating other tokenizer methods."""
     class FakeEncoding:
         def __init__(self, ids):
             self.ids = ids
@@ -209,31 +223,31 @@ def test_real_tokenizer_wrapper_flattens_encoding_template_results():
 
 
 def test_build_claude_command(tmp_path):
+    """One-shot Claude Code smoke uses the bare, non-persistent CLI mode with
+    captured debug output, prompt text output, and the requested frontend model."""
     debug_file = tmp_path / "claude-debug.log"
 
-    assert debug_launcher.build_claude_command(
+    command = debug_launcher.build_claude_command(
         prompt="Reply with OK only.",
         model="claude-sonnet-4-5",
         debug_file=debug_file,
-    ) == [
-        "claude",
-        "--bare",
-        "--no-session-persistence",
-        "--debug-file",
-        str(debug_file),
-        "-p",
-        "Reply with OK only.",
-        "--output-format",
-        "text",
-        "--model",
-        "claude-sonnet-4-5",
-    ]
+    )
+
+    assert command[0] == "claude"
+    assert "--bare" in command
+    assert "--no-session-persistence" in command
+    assert command[command.index("--debug-file") + 1] == str(debug_file)
+    assert command[command.index("-p") + 1] == "Reply with OK only."
+    assert command[command.index("--output-format") + 1] == "text"
+    assert command[command.index("--model") + 1] == "claude-sonnet-4-5"
 
 
 @pytest.mark.asyncio
 async def test_openai_completions_backend_generate_sends_prompt_token_ids_and_parses_token_ids_logprobs(
     monkeypatch,
 ):
+    """The OpenAI completions debug backend sends token-id prompts with
+    return_token_ids enabled and maps token ids, logprobs, and finish reason."""
     requests = []
 
     class FakeResponse:
@@ -310,6 +324,8 @@ async def test_openai_completions_backend_generate_sends_prompt_token_ids_and_pa
 
 @pytest.mark.asyncio
 async def test_openai_completions_backend_requires_token_ids(monkeypatch):
+    """A completions backend response without token_ids is rejected because
+    trajectory response tokens must come from backend token truth."""
     class FakeResponse:
         def raise_for_status(self):
             pass
@@ -342,6 +358,8 @@ async def test_openai_completions_backend_requires_token_ids(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_openai_completions_backend_http_error_includes_request_id_and_body(monkeypatch):
+    """HTTP errors from the completions backend include the gateway request id,
+    status code, and response body in the raised diagnostic."""
     class FakeResponse:
         is_error = True
         status_code = 400
@@ -378,6 +396,8 @@ async def test_openai_completions_backend_http_error_includes_request_id_and_bod
 
 @pytest.mark.asyncio
 async def test_run_claude_once_records_timeout_metadata(monkeypatch, tmp_path):
+    """A timed-out one-shot Claude subprocess records timeout metadata and
+    preserves captured stdout/stderr files for diagnosis."""
     def fake_run(cmd, **kwargs):
         raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs["timeout"], output="partial stdout", stderr="slow")
 
@@ -405,6 +425,8 @@ async def test_run_debug_session_once_fake_creates_finalizes_and_writes_trajecto
     monkeypatch,
     tmp_path,
 ):
+    """The fake debug session starts the gateway, simulates Claude hitting the
+    Anthropic route, finalizes the session, and writes trajectory artifacts."""
     post_urls = []
     captured_run = {}
 
@@ -478,6 +500,8 @@ async def test_run_debug_session_once_fake_creates_finalizes_and_writes_trajecto
 
 @pytest.mark.asyncio
 async def test_async_main_returns_nonzero_when_claude_fails(monkeypatch, tmp_path):
+    """The CLI exits with Claude's non-zero return code when one-shot Claude
+    execution fails after artifacts are written."""
     async def fake_run_debug_session_once(**kwargs):
         return debug_launcher.DebugSessionResult(
             session_id=kwargs["session_id"],

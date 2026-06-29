@@ -6,6 +6,8 @@ ALLOWED_SAMPLING_KEYS = frozenset({"temperature", "top_p", "top_k", "max_tokens"
 
 
 def test_openai_build_response_shape():
+    """A completed internal outcome serializes to the basic OpenAI chat
+    completion envelope with ids, model, choices, and token usage."""
     from uni_agent.gateway.adapters.openai import openai_build_response
     from uni_agent.gateway.session.session import GenerationOutcome
 
@@ -27,6 +29,8 @@ def test_openai_build_response_shape():
 
 @pytest.mark.asyncio
 async def test_openai_stream_response_emits_compatible_sse_chunks():
+    """A completed internal outcome is synthesized into OpenAI-compatible SSE
+    chunks for role, reasoning, content, tool calls, final usage, and DONE."""
     from uni_agent.gateway.adapters.openai import openai_stream_response
     from uni_agent.gateway.session.session import GenerationOutcome
 
@@ -73,11 +77,23 @@ async def test_openai_stream_response_emits_compatible_sse_chunks():
     }
 
 
-def test_openai_to_internal_normalizes_messages_and_sampling():
+def test_openai_to_internal_normalizes_messages_sampling_and_tools():
+    """OpenAI wire requests lower to the internal shape: sampling params use the
+    gateway allowlist, JSON tool arguments are parsed, malformed argument
+    strings are preserved, and tool_choice=none clears tool schemas."""
     from uni_agent.gateway.adapters.openai import openai_to_internal
 
     payload = {
-        "messages": [{"role": "user", "content": "hi"}],
+        "messages": [
+            {"role": "user", "content": "hi"},
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {"id": "x", "type": "function", "function": {"name": "f", "arguments": '{"x": 1}'}},
+                    {"id": "y", "type": "function", "function": {"name": "g", "arguments": "not json"}},
+                ],
+            },
+        ],
         "tools": [{"type": "function", "function": {"name": "f", "parameters": {}}}],
         "max_tokens": 32,
         "temperature": 0.7,
@@ -90,7 +106,9 @@ def test_openai_to_internal_normalizes_messages_and_sampling():
         allowed_sampling_keys=ALLOWED_SAMPLING_KEYS,
     )
     assert set(req) == {"messages", "tools", "chat_template_kwargs", "sampling_params"}
-    assert req["messages"] == [{"role": "user", "content": "hi"}]
+    assert req["messages"][0] == {"role": "user", "content": "hi"}
+    assert req["messages"][1]["tool_calls"][0]["function"]["arguments"] == {"x": 1}
+    assert req["messages"][1]["tool_calls"][1]["function"]["arguments"] == "not json"
     assert req["tools"][0]["function"]["name"] == "f"
     assert req["chat_template_kwargs"] == {}
     assert req["sampling_params"]["max_tokens"] == 32
@@ -99,11 +117,7 @@ def test_openai_to_internal_normalizes_messages_and_sampling():
     assert req["sampling_params"]["stop"] == ["</s>"]
     assert "ignored_field" not in req["sampling_params"]
 
-
-def test_openai_to_internal_tool_choice_none_drops_tools():
-    from uni_agent.gateway.adapters.openai import openai_to_internal
-
-    req = openai_to_internal(
+    without_tools = openai_to_internal(
         {
             "messages": [{"role": "user", "content": "hi"}],
             "tools": [{"type": "function", "function": {"name": "f", "parameters": {}}}],
@@ -112,4 +126,4 @@ def test_openai_to_internal_tool_choice_none_drops_tools():
         base_sampling_params={},
         allowed_sampling_keys=ALLOWED_SAMPLING_KEYS,
     )
-    assert req["tools"] is None
+    assert without_tools["tools"] is None
