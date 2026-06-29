@@ -3,7 +3,9 @@
 `debug_launcher.py` starts the existing gateway without training, creates one
 external session, prints connection URLs, and writes finalized trajectories when
 the session is released. It is meant for local gateway debugging and interaction
-collection.
+collection. It also writes a debug snapshot with the normalized message history
+and pre-finalize session state so token-level trajectories can be interpreted
+after the run.
 
 It does not add a gateway HTTP control plane, does not create a training
 framework mode, and does not add a sessionless `/v1/messages` facade.
@@ -85,8 +87,9 @@ claude --bare --model claude-sonnet-4-5
 Do not use `-p` / `--print` for a manual interactive session. `-p` sends one
 prompt, prints the response, and exits.
 
-When finished, press `Ctrl-C` in the launcher terminal. This is the normal
-finalize path: the launcher finalizes the session and writes trajectories.
+When finished, return to the launcher terminal and press `Enter` or `Ctrl-C`.
+This is the normal finalize path: the launcher finalizes the session and writes
+trajectories, session metadata, and the debug snapshot.
 
 ## One-Shot Claude Code Smoke
 
@@ -150,6 +153,18 @@ http://host:port/sessions/manual-cc-001
 
 Do not use `CLAUDE_CODE_API_BASE_URL` for this Anthropic Messages proxy path.
 
+## Scope and Known Gaps
+
+The launcher is a local debug entrypoint, not a general standalone gateway
+service. It creates one session up front and writes artifacts only when that
+session is finalized.
+
+The documented smoke paths cover connection setup, text generation, trajectory
+writing, and Claude Code CLI availability. Gateway-level automated tests cover
+OpenAI tool calls and Anthropic `tool_use` round trips, but this launcher does
+not currently provide a full Claude Code tool-workflow recipe. Use a dedicated
+Claude Code SWE recipe or manual smoke when validating complex tool behavior.
+
 ## Model Arguments
 
 `--model claude-sonnet-4-5` in a manual Claude Code command, and
@@ -182,6 +197,9 @@ Files:
 - `session_metadata.json`: launcher metadata, provider URLs, Claude return code,
   artifact paths, and trajectory count. This exists even when zero trajectories
   were recorded.
+- `debug_snapshot.json`: provider URLs, normalized message history,
+  active tool schemas, and session state captured immediately before
+  finalization. This is a diagnostic artifact, not a training trajectory schema.
 - `claude.stdout`: captured Claude Code stdout in one-shot mode.
 - `claude.stderr`: captured Claude Code stderr in one-shot mode.
 - `claude-debug.log`: Claude Code debug log in one-shot mode.
@@ -198,6 +216,10 @@ Each trajectory record has `schema_version: 1` and stores the finalized
 - `num_turns`
 - `multi_modal_data`
 - `extra_fields`
+
+The trajectory records intentionally store token-level training data. Use
+`debug_snapshot.json` when you need the normalized conversation history that
+produced those tokens.
 
 ## Fake Backend
 
@@ -237,6 +259,7 @@ If Claude Code prints `API Error: 500 ConnectError: All connection attempts fail
 If `trajectories.jsonl` is empty:
 
 - Check `session_metadata.json` first.
+- Inspect `debug_snapshot.json` to confirm which messages reached the gateway.
 - Then inspect `claude.stdout`, `claude.stderr`, and `claude-debug.log` if
   one-shot mode was used.
 

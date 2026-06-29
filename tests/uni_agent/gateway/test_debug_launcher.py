@@ -1,4 +1,6 @@
+import asyncio
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -99,6 +101,7 @@ def test_write_session_metadata_json_writes_run_context_without_trajectories(tmp
         provider_urls={"anthropic_base_url": "http://127.0.0.1:9000/sessions/s-empty"},
         trajectories_count=0,
         trajectories_path=tmp_path / "s-empty" / "trajectories.jsonl",
+        debug_snapshot_path=tmp_path / "s-empty" / "debug_snapshot.json",
         created_at="2026-06-24T01:02:03Z",
     )
 
@@ -109,6 +112,29 @@ def test_write_session_metadata_json_writes_run_context_without_trajectories(tmp
     assert record["metadata"]["claude"]["returncode"] == 1
     assert record["trajectories_count"] == 0
     assert record["trajectories_path"].endswith("trajectories.jsonl")
+    assert record["debug_snapshot_path"].endswith("debug_snapshot.json")
+
+
+def test_write_debug_snapshot_json_writes_message_history_and_session_state(tmp_path):
+    """Debug snapshots preserve normalized conversation state separately from
+    token-level trajectories for post-run diagnosis."""
+    path = debug_launcher.write_debug_snapshot_json(
+        output_dir=tmp_path,
+        session_id="s-debug",
+        snapshot={
+            "session_state": {"phase": "ACTIVE", "has_active_trajectory": True},
+            "message_history": [{"role": "user", "content": "hi"}],
+        },
+        created_at="2026-06-24T01:02:03Z",
+    )
+
+    assert path == tmp_path / "s-debug" / "debug_snapshot.json"
+    record = json.loads(path.read_text())
+    assert record["schema_version"] == 1
+    assert record["session_id"] == "s-debug"
+    assert record["created_at"] == "2026-06-24T01:02:03Z"
+    assert record["session_state"]["has_active_trajectory"] is True
+    assert record["message_history"] == [{"role": "user", "content": "hi"}]
 
 
 def test_provider_urls_strips_v1_for_anthropic_and_keeps_openai_base_url():
@@ -421,6 +447,35 @@ async def test_run_claude_once_records_timeout_metadata(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_wait_for_manual_finalize_accepts_enter_from_tty_stdin():
+    """Manual launcher mode can be finalized with Enter instead of requiring a
+    signal-only shutdown path."""
+    read_fd, write_fd = os.pipe()
+    reader = os.fdopen(read_fd, "r", encoding="utf-8")
+
+    class EnterStdin:
+        def isatty(self):
+            return True
+
+        def fileno(self):
+            return reader.fileno()
+
+        def readline(self):
+            return reader.readline()
+
+    try:
+        task = asyncio.create_task(debug_launcher.wait_for_manual_finalize(stdin=EnterStdin()))
+        await asyncio.sleep(0)
+        os.write(write_fd, b"\n")
+        trigger = await asyncio.wait_for(task, timeout=1.0)
+    finally:
+        reader.close()
+        os.close(write_fd)
+
+    assert trigger == "stdin"
+
+
+@pytest.mark.asyncio
 async def test_run_debug_session_once_fake_creates_finalizes_and_writes_trajectories(
     monkeypatch,
     tmp_path,
@@ -475,6 +530,7 @@ async def test_run_debug_session_once_fake_creates_finalizes_and_writes_trajecto
     assert result.session_id == "fake-session"
     assert result.output_path == tmp_path / "fake-session" / "trajectories.jsonl"
     assert result.metadata_path == tmp_path / "fake-session" / "session_metadata.json"
+    assert result.debug_snapshot_path == tmp_path / "fake-session" / "debug_snapshot.json"
     assert result.trajectories_count == 1
     assert captured_run["cmd"][0] == "claude"
     assert captured_run["check"] is False
@@ -486,6 +542,7 @@ async def test_run_debug_session_once_fake_creates_finalizes_and_writes_trajecto
     session_metadata = json.loads(result.metadata_path.read_text())
     assert session_metadata["metadata"]["claude"]["returncode"] == 0
     assert session_metadata["trajectories_count"] == 1
+    assert session_metadata["debug_snapshot_path"].endswith("debug_snapshot.json")
     assert records[0]["session_id"] == "fake-session"
     assert records[0]["metadata"]["backend"] == "fake"
     assert records[0]["metadata"]["claude"]["enabled"] is True
@@ -496,6 +553,9 @@ async def test_run_debug_session_once_fake_creates_finalizes_and_writes_trajecto
     assert stderr_path.read_text() == "debug log\n"
     assert records[0]["metadata"]["claude"]["debug_log_path"].endswith("claude-debug.log")
     assert records[0]["trajectory"]["response_ids"] == [79, 75]
+    debug_snapshot = json.loads(result.debug_snapshot_path.read_text())
+    assert debug_snapshot["session_state"]["has_active_trajectory"] is True
+    assert debug_snapshot["message_history"][0] == {"role": "user", "content": "Reply with OK only."}
 
 
 @pytest.mark.asyncio
@@ -507,6 +567,7 @@ async def test_async_main_returns_nonzero_when_claude_fails(monkeypatch, tmp_pat
             session_id=kwargs["session_id"],
             output_path=tmp_path / kwargs["session_id"] / "trajectories.jsonl",
             metadata_path=tmp_path / kwargs["session_id"] / "session_metadata.json",
+            debug_snapshot_path=tmp_path / kwargs["session_id"] / "debug_snapshot.json",
             trajectories_count=0,
             provider_urls={},
             claude_returncode=1,

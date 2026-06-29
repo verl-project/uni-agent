@@ -8,6 +8,7 @@ import json
 import os
 import signal
 import subprocess
+import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -198,6 +199,7 @@ class DebugSessionResult:
     session_id: str
     output_path: Path
     metadata_path: Path
+    debug_snapshot_path: Path
     trajectories_count: int
     provider_urls: dict[str, str]
     claude_returncode: int | None = None
@@ -271,6 +273,7 @@ def write_session_metadata_json(
     provider_urls: dict[str, str],
     trajectories_count: int,
     trajectories_path: Path,
+    debug_snapshot_path: Path,
     created_at: str | None = None,
 ) -> Path:
     session_dir = output_dir / session_id
@@ -284,6 +287,27 @@ def write_session_metadata_json(
         "provider_urls": dict(provider_urls),
         "trajectories_count": trajectories_count,
         "trajectories_path": str(trajectories_path),
+        "debug_snapshot_path": str(debug_snapshot_path),
+    }
+    path.write_text(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
+    return path
+
+
+def write_debug_snapshot_json(
+    *,
+    output_dir: Path,
+    session_id: str,
+    snapshot: dict[str, Any],
+    created_at: str | None = None,
+) -> Path:
+    session_dir = output_dir / session_id
+    session_dir.mkdir(parents=True, exist_ok=True)
+    path = session_dir / "debug_snapshot.json"
+    record = {
+        **snapshot,
+        "schema_version": 1,
+        "session_id": session_id,
+        "created_at": created_at or utc_now(),
     }
     path.write_text(json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
     return path
@@ -394,19 +418,65 @@ def build_backend(args: argparse.Namespace):
     )
 
 
-async def wait_for_shutdown_signal() -> None:
+async def wait_for_manual_finalize(stdin: Any = sys.stdin) -> str:
     loop = asyncio.get_running_loop()
     stop_event = asyncio.Event()
+    trigger = "signal"
 
-    def _stop() -> None:
-        stop_event.set()
+    def _stop(source: str) -> None:
+        nonlocal trigger
+        if not stop_event.is_set():
+            trigger = source
+            stop_event.set()
 
+    registered_signals = []
     for sig in (signal.SIGINT, signal.SIGTERM):
         try:
-            loop.add_signal_handler(sig, _stop)
+            loop.add_signal_handler(sig, _stop, "signal")
+            registered_signals.append(sig)
         except NotImplementedError:
             pass
-    await stop_event.wait()
+    stdin_task: asyncio.Task | None = None
+    stdin_fd = None
+    try:
+        if stdin is not None and stdin.isatty():
+            print("Press Enter or Ctrl-C to finalize the session and write trajectories.")
+            try:
+                stdin_fd = stdin.fileno()
+                loop.add_reader(stdin_fd, _stop, "stdin")
+            except (AttributeError, OSError, NotImplementedError):
+                stdin_task = asyncio.create_task(asyncio.to_thread(stdin.readline))
+                stdin_task.add_done_callback(lambda _: _stop("stdin"))
+        await stop_event.wait()
+        return trigger
+    finally:
+        if stdin_fd is not None:
+            try:
+                loop.remove_reader(stdin_fd)
+            except (OSError, NotImplementedError):
+                pass
+        if stdin_task is not None:
+            stdin_task.cancel()
+        for sig in registered_signals:
+            loop.remove_signal_handler(sig)
+
+
+def capture_debug_snapshot(actor: _GatewayActor, session_id: str, urls: dict[str, str]) -> dict[str, Any]:
+    session = actor._sessions.get(session_id)
+    if session is None:
+        return {
+            "session_state": None,
+            "message_history": [],
+            "active_tool_schemas": None,
+            "provider_urls": dict(urls),
+            "note": "session was not available when debug snapshot was captured",
+        }
+    return {
+        "session_state": session.snapshot_state(),
+        "message_history": list(session.message_history),
+        "active_tool_schemas": session.active_tool_schemas,
+        "provider_urls": dict(urls),
+    }
 
 
 async def run_claude_once(
@@ -520,6 +590,13 @@ async def run_debug_session_once(
     await actor.start()
     trajectories: list[Trajectory] = []
     urls: dict[str, str] = {}
+    debug_snapshot: dict[str, Any] = {
+        "session_state": None,
+        "message_history": [],
+        "active_tool_schemas": None,
+        "provider_urls": {},
+        "note": "session was not created before debug snapshot was captured",
+    }
     claude_metadata: dict[str, Any] = {
         "enabled": run_claude,
         "returncode": None,
@@ -544,7 +621,8 @@ async def run_debug_session_once(
                 claude_timeout=claude_timeout,
             )
         else:
-            await wait_for_shutdown_signal()
+            await wait_for_manual_finalize()
+        debug_snapshot = capture_debug_snapshot(actor, session_id, urls)
         trajectories = await actor.finalize_session(session_id)
     finally:
         await actor.shutdown()
@@ -556,6 +634,11 @@ async def run_debug_session_once(
         trajectories=trajectories,
         metadata=metadata,
     )
+    debug_snapshot_path = write_debug_snapshot_json(
+        output_dir=output_dir,
+        session_id=session_id,
+        snapshot=debug_snapshot,
+    )
     metadata_path = write_session_metadata_json(
         output_dir=output_dir,
         session_id=session_id,
@@ -563,11 +646,13 @@ async def run_debug_session_once(
         provider_urls=urls,
         trajectories_count=len(trajectories),
         trajectories_path=output_path,
+        debug_snapshot_path=debug_snapshot_path,
     )
     return DebugSessionResult(
         session_id=session_id,
         output_path=output_path,
         metadata_path=metadata_path,
+        debug_snapshot_path=debug_snapshot_path,
         trajectories_count=len(trajectories),
         provider_urls=urls,
         claude_returncode=claude_metadata["returncode"],
@@ -592,6 +677,8 @@ async def async_main(argv: list[str] | None = None) -> int:
         response_length=args.response_length,
     )
     print(f"Wrote {result.trajectories_count} trajectories to {result.output_path}")
+    print(f"Wrote debug snapshot to {result.debug_snapshot_path}")
+    print(f"Wrote session metadata to {result.metadata_path}")
     if result.claude_returncode not in (None, 0):
         return result.claude_returncode
     return 0
