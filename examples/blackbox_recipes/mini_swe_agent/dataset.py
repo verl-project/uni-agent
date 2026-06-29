@@ -21,7 +21,6 @@ def extract_image(env_config: dict) -> str:
 
 
 class SWEBenchDataset(RLHFDataset):
-
     def __getitem__(self, item):
         row_dict = super().__getitem__(item)
         extra_info = row_dict.get("extra_info", {})

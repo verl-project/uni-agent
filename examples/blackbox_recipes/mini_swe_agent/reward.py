@@ -27,7 +27,7 @@ def build_reward_context(tools_kwargs: dict) -> tuple[dict[str, Any], int]:
 
 
 def compute_score(data_source: str, solution_str: str, ground_truth: str, extra_info=None) -> dict:
-    """Read reward_score from extra_info, injected by SWEAgentFramework."""
+    """Read reward_score from extra_info, injected by the agent runner."""
     score = 0.0
     if extra_info and "reward_score" in extra_info:
         score = float(extra_info["reward_score"])

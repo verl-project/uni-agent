@@ -1,5 +1,7 @@
-"""OpenYuanRong (AKernel) remote sandbox command execution.
+"""AKernel remote sandbox command execution.
 
+AKernel is an agent sandbox infra collaboratively developed by the
+OpenYuanrong team and the Ant AKernel team.
 Uses ``akernel_sdk.Sandbox`` with sidecar ``Mount`` to inject the
 mini-swe-agent tool image.  Supports upstream tunnel so the agent
 inside the sandbox can reach the gateway via ``http://127.0.0.1:<proxy_port>``.
@@ -10,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import uuid
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
@@ -23,24 +26,31 @@ class CommandResult:
     stderr: str
     exit_code: int
 
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_PROXY_PORT = 38197
 
 
 def _configure_akernel_env() -> None:
-    """Map OPENYUANRONG_* env vars to AKERNEL_* before importing akernel_sdk."""
-    server = os.getenv("OPENYUANRONG_SERVER_ADDRESS")
-    token = os.getenv("OPENYUANRONG_TOKEN")
-    tunnel_ssl_verify = os.getenv("OPENYUANRONG_TUNNEL_SSL_VERIFY", "0")
+    """Validate AKernel credentials and map the tunnel SSL flag for akernel_sdk.
+
+    ``akernel_sdk`` reads ``AKERNEL_SERVER_ADDRESS`` / ``AKERNEL_TOKEN`` directly,
+    so only the tunnel SSL flag needs to be translated to ``TUNNEL_SSL_VERIFY``.
+    """
+    server = os.getenv("AKERNEL_SERVER_ADDRESS")
+    token = os.getenv("AKERNEL_TOKEN")
     if not server or not token:
-        raise ValueError(
-            "OPENYUANRONG_SERVER_ADDRESS and OPENYUANRONG_TOKEN "
-            "environment variables must be set for YR sandbox"
-        )
-    os.environ["AKERNEL_SERVER_ADDRESS"] = server
-    os.environ["AKERNEL_TOKEN"] = token
-    os.environ["TUNNEL_SSL_VERIFY"] = tunnel_ssl_verify
+        raise ValueError("AKERNEL_SERVER_ADDRESS and AKERNEL_TOKEN environment variables must be set for sandbox")
+    os.environ["TUNNEL_SSL_VERIFY"] = os.getenv("AKERNEL_TUNNEL_SSL_VERIFY", "0")
+
+
+def _resolve_sandbox_name() -> str | None:
+    """Return ``{prefix}{random}`` when ``SANDBOX_NAME_PREFIX`` env is set."""
+    prefix = os.getenv("SANDBOX_NAME_PREFIX")
+    if not prefix:
+        return None
+    return f"{prefix}{uuid.uuid4().hex[:8]}"
 
 
 def extract_upstream(gateway_url: str) -> str:
@@ -71,8 +81,8 @@ def rewrite_gateway_url(
     return f"http://127.0.0.1:{proxy_port}{path}"
 
 
-class YRSandbox:
-    """Command execution via OpenYuanRong (AKernel) remote sandbox."""
+class SandboxClient:
+    """Command execution via remote sandbox."""
 
     def __init__(self, sandbox: Any) -> None:
         self._sandbox = sandbox
@@ -80,7 +90,6 @@ class YRSandbox:
     @property
     def sandbox_id(self) -> str:
         return getattr(self._sandbox, "sandbox_id", "unknown")
-
 
     @classmethod
     async def create(
@@ -97,10 +106,10 @@ class YRSandbox:
         mem_limit: int = 8192,
         idle_timeout: int = 7200,
         sidecar_target: str = "/opt/mini-swe-agent",
-        max_retries: int = 5,
+        max_retries: int = 10,
         **sandbox_kwargs: Any,
-    ) -> "YRSandbox":
-        """Create an OpenYuanRong sandbox with sidecar tool mounted.
+    ) -> SandboxClient:
+        """Create an sandbox client with sidecar tool mounted.
 
         The sidecar image is mounted at ``sidecar_target`` inside the
         sandbox via ``akernel_sdk.Mount``.
@@ -127,25 +136,35 @@ class YRSandbox:
             sb_kwargs["proxy_port"] = proxy_port
         if env:
             sb_kwargs["env"] = env
+        name = _resolve_sandbox_name()
+        if name is not None:
+            sb_kwargs["name"] = name
         sb_kwargs.update(sandbox_kwargs)
 
         logger.info(
-            "Creating YR sandbox (image=%s, cpu=%d, memory=%d, sidecar=%s:%s, upstream=%s)",
-            image, cpu, memory, sidecar_image, sidecar_target, upstream or "none",
+            "Creating sandbox (image=%s, cpu=%d, memory=%d, sidecar=%s:%s, upstream=%s, name=%s)",
+            image,
+            cpu,
+            memory,
+            sidecar_image,
+            sidecar_target,
+            upstream or "none",
+            name or "auto",
         )
         last_error: Exception | None = None
         for retry in range(max_retries):
             sandbox = None
             try:
                 sandbox = await asyncio.to_thread(lambda: Sandbox(**sb_kwargs))
-                logger.info("YR sandbox created: %s", getattr(sandbox, "sandbox_id", "?"))
+                logger.info("sandbox created: %s", getattr(sandbox, "sandbox_id", "?"))
                 return cls(sandbox=sandbox)
             except Exception as exc:
                 last_error = exc
                 sandbox_id = getattr(sandbox, "sandbox_id", None)
                 logger.critical(
-                    "Failed to create YR sandbox (sandbox_id=%s): %s",
-                    sandbox_id or "n/a", exc,
+                    "Failed to create sandbox (sandbox_id=%s): %s",
+                    sandbox_id or "n/a",
+                    exc,
                 )
                 if sandbox is not None:
                     try:
@@ -153,17 +172,19 @@ class YRSandbox:
                     except Exception:
                         pass
                 if retry < max_retries - 1:
-                    sleep_time = min(30, 2 ** retry)
-                    logger.info("Retrying YR sandbox creation in %d seconds...", sleep_time)
+                    sleep_time = min(30, 2**retry)
+                    logger.info("Retrying sandbox creation in %d seconds...", sleep_time)
                     await asyncio.sleep(sleep_time)
 
-        raise RuntimeError(f"Failed to create YR sandbox after {max_retries} retries") from last_error
+        raise RuntimeError(f"Failed to create sandbox after {max_retries} retries") from last_error
 
     async def run(self, cmd: str, *, timeout: int = 600) -> CommandResult:
-        """Execute *cmd* inside the OpenYuanRong sandbox via ``sandbox.commands.run``."""
+        """Execute *cmd* inside the sandbox via ``sandbox.commands.run``."""
         try:
             result = await asyncio.to_thread(
-                self._sandbox.commands.run, cmd, timeout=timeout,
+                self._sandbox.commands.run,
+                cmd,
+                timeout=timeout,
             )
             return CommandResult(
                 stdout=getattr(result, "stdout", ""),
@@ -174,15 +195,15 @@ class YRSandbox:
             return CommandResult(stdout="", stderr=str(e), exit_code=-1)
 
     async def cleanup(self) -> None:
-        """Kill the OpenYuanRong sandbox if still running."""
+        """Kill the sandbox if still running."""
         if self._sandbox is not None:
             sandbox_id = getattr(self._sandbox, "sandbox_id", "?")
             try:
                 if self._sandbox.is_running():
                     await asyncio.to_thread(self._sandbox.kill)
-                    logger.info("YR sandbox %s killed", sandbox_id)
+                    logger.info("sandbox %s killed", sandbox_id)
                 else:
-                    logger.info("YR sandbox %s already stopped", sandbox_id)
+                    logger.info("sandbox %s already stopped", sandbox_id)
             except Exception as e:
-                logger.warning("Failed to kill YR sandbox %s: %s", sandbox_id, e)
+                logger.warning("Failed to kill sandbox %s: %s", sandbox_id, e)
             self._sandbox = None

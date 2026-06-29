@@ -17,6 +17,14 @@ elif impl == "modal":
         project_name = parts[0].lower()
         instance_number = parts[1].lower()
         return f"swerebench/sweb.eval.x86_64.{project_name}_1776_{instance_number}"
+elif impl == "openyuanrong":
+
+    def get_image_name(dataset_id: str, instance_id: str) -> str:
+        parts = instance_id.split("__")
+        assert len(parts) == 2
+        project_name = parts[0].lower()
+        instance_number = parts[1].lower()
+        return f"swr.cn-east-3.myhuaweicloud.com/openyuanrong/swe-rebench/{project_name}_1776_{instance_number}:latest"
 else:
     raise ValueError(f"Invalid deployment implementation: {impl}")
 

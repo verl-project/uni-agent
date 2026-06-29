@@ -3,7 +3,7 @@
 
 Input:  task config JSON from **stdin**
     - task: str — the issue description for the agent to solve
-    - gateway_url: str — LLM gateway endpoint (tunnel URL for OpenYuanRong sandbox)
+    - gateway_url: str — LLM gateway endpoint (tunnel URL for remote sandbox)
     - agent: dict — agent config (e.g. step_limit)
 
 Output: agent result JSON to **stdout**, or error JSON on failure
@@ -12,7 +12,6 @@ Output: agent result JSON to **stdout**, or error JSON on failure
 from __future__ import annotations
 
 import json
-import os
 import sys
 
 DEFAULT_ACTION_TIMEOUT = 600
@@ -45,8 +44,15 @@ def main() -> None:
         env_cfg["timeout"] = DEFAULT_ACTION_TIMEOUT
         env_cfg.setdefault("env", {})
         env_cfg["env"].setdefault("GIT_PAGER", "cat")
-        for key in ("image", "container_timeout", "run_args", "executable", "pull_timeout",
-                    "forward_env", "interpreter"):
+        for key in (
+            "image",
+            "container_timeout",
+            "run_args",
+            "executable",
+            "pull_timeout",
+            "forward_env",
+            "interpreter",
+        ):
             env_cfg.pop(key, None)
         env = LocalEnvironment(**env_cfg)
 
@@ -57,15 +63,17 @@ def main() -> None:
         model_defaults.pop("model_name", None)
         model_defaults.pop("model_kwargs", None)
         model_cfg = model_defaults
-        model_cfg.update({
-            "model_name": "openai/default",
-            "model_kwargs": {
-                "api_base": gateway_url,
-                "api_key": "not-needed",
-                "drop_params": True,
-            },
-            "cost_tracking": "ignore_errors",
-        })
+        model_cfg.update(
+            {
+                "model_name": "openai/default",
+                "model_kwargs": {
+                    "api_base": gateway_url,
+                    "api_key": "not-needed",
+                    "drop_params": True,
+                },
+                "cost_tracking": "ignore_errors",
+            }
+        )
         model = LitellmModel(**model_cfg)
 
         # 5. Create DefaultAgent

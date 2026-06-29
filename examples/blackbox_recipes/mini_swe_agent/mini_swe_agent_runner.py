@@ -1,6 +1,6 @@
 """Mini-swe-agent runner for the blackbox SWE-agent recipe.
 
-Agent runs inside a OpenYuanRong remote sandbox via sidecar tool image mount.
+Agent runs inside a remote sandbox via sidecar tool image mount.
 The runner creates the sandbox, pipes task config via stdin, parses
 the result from stdout, and evaluates reward in the same sandbox.
 """
@@ -15,21 +15,24 @@ import shlex
 import time
 from pathlib import Path
 
-from uni_agent.trainer.framework.types import SessionHandle, SessionRuntime
+import httpx
 
-from examples.swe_agent_blackbox.dataset import extract_image
-from examples.swe_agent_blackbox.reward import build_reward_context, evaluate_in_env
-from examples.swe_agent_blackbox.sandbox import CommandResult, YRSandbox, extract_upstream, rewrite_gateway_url
+from examples.blackbox_recipes.mini_swe_agent.dataset import extract_image
+from examples.blackbox_recipes.mini_swe_agent.reward import build_reward_context, evaluate_in_env
+from examples.blackbox_recipes.sandbox_client import (
+    SandboxClient,
+    extract_upstream,
+    rewrite_gateway_url,
+)
+from uni_agent.gateway.session import SessionHandle
 
 logger = logging.getLogger(__name__)
-if os.environ.get("DEBUG_MODE"):
-    logger.setLevel(logging.DEBUG)
 
 DEFAULT_TOOL_IMAGE = "swr.cn-east-3.myhuaweicloud.com/openyuanrong/mini-swe-agent-tool:latest"
 
 
 class SandboxEnvForReward:
-    """Adapts :class:`YRSandbox` to the async env interface used by
+    """Adapts :class:`Sandbox` to the async env interface used by
     reward specs (``communicate``, ``write_file``, ``read_file``).
     """
 
@@ -67,7 +70,7 @@ def _build_task_config(
 ) -> dict:
     """Build the task config passed to run_agent.py via stdin."""
     agent_gateway_url = rewrite_gateway_url(gateway_url)
-    step_limit = int(os.environ.get("SWE_AGENT_MAX_TURNS", "100"))
+    step_limit = int(os.environ.get("AGENT_MAX_TURNS", "100"))
     return {
         "task": task,
         "gateway_url": agent_gateway_url,
@@ -84,15 +87,20 @@ def build_agent_command(
 ) -> str:
     """Build the command that runs run_agent.py inside the sandbox."""
     conda_prefix = f"/opt/miniconda3/envs/{conda_env}"
-    env_prefix = (
+    run_agent_env = (
         f"CONDA_DEFAULT_ENV={shlex.quote(conda_env)} "
         f"CONDA_PREFIX={shlex.quote(conda_prefix)} "
-        f"PATH={shlex.quote(conda_prefix + '/bin')}:/opt/miniconda3/bin:$PATH"
+        f"PATH={shlex.quote(conda_prefix + '/bin')}:/opt/miniconda3/bin:$PATH "
+        "PIP_DISABLE_PIP_VERSION_CHECK=1 "
+        "PIP_PROGRESS_BAR=off"
     )
     return (
         "unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy NO_PROXY no_proxy; "
-        f"{env_prefix} "
-        f"echo {config_b64} | base64 -d | "
+        f"env {run_agent_env} sh -c 'echo \"[mini_swe] shell env: CONDA_DEFAULT_ENV=$CONDA_DEFAULT_ENV "
+        'CONDA_PREFIX=$CONDA_PREFIX PATH=$PATH" >&2; '
+        'echo "[mini_swe] python=$(command -v python) pip=$(command -v pip)" >&2\' ; '
+        f"printf %s {shlex.quote(config_b64)} | base64 -d | "
+        f"env {run_agent_env} "
         "/opt/mini-swe-agent/bin/python /opt/mini-swe-agent/bin/run_agent.py"
     )
 
@@ -102,21 +110,21 @@ async def mini_swe_agent_runner(
     raw_prompt,
     session: SessionHandle,
     sample_index: int,
-    session_runtime: SessionRuntime,
     tools_kwargs: dict | None = None,
     tool_image: str = DEFAULT_TOOL_IMAGE,
     run_timeout: int = 7200,
     conda_env: str = "testbed",
+    sandbox_max_retries: int = 10,
     **kwargs,
 ) -> None:
     """Run mini-swe-agent inside a sandbox with sidecar tool mount.
 
     Flow:
-        1. Create OpenYuanRong remote sandbox with mini-swe-agent sidecar
+        1. Create remote sandbox with mini-swe-agent sidecar
         2. Pipe task config to run_agent.py via stdin
         3. Parse agent result from stdout
         4. Evaluate reward in the same sandbox
-        5. Complete session with reward_info
+        5. Post reward_info for the framework reward path
     """
     tools_kwargs = tools_kwargs or {}
     logger.info("mini_swe_agent_runner called, sample_index=%d", sample_index)
@@ -130,14 +138,17 @@ async def mini_swe_agent_runner(
     if not image:
         raise ValueError(f"No sandbox image found in tools_kwargs.env for sample {sample_index}")
 
-    # Gateway URL — extract upstream for OpenYuanRong tunnel
+    # Gateway URL — extract upstream for tunnel
     gateway_url = session.base_url
     if not gateway_url:
         raise ValueError(f"gateway_url is empty for sample {sample_index}")
 
     upstream = extract_upstream(gateway_url)
-    sandbox = await YRSandbox.create(
-        image=image, sidecar_image=tool_image, upstream=upstream,
+    sandbox = await SandboxClient.create(
+        image=image,
+        sidecar_image=tool_image,
+        upstream=upstream,
+        max_retries=int(sandbox_max_retries),
     )
     sandbox_id = sandbox.sandbox_id
     logger.info("Sandbox created (image=%s, sandbox_id=%s)", image, sandbox_id)
@@ -168,14 +179,17 @@ async def mini_swe_agent_runner(
         elapsed = time.perf_counter() - t0
         logger.debug(
             "[sample %d] agent process finished: rc=%d (%.1fs)",
-            sample_index, agent_result.exit_code, elapsed,
+            sample_index,
+            agent_result.exit_code,
+            elapsed,
         )
 
         # Parse agent result from stdout
         agent_info = _parse_agent_result(agent_result.stdout, sample_index)
         logger.info(
             "[sample %d] agent: exit_status=%s, submission=%d chars",
-            sample_index, agent_info.get("exit_status"),
+            sample_index,
+            agent_info.get("exit_status"),
             len(agent_info.get("submission", "")),
         )
 
@@ -186,11 +200,18 @@ async def mini_swe_agent_runner(
         score, eval_result = await evaluate_in_env(reward_env, metadata, eval_timeout)
         logger.debug(
             "[sample %d] reward done: score=%s, resolved=%s (%.1fs)",
-            sample_index, score, eval_result.get("resolved"), time.perf_counter() - t0,
+            sample_index,
+            score,
+            eval_result.get("resolved"),
+            time.perf_counter() - t0,
         )
 
         reward_info = {"reward_score": score, **eval_result}
-        await session_runtime.complete_session(session.session_id, reward_info=reward_info)
+        if not session.reward_info_url:
+            raise ValueError(f"reward_info_url is empty for session {session.session_id}")
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(session.reward_info_url, json={"reward_info": reward_info})
+            response.raise_for_status()
 
     except Exception as e:
         logger.warning("Mini-swe-agent runner failed for sample %d (sandbox_id=%s): %s", sample_index, sandbox_id, e)
@@ -212,7 +233,7 @@ def _parse_agent_result(stdout: str, sample_index: int) -> dict:
     if not stdout:
         return {"exit_status": "error", "submission": ""}
     # Try the last line that looks like JSON first
-    lines = [l.strip() for l in stdout.split("\n") if l.strip()]
+    lines = [ln.strip() for ln in stdout.split("\n") if ln.strip()]
     for line in reversed(lines):
         if line.startswith("{"):
             try:

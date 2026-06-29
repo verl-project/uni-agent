@@ -1,8 +1,8 @@
-# Megatron + TQ fully-async training config for the blackbox SWE-agent recipe.
-# Uses FullyAsyncAgentFrameworkRolloutAdapter + SWEAgentFramework with Megatron backend.
+# Megatron + V1 unified trainer config for the blackbox mini-swe recipe.
 #
-# Entry point: python3 -m verl.experimental.fully_async_policy.fully_async_main
-# Requires: transfer_queue.enable=true (selects TQ path in FullyAsyncTaskRunner)
+# Entry point: python3 -m verl.trainer.main_ppo
+# Default trainer mode is separate_async. On a single 8-GPU node this recipe
+# uses 4 GPUs for trainer and 4 GPUs for standalone rollout.
 
 hydra:
   searchpath:
@@ -13,7 +13,7 @@ defaults:
   - _self_
 
 actor_rollout_ref:
-  hybrid_engine: false
+  hybrid_engine: true
   nccl_timeout: 9600
 
   model:
@@ -22,13 +22,16 @@ actor_rollout_ref:
   rollout:
     name: vllm
     mode: async
+    nnodes: 1
+    n_gpus_per_node: 4
     prompt_length: 4096
     response_length: 131072
     max_model_len: 135168
     temperature: 1.0
     top_p: 1.0
+    top_k: -1
     n: 8
-    tensor_model_parallel_size: 2
+    tensor_model_parallel_size: 4
     gpu_memory_utilization: 0.7
     calculate_log_probs: true
     enable_sleep_mode: true
@@ -37,26 +40,29 @@ actor_rollout_ref:
     max_num_batched_tokens: 135168
     checkpoint_engine:
       backend: nccl
+      update_weights_bucket_megabytes: 2048
 
     multi_turn:
       enable: true
-      max_assistant_turns: 1
       max_parallel_calls: 1
       format: qwen3_coder
 
     agent:
       num_workers: 8
-      agent_loop_manager_class: uni_agent.trainer.framework.entry.FullyAsyncAgentFrameworkRolloutAdapter
+      agent_loop_manager_class: uni_agent.framework.entry.AgentFrameworkRolloutAdapter
 
     custom:
       agent_framework:
-        framework_class_fqn: examples.swe_agent_blackbox.framework.SWEAgentFramework
-        agent_runner_fqn: examples.swe_agent_blackbox.mini_swe_agent_runner.mini_swe_agent_runner
         gateway_count: 1
-        completion_timeout_seconds: 600
-        max_concurrent_sessions: 32
-        agent_runner_kwargs:
-          agent_config_path: examples/swe_agent_blackbox/config/agent_config.yaml
+        agent_runners:
+          swe_agent:
+            runner_fqn: examples.blackbox_recipes.mini_swe_agent.mini_swe_agent_runner.mini_swe_agent_runner
+            dispatch_mode: ray_task
+            max_concurrent_sessions: 32
+            runner_kwargs:
+              tool_image: swr.cn-east-3.myhuaweicloud.com/openyuanrong/mini-swe-agent-tool:latest
+              run_timeout: 3600
+              conda_env: testbed
 
   actor:
     use_dynamic_bsz: true
@@ -78,16 +84,17 @@ actor_rollout_ref:
       param_offload: true
       grad_offload: true
       optimizer_offload: true
-      tensor_model_parallel_size: 8
+      tensor_model_parallel_size: 4
       pipeline_model_parallel_size: 1
       context_parallel_size: 1
       use_mbridge: true
       use_remove_padding: false
 
   ref:
+    log_prob_micro_batch_size_per_gpu: 1
     megatron:
       param_offload: false
-      tensor_model_parallel_size: 8
+      tensor_model_parallel_size: 4
       pipeline_model_parallel_size: 1
       context_parallel_size: 1
 
@@ -98,12 +105,14 @@ data:
   truncation: left
   max_prompt_length: 4096
   max_response_length: 131072
-  train_batch_size: 0
+  train_batch_size: 1
+  val_batch_size: 1
   gen_batch_size: 1
   return_raw_chat: true
   trust_remote_code: true
+  dataloader_num_workers: 0
   custom_cls:
-    path: pkg://examples.swe_agent_blackbox.dataset
+    path: pkg://examples.blackbox_recipes.mini_swe_agent.dataset
     name: SWEBenchDataset
 
 algorithm:
@@ -119,13 +128,14 @@ algorithm:
 
 reward:
   custom_reward_function:
-    path: pkg://examples.swe_agent_blackbox.reward
+    path: pkg://examples.blackbox_recipes.mini_swe_agent.reward
     name: compute_score
 
 trainer:
   nnodes: 1
-  n_gpus_per_node: 8
+  n_gpus_per_node: 4
   total_epochs: 10
+  total_training_steps: null
   project_name: swe_agent_blackbox
   experiment_name: swe_agent
   logger:
@@ -137,18 +147,14 @@ trainer:
   test_freq: 10
   default_local_dir: checkpoints/swe_agent_blackbox
   resume_mode: auto
-
-rollout:
-  nnodes: 1
-  n_gpus_per_node: 8
-  total_rollout_steps: 100000
-
-async_training:
-  use_trainer_do_validate: false
-  staleness_threshold: 1.0
-  trigger_parameter_sync_step: 4
-  require_batches: 1
-  partial_rollout: true
+  use_v1: true
+  v1:
+    trainer_mode: separate_async
+    colocate_async:
+      num_warmup_batches: 1
+    separate_async:
+      num_warmup_batches: 4
+      parameter_sync_step: 4
 
 transfer_queue:
   enable: true
