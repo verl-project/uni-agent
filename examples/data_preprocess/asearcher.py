@@ -19,6 +19,16 @@ Adapted from asearcher/preprocess_asearcher.py for the uni-agent framework:
   - agent_name is set to "search_agent" (matching agent_config.yaml)
   - ground_truth is placed in tools_kwargs["reward"] for SearchRewardSpec
   - system prompt instructs the model to use search + finish tools
+
+If ``--input_json`` is omitted, the filtered ASearcher dataset
+(``aidenjhwu/ASearcher_en_no-math_Qwen3-8B-reject-sample``) is downloaded from
+HuggingFace automatically. That dataset is derived from the original
+``inclusionAI/ASearcher-train-data`` with Chinese samples and math problems
+removed and reject sampling applied, and it already ships in the nested
+``extra_info`` schema this script expects. To preprocess the original
+(unfiltered) ASearcher data instead, write a separate preprocessing script: its
+records use a different, flat schema (top-level ``question``/``answer``) that
+this script does not handle.
 """
 
 import argparse
@@ -29,6 +39,10 @@ import pandas as pd
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
+
+# Filtered ASearcher dataset used by default when no local --input_json is given.
+HF_FILTERED_REPO = "aidenjhwu/ASearcher_en_no-math_Qwen3-8B-reject-sample"
+HF_FILTERED_FILE = "ASearcher_en_nomath_rejectsample.json"
 
 DEFAULT_SYSTEM_CONTENT = (
     "You are an expert research assistant. Your goal is to answer the user's question by thoroughly "
@@ -117,12 +131,22 @@ def _read_input_as_dataframe(json_path: str) -> pd.DataFrame:
         return pd.read_json(json_path, lines=True)
 
 
+def _load_filtered_dataset() -> pd.DataFrame:
+    """Download the filtered ASearcher dataset from HuggingFace as a DataFrame."""
+    from datasets import load_dataset
+
+    logger.info(f"Downloading {HF_FILTERED_REPO}:{HF_FILTERED_FILE} from HuggingFace...")
+    dataset = load_dataset(HF_FILTERED_REPO, data_files=HF_FILTERED_FILE, split="train")
+    return dataset.to_pandas()
+
+
 def main():
     parser = argparse.ArgumentParser(description="Preprocess ASearcher JSON/JSONL dataset for uni-agent training.")
     parser.add_argument(
         "--input_json",
-        required=True,
-        help="Path to raw ASearcher JSON or JSONL file.",
+        default=None,
+        help="Path to raw ASearcher JSON or JSONL file. If omitted, the filtered dataset "
+        f"({HF_FILTERED_REPO}) is downloaded from HuggingFace.",
     )
     parser.add_argument(
         "--local_save_dir",
@@ -143,12 +167,16 @@ def main():
     )
     args = parser.parse_args()
 
-    input_json_path = os.path.expanduser(args.input_json)
     local_save_dir = os.path.expanduser(args.local_save_dir)
     os.makedirs(local_save_dir, exist_ok=True)
 
-    df_raw = _read_input_as_dataframe(input_json_path)
-    logger.info(f"Loaded {len(df_raw)} records from {input_json_path}")
+    if args.input_json:
+        input_json_path = os.path.expanduser(args.input_json)
+        df_raw = _read_input_as_dataframe(input_json_path)
+        logger.info(f"Loaded {len(df_raw)} records from {input_json_path}")
+    else:
+        df_raw = _load_filtered_dataset()
+        logger.info(f"Loaded {len(df_raw)} records from {HF_FILTERED_REPO}")
 
     total_needed = args.train_rows + args.test_rows
     if len(df_raw) < total_needed:

@@ -1,36 +1,80 @@
-"""Abstract base class for scaffold tools."""
+"""Tool layer: host-side tools, each a schema plus a (possibly stateful) ``run``.
 
-from abc import ABC, abstractmethod
-from pathlib import Path
-from typing import Any, Literal
+The agent runs *outside* the task image. A :class:`Tool` is the single
+agent-facing unit: a schema (what the model sees) plus an async :meth:`run` that
+drives the container through the :class:`~uni_agent.sandbox.SandboxBackend` data
+plane (``exec`` / ``read_file`` / ``write_file`` / ...). A tool is constructed
+with its sandbox and *owns* whatever state it needs:
+
+* **Stateless tools** (e.g. the editor) just read/write the data plane; their
+  only state is incidental (the editor's undo history lives on the instance).
+* **Stateful tools** (e.g. ``shell``) hold a live channel -- a persistent
+  shell/browser/desktop handle -- as a private attribute, opened lazily on first
+  use and torn down in :meth:`close`. There is no separate "session" layer: the
+  stateful part of a tool *is* the channel it keeps open.
+
+Every :meth:`run` returns a normalized :class:`Observation` (text and/or an
+image plus structured extras), so a multimodal agent loop never special-cases a
+modality: a shell tool fills ``text``, a browser/desktop tool fills ``image``.
+Bind a selection of tools to a sandbox with :class:`Toolbox`.
+"""
+
+from __future__ import annotations
+
+import abc
+import dataclasses
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from pydantic import BaseModel
 
-
-class ToolFunctionSchema(BaseModel):
-    name: str
-    description: str
-    parameters: dict[str, Any]
+if TYPE_CHECKING:
+    from ..sandbox import SandboxBackend
 
 
-class ToolSchema(BaseModel):
-    type: Literal["function"]
-    function: ToolFunctionSchema
+@dataclasses.dataclass
+class Observation:
+    """A normalized result of one tool call.
+
+    One shape for every modality: terminal text, a screenshot, and any
+    structured extras (exit code, url, cursor position) funnel through here so
+    the agent loop never special-cases the transport. ``str(obs)`` yields the
+    text channel for convenience.
+    """
+
+    text: str | None = None
+    image: bytes | None = None
+    structured: dict | None = None
+    meta: dict | None = None
+
+    def __str__(self) -> str:
+        return self.text if self.text is not None else ""
+
+
+class ToolError(Exception):
+    """Raised by a tool for a user-facing failure.
+
+    :meth:`Toolbox.call` turns this into an ``"Error: ..."`` observation handed
+    back to the model, instead of crashing the rollout. Use it for bad arguments
+    / expected failures; let genuine bugs propagate.
+    """
 
 
 def _normalize_json_schema(value: Any) -> Any:
-    """Normalize Pydantic JSON Schema for tool runtime usage."""
+    """Normalize Pydantic JSON Schema into the shape tool runtimes expect.
+
+    Drops ``title``, collapses ``Optional[...]`` ``anyOf`` down to the non-null
+    variant, removes ``default: null`` and applies a stable key order, yielding
+    the standard OpenAI function-call parameter schema.
+    """
     if isinstance(value, list):
         return [_normalize_json_schema(item) for item in value]
-
     if not isinstance(value, dict):
         return value
 
-    normalized = {}
+    normalized: dict[str, Any] = {}
     for key, item in value.items():
         if key == "title":
             continue
-
         normalized_item = _normalize_json_schema(item)
         if key == "default" and normalized_item is None:
             continue
@@ -50,7 +94,7 @@ def _normalize_json_schema(value: Any) -> Any:
             normalized = merged
 
     preferred_order = ("type", "description", "enum", "default", "items", "properties", "required")
-    ordered = {}
+    ordered: dict[str, Any] = {}
     for key in preferred_order:
         if key in normalized:
             ordered[key] = normalized.pop(key)
@@ -58,54 +102,148 @@ def _normalize_json_schema(value: Any) -> Any:
     return ordered
 
 
-class AbstractTool(ABC):
-    """Abstract tool definition with description and install command."""
+def build_function_schema(name: str, description: str, model: type[BaseModel]) -> dict:
+    """Build an OpenAI-compatible function schema from a Pydantic args model."""
+    return {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": description,
+            "parameters": _normalize_json_schema(model.model_json_schema()),
+        },
+    }
 
-    copy_to_remote: bool = True
-    """Whether ``install_tools`` should copy ``local_path`` into the runtime.
 
-    True (default): framework-shipped tool scripts that get pushed to
-    ``install_dir/<name>``. False: *system tools* whose binary the user
-    installs separately and is already on PATH inside the runtime (e.g.
-    ``lark-cli`` via ``npm install -g``, ``gh`` via apt). When False,
-    ``install_tools`` skips copy+chmod and only runs ``get_install_command()``
-    + ``which <name>`` as a presence check; ``local_path`` is ignored.
+class Tool(abc.ABC):
+    """A host-side tool: a schema plus an async :meth:`run` over the sandbox.
+
+    Subclasses set :attr:`name` / :attr:`description` / :attr:`args_model` (the
+    per-call args the model fills, so the default :meth:`schema` works) and
+    implement :meth:`run`. A tool also declares its *construction* options via
+    :attr:`config_model`: a tool is built with its sandbox plus keyword args, and
+    the base auto-parses those kwargs through ``config_model`` into ``self.config``
+    (typed, defaulted, validated). e.g. the shell tool's ``env_vars`` /
+    ``command_timeout`` come from its config. Stateful tools open a channel lazily
+    and release it in :meth:`close`.
     """
 
-    @property
-    @abstractmethod
-    def name(self) -> str:
-        """Tool name (e.g. execute_bash, str_replace_editor, submit)."""
+    name: ClassVar[str] = ""
+    description: ClassVar[str] = ""
+    args_model: ClassVar[type[BaseModel] | None] = None
+    #: Pydantic schema for this tool's construction kwargs (a tools entry's kwargs).
+    #: ``None`` means the tool takes no kwargs beyond the sandbox.
+    config_model: ClassVar[type[BaseModel] | None] = None
+
+    def __init__(self, sandbox: SandboxBackend, **kwargs: Any):
+        self.sandbox = sandbox
+        if self.config_model is not None:
+            # Auto-parse: raw kwargs -> typed, validated config object.
+            self.config: BaseModel | None = self.config_model(**kwargs)
+        elif kwargs:
+            raise TypeError(
+                f"{type(self).__name__} takes no tool kwargs, got {sorted(kwargs)}"
+            )
+        else:
+            self.config = None
+
+    def schema(self) -> dict:
+        """Return the OpenAI function schema shown to the model."""
+        if self.args_model is None:
+            raise NotImplementedError(
+                f"{type(self).__name__} must set `args_model` or override schema()"
+            )
+        return build_function_schema(self.name, self.description, self.args_model)
+
+    @classmethod
+    def config_schema(cls) -> dict | None:
+        """JSON schema for this tool's construction kwargs, or ``None`` if it has none."""
+        return cls.config_model.model_json_schema() if cls.config_model is not None else None
+
+    @abc.abstractmethod
+    async def run(self, args: dict[str, Any]) -> Observation:
+        """Execute the call and return an :class:`Observation` for the model.
+
+        Drive the container through ``self.sandbox`` (and any channel the tool
+        holds). Raise :class:`ToolError` for user-facing failures.
+        """
         ...
 
-    @property
-    def local_path(self) -> Path | None:
-        """Local script to copy into the runtime as ``install_dir/<name>``.
-        Must point at an existing file when ``copy_to_remote`` is True;
-        ignored (and may stay ``None``) otherwise.
-        """
+    async def close(self) -> None:
+        """Release any state the tool holds (open channels). No-op by default."""
         return None
 
-    @abstractmethod
-    def get_tool_schema(self) -> dict:
-        """
-        OpenAI tool schema: { \"type\": \"function\", \"function\": { ... } }.
-        """
-        ...
 
-    def build_tool_schema(self, description: str, arguments_model: type[BaseModel]) -> dict:
-        """Build an OpenAI-compatible tool schema from a Pydantic arguments model."""
-        parameters = _normalize_json_schema(arguments_model.model_json_schema())
-        return ToolSchema(
-            type="function",
-            function=ToolFunctionSchema(
-                name=self.name,
-                description=description,
-                parameters=parameters,
-            ),
-        ).model_dump()
+TOOL_REGISTRY: dict[str, type[Tool]] = {}
 
-    @abstractmethod
-    def get_install_command(self) -> str | None:
-        """Command to run in container to complete tool installation. Return None if no extra install step."""
-        ...
+
+def register_tool(name: str):
+    """Class decorator: register ``cls`` under ``name`` (and stamp ``cls.name``)."""
+
+    def decorator(cls: type[Tool]) -> type[Tool]:
+        if name in TOOL_REGISTRY and TOOL_REGISTRY[name] is not cls:
+            raise ValueError(
+                f"Tool {name!r} already registered: {TOOL_REGISTRY[name]!r} vs {cls!r}"
+            )
+        cls.name = name
+        TOOL_REGISTRY[name] = cls
+        return cls
+
+    return decorator
+
+
+def get_tool(name: str, sandbox: SandboxBackend) -> Tool:
+    """Instantiate a registered tool by name, bound to ``sandbox``."""
+    if name not in TOOL_REGISTRY:
+        raise KeyError(f"Unknown tool: {name!r}")
+    return TOOL_REGISTRY[name](sandbox)
+
+
+class Toolbox:
+    """A set of instantiated tools bound to one sandbox for a rollout.
+
+    Holds tool *instances* (each already bound to the sandbox and owning its own
+    state) so stateful tools keep state across calls. Exposes the model-facing
+    :meth:`schemas`, a single :meth:`call` dispatch the agent loop drives, and an
+    ordered :meth:`close`.
+    """
+
+    def __init__(self, tools: list[Tool]):
+        self._tools: dict[str, Tool] = {}
+        for tool in tools:
+            self._tools[tool.name] = tool
+
+    @classmethod
+    def from_names(cls, names: list[str], *, sandbox: SandboxBackend) -> Toolbox:
+        """Build a toolbox from registered tool names, each bound to ``sandbox``."""
+        return cls([get_tool(n, sandbox) for n in names])
+
+    @classmethod
+    def all(cls, *, sandbox: SandboxBackend) -> Toolbox:
+        """Build a toolbox from every registered tool, each bound to ``sandbox``."""
+        return cls([t(sandbox) for t in TOOL_REGISTRY.values()])
+
+    def names(self) -> list[str]:
+        return list(self._tools)
+
+    def schemas(self) -> list[dict]:
+        """OpenAI function schemas for every tool (pass straight to the model)."""
+        return [tool.schema() for tool in self._tools.values()]
+
+    async def call(self, name: str, args: dict[str, Any] | None = None) -> Observation:
+        """Dispatch one tool call, returning the :class:`Observation` for the model."""
+        tool = self._tools.get(name)
+        if tool is None:
+            return Observation(text=f"Error: unknown tool {name!r}. Available: {', '.join(self._tools)}")
+        try:
+            obs = await tool.run(dict(args or {}))
+        except ToolError as exc:
+            return Observation(text=f"Error: {exc}")
+        return obs if isinstance(obs, Observation) else Observation(text=str(obs))
+
+    async def close(self) -> None:
+        """Close every tool (release open channels); never raises."""
+        for tool in self._tools.values():
+            try:
+                await tool.close()
+            except Exception:
+                pass
