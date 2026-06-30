@@ -29,9 +29,7 @@ def register_agent(name: str) -> Callable[[type[Agent]], type[Agent]]:
 
     def decorator(cls: type[Agent]) -> type[Agent]:
         if name in AGENT_REGISTRY and AGENT_REGISTRY[name] is not cls:
-            raise ValueError(
-                f"Agent {name!r} already registered: {AGENT_REGISTRY[name]!r} vs {cls!r}"
-            )
+            raise ValueError(f"Agent {name!r} already registered: {AGENT_REGISTRY[name]!r} vs {cls!r}")
         cls.name = name
         AGENT_REGISTRY[name] = cls
         return cls
@@ -48,8 +46,7 @@ def _load_agent_module(name: str) -> None:
         import_module(module_name)
     except ImportError as exc:
         raise ImportError(
-            f"Failed to import agent {name!r} from {module_name!r}. "
-            f"Install the optional dependencies it needs."
+            f"Failed to import agent {name!r} from {module_name!r}. Install the optional dependencies it needs."
         ) from exc
 
 

@@ -70,7 +70,6 @@ class SWEBenchTask(Task):
         # Sandbox lifecycle via async-with: __aenter__ starts it (cleaning up if
         # start fails), __aexit__ always stops it -- same guarantees as try/finally.
         async with self.build_sandbox() as sandbox:
-
             # Gateway session lifecycle: create -> run agent -> finalize (abort on error).
             session = await gateway.create_session(session_id)
             try:

@@ -28,9 +28,7 @@ class ClaudeCodeConfig(AgentConfig):
     """Black-box launch params for Claude Code, pointed at the gateway session."""
 
     name: str = "claude_code"
-    command: list[str] = Field(
-        default_factory=lambda: ["claude", "-p"], description="Launch argv inside the sandbox."
-    )
+    command: list[str] = Field(default_factory=lambda: ["claude", "-p"], description="Launch argv inside the sandbox.")
     model: str | None = Field(default="claude-sonnet-4", description="Model the agent should use.")
     max_turns: int | None = Field(default=50, description="Turn budget passed to the agent.")
     allowed_tools: list[str] = Field(
@@ -43,15 +41,9 @@ class ClaudeCodeConfig(AgentConfig):
         default="ANTHROPIC_BASE_URL",
         description="Env var the CLI reads for its API base; set to session.base_url.",
     )
-    api_key_env: str = Field(
-        default="ANTHROPIC_API_KEY", description="Env var the CLI reads for its API key."
-    )
-    api_key: str = Field(
-        default="EMPTY", description="API key value (the self-hosted gateway accepts any non-empty)."
-    )
-    env: dict[str, str] = Field(
-        default_factory=dict, description="Extra env vars injected into the launched process."
-    )
+    api_key_env: str = Field(default="ANTHROPIC_API_KEY", description="Env var the CLI reads for its API key.")
+    api_key: str = Field(default="EMPTY", description="API key value (the self-hosted gateway accepts any non-empty).")
+    env: dict[str, str] = Field(default_factory=dict, description="Extra env vars injected into the launched process.")
 
 
 @register_agent("claude_code")
@@ -89,6 +81,4 @@ class ClaudeCodeAgent(Agent):
         # No client-side timeout: the sandbox's runtime_timeout bounds the run.
         proc = await sandbox.exec(argv, env=env)
         patch = (await sandbox.exec_shell("git diff")).stdout
-        return AgentResult(
-            output={"patch": patch, "agent_stdout": proc.stdout, "exit_code": proc.exit_code}
-        )
+        return AgentResult(output={"patch": patch, "agent_stdout": proc.stdout, "exit_code": proc.exit_code})

@@ -29,9 +29,7 @@ def register_sandbox(name: str) -> Callable[[type[Sandbox]], type[Sandbox]]:
 
     def decorator(cls: type[Sandbox]) -> type[Sandbox]:
         if name in SANDBOX_REGISTRY and SANDBOX_REGISTRY[name] is not cls:
-            raise ValueError(
-                f"Sandbox provider {name!r} already registered: {SANDBOX_REGISTRY[name]!r} vs {cls!r}"
-            )
+            raise ValueError(f"Sandbox provider {name!r} already registered: {SANDBOX_REGISTRY[name]!r} vs {cls!r}")
         cls.provider = name
         SANDBOX_REGISTRY[name] = cls
         return cls
