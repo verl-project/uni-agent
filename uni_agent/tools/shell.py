@@ -1,10 +1,11 @@
 """``shell`` tool + the stateful shell channel it owns, in one place.
 
-The agent-facing unit is :class:`ShellTool` (registered as ``shell``): it holds a
-live shell channel -- a detached tmux shell -- opened lazily on first use and torn
-down in :meth:`ShellTool.close`. Commands run in that one shell, so cwd / exports /
-background jobs persist across calls (a ``cd`` sticks). The agent runs on the host;
-only the command text crosses into the container.
+The agent-facing unit is :class:`ShellTool` (registry key ``stateful_shell``,
+surfaced to the model as ``shell``): it holds a live shell channel -- a detached
+tmux shell -- opened lazily on first use and torn down in :meth:`ShellTool.close`.
+Commands run in that one shell, so cwd / exports / background jobs persist across
+calls (a ``cd`` sticks). The agent runs on the host; only the command text crosses
+into the container.
 
 The channel itself (:class:`ShellChannel`) is an implementation detail of the
 tool, not an agent-facing layer:
@@ -327,8 +328,10 @@ class ShellToolConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-@register_tool("shell")
+@register_tool("stateful_shell")
 class ShellTool(Tool):
+    # Registry key is ``stateful_shell`` (config / TOOL_REGISTRY); the model
+    # still sees this tool as ``shell`` via the explicit ``name`` below.
     name = "shell"
     description = DESCRIPTION
     args_model = ShellArguments

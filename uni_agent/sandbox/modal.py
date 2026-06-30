@@ -1,11 +1,16 @@
 """Modal sandbox: one class that creates a Modal sandbox and drives it.
 
 Merges lifecycle (``start`` creates a ``sleep infinity`` sandbox, ``stop``
-terminates it) with the data plane (``exec`` over ``modal.Sandbox.exec``, native
-binary-safe ``upload`` / ``download``). ``modal`` is imported lazily inside
-:meth:`start`, so this module imports fine where ``modal`` isn't installed; an
-already-created handle can be wrapped via :meth:`from_handle` (warm pools, or a
-sandbox booted by another service) without owning its lifecycle.
+terminates it) with the data plane, on Modal's v1.4+ API: ``exec`` runs an argv
+vector with per-call ``workdir`` / ``env`` / ``timeout``, and file transfer uses
+the native ``filesystem`` channel (``read_bytes`` / ``write_bytes`` /
+``copy_from_local`` / ``copy_to_local``) -- binary-safe, streamed, and without
+the base64-over-exec floor's argument-size limits. ``modal`` is imported lazily
+inside :meth:`start`, so this module imports fine where ``modal`` isn't
+installed.
+
+See https://modal.com/docs/guide/sandbox-spawn and
+https://modal.com/docs/guide/sandbox-files.
 """
 
 from __future__ import annotations
@@ -37,25 +42,11 @@ class ModalSandbox(Sandbox):
         self.modal_sandbox_kwargs = dict(modal_sandbox_kwargs or {})
         self._app = None
         self._sandbox: modal.Sandbox | None = None
-        self._owns_sandbox = True
-
-    @classmethod
-    def from_handle(cls, sandbox: modal.Sandbox) -> ModalSandbox:
-        """Wrap an already-created Modal sandbox without owning its lifecycle.
-
-        ``start`` becomes a no-op and ``stop`` will not terminate the sandbox --
-        use this to attach to a warm-pool / externally-booted sandbox and drive
-        it (exec + files + sessions) while leaving teardown to its owner.
-        """
-        inst = cls()
-        inst._sandbox = sandbox
-        inst._owns_sandbox = False
-        return inst
 
     # ----- control plane -----
     async def start(self) -> None:
         if self._sandbox is not None:
-            return  # already attached (from_handle) or started
+            return  # already started
         import modal
 
         self._app = await modal.App.lookup.aio(self.app_name, create_if_missing=True)
@@ -70,7 +61,7 @@ class ModalSandbox(Sandbox):
         )
 
     async def stop(self) -> None:
-        if self._sandbox is not None and self._owns_sandbox:
+        if self._sandbox is not None:
             try:
                 if await self._sandbox.poll.aio() is None:
                     await self._sandbox.terminate.aio()
@@ -80,7 +71,7 @@ class ModalSandbox(Sandbox):
 
     def _require_sandbox(self) -> modal.Sandbox:
         if self._sandbox is None:
-            raise RuntimeError("ModalSandbox not started; call start() or use from_handle()")
+            raise RuntimeError("ModalSandbox not started; call start() first")
         return self._sandbox
 
     # ----- data plane -----
@@ -92,15 +83,14 @@ class ModalSandbox(Sandbox):
         workdir: str | None = None,
         env: dict[str, str] | None = None,
     ) -> ExecResult:
-        sandbox = self._require_sandbox()
-        # Modal exec has no portable env kwarg across versions; inject via the
-        # shell-free ``env`` binary so quoting stays the caller's concern.
-        if env:
-            argv = ["env", *(f"{key}={value}" for key, value in env.items()), *argv]
-        proc = await sandbox.exec.aio(
+        # ``Sandbox.exec`` takes the argv vector directly (no implicit shell) and
+        # accepts per-call workdir / env / timeout. stdout & stderr default to
+        # in-memory PIPEs; drain both concurrently, then collect the exit code.
+        proc = await self._require_sandbox().exec.aio(
             *argv,
-            workdir=workdir,
             timeout=int(timeout) if timeout else None,
+            workdir=workdir,
+            env=env or None,
         )
 
         async def _read(stream) -> str:
@@ -109,24 +99,37 @@ class ModalSandbox(Sandbox):
             except Exception:
                 return ""
 
-        out_task = asyncio.create_task(_read(proc.stdout))
-        err_task = asyncio.create_task(_read(proc.stderr))
+        stdout, stderr = await asyncio.gather(_read(proc.stdout), _read(proc.stderr))
         exit_code = await proc.wait.aio()
-        return ExecResult(exit_code=int(exit_code or 0), stdout=await out_task, stderr=await err_task)
+        return ExecResult(exit_code=int(exit_code or 0), stdout=stdout, stderr=stderr)
 
-    async def upload(self, local_path: Path | str, remote_path: str) -> None:
-        # Native Modal filesystem copy: streams the file, creates the remote
-        # parent dirs, and overwrites. ``remote_path`` must be absolute.
-        # (Directories go through the base ``upload_dir`` tar path.)
-        src = Path(local_path)
-        if src.is_dir():
-            raise IsADirectoryError(f"upload expects a file; use upload_dir() for {src}")
-        await self._require_sandbox().filesystem.copy_from_local.aio(str(src), remote_path)
+    async def read_file(self, path: str) -> bytes:
+        # ``read_bytes`` streams the file. The filesystem API is absolute-only, so
+        # relative paths fall back to the exec-based floor (resolved against the
+        # sandbox cwd).
+        if not path.startswith("/"):
+            return await super().read_file(path)
+        return await self._require_sandbox().filesystem.read_bytes.aio(path)
 
-    async def download(self, remote_path: str, local_path: Path | str) -> None:
-        # Native Modal filesystem copy: streams to a temp file then atomically
-        # renames, and creates local parent dirs. ``remote_path`` must be absolute.
-        await self._require_sandbox().filesystem.copy_to_local.aio(remote_path, str(local_path))
+    async def write_file(self, path: str, content: bytes | str) -> None:
+        # ``write_bytes`` streams the content (no shell-arg size limit, unlike the
+        # base64 floor) and creates parent dirs. Absolute-only; relative paths
+        # fall back to the exec-based floor.
+        if not path.startswith("/"):
+            return await super().write_file(path, content)
+        data = content.encode("utf-8") if isinstance(content, str) else content
+        await self._require_sandbox().filesystem.write_bytes.aio(data, path)
+
+    async def upload_file(self, local_file: Path | str, remote_file: str) -> None:
+        # Native streamed copy: creates remote parent dirs and overwrites.
+        # ``remote_file`` must be absolute. Directory trees are handled by the
+        # base ``upload`` dispatcher (tar), which routes the archive here.
+        await self._require_sandbox().filesystem.copy_from_local.aio(str(local_file), remote_file)
+
+    async def download_file(self, remote_file: str, local_file: Path | str) -> None:
+        # Native streamed copy to a temp file then atomic rename; creates local
+        # parent dirs. ``remote_file`` must be absolute.
+        await self._require_sandbox().filesystem.copy_to_local.aio(remote_file, str(local_file))
 
     async def expose_port(self, port: int) -> str:
         # Modal requires ports to be declared via ``encrypted_ports`` at sandbox

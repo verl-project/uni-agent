@@ -17,8 +17,9 @@ session layer. Bind a selection of tools to a sandbox with :class:`Toolbox`::
         print(obs.text)
         await tools.close()                             # release open channels
 
-Importing this package registers the built-in tools (``shell``,
-``str_replace_editor``) in :data:`TOOL_REGISTRY`.
+Importing this package registers the built-in tools (under registry keys
+``stateful_shell`` and ``str_replace_editor``) in :data:`TOOL_REGISTRY`; the
+shell tool is surfaced to the model as ``shell``.
 """
 
 from __future__ import annotations

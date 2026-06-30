@@ -7,7 +7,7 @@ Mirrors the YAML shape::
         provider: local | vefaas | modal
         runtime_timeout: 3600
       tools:
-        - name: shell           # name + tool-specific kwargs as siblings
+        - name: stateful_shell  # registry key (model sees it as `shell`)
           command_timeout: 120  # shell's per-command timeout (seconds)
           env_vars:
             PAGER: cat

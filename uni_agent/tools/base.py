@@ -177,14 +177,22 @@ TOOL_REGISTRY: dict[str, type[Tool]] = {}
 
 
 def register_tool(name: str):
-    """Class decorator: register ``cls`` under ``name`` (and stamp ``cls.name``)."""
+    """Class decorator: register ``cls`` under the registry key ``name``.
+
+    The registry key (used in config and :func:`get_tool`) is independent of the
+    model-facing :attr:`Tool.name`. If the class doesn't set its own ``name``, the
+    registry key is stamped as the default; a class that sets ``name`` explicitly
+    keeps it -- e.g. ``stateful_shell`` registers a tool the model still sees as
+    ``shell``.
+    """
 
     def decorator(cls: type[Tool]) -> type[Tool]:
         if name in TOOL_REGISTRY and TOOL_REGISTRY[name] is not cls:
             raise ValueError(
                 f"Tool {name!r} already registered: {TOOL_REGISTRY[name]!r} vs {cls!r}"
             )
-        cls.name = name
+        if not cls.__dict__.get("name"):
+            cls.name = name
         TOOL_REGISTRY[name] = cls
         return cls
 

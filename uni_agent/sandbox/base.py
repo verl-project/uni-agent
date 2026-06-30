@@ -33,7 +33,7 @@ import uuid
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
-from .tar_transfer import (
+from .utils import (
     extract_dir_from_file,
     pack_dir_to_file,
     remote_pack_command,
@@ -96,10 +96,6 @@ class SandboxBackend(Protocol):
     async def upload(self, local_path: Path | str, remote_path: str) -> None: ...
 
     async def download(self, remote_path: str, local_path: Path | str) -> None: ...
-
-    async def upload_dir(self, local_dir: Path | str, remote_dir: str) -> None: ...
-
-    async def download_dir(self, remote_dir: str, local_dir: Path | str) -> None: ...
 
     async def expose_port(self, port: int) -> str: ...
 
@@ -183,71 +179,80 @@ class Sandbox(abc.ABC):
             raise RuntimeError(f"write_file {path!r} failed: {res.stderr.strip()}")
 
     async def upload(self, local_path: Path | str, remote_path: str) -> None:
-        """Upload a host file into the sandbox.
+        """Upload a host file *or* directory tree into the sandbox.
 
-        Floor: inline the bytes through :meth:`write_file`. Fine for small/medium
-        files; large blobs want a provider-native override, and whole trees go
-        through :meth:`upload_dir`.
+        A file goes through :meth:`upload_file`. A directory is packed into one
+        gzipped tar locally, shipped as that single archive, and unpacked into
+        ``remote_path`` -- preserving modes / symlinks / empty dirs and avoiding
+        a round-trip per file (needs ``tar`` and ``gzip`` in the sandbox image).
         """
         src = Path(local_path)
         if src.is_dir():
-            raise IsADirectoryError(f"{type(self).__name__}.upload expects a file; use upload_dir() for {src}")
-        await self.write_file(remote_path, src.read_bytes())
+            await self._upload_tree(src, str(remote_path))
+        else:
+            await self.upload_file(src, str(remote_path))
 
     async def download(self, remote_path: str, local_path: Path | str) -> None:
-        """Download a sandbox file to the host (floor: via :meth:`read_file`)."""
-        data = await self.read_file(remote_path)
-        dst = Path(local_path)
+        """Download a sandbox file *or* directory tree to the host.
+
+        The remote path's type is probed once (``test -d``): a file goes through
+        :meth:`download_file`; a directory is archived in the sandbox, pulled as
+        one archive, and extracted locally (tar's ``data`` filter guards against
+        path traversal). Directory transfer needs ``tar`` and ``gzip``.
+        """
+        remote = str(remote_path)
+        if (await self.exec_shell(f"test -d {shlex.quote(remote)}")).exit_code == 0:
+            await self._download_tree(remote, local_path)
+        else:
+            await self.download_file(remote, local_path)
+
+    # ----- single-file transfer: floor over read/write; provider override seam -----
+    async def upload_file(self, local_file: Path | str, remote_file: str) -> None:
+        """Upload one host file into the sandbox (floor: inline via :meth:`write_file`).
+
+        The override point for a provider-native single-file fast path. Whole
+        trees go through :meth:`upload`'s tar path, which routes the archive here.
+        """
+        await self.write_file(remote_file, Path(local_file).read_bytes())
+
+    async def download_file(self, remote_file: str, local_file: Path | str) -> None:
+        """Download one sandbox file to the host (floor: via :meth:`read_file`)."""
+        data = await self.read_file(remote_file)
+        dst = Path(local_file)
         dst.parent.mkdir(parents=True, exist_ok=True)
         dst.write_bytes(data)
 
-    # ----- directories: tar one archive over the single-file transfer -----
-    async def upload_dir(self, local_dir: Path | str, remote_dir: str) -> None:
-        """Upload a host directory tree into the sandbox.
-
-        Packs the tree into one gzipped tar locally, ships that single archive
-        through :meth:`upload` (so a provider-native file override is reused),
-        and extracts it in the sandbox -- preserving modes / symlinks / empty
-        dirs and avoiding a round-trip per file. Requires ``tar`` and ``gzip``
-        in the sandbox image.
-        """
-        src = Path(local_dir)
-        if not src.is_dir():
-            raise NotADirectoryError(f"upload_dir source {src} is not a directory")
+    # ----- directory transfer: tar one archive over the single-file seam -----
+    async def _upload_tree(self, local_dir: Path, remote_dir: str) -> None:
+        """Pack a host dir into one tar, ship via :meth:`upload_file`, unpack in the sandbox."""
         remote_archive = f"/tmp/uni-upload-{uuid.uuid4().hex}.tar.gz"
         with tempfile.TemporaryDirectory() as tmp:
             archive = Path(tmp) / "upload.tar.gz"
-            pack_dir_to_file(src, archive)
-            await self.upload(archive, remote_archive)
+            pack_dir_to_file(local_dir, archive)
+            await self.upload_file(archive, remote_archive)
         try:
-            res = await self.exec_shell(remote_unpack_command(remote_archive, str(remote_dir)))
+            res = await self.exec_shell(remote_unpack_command(remote_archive, remote_dir))
             if res.exit_code != 0:
                 raise RuntimeError(
-                    f"upload_dir into {remote_dir!r} failed (sandbox needs tar and gzip): {res.stderr.strip()}"
+                    f"upload into {remote_dir!r} failed (sandbox needs tar and gzip): {res.stderr.strip()}"
                 )
         finally:
             await self.exec(["rm", "-f", remote_archive])
 
-    async def download_dir(self, remote_dir: str, local_dir: Path | str) -> None:
-        """Download a sandbox directory tree to the host.
-
-        Mirror of :meth:`upload_dir`: archives the tree in the sandbox, pulls the
-        single archive through :meth:`download`, and extracts it locally (with
-        tar's ``data`` filter against path traversal). Requires ``tar`` and
-        ``gzip`` in the sandbox image.
-        """
+    async def _download_tree(self, remote_dir: str, local_dir: Path | str) -> None:
+        """Archive a sandbox dir, pull via :meth:`download_file`, extract locally."""
         dst = Path(local_dir)
         dst.mkdir(parents=True, exist_ok=True)
         remote_archive = f"/tmp/uni-download-{uuid.uuid4().hex}.tar.gz"
         try:
-            res = await self.exec_shell(remote_pack_command(str(remote_dir), remote_archive))
+            res = await self.exec_shell(remote_pack_command(remote_dir, remote_archive))
             if res.exit_code != 0:
                 raise RuntimeError(
-                    f"download_dir of {remote_dir!r} failed (sandbox needs tar and gzip): {res.stderr.strip()}"
+                    f"download of {remote_dir!r} failed (sandbox needs tar and gzip): {res.stderr.strip()}"
                 )
             with tempfile.TemporaryDirectory() as tmp:
                 archive = Path(tmp) / "download.tar.gz"
-                await self.download(remote_archive, archive)
+                await self.download_file(remote_archive, archive)
                 extract_dir_from_file(archive, dst)
         finally:
             await self.exec(["rm", "-f", remote_archive])

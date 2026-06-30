@@ -10,7 +10,7 @@ config::
 
     env = Environment.from_config({
         "sandbox": {"provider": "modal", "runtime_timeout": 3600},
-        "tools": [{"name": "shell", "command_timeout": 120}, {"name": "str_replace_editor"}],
+        "tools": [{"name": "stateful_shell", "command_timeout": 120}, {"name": "str_replace_editor"}],
     })
     async with env:
         schemas = env.tool_schemas()
