@@ -9,8 +9,8 @@ runner builds it with :func:`build_agent`::
     from uni_agent.agents.code_act import CodeActConfig
 
     agent = build_agent(CodeActConfig())     # white-box: native framework loop
-    # ... task starts + provisions the sandbox, then:
-    # result = await agent.run(sandbox=sandbox, sample=sample, gateway=gateway)
+    # ... task starts + provisions the sandbox + creates the gateway session, then:
+    # result = await agent.run(sandbox=sandbox, base_url=..., api_key=..., messages=messages)
 
 Concrete agents under ``agents/<name>/`` register themselves and are imported
 *lazily* by :func:`build_agent` (see ``AGENT_MODULES``), so importing this

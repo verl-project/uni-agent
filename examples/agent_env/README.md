@@ -1,13 +1,19 @@
 # Agent Environment Example
 
-This directory contains a minimal example for launching an agent environment and running commands inside a persistent sandbox.
-
-For the full setup guide, see the documentation:
-
-[Launch an Agent Environment](https://uni-agent.readthedocs.io/en/latest/start/agent_env.html)
+A minimal example of the **sandbox + tools** stack: it builds a `Toolbox` over a
+persistent sandbox and runs a few steps (install a dep, create/edit a script with
+the editor tool, run it, read the output) to show that state persists across calls.
+The agent script runs on the host and never enters the sandbox image.
 
 ## Run
 
 ```bash
-DEPLOYMENT=<local|vefaas|modal> DEBUG_MODE=1 python examples/agent_env/demo.py
+# Modal (default) -- set up auth first: pip install modal && modal token set ...
+python examples/agent_env/demo.py
+
+# or run locally on the host (no credentials needed):
+SANDBOX_PROVIDER=local python examples/agent_env/demo.py
+
+# override the Modal image:
+IMAGE=python:3.12 python examples/agent_env/demo.py
 ```

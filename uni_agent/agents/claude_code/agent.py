@@ -1,14 +1,4 @@
-"""Claude Code: a black-box agent launched *inside* the sandbox.
-
-The solver is an opaque Claude Code process that runs its own loop + tools in the
-container, but it is **not** a different model: we point it at the task-created
-gateway session (its per-session ``base_url``) so its model calls go through our
-policy and become trainable trajectories. This agent therefore only configures the
-*launch* -- command, model, turn budget, tool allow-list, how to inject the gateway
-endpoint, extra env -- and reads back what it produced (the working-tree diff). The
-task is expected to have provisioned the instance (clone repo @ base commit, ...)
-and created the session before handing over the live sandbox.
-"""
+"""Claude Code: a black-box agent launched *inside* the sandbox."""
 
 from __future__ import annotations
 
@@ -20,12 +10,11 @@ from ..base import Agent, AgentConfig, AgentResult
 from ..registry import register_agent
 
 if TYPE_CHECKING:
-    from ...gateway.session.types import SessionHandle
     from ...sandbox import Sandbox
 
 
 class ClaudeCodeConfig(AgentConfig):
-    """Black-box launch params for Claude Code, pointed at the gateway session."""
+    """Black-box launch params for Claude Code (endpoint is supplied at run time)."""
 
     name: str = "claude_code"
     command: list[str] = Field(default_factory=lambda: ["claude", "-p"], description="Launch argv inside the sandbox.")
@@ -34,21 +23,11 @@ class ClaudeCodeConfig(AgentConfig):
     allowed_tools: list[str] = Field(
         default_factory=lambda: ["Bash", "Edit", "Read", "Write"], description="Tool allow-list."
     )
-    # How to point the in-sandbox CLI at our per-session gateway endpoint instead
-    # of a real provider. The gateway is OpenAI-compatible and self-hosted, so the
-    # key value can be any non-empty string.
-    base_url_env: str = Field(
-        default="ANTHROPIC_BASE_URL",
-        description="Env var the CLI reads for its API base; set to session.base_url.",
-    )
-    api_key_env: str = Field(default="ANTHROPIC_API_KEY", description="Env var the CLI reads for its API key.")
-    api_key: str = Field(default="EMPTY", description="API key value (the self-hosted gateway accepts any non-empty).")
-    env: dict[str, str] = Field(default_factory=dict, description="Extra env vars injected into the launched process.")
 
 
 @register_agent("claude_code")
 class ClaudeCodeAgent(Agent):
-    """Black-box solver: launch Claude Code in the sandbox, pointed at the gateway URL."""
+    """Black-box solver: launch Claude Code in the sandbox, pointed at ``base_url``."""
 
     config_model = ClaudeCodeConfig
 
@@ -56,27 +35,32 @@ class ClaudeCodeAgent(Agent):
         self,
         *,
         sandbox: Sandbox,
-        sample: dict[str, Any],
-        session: SessionHandle,
+        base_url: str,
+        api_key: str,
+        messages: list[dict[str, Any]],
     ) -> AgentResult:
-        # The black-box loop runs in the sandbox, but its model is *our* policy:
-        # it needs the per-session gateway URL to reach it.
-        if session.base_url is None:
-            raise ValueError("claude_code needs session.base_url to route the model through the gateway")
         cfg: ClaudeCodeConfig = self.config  # type: ignore[assignment]
+        # Claude Code owns its loop + tools, so we can only seed it: a required user
+        # turn (the problem statement) and at most one optional system turn.
+        if len(messages) > 2:
+            raise ValueError(f"claude_code accepts at most 2 messages (system?, user), got {len(messages)}")
+        problem_statement = next((m["content"] for m in messages if m.get("role") == "user"), None)
+        if not problem_statement:
+            raise ValueError("claude_code requires a 'user' message (the problem statement)")
+        system_prompt = next((m["content"] for m in messages if m.get("role") == "system"), None)
         argv = [
             *cfg.command,
             *(["--model", cfg.model] if cfg.model else []),
             *(["--max-turns", str(cfg.max_turns)] if cfg.max_turns is not None else []),
             *(["--allowedTools", ",".join(cfg.allowed_tools)] if cfg.allowed_tools else []),
-            sample.get("problem_statement", ""),
+            # Append (not replace) so Claude Code keeps its built-in tool/safety prompt.
+            *(["--append-system-prompt", system_prompt] if system_prompt else []),
+            problem_statement,
         ]
-        # Route the CLI's model calls through our per-session gateway URL (so they
-        # become trainable trajectories) -- it never talks to a real provider.
+        # Point the in-sandbox CLI at our endpoint via the env vars it reads.
         env = {
-            **cfg.env,
-            cfg.base_url_env: session.base_url,
-            cfg.api_key_env: cfg.api_key,
+            "ANTHROPIC_BASE_URL": base_url,
+            "ANTHROPIC_API_KEY": api_key,
         }
         # No client-side timeout: the sandbox's runtime_timeout bounds the run.
         proc = await sandbox.exec(argv, env=env)

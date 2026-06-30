@@ -199,11 +199,15 @@ def register_tool(name: str):
     return decorator
 
 
-def get_tool(name: str, sandbox: SandboxBackend) -> Tool:
-    """Instantiate a registered tool by name, bound to ``sandbox``."""
+def get_tool(name: str, sandbox: SandboxBackend, **kwargs: Any) -> Tool:
+    """Instantiate a registered tool by name, bound to ``sandbox``.
+
+    Extra ``kwargs`` are forwarded to the tool constructor (auto-parsed into the
+    tool's ``config_model``), e.g. ``get_tool("stateful_shell", sb, command_timeout=120)``.
+    """
     if name not in TOOL_REGISTRY:
         raise KeyError(f"Unknown tool: {name!r}")
-    return TOOL_REGISTRY[name](sandbox)
+    return TOOL_REGISTRY[name](sandbox, **kwargs)
 
 
 class Toolbox:
@@ -221,9 +225,20 @@ class Toolbox:
             self._tools[tool.name] = tool
 
     @classmethod
-    def from_names(cls, names: list[str], *, sandbox: SandboxBackend) -> Toolbox:
-        """Build a toolbox from registered tool names, each bound to ``sandbox``."""
-        return cls([get_tool(n, sandbox) for n in names])
+    def from_specs(cls, specs: list[dict[str, Any]], *, sandbox: SandboxBackend) -> Toolbox:
+        """Build a toolbox from ``{name, ...kwargs}`` config entries, bound to ``sandbox``.
+
+        Each entry is a mapping with a ``name`` (a TOOL_REGISTRY key) plus that
+        tool's construction kwargs (auto-parsed into its ``config_model``), e.g.
+        ``{"name": "stateful_shell", "command_timeout": 120}``.
+        """
+        tools: list[Tool] = []
+        for entry in specs:
+            if not isinstance(entry, dict) or not entry.get("name"):
+                raise ValueError(f"each tools entry must be a mapping with a 'name': {entry!r}")
+            kwargs = {k: v for k, v in entry.items() if k != "name"}
+            tools.append(get_tool(entry["name"], sandbox, **kwargs))
+        return cls(tools)
 
     @classmethod
     def all(cls, *, sandbox: SandboxBackend) -> Toolbox:

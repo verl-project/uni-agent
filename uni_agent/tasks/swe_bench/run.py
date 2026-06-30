@@ -3,13 +3,15 @@
 A task *selects* an agent and subclasses :class:`TaskConfig` to narrow ``agent``
 and add task knobs (the default here is the white-box
 :class:`~uni_agent.agents.code_act.CodeActConfig`, but a black-box agent such as
-``claude_code`` works too -- both drive the model through the gateway session, so
-the task runs them the same way). ``run.py`` owns the runtime lifecycles --
-mirroring the driver in :mod:`uni_agent.framework.framework`:
+``claude_code`` works too -- both talk to the model at the gateway session's
+``base_url``, which the task passes in, so it runs them the same way). ``run.py``
+owns the runtime lifecycles -- mirroring the driver in
+:mod:`uni_agent.framework.framework`:
 
 * it starts the sandbox (cleaning up even if ``start`` fails) and always stops it;
-* it creates a gateway session, runs the agent against it, and finalizes it for
-  trajectories (aborting on error);
+* it creates a gateway session, hands its ``base_url`` / ``api_key`` plus the task
+  ``messages`` to the agent, and finalizes the session for trajectories (aborting
+  on error);
 * it then scores what the agent produced.
 
 Values below are illustrative defaults -- the shape is the point.
@@ -52,12 +54,12 @@ class SWEBenchTask(Task):
 
         1. **Sandbox** -- entered with ``async with``: ``start`` on enter (cleaned
            up if start fails), ``stop`` always on exit.
-        2. **Gateway session** -- both agent kinds drive the model through the
-           per-session ``base_url``, so the task always creates a session:
+        2. **Gateway session** -- the task creates a session, then hands its
+           ``base_url`` (+ ``api_key``) and the task ``messages`` to the agent:
            ``create_session`` -> run agent -> ``finalize_session`` for trajectories
-           (``abort_session`` on error). A white-box agent calls the URL from our
-           framework loop; a black-box agent is launched in the sandbox pointed at
-           that same URL.
+           (``abort_session`` on error). The agent never sees the session: a
+           white-box agent calls the URL from our framework loop; a black-box agent
+           is launched in the sandbox pointed at the same URL.
         3. **Reward** -- score the patch the agent left in the sandbox.
         """
         if gateway is None:
@@ -73,7 +75,17 @@ class SWEBenchTask(Task):
             # Gateway session lifecycle: create -> run agent -> finalize (abort on error).
             session = await gateway.create_session(session_id)
             try:
-                result = await agent.run(sandbox=sandbox, sample=sample, session=session)
+                if session.base_url is None:
+                    raise RuntimeError(f"gateway session {session_id!r} has no base_url")
+                # The agent talks to the model at the session's OpenAI-compatible URL;
+                # it never sees the session. The gateway accepts any non-empty api_key.
+                messages = [{"role": "user", "content": sample.get("problem_statement", "")}]
+                result = await agent.run(
+                    sandbox=sandbox,
+                    base_url=session.base_url,
+                    api_key="EMPTY",
+                    messages=messages,
+                )
                 trajectories = await gateway.finalize_session(session_id)
             except Exception:
                 await gateway.abort_session(session_id)
