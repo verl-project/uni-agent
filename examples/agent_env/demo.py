@@ -106,7 +106,9 @@ async def main() -> None:
         print("[Step 2] str_replace_editor create /tmp/demo.py")
         print(
             _indent(
-                await toolbox.call("str_replace_editor", {"command": "create", "path": "/tmp/demo.py", "file_text": script})
+                await toolbox.call(
+                    "str_replace_editor", {"command": "create", "path": "/tmp/demo.py", "file_text": script}
+                )
             )
         )
 
