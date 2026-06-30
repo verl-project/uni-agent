@@ -34,9 +34,7 @@ class SandboxConfig(BaseModel):
         default=3600.0,
         description="Max sandbox runtime/lifetime (seconds) before it is killed; used by remote providers.",
     )
-    image: str = Field(
-        default="python:3.12", description="Container image for remote providers (modal / vefaas)."
-    )
+    image: str = Field(default="python:3.12", description="Container image for remote providers (modal / vefaas).")
     sandbox_kwargs: dict[str, Any] = Field(
         default_factory=dict,
         description="Extra provider-specific kwargs forwarded to the sandbox constructor "

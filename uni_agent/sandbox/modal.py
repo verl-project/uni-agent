@@ -133,6 +133,4 @@ class ModalSandbox(Sandbox):
         # creation (pass through ``modal_sandbox_kwargs``); a running
         # ``sleep infinity`` sandbox cannot open one on demand. Once declared,
         # implement this via ``self._sandbox.tunnels()``.
-        raise NotImplementedError(
-            "ModalSandbox.expose_port requires encrypted_ports at sandbox creation time"
-        )
+        raise NotImplementedError("ModalSandbox.expose_port requires encrypted_ports at sandbox creation time")

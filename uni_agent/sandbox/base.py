@@ -191,9 +191,7 @@ class Sandbox(abc.ABC):
         """
         src = Path(local_path)
         if src.is_dir():
-            raise IsADirectoryError(
-                f"{type(self).__name__}.upload expects a file; use upload_dir() for {src}"
-            )
+            raise IsADirectoryError(f"{type(self).__name__}.upload expects a file; use upload_dir() for {src}")
         await self.write_file(remote_path, src.read_bytes())
 
     async def download(self, remote_path: str, local_path: Path | str) -> None:
@@ -225,8 +223,7 @@ class Sandbox(abc.ABC):
             res = await self.exec_shell(remote_unpack_command(remote_archive, str(remote_dir)))
             if res.exit_code != 0:
                 raise RuntimeError(
-                    f"upload_dir into {remote_dir!r} failed "
-                    f"(sandbox needs tar and gzip): {res.stderr.strip()}"
+                    f"upload_dir into {remote_dir!r} failed (sandbox needs tar and gzip): {res.stderr.strip()}"
                 )
         finally:
             await self.exec(["rm", "-f", remote_archive])
@@ -246,8 +243,7 @@ class Sandbox(abc.ABC):
             res = await self.exec_shell(remote_pack_command(str(remote_dir), remote_archive))
             if res.exit_code != 0:
                 raise RuntimeError(
-                    f"download_dir of {remote_dir!r} failed "
-                    f"(sandbox needs tar and gzip): {res.stderr.strip()}"
+                    f"download_dir of {remote_dir!r} failed (sandbox needs tar and gzip): {res.stderr.strip()}"
                 )
             with tempfile.TemporaryDirectory() as tmp:
                 archive = Path(tmp) / "download.tar.gz"

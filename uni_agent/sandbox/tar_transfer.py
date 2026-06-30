@@ -32,9 +32,7 @@ def pack_dir(source_dir: Path | str, fileobj: BinaryIO, *, compress: bool = True
         tar.add(source_path, arcname=".")
 
 
-def pack_dir_to_file(
-    source_dir: Path | str, archive_path: Path | str, *, compress: bool = True
-) -> None:
+def pack_dir_to_file(source_dir: Path | str, archive_path: Path | str, *, compress: bool = True) -> None:
     """Pack *source_dir* into a tar archive file (see :func:`pack_dir`)."""
     with Path(archive_path).open("wb") as fileobj:
         pack_dir(source_dir, fileobj, compress=compress)
@@ -69,7 +67,4 @@ def remote_unpack_command(archive_path: str, target_dir: str) -> str:
     tar exits non-zero on a truncated/corrupt archive (gzip CRC), so a partial
     transfer fails loudly instead of dropping files.
     """
-    return (
-        f"mkdir -p {shlex.quote(target_dir)} && "
-        f"tar -xzf {shlex.quote(archive_path)} -C {shlex.quote(target_dir)}"
-    )
+    return f"mkdir -p {shlex.quote(target_dir)} && tar -xzf {shlex.quote(archive_path)} -C {shlex.quote(target_dir)}"

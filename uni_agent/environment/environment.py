@@ -28,6 +28,7 @@ def _tool_entry(entry: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     kwargs = {k: v for k, v in entry.items() if k != "name"}
     return name, kwargs
 
+
 if TYPE_CHECKING:
     from ..sandbox import SandboxBackend
     from ..tools import Observation, Tool
@@ -122,10 +123,7 @@ class Environment:
         if self._started:
             await self.close()
         await self.sandbox.start()
-        tools = [
-            build_tool(name, self.sandbox, kwargs=kwargs)
-            for name, kwargs in self._tool_specs
-        ]
+        tools = [build_tool(name, self.sandbox, kwargs=kwargs) for name, kwargs in self._tool_specs]
         self.toolbox = Toolbox(tools)
         self._started = True
         return self.toolbox.schemas()

@@ -100,8 +100,11 @@ async def main() -> None:
         # 2. create a runnable script with the editor tool (writes via data plane)
         script = "import numpy as np\nprint('sum =', int(np.array([1, 2, 4]).sum()))\n"
         print("[Step 2] str_replace_editor create /tmp/demo.py")
-        print(_indent(await env.call("str_replace_editor",
-                                     {"command": "create", "path": "/tmp/demo.py", "file_text": script})))
+        print(
+            _indent(
+                await env.call("str_replace_editor", {"command": "create", "path": "/tmp/demo.py", "file_text": script})
+            )
+        )
 
         # 3. view it back
         print("[Step 3] str_replace_editor view /tmp/demo.py")
@@ -117,12 +120,15 @@ async def main() -> None:
 
         # 6. edit the script (sum -> product), then re-run
         print("[Step 6] str_replace_editor str_replace (sum -> product), then re-run")
-        await env.call("str_replace_editor", {
-            "command": "str_replace",
-            "path": "/tmp/demo.py",
-            "old_str": "print('sum =', int(np.array([1, 2, 4]).sum()))",
-            "new_str": "print('product =', int(np.array([1, 2, 4]).prod()))",
-        })
+        await env.call(
+            "str_replace_editor",
+            {
+                "command": "str_replace",
+                "path": "/tmp/demo.py",
+                "old_str": "print('sum =', int(np.array([1, 2, 4]).sum()))",
+                "new_str": "print('product =', int(np.array([1, 2, 4]).prod()))",
+            },
+        )
         print(_indent(await env.call("shell", {"command": "python3 /tmp/demo.py"})))
 
         # 7. stateful shell: cd persists across calls (same channel)
