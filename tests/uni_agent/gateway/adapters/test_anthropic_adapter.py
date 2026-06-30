@@ -335,11 +335,9 @@ def test_provider_specific_tool_metadata_lowers_to_template_function_schema():
     assert req["tools"] == [{"type": "function", "function": {"name": "web_search", "parameters": {}}}]
 
 
-def test_tool_input_schema_minimally_normalized_for_qwen_parser():
-    """Anthropic JSON schema is copied and minimally annotated so VERL's
-    OpenAI tool schema model accepts it without flattening nested structure."""
-    from verl.tools.schemas import OpenAIFunctionToolSchema
-
+def test_tool_input_schema_passes_through_json_schema():
+    """Anthropic JSON schema is copied into OpenAI function parameters without
+    gateway-specific parser normalization."""
     schema = {
         "type": "object",
         "properties": {
@@ -359,18 +357,14 @@ def test_tool_input_schema_minimally_normalized_for_qwen_parser():
     )
     params = req["tools"][0]["function"]["parameters"]
     assert params is not schema
-    assert params["properties"]["target"]["type"] == "string"
+    assert params == schema
+    assert "type" not in params["properties"]["target"]
     assert "enum" not in params["properties"]["target"]
-    assert params["properties"]["target"]["anyOf"] == [{"const": "file"}, {"type": "string"}]
-    assert params["properties"]["mode"]["type"] == "string"
-    assert params["properties"]["mode"]["enum"] == ["read", "write"]
-    assert params["properties"]["nested"]["properties"] == {"x": {"type": "integer"}}
-    OpenAIFunctionToolSchema(**req["tools"][0])
 
 
-def test_tool_input_schema_anyof_preserves_heterogeneous_types():
+def test_tool_input_schema_anyof_preserves_heterogeneous_branches_without_inferred_type():
     """Heterogeneous anyOf branches keep their distinct JSON types instead of
-    being collapsed into a lossy single-type schema."""
+    being collapsed into a compatibility hint for a specific parser."""
     schema = {
         "type": "object",
         "properties": {
@@ -385,7 +379,9 @@ def test_tool_input_schema_anyof_preserves_heterogeneous_types():
         },
         **BASE,
     )
-    assert req["tools"][0]["function"]["parameters"]["properties"]["value"]["type"] == ["integer", "number"]
+    assert req["tools"][0]["function"]["parameters"]["properties"]["value"] == {
+        "anyOf": [{"type": "integer"}, {"type": "number"}]
+    }
 
 
 def test_thinking_block_dropped_with_warning(caplog):

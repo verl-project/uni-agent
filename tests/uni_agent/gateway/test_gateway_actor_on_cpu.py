@@ -1,6 +1,7 @@
 import asyncio
 import json
 import time
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -21,6 +22,13 @@ from tests.uni_agent.support import (
 )
 
 ALLOWED_SAMPLING_KEYS = frozenset({"temperature", "top_p", "top_k", "max_tokens", "stop"})
+
+
+def fake_tool_call_dispatch(text, tools, parser_name, tokenizer):
+    if "<tool_call>" not in text:
+        return text, []
+    arguments = '{"query":"crop"}' if "crop" in text else '{"query":"weather"}'
+    return "", [SimpleNamespace(name="search", arguments=arguments)]
 
 
 @pytest.fixture(scope="session")
@@ -660,18 +668,20 @@ async def test_gateway_actor_multimodal_reference_change_splits_trajectory(ray_r
 
 
 @pytest.mark.asyncio
-async def test_gateway_actor_continuation_with_tool_returned_image_appends_media(ray_runtime):
+async def test_gateway_actor_continuation_with_tool_returned_image_appends_media(monkeypatch):
     """When a tool-call continuation brings a new image (e.g. a zoomed crop),
     the new image is appended to the session media accumulator. The full
     ``prompt_ids`` sequence (initial prompt + tool-call tokens + incremental
     prompt) is verified token-by-token."""
     from uni_agent.gateway.config import GatewayActorConfig
-    from uni_agent.gateway.gateway import GatewayActor
+    from uni_agent.gateway.gateway import _GatewayActor
+    import uni_agent.gateway.session.codec as codec_mod
     from verl.utils.chat_template import apply_chat_template, initialize_system_prompt
 
+    monkeypatch.setattr(codec_mod, "_extract_tool_calls_with_sglang_or_vllm", fake_tool_call_dispatch)
     processor = FakeProcessor()
     tool_call_text = '<tool_call>\n{"name": "search", "arguments": {"query": "crop"}}\n</tool_call>'
-    actor = GatewayActor.remote(
+    actor = _GatewayActor(
         GatewayActorConfig(
             tokenizer=FakeTokenizer(),
             processor=processor,
@@ -680,8 +690,8 @@ async def test_gateway_actor_continuation_with_tool_returned_image_appends_media
         ),
         InspectingSequencedBackend([tool_call_text, "__inspect__"]),
     )
-    ray.get(actor.start.remote())
-    session = ray.get(actor.create_session.remote("session-mm-tool-image"))
+    await actor.start()
+    await actor.create_session("session-mm-tool-image")
 
     tools = [{"type": "function", "function": {"name": "search", "parameters": {"type": "object"}}}]
     initial_message = {
@@ -692,40 +702,39 @@ async def test_gateway_actor_continuation_with_tool_returned_image_appends_media
         ],
     }
 
-    async with httpx.AsyncClient(timeout=5.0) as client:
-        first = await client.post(
-            f"{session.base_url}/chat/completions",
-            json={
-                "model": "dummy-model",
-                "tools": tools,
-                "messages": [initial_message],
-            },
-        )
-        assert first.status_code == 200
-        assistant_message = first.json()["choices"][0]["message"]
-        tool_message = {
-            "role": "tool",
-            "tool_call_id": assistant_message["tool_calls"][0]["id"],
-            "content": [
-                {"type": "image_url", "image_url": {"url": "image://tool-b.png"}},
-                {"type": "text", "text": "zoomed crop"},
-            ],
-        }
+    first = await actor._handle_openai_chat_completions(
+        "session-mm-tool-image",
+        {
+            "model": "dummy-model",
+            "tools": tools,
+            "messages": [initial_message],
+        },
+    )
+    assert first.status_code == 200
+    assistant_message = json.loads(first.body)["choices"][0]["message"]
+    tool_message = {
+        "role": "tool",
+        "tool_call_id": assistant_message["tool_calls"][0]["id"],
+        "content": [
+            {"type": "image_url", "image_url": {"url": "image://tool-b.png"}},
+            {"type": "text", "text": "zoomed crop"},
+        ],
+    }
 
-        second = await client.post(
-            f"{session.base_url}/chat/completions",
-            json={
-                "model": "dummy-model",
-                "tools": tools,
-                "messages": [initial_message, assistant_message, tool_message],
-            },
-        )
+    second = await actor._handle_openai_chat_completions(
+        "session-mm-tool-image",
+        {
+            "model": "dummy-model",
+            "tools": tools,
+            "messages": [initial_message, assistant_message, tool_message],
+        },
+    )
 
-    trajectories = ray.get(actor.finalize_session.remote("session-mm-tool-image"))
-    ray.get(actor.shutdown.remote())
+    trajectories = await actor.finalize_session("session-mm-tool-image")
+    await actor.shutdown()
 
     assert second.status_code == 200
-    second_call = json.loads(second.json()["choices"][0]["message"]["content"])
+    second_call = json.loads(json.loads(second.body)["choices"][0]["message"]["content"])
     assert second_call["image_data"] == ["image://a.png", "image://tool-b.png"]
     assert len(trajectories) == 1
     assert trajectories[0].multi_modal_data == {
@@ -1119,35 +1128,36 @@ async def test_gateway_actor_backend_failure_after_tool_mismatch_does_not_split(
 
 
 @pytest.mark.asyncio
-async def test_gateway_actor_tool_call_decode_returns_openai_format(ray_runtime):
+async def test_gateway_actor_tool_call_decode_returns_openai_format(monkeypatch):
     """When tool_parser_name is set and model outputs tool call tokens,
     the HTTP response should contain tool_calls in OpenAI format."""
     from uni_agent.gateway.config import GatewayActorConfig
-    from uni_agent.gateway.gateway import GatewayActor
+    from uni_agent.gateway.gateway import _GatewayActor
+    import uni_agent.gateway.session.codec as codec_mod
 
+    monkeypatch.setattr(codec_mod, "_extract_tool_calls_with_sglang_or_vllm", fake_tool_call_dispatch)
     tool_call_text = '<tool_call>\n{"name": "search", "arguments": {"query": "weather"}}\n</tool_call>'
-    actor = GatewayActor.remote(
+    actor = _GatewayActor(
         GatewayActorConfig(
             tokenizer=FakeTokenizer(),
             tool_parser_name="hermes",
         ),
         QueuedBackend([tool_call_text, "sunny today"]),
     )
-    ray.get(actor.start.remote())
-    session = ray.get(actor.create_session.remote("session-tool-call"))
-
-    async with httpx.AsyncClient(timeout=5.0) as client:
+    await actor.start()
+    await actor.create_session("session-tool-call")
+    try:
         # First request: model returns a tool call
-        first = await client.post(
-            f"{session.base_url}/chat/completions",
-            json={
+        first = await actor._handle_openai_chat_completions(
+            "session-tool-call",
+            {
                 "model": "dummy-model",
                 "tools": [{"type": "function", "function": {"name": "search", "parameters": {"type": "object"}}}],
                 "messages": [{"role": "user", "content": "what is the weather?"}],
             },
         )
         assert first.status_code == 200
-        first_data = first.json()
+        first_data = json.loads(first.body)
         assert first_data["choices"][0]["finish_reason"] == "tool_calls"
         tool_calls = first_data["choices"][0]["message"].get("tool_calls")
         assert tool_calls is not None
@@ -1159,9 +1169,9 @@ async def test_gateway_actor_tool_call_decode_returns_openai_format(ray_runtime)
         assert isinstance(tool_calls[0]["function"]["arguments"], str)
 
         # Second request: agent sends back tool result as continuation
-        second = await client.post(
-            f"{session.base_url}/chat/completions",
-            json={
+        second = await actor._handle_openai_chat_completions(
+            "session-tool-call",
+            {
                 "model": "dummy-model",
                 "tools": [{"type": "function", "function": {"name": "search", "parameters": {"type": "object"}}}],
                 "messages": [
@@ -1172,10 +1182,11 @@ async def test_gateway_actor_tool_call_decode_returns_openai_format(ray_runtime)
             },
         )
         assert second.status_code == 200
-        assert second.json()["choices"][0]["message"]["content"] == "sunny today"
+        assert json.loads(second.body)["choices"][0]["message"]["content"] == "sunny today"
 
-    trajectories = ray.get(actor.finalize_session.remote("session-tool-call"))
-    ray.get(actor.shutdown.remote())
+        trajectories = await actor.finalize_session("session-tool-call")
+    finally:
+        await actor.shutdown()
 
     assert len(trajectories) == 1
     # Should have both mask=0 (incremental) and mask=1 (model output) tokens
@@ -1241,13 +1252,15 @@ async def test_anthropic_and_openai_produce_identical_trajectory():
 
 
 @pytest.mark.asyncio
-async def test_anthropic_tool_turn_round_trip_extends_not_reencodes():
+async def test_anthropic_tool_turn_round_trip_extends_not_reencodes(monkeypatch):
     """When an Anthropic agent echoes a previous assistant tool_use turn back as
     history, conversion must reproduce stored normalized message sufficiently for
     prefix check to pass and extend one trajectory instead of re-encoding a new one."""
     from uni_agent.gateway.config import GatewayActorConfig
     from uni_agent.gateway.gateway import _GatewayActor
+    import uni_agent.gateway.session.codec as codec_mod
 
+    monkeypatch.setattr(codec_mod, "_extract_tool_calls_with_sglang_or_vllm", fake_tool_call_dispatch)
     tool_call_text = '<tool_call>\n{"name": "search", "arguments": {"query": "weather"}}\n</tool_call>'
     actor = _GatewayActor(
         GatewayActorConfig(

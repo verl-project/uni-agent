@@ -475,74 +475,6 @@ def _messages_to_internal(messages: Any) -> list[dict[str, Any]]:
     return result
 
 
-def _infer_json_type(value: Any) -> str:
-    if isinstance(value, bool):
-        return "boolean"
-    if isinstance(value, int) and not isinstance(value, bool):
-        return "integer"
-    if isinstance(value, float):
-        return "number"
-    if isinstance(value, dict):
-        return "object"
-    if isinstance(value, list):
-        return "array"
-    if value is None:
-        return "null"
-    return "string"
-
-
-def _infer_any_of_type(branches: Any) -> str | list[str] | None:
-    if not isinstance(branches, list):
-        return None
-    inferred: list[str] = []
-    for branch in branches:
-        if not isinstance(branch, dict):
-            continue
-        branch_type = branch.get("type")
-        if isinstance(branch_type, str):
-            inferred.append(branch_type)
-        elif isinstance(branch_type, list):
-            inferred.extend(t for t in branch_type if isinstance(t, str))
-        elif "const" in branch:
-            inferred.append(_infer_json_type(branch["const"]))
-    if not inferred:
-        return None
-    first = inferred[0]
-    if all(t == first for t in inferred):
-        return first
-    return list(dict.fromkeys(inferred))
-
-
-def _normalize_tool_schema_for_qwen_parser(schema: dict[str, Any]) -> dict[str, Any]:
-    normalized: dict[str, Any] = {}
-    for key, value in schema.items():
-        if key == "properties" and isinstance(value, dict):
-            normalized[key] = {
-                prop_name: _normalize_tool_schema_for_qwen_parser(prop_schema)
-                if isinstance(prop_schema, dict)
-                else copy.deepcopy(prop_schema)
-                for prop_name, prop_schema in value.items()
-            }
-        elif key == "items" and isinstance(value, dict):
-            normalized[key] = _normalize_tool_schema_for_qwen_parser(value)
-        else:
-            normalized[key] = copy.deepcopy(value)
-
-    if "const" in normalized:
-        normalized.setdefault("enum", [normalized["const"]])
-        normalized.setdefault("type", _infer_json_type(normalized["const"]))
-    if "anyOf" in normalized:
-        any_of_branches = normalized["anyOf"]
-        if isinstance(any_of_branches, list) and all(
-            isinstance(branch, dict) and "const" in branch for branch in any_of_branches
-        ):
-            normalized.setdefault("enum", [branch["const"] for branch in any_of_branches])
-        any_of_type = _infer_any_of_type(normalized["anyOf"])
-        if any_of_type is not None:
-            normalized.setdefault("type", any_of_type)
-    return normalized
-
-
 def _convert_tools(tools: Any) -> list[dict[str, Any]] | None:
     if tools is None:
         return None
@@ -556,19 +488,13 @@ def _convert_tools(tools: Any) -> list[dict[str, Any]] | None:
         name = tool.get("name")
         if not isinstance(name, str):
             raise MalformedRequestError("tool.name must be a string")
-        input_schema = tool.get("input_schema", {})
-        if isinstance(input_schema, dict):
-            # Qwen3.5 can render Anthropic JSON schema directly, but VERL's
-            # OpenAI tool schema parser requires property-level ``type``. Add
-            # only the missing type/enum hints for const/anyOf nodes without
-            # flattening nested properties/items.
-            input_schema = _normalize_tool_schema_for_qwen_parser(input_schema)
+        input_schema = copy.deepcopy(tool.get("input_schema", {}))
         function: dict[str, Any] = {"name": name, "parameters": input_schema}
         description = tool.get("description")
         if isinstance(description, str):
             function["description"] = description
         # cache_control is request/cache metadata; internal tools keep only the
-        # OpenAI function schema with minimally normalized parameters.
+        # OpenAI function schema.
         converted.append({"type": "function", "function": function})
     return converted
 

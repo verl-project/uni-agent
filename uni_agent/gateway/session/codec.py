@@ -7,13 +7,16 @@ processor-backed multimodal inputs, parses tools, and decodes backend outputs.
 from __future__ import annotations
 
 import json
+import logging
+from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
-from verl.experimental.agent_loop.tool_parser import ToolParser
 from verl.utils.chat_template import apply_chat_template as _apply_chat_template
 from verl.utils.chat_template import initialize_system_prompt
 from verl.utils.tokenizer import normalize_token_ids
+
+logger = logging.getLogger("gateway")
 
 # Map backend stop_reason values into the gateway's internal finish_reason vocabulary.
 _FINISH_REASON_MAP = {
@@ -27,6 +30,16 @@ _FINISH_REASON_MAP = {
     "abort": "stop",
 }
 
+_SGLANG_TOOL_PARSER_ALIASES = {
+    "qwen3_xml": "qwen3_coder",
+}
+
+_VLLM_TOOL_PARSER_ALIASES = {
+    "qwen": "qwen3_xml",
+    "qwen25": "qwen3_xml",
+    "qwen3": "qwen3_xml",
+}
+
 
 def _canonicalize_tool_arguments_for_comparison(arguments: Any) -> tuple[str, Any]:
     if isinstance(arguments, dict | list):
@@ -37,6 +50,71 @@ def _canonicalize_tool_arguments_for_comparison(arguments: Any) -> tuple[str, An
         except json.JSONDecodeError:
             return ("raw", arguments)
     return ("raw", arguments)
+
+
+def _process_tool_calls_sglang(
+    text: str,
+    tools: list[dict[str, Any]],
+    parser_name: str,
+) -> tuple[str, list[Any]]:
+    from sglang.srt.entrypoints.openai.protocol import Function as SglFunction
+    from sglang.srt.entrypoints.openai.protocol import Tool as SglTool
+    from sglang.srt.function_call.function_call_parser import FunctionCallParser
+
+    sglang_tools = [SglTool(type=tool["type"], function=SglFunction(**tool["function"])) for tool in tools]
+    parser = FunctionCallParser(sglang_tools, parser_name)
+    if not parser.has_tool_call(text):
+        return text, []
+
+    content, calls = parser.parse_non_stream(text)
+    return content, [SimpleNamespace(name=call.name, arguments=call.parameters) for call in calls]
+
+
+def _process_tool_calls_vllm(
+    text: str,
+    tools: list[dict[str, Any]],
+    parser_name: str,
+    tokenizer,
+) -> tuple[str, list[Any]]:
+    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionToolsParam
+    from vllm.tool_parsers import ToolParserManager
+
+    parser_cls = ToolParserManager.get_tool_parser(parser_name)
+    parser = parser_cls(tokenizer)
+    request = SimpleNamespace(
+        tools=[ChatCompletionToolsParam(**tool) if isinstance(tool, dict) else tool for tool in tools],
+        tool_choice="auto",
+        skip_special_tokens=True,
+    )
+    parsed = parser.extract_tool_calls(text, request)
+    if not parsed.tools_called:
+        return text, []
+    return parsed.content or "", [tool_call.function for tool_call in parsed.tool_calls]
+
+
+def _extract_tool_calls_with_sglang_or_vllm(
+    text: str,
+    tools: list[dict[str, Any]],
+    parser_name: str,
+    tokenizer,
+) -> tuple[str, list[Any]]:
+    sglang_name = _SGLANG_TOOL_PARSER_ALIASES.get(parser_name, parser_name)
+    try:
+        return _process_tool_calls_sglang(text, tools, sglang_name)
+    except ModuleNotFoundError:
+        pass
+    except Exception:
+        logger.warning("SGLang tool-call parsing failed; trying vLLM", exc_info=True)
+
+    vllm_name = _VLLM_TOOL_PARSER_ALIASES.get(parser_name, parser_name)
+    try:
+        return _process_tool_calls_vllm(text, tools, vllm_name, tokenizer)
+    except ModuleNotFoundError:
+        pass
+    except Exception:
+        logger.warning("vLLM tool-call parsing failed; returning raw text", exc_info=True)
+
+    return text, []
 
 
 class MessageCodec:
@@ -67,7 +145,7 @@ class MessageCodec:
             tokenizer,
             **self._apply_chat_template_kwargs,
         )
-        self._tool_parser = ToolParser.get_tool_parser(tool_parser_name, tokenizer) if tool_parser_name else None
+        self._tool_parser_name = tool_parser_name
 
     async def _default_vision_info_extractor(
         self,
@@ -209,15 +287,14 @@ class MessageCodec:
         stop_reason: str | None = None,
     ) -> tuple[dict[str, Any], str]:
         """Decode model output tokens into an assistant message and finish reason."""
-        if self._tool_parser is not None and tools:
-            parsed_tools = None
-            try:
-                from verl.tools.schemas import OpenAIFunctionToolSchema
-
-                parsed_tools = [OpenAIFunctionToolSchema(**t) if isinstance(t, dict) else t for t in tools]
-            except Exception:
-                pass
-            content, function_calls = await self._tool_parser.extract_tool_calls(response_ids, parsed_tools)
+        if self._tool_parser_name and tools:
+            response_text = self._tokenizer.decode(response_ids, skip_special_tokens=False)
+            content, function_calls = _extract_tool_calls_with_sglang_or_vllm(
+                response_text,
+                tools,
+                self._tool_parser_name,
+                self._tokenizer,
+            )
             if function_calls:
                 tool_calls = [
                     {
