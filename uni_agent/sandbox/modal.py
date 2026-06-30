@@ -1,18 +1,3 @@
-"""Modal sandbox: one class that creates a Modal sandbox and drives it.
-
-Merges lifecycle (``start`` creates a ``sleep infinity`` sandbox, ``stop``
-terminates it) with the data plane, on Modal's v1.4+ API: ``exec`` runs an argv
-vector with per-call ``workdir`` / ``env`` / ``timeout``, and file transfer uses
-the native ``filesystem`` channel (``read_bytes`` / ``write_bytes`` /
-``copy_from_local`` / ``copy_to_local``) -- binary-safe, streamed, and without
-the base64-over-exec floor's argument-size limits. ``modal`` is imported lazily
-inside :meth:`start`, so this module imports fine where ``modal`` isn't
-installed.
-
-See https://modal.com/docs/guide/sandbox-spawn and
-https://modal.com/docs/guide/sandbox-files.
-"""
-
 from __future__ import annotations
 
 import asyncio
@@ -20,11 +5,15 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .base import ExecResult, Sandbox, _to_str
+from .registry import register_sandbox
 
 if TYPE_CHECKING:
     import modal
 
+    from .base import SandboxConfig
 
+
+@register_sandbox("modal")
 class ModalSandbox(Sandbox):
     """Creates a Modal sandbox (``sleep infinity``) and drives it via exec."""
 
@@ -42,6 +31,12 @@ class ModalSandbox(Sandbox):
         self.modal_sandbox_kwargs = dict(modal_sandbox_kwargs or {})
         self._app = None
         self._sandbox: modal.Sandbox | None = None
+
+    @classmethod
+    def from_config(cls, config: SandboxConfig) -> ModalSandbox:
+        # Standard fields map to constructor args; provider-specific extras
+        # (app_name, modal_sandbox_kwargs, ...) ride along in sandbox_kwargs.
+        return cls(image=config.image, runtime_timeout=config.runtime_timeout, **config.sandbox_kwargs)
 
     # ----- control plane -----
     async def start(self) -> None:

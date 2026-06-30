@@ -15,9 +15,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from ..sandbox import LocalSandbox, ModalSandbox, Sandbox
+from ..sandbox import Sandbox, build_sandbox
 from ..tools import TOOL_REGISTRY, Toolbox
-from .config import EnvironmentConfig, SandboxConfig
+from .config import EnvironmentConfig
 
 
 def _tool_entry(entry: dict[str, Any]) -> tuple[str, dict[str, Any]]:
@@ -32,30 +32,6 @@ def _tool_entry(entry: dict[str, Any]) -> tuple[str, dict[str, Any]]:
 if TYPE_CHECKING:
     from ..sandbox import SandboxBackend
     from ..tools import Observation, Tool
-
-
-def build_sandbox(config: SandboxConfig) -> Sandbox:
-    """Instantiate the sandbox backend named by ``config.provider``."""
-    provider = config.provider
-    if provider == "local":
-        return LocalSandbox()
-    if provider == "modal":
-        if ModalSandbox is None:
-            raise RuntimeError("modal is not installed; `pip install modal` to use provider='modal'")
-        # sandbox_kwargs is forwarded to the ModalSandbox constructor, so app_name /
-        # modal_sandbox_kwargs (or an image / runtime_timeout override) all flow
-        # through it; explicit fields are the defaults it may override.
-        kwargs: dict[str, Any] = {
-            "image": config.image,
-            "runtime_timeout": config.runtime_timeout,
-            **config.sandbox_kwargs,
-        }
-        return ModalSandbox(**kwargs)
-    if provider == "vefaas":
-        raise NotImplementedError(
-            "provider='vefaas' is not yet ported to uni_agent.sandbox; available providers: local, modal"
-        )
-    raise ValueError(f"unknown sandbox provider: {provider!r}")
 
 
 def build_tool(

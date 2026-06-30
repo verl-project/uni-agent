@@ -20,12 +20,11 @@ config::
 from __future__ import annotations
 
 from .config import EnvironmentConfig, SandboxConfig
-from .environment import Environment, build_sandbox, build_tool
+from .environment import Environment, build_tool
 
 __all__ = [
     "Environment",
     "EnvironmentConfig",
     "SandboxConfig",
-    "build_sandbox",
     "build_tool",
 ]

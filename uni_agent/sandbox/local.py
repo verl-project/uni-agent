@@ -1,22 +1,18 @@
-"""Host-local sandbox (no container).
-
-Runs commands as host subprocesses; for tests and host-local runs. ``start`` /
-``stop`` are no-ops (the host is always there). Depends only on the standard
-library, so it is always importable.
-"""
-
 from __future__ import annotations
 
 import asyncio
 
 from .base import ExecResult, Sandbox, _to_str
+from .registry import register_sandbox
 
 
+@register_sandbox("local")
 class LocalSandbox(Sandbox):
     """Runs commands on the host via ``asyncio`` subprocesses (no container).
 
     File operations use the inherited exec-based floor, which transparently
-    round-trips through the host shell.
+    round-trips through the host shell. Constructed with no args, so it uses the
+    base :meth:`Sandbox.from_config` (which ignores the config fields).
     """
 
     async def start(self) -> None:

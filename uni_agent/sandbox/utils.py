@@ -1,15 +1,3 @@
-"""Tar-based helpers for whole-directory transfer over the exec data plane.
-
-A sandbox's file floor moves one file at a time. Copying a tree file-by-file has
-two problems: it loses fidelity (exec bits, symlinks, empty directories) and it
-is unreliable (one network round-trip per file, and a partial transfer can drop
-files silently). Packing the tree into a single tar archive on one side and
-extracting it on the other fixes both -- tar carries modes, symlinks and empty
-dirs, and a truncated archive fails loudly (gzip CRC / tar exit status) instead
-of dropping files. Directory transfer is therefore: pack -> move one archive ->
-extract.
-"""
-
 from __future__ import annotations
 
 import shlex

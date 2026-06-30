@@ -1,37 +1,16 @@
-"""Sandbox layer: one class per provider = lifecycle + data-plane in one.
-
-A :class:`Sandbox` is the single provider-specific object: it *owns* one
-sandbox's lifecycle (:meth:`start` / :meth:`stop`) and *is* the data plane used
-to drive it (:meth:`exec` + file transfer + optional :meth:`expose_port`).
-Stateful, modality-specific channels (shell / browser / desktop) are layered on
-top in the tool layer, which builds them purely on this data plane.
-
-The only primitive a new provider *must* implement is :meth:`exec` (plus the
-:meth:`start` / :meth:`stop` lifecycle). File operations ship with an exec-based
-floor (``base64`` over the command channel), so a minimal provider gets working
-file transfer for free; providers with a native filesystem API override
-``upload`` / ``download`` (and optionally ``read_file`` / ``write_file``) for
-speed and robustness. No resident HTTP server is installed into the task image;
-tools talk to the container purely through :meth:`exec` (plus an optional port
-tunnel).
-
-Tools never need the control plane: they depend only on the narrow
-:class:`SandboxBackend` protocol (the data-plane subset), so a channel riding
-inside a sandbox cannot ``stop`` it. A single :class:`Sandbox` instance is
-shared by any number of coexisting tools/channels (e.g. a shell + a browser in
-the same container).
-"""
-
 from __future__ import annotations
 
 import abc
 import base64
 import dataclasses
+import logging
 import shlex
 import tempfile
 import uuid
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Any, ClassVar, Protocol, runtime_checkable
+
+from pydantic import BaseModel, ConfigDict, Field
 
 from .utils import (
     extract_dir_from_file,
@@ -39,6 +18,8 @@ from .utils import (
     remote_pack_command,
     remote_unpack_command,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _to_str(data: str | bytes | None) -> str:
@@ -56,6 +37,34 @@ class ExecResult:
     exit_code: int
     stdout: str
     stderr: str
+
+
+class SandboxConfig(BaseModel):
+    """Which provider to run, plus its construction kwargs.
+
+    ``provider`` is a registry key (see :data:`uni_agent.sandbox.SANDBOX_REGISTRY`);
+    it is a free-form string rather than an enum so new providers can register
+    without touching this model. The standard fields below are what a provider's
+    :meth:`Sandbox.from_config` may consume; anything provider-specific rides
+    along in ``sandbox_kwargs``.
+    """
+
+    provider: str = Field(
+        default="local",
+        description="Registered sandbox provider name (key in SANDBOX_REGISTRY), e.g. 'local' or 'modal'.",
+    )
+    runtime_timeout: float = Field(
+        default=3600.0,
+        description="Max sandbox runtime/lifetime (seconds) before it is killed; used by remote providers.",
+    )
+    image: str = Field(default="python:3.12", description="Container image for remote providers (e.g. modal).")
+    sandbox_kwargs: dict[str, Any] = Field(
+        default_factory=dict,
+        description="Extra provider-specific kwargs forwarded to the sandbox constructor "
+        "(e.g. modal: app_name, modal_sandbox_kwargs).",
+    )
+
+    model_config = ConfigDict(extra="forbid")
 
 
 @runtime_checkable
@@ -110,6 +119,19 @@ class Sandbox(abc.ABC):
     implements it).
     """
 
+    #: Registry key for this provider, stamped by ``@register_sandbox``.
+    provider: ClassVar[str] = ""
+
+    @classmethod
+    def from_config(cls, config: SandboxConfig) -> Sandbox:
+        """Build an instance from a :class:`SandboxConfig`.
+
+        Default: construct with no args (good for host-local providers). A
+        provider that takes constructor kwargs (image, timeout, ...) overrides
+        this to map them off ``config`` (see :class:`ModalSandbox`).
+        """
+        return cls()
+
     # ----- control plane: lifecycle (owner-facing) -----
     @abc.abstractmethod
     async def start(self) -> None:
@@ -122,7 +144,14 @@ class Sandbox(abc.ABC):
         ...
 
     async def __aenter__(self) -> Sandbox:
-        await self.start()
+        try:
+            await self.start()
+        except BaseException:
+            try:
+                await self.stop()
+            except Exception:
+                logger.warning("sandbox stop() failed during start() cleanup", exc_info=True)
+            raise
         return self
 
     async def __aexit__(self, *exc) -> None:

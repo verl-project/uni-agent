@@ -4,7 +4,7 @@ Mirrors the YAML shape::
 
     environment:
       sandbox:
-        provider: local | vefaas | modal
+        provider: local | modal  # SANDBOX_REGISTRY key
         runtime_timeout: 3600
       tools:
         - name: stateful_shell  # registry key (model sees it as `shell`)
@@ -13,35 +13,23 @@ Mirrors the YAML shape::
             PAGER: cat
         - name: str_replace_editor
 
-Each ``tools`` entry is a mapping with ``name`` plus that tool's construction
-kwargs (co-located, no separate block). Each tool declares its own kwargs schema
-(``Tool.config_model``) and the env auto-parses the entry's kwargs into it. A
-tool's own timeout (e.g. the shell's ``command_timeout``) lives in its kwargs.
+The ``sandbox`` block is the sandbox layer's :class:`SandboxConfig` (re-exported
+here for convenience). Each ``tools`` entry is a mapping with ``name`` plus that
+tool's construction kwargs (co-located, no separate block). Each tool declares
+its own kwargs schema (``Tool.config_model``) and the env auto-parses the
+entry's kwargs into it. A tool's own timeout (e.g. the shell's
+``command_timeout``) lives in its kwargs.
 """
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from ..sandbox import SandboxConfig
 
-class SandboxConfig(BaseModel):
-    provider: Literal["local", "vefaas", "modal"] = Field(
-        default="local", description="Which sandbox backend to run the task in."
-    )
-    runtime_timeout: float = Field(
-        default=3600.0,
-        description="Max sandbox runtime/lifetime (seconds) before it is killed; used by remote providers.",
-    )
-    image: str = Field(default="python:3.12", description="Container image for remote providers (modal / vefaas).")
-    sandbox_kwargs: dict[str, Any] = Field(
-        default_factory=dict,
-        description="Extra provider-specific kwargs forwarded to the sandbox constructor "
-        "(e.g. modal: app_name, modal_sandbox_kwargs).",
-    )
-
-    model_config = ConfigDict(extra="forbid")
+__all__ = ["SandboxConfig", "EnvironmentConfig"]
 
 
 class EnvironmentConfig(BaseModel):
