@@ -1,34 +1,24 @@
-"""Model-scoped codec for tokenizer, processor, tool-parser, and sampling boundaries."""
+"""Model-scoped codec for tokenizer, processor, tool-parser, and decode paths.
+
+This layer stays within the model boundary: it applies chat templates, handles
+processor-backed multimodal inputs, parses tools, and decodes backend outputs.
+"""
 
 from __future__ import annotations
 
 import json
+import logging
+from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
-from verl.experimental.agent_loop.tool_parser import ToolParser
 from verl.utils.chat_template import apply_chat_template as _apply_chat_template
 from verl.utils.chat_template import initialize_system_prompt
 from verl.utils.tokenizer import normalize_token_ids
 
+logger = logging.getLogger("gateway")
 
-class MalformedRequestError(ValueError):
-    """Raised when request payload normalization finds unsupported input."""
-
-    pass
-
-
-_DEFAULT_ALLOWED_REQUEST_SAMPLING_PARAM_KEYS = frozenset(
-    {
-        "temperature",
-        "top_p",
-        "top_k",
-        "max_tokens",
-    }
-)
-
-
-# Map backend stop_reason values to OpenAI-spec finish_reason values.
+# Map backend stop_reason values into the gateway's internal finish_reason vocabulary.
 _FINISH_REASON_MAP = {
     "completed": "stop",
     "stop": "stop",
@@ -40,78 +30,15 @@ _FINISH_REASON_MAP = {
     "abort": "stop",
 }
 
+_SGLANG_TOOL_PARSER_ALIASES = {
+    "qwen3_xml": "qwen3_coder",
+}
 
-def _normalize_message_content(content: Any) -> Any:
-    """Normalize message content: coerce None to empty string, validate type."""
-    if isinstance(content, list | dict | str):
-        return content
-    if content is None:
-        return ""
-    raise MalformedRequestError(f"Unsupported content type: {type(content).__name__}")
-
-
-def _normalize_tool_calls(tool_calls: Any) -> list[dict[str, Any]]:
-    """Validate tool_calls and parse JSON-string function arguments."""
-    if not isinstance(tool_calls, list):
-        raise MalformedRequestError("tool_calls must be a list")
-    result = []
-    for tool_call in tool_calls:
-        if not isinstance(tool_call, dict):
-            raise MalformedRequestError("tool_calls entries must be objects")
-        function = tool_call.get("function")
-        if not isinstance(function, dict):
-            raise MalformedRequestError("tool_call.function must be an object")
-
-        normalized_tool_call = dict(tool_call)
-        normalized_function = dict(function)
-        arguments = normalized_function.get("arguments")
-        if isinstance(arguments, str):
-            try:
-                normalized_function["arguments"] = json.loads(arguments)
-            except (json.JSONDecodeError, TypeError):
-                pass
-        normalized_tool_call["function"] = normalized_function
-        result.append(normalized_tool_call)
-    return result
-
-
-def _normalize_message(message: Any) -> dict[str, Any]:
-    """Normalize a single message and filter to known OpenAI chat fields."""
-    if not isinstance(message, dict):
-        raise MalformedRequestError("messages entries must be objects")
-
-    role = message.get("role")
-    if not isinstance(role, str) or not role:
-        raise MalformedRequestError("message.role must be a non-empty string")
-
-    normalized: dict[str, Any] = {
-        "role": role,
-        "content": _normalize_message_content(message.get("content", "")),
-    }
-    if "name" in message:
-        name = message["name"]
-        if not isinstance(name, str):
-            raise MalformedRequestError("message.name must be a string")
-        normalized["name"] = name
-    if "tool_calls" in message:
-        normalized["tool_calls"] = _normalize_tool_calls(message["tool_calls"])
-    if "tool_call_id" in message:
-        normalized["tool_call_id"] = str(message["tool_call_id"])
-    if "reasoning_content" in message:
-        reasoning_content = message["reasoning_content"]
-        if reasoning_content is not None and not isinstance(reasoning_content, str):
-            raise MalformedRequestError("message.reasoning_content must be a string or null")
-        normalized["reasoning_content"] = reasoning_content
-    return normalized
-
-
-def _validate_tools(tools: Any) -> list[Any] | None:
-    """Validate tools structure. Does not modify content."""
-    if tools is None:
-        return None
-    if not isinstance(tools, list):
-        raise MalformedRequestError("tools must be a list")
-    return tools
+_VLLM_TOOL_PARSER_ALIASES = {
+    "qwen": "qwen3_xml",
+    "qwen25": "qwen3_xml",
+    "qwen3": "qwen3_xml",
+}
 
 
 def _canonicalize_tool_arguments_for_comparison(arguments: Any) -> tuple[str, Any]:
@@ -125,13 +52,78 @@ def _canonicalize_tool_arguments_for_comparison(arguments: Any) -> tuple[str, An
     return ("raw", arguments)
 
 
+def _process_tool_calls_sglang(
+    text: str,
+    tools: list[dict[str, Any]],
+    parser_name: str,
+) -> tuple[str, list[Any]]:
+    from sglang.srt.entrypoints.openai.protocol import Function as SglFunction
+    from sglang.srt.entrypoints.openai.protocol import Tool as SglTool
+    from sglang.srt.function_call.function_call_parser import FunctionCallParser
+
+    sglang_tools = [SglTool(type=tool["type"], function=SglFunction(**tool["function"])) for tool in tools]
+    parser = FunctionCallParser(sglang_tools, parser_name)
+    if not parser.has_tool_call(text):
+        return text, []
+
+    content, calls = parser.parse_non_stream(text)
+    return content, [SimpleNamespace(name=call.name, arguments=call.parameters) for call in calls]
+
+
+def _process_tool_calls_vllm(
+    text: str,
+    tools: list[dict[str, Any]],
+    parser_name: str,
+    tokenizer,
+) -> tuple[str, list[Any]]:
+    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionToolsParam
+    from vllm.tool_parsers import ToolParserManager
+
+    parser_cls = ToolParserManager.get_tool_parser(parser_name)
+    parser = parser_cls(tokenizer)
+    request = SimpleNamespace(
+        tools=[ChatCompletionToolsParam(**tool) if isinstance(tool, dict) else tool for tool in tools],
+        tool_choice="auto",
+        skip_special_tokens=True,
+    )
+    parsed = parser.extract_tool_calls(text, request)
+    if not parsed.tools_called:
+        return text, []
+    return parsed.content or "", [tool_call.function for tool_call in parsed.tool_calls]
+
+
+def _extract_tool_calls_with_sglang_or_vllm(
+    text: str,
+    tools: list[dict[str, Any]],
+    parser_name: str,
+    tokenizer,
+) -> tuple[str, list[Any]]:
+    sglang_name = _SGLANG_TOOL_PARSER_ALIASES.get(parser_name, parser_name)
+    try:
+        return _process_tool_calls_sglang(text, tools, sglang_name)
+    except ModuleNotFoundError:
+        pass
+    except Exception:
+        logger.warning("SGLang tool-call parsing failed; trying vLLM", exc_info=True)
+
+    vllm_name = _VLLM_TOOL_PARSER_ALIASES.get(parser_name, parser_name)
+    try:
+        return _process_tool_calls_vllm(text, tools, vllm_name, tokenizer)
+    except ModuleNotFoundError:
+        pass
+    except Exception:
+        logger.warning("vLLM tool-call parsing failed; returning raw text", exc_info=True)
+
+    return text, []
+
+
 class MessageCodec:
-    """Model-scoped request codec used by gateway sessions and actors.
+    """Model-scoped request codec used by gateway sessions.
 
     ``_GatewayActor`` owns one codec per actor and injects it into
-    ``GatewaySession`` instances. The codec normalizes OpenAI-shaped request
-    payloads, renders chat templates, handles multimodal processor inputs, and
-    decodes backend token outputs without reading session state.
+    ``GatewaySession`` instances. The codec renders chat templates, handles
+    multimodal processor inputs, and decodes backend token outputs without
+    reading session state.
     """
 
     def __init__(
@@ -143,25 +135,17 @@ class MessageCodec:
         vision_info_extractor_kwargs: dict[str, Any] | None = None,
         tool_parser_name: str | None = None,
         apply_chat_template_kwargs: dict[str, Any] | None = None,
-        base_sampling_params: dict[str, Any] | None = None,
-        allowed_request_sampling_param_keys: set[str] | frozenset[str] | None = None,
     ):
         self._tokenizer = tokenizer
         self._processor = processor
         self._vision_info_extractor = vision_info_extractor or self._default_vision_info_extractor
         self._vision_info_extractor_kwargs = dict(vision_info_extractor_kwargs or {})
         self._apply_chat_template_kwargs = apply_chat_template_kwargs or {}
-        self._base_sampling_params = dict(base_sampling_params or {})
-        self._allowed_request_sampling_param_keys = (
-            _DEFAULT_ALLOWED_REQUEST_SAMPLING_PARAM_KEYS
-            if allowed_request_sampling_param_keys is None
-            else frozenset(allowed_request_sampling_param_keys)
-        )
         self._system_prompt = initialize_system_prompt(
             tokenizer,
             **self._apply_chat_template_kwargs,
         )
-        self._tool_parser = ToolParser.get_tool_parser(tool_parser_name, tokenizer) if tool_parser_name else None
+        self._tool_parser_name = tool_parser_name
 
     async def _default_vision_info_extractor(
         self,
@@ -303,15 +287,14 @@ class MessageCodec:
         stop_reason: str | None = None,
     ) -> tuple[dict[str, Any], str]:
         """Decode model output tokens into an assistant message and finish reason."""
-        if self._tool_parser is not None and tools:
-            parsed_tools = None
-            try:
-                from verl.tools.schemas import OpenAIFunctionToolSchema
-
-                parsed_tools = [OpenAIFunctionToolSchema(**t) if isinstance(t, dict) else t for t in tools]
-            except Exception:
-                pass
-            content, function_calls = await self._tool_parser.extract_tool_calls(response_ids, parsed_tools)
+        if self._tool_parser_name and tools:
+            response_text = self._tokenizer.decode(response_ids, skip_special_tokens=False)
+            content, function_calls = _extract_tool_calls_with_sglang_or_vllm(
+                response_text,
+                tools,
+                self._tool_parser_name,
+                self._tokenizer,
+            )
             if function_calls:
                 tool_calls = [
                     {
@@ -331,30 +314,13 @@ class MessageCodec:
         finish_reason = _FINISH_REASON_MAP.get(stop_reason, stop_reason) if stop_reason else "stop"
         return {"role": "assistant", "content": response_text}, finish_reason
 
-    def normalize_request(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Normalize chat messages, tool schemas, and chat-template kwargs."""
-        messages = payload.get("messages")
-        if not isinstance(messages, list) or not messages:
-            raise MalformedRequestError("messages must be non-empty")
-        chat_template_kwargs = payload.get("chat_template_kwargs")
-        if chat_template_kwargs is not None and not isinstance(chat_template_kwargs, dict):
-            raise MalformedRequestError("chat_template_kwargs must be an object")
-
-        tool_choice_payload = payload.get("tool_choice")
-        tool_choice = tool_choice_payload.lower() if isinstance(tool_choice_payload, str) else "auto"
-        tools = _validate_tools(payload.get("tools"))
-        if tool_choice == "none":
-            tools = None
-
-        return {
-            "messages": [_normalize_message(message) for message in messages],
-            "tools": tools,
-            "chat_template_kwargs": dict(chat_template_kwargs) if chat_template_kwargs else {},
-        }
-
     def canonicalize_message_for_prefix_comparison(self, message: dict[str, Any]) -> dict[str, Any]:
         """Canonicalize one message before session prefix comparison."""
         normalized = dict(message)
+        # Tool-result correlation ids are wire noise; prefix comparison ignores
+        # them while preserving unexpected top-level fields on other roles.
+        if normalized.get("role") == "tool":
+            normalized.pop("tool_call_id", None)
         tool_calls = normalized.get("tool_calls")
         if not isinstance(tool_calls, list):
             return normalized
@@ -362,6 +328,7 @@ class MessageCodec:
         normalized_tool_calls: list[dict[str, Any]] = []
         for tool_call in tool_calls:
             normalized_tool_call = dict(tool_call)
+            normalized_tool_call.pop("id", None)
             function = normalized_tool_call.get("function")
             if isinstance(function, dict) and "arguments" in function:
                 normalized_function = dict(function)
@@ -370,11 +337,3 @@ class MessageCodec:
             normalized_tool_calls.append(normalized_tool_call)
         normalized["tool_calls"] = normalized_tool_calls
         return normalized
-
-    def build_sampling_params(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Merge allowed per-request sampling params with codec defaults."""
-        sampling_params = dict(self._base_sampling_params)
-        for key in self._allowed_request_sampling_param_keys:
-            if key in payload:
-                sampling_params[key] = payload[key]
-        return sampling_params

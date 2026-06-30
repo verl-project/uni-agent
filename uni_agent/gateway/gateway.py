@@ -1,21 +1,35 @@
-"""Thin FastAPI/Ray actor layer for gateway routing and JSON serialization."""
+"""Thin FastAPI/Ray actor layer for routing and session ownership.
+
+The actor owns routing, capability gates, and per-session ``GatewaySession``
+instances. Provider adapters own wire-to-internal translation and the response
+or SSE envelopes returned to clients.
+"""
 
 from __future__ import annotations
 
 import asyncio
-import time
-from logging import getLogger
+import logging
 from typing import Any
-from uuid import uuid4
 
 import ray
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
+from uni_agent.gateway.adapters.anthropic import (
+    anthropic_build_response,
+    anthropic_error_body,
+    anthropic_stream_response,
+    anthropic_to_internal,
+)
+from uni_agent.gateway.adapters.openai import (
+    openai_build_response,
+    openai_error_body,
+    openai_stream_response,
+    openai_to_internal,
+)
+from uni_agent.gateway.adapters.types import AnthropicRequest, MalformedRequestError, OpenAIChatCompletionRequest
 from uni_agent.gateway.config import GatewayActorConfig
 from uni_agent.gateway.session import (
-    ChatCompletionRequest,
-    ChatCompletionResponse,
     GatewaySession,
     MessageCodec,
     SessionHandle,
@@ -23,14 +37,18 @@ from uni_agent.gateway.session import (
 )
 from verl.workers.rollout.utils import run_uvicorn
 
+DEFAULT_ALLOWED_REQUEST_SAMPLING_KEYS = frozenset({"temperature", "top_p", "top_k", "max_tokens", "stop"})
+
+logger = logging.getLogger("gateway")
+
 
 class _GatewayActor:
     """Ray actor implementation exposed as ``GatewayActor = ray.remote(...)``.
 
     Runtime and manager callers invoke public methods with
-    ``actor.method.remote(...)``. The actor owns FastAPI routing, OpenAI
-    capability gates, JSON response envelopes, and per-session
-    ``GatewaySession`` instances.
+    ``actor.method.remote(...)``. The actor owns FastAPI routing, provider
+    capability gates, response envelopes, and per-session ``GatewaySession``
+    instances.
     """
 
     def __init__(self, config: GatewayActorConfig, backend):
@@ -46,8 +64,12 @@ class _GatewayActor:
             vision_info_extractor_kwargs=config.vision_info_extractor_kwargs,
             tool_parser_name=config.tool_parser_name,
             apply_chat_template_kwargs=config.apply_chat_template_kwargs,
-            base_sampling_params=config.base_sampling_params,
-            allowed_request_sampling_param_keys=config.allowed_request_sampling_param_keys,
+        )
+        self._base_sampling_params = dict(config.base_sampling_params or {})
+        self._allowed_request_sampling_param_keys = (
+            DEFAULT_ALLOWED_REQUEST_SAMPLING_KEYS
+            if config.allowed_request_sampling_param_keys is None
+            else frozenset(config.allowed_request_sampling_param_keys)
         )
         self._prompt_length = config.prompt_length
         self._response_length = config.response_length
@@ -59,33 +81,53 @@ class _GatewayActor:
         self._register_routes()
 
     def _register_routes(self) -> None:
-        """Register HTTP handlers for chat completions and reward metadata."""
+        """Register provider HTTP handlers and reward metadata."""
+
+        def _error_body_for_path(path: str, status_code: int, message: str) -> dict[str, Any]:
+            if path.endswith("/v1/messages"):
+                return anthropic_error_body(status_code, message)
+            return openai_error_body(status_code, message)
 
         @self._app.exception_handler(HTTPException)
-        async def _http_exception_handler(_request: Request, exc: HTTPException):
+        async def _http_exception_handler(request: Request, exc: HTTPException):
             if isinstance(exc.detail, str):
                 message = exc.detail
             elif isinstance(exc.detail, dict) and "message" in exc.detail:
                 message = str(exc.detail["message"])
             else:
                 message = str(exc.detail)
-            error_type = "invalid_request_error" if 400 <= exc.status_code < 500 else "internal_server_error"
             return JSONResponse(
                 status_code=exc.status_code,
-                content={
-                    "error": {
-                        "message": message,
-                        "type": error_type,
-                        "code": None,
-                        "param": None,
-                    }
-                },
+                content=_error_body_for_path(request.url.path, exc.status_code, message),
+            )
+
+        @self._app.exception_handler(Exception)
+        async def _unhandled_exception_handler(request: Request, exc: Exception):
+            # Any exception that escapes the route handlers (programmer bugs,
+            # ungraceful third-party failures, etc.) reaches here. We log the
+            # full traceback for diagnosis but return a provider-shaped error
+            # body so client SDKs can still parse it.
+            logger.exception("Unhandled exception in gateway route %s", request.url.path)
+            return JSONResponse(
+                status_code=500,
+                content=_error_body_for_path(request.url.path, 500, "Internal server error"),
             )
 
         @self._app.post("/sessions/{session_id}/v1/chat/completions")
-        async def _chat_completions(session_id: str, request: Request):
-            payload = await request.json()
-            return await self._handle_chat_completions(session_id=session_id, payload=payload)
+        async def _openai_chat_completions(session_id: str, request: Request):
+            try:
+                payload = await request.json()
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
+            return await self._handle_openai_chat_completions(session_id=session_id, payload=payload)
+
+        @self._app.post("/sessions/{session_id}/v1/messages")
+        async def _anthropic_messages(session_id: str, request: Request):
+            try:
+                payload = await request.json()
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
+            return await self._handle_anthropic_messages(session_id=session_id, payload=payload)
 
         @self._app.post("/sessions/{session_id}/reward_info")
         async def _reward_info(session_id: str, request: Request):
@@ -109,58 +151,55 @@ class _GatewayActor:
             raise KeyError(f"Unknown session_id: {session_id}")
         return session
 
-    async def _handle_chat_completions(
+    async def _handle_openai_chat_completions(
         self,
         session_id: str,
-        payload: ChatCompletionRequest,
-    ) -> JSONResponse:
-        """Validate a chat-completion payload and serialize the session outcome."""
+        payload: OpenAIChatCompletionRequest,
+    ) -> JSONResponse | StreamingResponse:
+        """Validate an OpenAI Chat Completions payload and serialize the session outcome."""
         session = self._sessions.get(session_id)
         if session is None:
             raise HTTPException(status_code=404, detail=f"Unknown session_id: {session_id}")
 
-        if payload.get("stream") is True:
-            getLogger("gateway").warning(
-                "session=%s stream=true requested; gateway returns non-streaming response",
-                session_id,
+        try:
+            internal = openai_to_internal(
+                payload,
+                base_sampling_params=self._base_sampling_params,
+                allowed_sampling_keys=self._allowed_request_sampling_param_keys,
             )
-        n_value = payload.get("n", 1)
-        if n_value != 1:
-            raise HTTPException(status_code=400, detail=f"n={n_value} is not supported (only n=1)")
-        if payload.get("response_format") is not None:
-            raise HTTPException(status_code=400, detail="response_format is not supported")
-        tool_choice_payload = payload.get("tool_choice")
-        if isinstance(tool_choice_payload, dict):
-            raise HTTPException(
-                status_code=400,
-                detail='tool_choice with a specific function is not supported (only "auto" / "none" are supported)',
-            )
-        if isinstance(tool_choice_payload, str) and tool_choice_payload.lower() == "required":
-            raise HTTPException(
-                status_code=400,
-                detail='tool_choice="required" is not supported (only "auto" / "none" are supported)',
-            )
+        except MalformedRequestError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-        outcome = await session.run_generation(payload, self._backend)
-        response: ChatCompletionResponse = {
-            "id": f"chatcmpl-{uuid4().hex}",
-            "object": "chat.completion",
-            "created": int(time.time()),
-            "model": str(payload.get("model") or "unknown"),
-            "choices": [
-                {
-                    "index": 0,
-                    "message": outcome.assistant_msg,
-                    "finish_reason": outcome.finish_reason,
-                }
-            ],
-            "usage": {
-                "prompt_tokens": outcome.prompt_tokens,
-                "completion_tokens": outcome.completion_tokens,
-                "total_tokens": outcome.prompt_tokens + outcome.completion_tokens,
-            },
-        }
-        return JSONResponse(response)
+        outcome = await session.run_generation(internal, self._backend)
+        model = str(payload.get("model") or "unknown")
+        if payload.get("stream") is True:
+            return openai_stream_response(outcome, model=model)
+        return JSONResponse(openai_build_response(outcome, model=model))
+
+    async def _handle_anthropic_messages(
+        self,
+        session_id: str,
+        payload: AnthropicRequest,
+    ) -> JSONResponse | StreamingResponse:
+        """Validate an Anthropic Messages payload and serialize the session outcome."""
+        session = self._sessions.get(session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail=f"Unknown session_id: {session_id}")
+
+        try:
+            internal = anthropic_to_internal(
+                payload,
+                base_sampling_params=self._base_sampling_params,
+                allowed_sampling_keys=self._allowed_request_sampling_param_keys,
+            )
+        except MalformedRequestError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        outcome = await session.run_generation(internal, self._backend)
+        model = str(payload.get("model") or "unknown")
+        if payload.get("stream") is True:
+            return anthropic_stream_response(outcome, model=model)
+        return JSONResponse(anthropic_build_response(outcome, model=model))
 
     async def start(self) -> None:
         """Start the FastAPI server backing this gateway actor."""
@@ -183,7 +222,7 @@ class _GatewayActor:
         self._server_base_url = None
 
     async def create_session(self, session_id: str, metadata: dict[str, Any] | None = None) -> SessionHandle:
-        """Create an actor-owned session and return its OpenAI-compatible handle."""
+        """Create an actor-owned session and return its provider-compatible handle."""
         self._require_started()
         if session_id in self._sessions:
             raise RuntimeError(f"Session {session_id} already exists")
