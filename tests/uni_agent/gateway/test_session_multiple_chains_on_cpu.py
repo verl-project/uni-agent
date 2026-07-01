@@ -1517,6 +1517,168 @@ async def test_multiple_chains_ignore_cch_for_prefix_hash_is_opt_in():
 
 
 @pytest.mark.asyncio
+async def test_multiple_chains_claude_code_subagent_cch_prefix_match_and_trajectory_assembly():
+    """Model the observable Claude Code shape: main Agent tool call, sidechain, return."""
+    # TODO: Replace this OpenAI-compatible projection with native Anthropic/Claude Code
+    # content-block requests once the gateway accepts that request envelope directly.
+    session = _session(
+        "claude-code-subagent-cch",
+        tool_parser_name="hermes",
+        ignore_cch_for_prefix_hash=True,
+    )
+    agent_tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "Agent",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "description": {"type": "string"},
+                        "name": {"type": "string"},
+                        "prompt": {"type": "string"},
+                        "subagent_type": {"type": "string"},
+                    },
+                    "required": ["description", "name", "prompt", "subagent_type"],
+                },
+            },
+        }
+    ]
+    subagent_tools = [
+        {"type": "function", "function": {"name": "Read", "parameters": {"type": "object"}}},
+        {"type": "function", "function": {"name": "Grep", "parameters": {"type": "object"}}},
+    ]
+    agent_tool_call_text = (
+        '<tool_call>\n'
+        '{"name": "Agent", "arguments": {"description": "prefix audit", '
+        '"name": "agent-aPrefix", '
+        '"prompt": "Check chain selection and trajectory assembly", '
+        '"subagent_type": "general-purpose"}}\n'
+        "</tool_call>"
+    )
+    backend = SequencedBackend([agent_tool_call_text, "SUB_FINDING", "MAIN_FINAL"])
+
+    main_first = [
+        {
+            "role": "system",
+            "content": "Claude Code main session=cc-main prompt_cache=cch=MAIN_SYS_A",
+        },
+        {
+            "role": "user",
+            "content": "Spawn a focused subagent to audit multiple chains. cch=MAIN_USER_A",
+        },
+    ]
+    first = await _run(session, backend, main_first, tools=agent_tools)
+    state_after_main_first = session.snapshot_state()
+
+    assert first.finish_reason == "tool_calls"
+    assert first.assistant_msg["tool_calls"][0]["function"]["name"] == "Agent"
+    assert state_after_main_first["active_chain_ids"] == [1]
+    main_tip_after_first = state_after_main_first["active_chain_tip_hashes"][1]
+
+    subagent_messages = [
+        {
+            "role": "system",
+            "content": (
+                "Claude Code subagent isSidechain=true agentId=agent-aPrefix "
+                "parentSession=cc-main cch=SUB_SYS_A"
+            ),
+        },
+        {
+            "role": "user",
+            "content": "Audit prefix matching in the gateway session. cch=SUB_TASK_A",
+        },
+    ]
+    await _run(session, backend, subagent_messages, tools=subagent_tools)
+    state_after_subagent = session.snapshot_state()
+
+    assert state_after_subagent["active_chain_ids"] == [1, 2]
+    assert state_after_subagent["active_chain_tip_hashes"][1] == main_tip_after_first
+
+    subagent_result = "Subagent agent-aPrefix result cch=RESULT_B: SUB_FINDING"
+    subagent_result_blocks = [{"type": "text", "text": subagent_result}]
+    main_followup = "Use the sidechain result and finish the main task. cch=MAIN_USER_B"
+    main_continuation = [
+        {
+            "role": "system",
+            "content": "Claude Code main session=cc-main prompt_cache=cch=MAIN_SYS_B",
+        },
+        {
+            "role": "user",
+            "content": "Spawn a focused subagent to audit multiple chains. cch=MAIN_USER_B",
+        },
+        first.assistant_msg,
+        {
+            "role": "tool",
+            "tool_call_id": first.assistant_msg["tool_calls"][0]["id"],
+            "content": subagent_result_blocks,
+        },
+        {"role": "user", "content": main_followup},
+    ]
+    await _run(session, backend, main_continuation, tools=agent_tools)
+    state_after_main_return = session.snapshot_state()
+
+    # The latest visible request returns to the old main chain despite cch= churn
+    # and despite the subagent being the most recently created sibling chain.
+    assert state_after_main_return["active_chain_ids"] == [1, 2]
+    assert (
+        state_after_main_return["active_chain_updated_seq"][1]
+        > state_after_main_return["active_chain_updated_seq"][2]
+    )
+    assert state_after_main_return["active_chain_tip_hashes"][1] != main_tip_after_first
+
+    main_chain, subagent_chain = session.active_chains
+    assert main_chain.chain_id == 1
+    assert subagent_chain.chain_id == 2
+    assert len(main_chain.message_history) == len(main_continuation) + 1
+    assert "cch=MAIN_SYS_B" in main_chain.message_history[0]["content"]
+    assert "cch=MAIN_USER_B" in main_chain.message_history[1]["content"]
+    assert main_chain.message_history[2]["tool_calls"][0]["id"] == first.assistant_msg["tool_calls"][0]["id"]
+    assert main_chain.message_history[2]["tool_calls"][0]["function"] == {
+        "name": "Agent",
+        "arguments": {
+            "description": "prefix audit",
+            "name": "agent-aPrefix",
+            "prompt": "Check chain selection and trajectory assembly",
+            "subagent_type": "general-purpose",
+        },
+    }
+    assert main_chain.message_history[3]["tool_call_id"] == first.assistant_msg["tool_calls"][0]["id"]
+    assert main_chain.message_history[3]["content"] == subagent_result_blocks
+    assert main_chain.message_history[4]["content"] == main_followup
+
+    trajectories = await session.finalize()
+    decoded = [_decode_response_ids(trajectory.response_ids) for trajectory in trajectories]
+
+    # Final order follows order_seq: subagent first, returned main chain last.
+    assert decoded[0] == "SUB_FINDING"
+    assert decoded[1].startswith(agent_tool_call_text)
+    assert decoded[1].endswith("MAIN_FINAL")
+    assert subagent_result in decoded[1]
+    assert main_followup in decoded[1]
+    assert "SUB_FINDING" not in decoded[1][: len(agent_tool_call_text)]
+
+    main_trajectory = trajectories[1]
+    assert main_trajectory.response_ids[: len(agent_tool_call_text)] == _ids(agent_tool_call_text)
+    assert main_trajectory.response_mask[: len(agent_tool_call_text)] == [1] * len(agent_tool_call_text)
+    assert main_trajectory.response_ids[-len("MAIN_FINAL") :] == _ids("MAIN_FINAL")
+    assert main_trajectory.response_mask[-len("MAIN_FINAL") :] == [1] * len("MAIN_FINAL")
+
+    subagent_result_offset = decoded[1].index(subagent_result)
+    main_followup_offset = decoded[1].index(main_followup)
+    assert main_trajectory.response_mask[
+        subagent_result_offset : subagent_result_offset + len(subagent_result)
+    ] == [0] * len(subagent_result)
+    assert main_trajectory.response_mask[main_followup_offset : main_followup_offset + len(main_followup)] == [
+        0
+    ] * len(main_followup)
+
+    assert trajectories[0].response_mask == [1] * len("SUB_FINDING")
+    assert agent_tool_call_text not in decoded[0]
+    assert "MAIN_FINAL" not in decoded[0]
+
+
+@pytest.mark.asyncio
 async def test_multiple_chains_tool_call_assistant_echo_hits_same_chain():
     session = _session("tool-call-echo", tool_parser_name="hermes")
     tools = [{"type": "function", "function": {"name": "search", "parameters": {"type": "object"}}}]
