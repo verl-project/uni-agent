@@ -45,5 +45,5 @@ class LocalSandbox(Sandbox):
                 proc.kill()
             except ProcessLookupError:
                 pass
-            return ExecResult(exit_code=124, stdout="", stderr=f"local exec timed out after {timeout}s")
+            return ExecResult(exit_code=-1, stdout="", stderr=f"local exec timed out after {timeout}s")
         return ExecResult(exit_code=proc.returncode or 0, stdout=_to_str(out), stderr=_to_str(err))

@@ -1,11 +1,8 @@
-"""Sandbox registry: register a provider by name and build it by name.
+"""Sandbox registry: register a provider by name, build it by name.
 
-Mirrors the reward / tools / tasks registries. Each provider is a
-:class:`~uni_agent.sandbox.base.Sandbox` subclass living in its own module that
-registers itself with :func:`register_sandbox`. :func:`build_sandbox` resolves a
-provider by name, importing its module on first use (:data:`SANDBOX_MODULES`) so
-a provider whose third-party SDK isn't installed never blocks importing this
-package -- you only pay for the provider you actually select.
+Providers live in their own module and self-register via
+:func:`register_sandbox`; :func:`build_sandbox` imports that module lazily on
+first use, so an uninstalled provider SDK never blocks importing this package.
 """
 
 from __future__ import annotations

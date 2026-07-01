@@ -54,6 +54,7 @@ def build_sandbox_config() -> SandboxConfig:
     return SandboxConfig(
         provider=os.getenv("SANDBOX_PROVIDER", "modal"),
         image=os.getenv("IMAGE", "enterprise-public-2-cn-beijing.cr.volces.com/vefaas-public/python:3.12"),
+        # image=os.getenv("IMAGE", "python:3.12"),
         runtime_timeout=3600,
     )
 
@@ -84,6 +85,8 @@ async def main() -> None:
 
     sandbox = build_sandbox(sandbox_config)
     async with sandbox:  # start() on enter, stop() on exit
+        print(await sandbox.exec(["tmux", "-V"]))
+        # exit()
         toolbox = Toolbox.from_specs(tool_specs, sandbox=sandbox)
         schemas = toolbox.schemas()
         print(f"  -> tool schemas  : {[s['function']['name'] for s in schemas]}")

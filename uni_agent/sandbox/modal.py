@@ -34,7 +34,6 @@ class ModalSandbox(Sandbox):
 
     @classmethod
     def from_config(cls, config: SandboxConfig) -> ModalSandbox:
-
         return cls(image=config.image, runtime_timeout=config.runtime_timeout, **config.sandbox_kwargs)
 
     # ----- control plane -----
@@ -77,9 +76,6 @@ class ModalSandbox(Sandbox):
         workdir: str | None = None,
         env: dict[str, str] | None = None,
     ) -> ExecResult:
-        # ``Sandbox.exec`` takes the argv vector directly (no implicit shell) and
-        # accepts per-call workdir / env / timeout. stdout & stderr default to
-        # in-memory PIPEs; drain both concurrently, then collect the exit code.
         proc = await self._require_sandbox().exec.aio(
             *argv,
             timeout=int(timeout) if timeout else None,
@@ -98,36 +94,27 @@ class ModalSandbox(Sandbox):
         return ExecResult(exit_code=int(exit_code or 0), stdout=stdout, stderr=stderr)
 
     async def read_file(self, path: str) -> bytes:
-        # ``read_bytes`` streams the file. The filesystem API is absolute-only, so
-        # relative paths fall back to the exec-based floor (resolved against the
-        # sandbox cwd).
+        # Native streamed read; absolute paths only -- relative paths use the exec floor.
         if not path.startswith("/"):
             return await super().read_file(path)
         return await self._require_sandbox().filesystem.read_bytes.aio(path)
 
     async def write_file(self, path: str, content: bytes | str) -> None:
-        # ``write_bytes`` streams the content (no shell-arg size limit, unlike the
-        # base64 floor) and creates parent dirs. Absolute-only; relative paths
-        # fall back to the exec-based floor.
+        # Native streamed write (creates parent dirs); absolute paths only -- relative use the exec floor.
         if not path.startswith("/"):
             return await super().write_file(path, content)
         data = content.encode("utf-8") if isinstance(content, str) else content
         await self._require_sandbox().filesystem.write_bytes.aio(data, path)
 
     async def upload_file(self, local_file: Path | str, remote_file: str) -> None:
-        # Native streamed copy: creates remote parent dirs and overwrites.
-        # ``remote_file`` must be absolute. Directory trees are handled by the
-        # base ``upload`` dispatcher (tar), which routes the archive here.
+        # Native streamed copy (creates remote dirs, overwrites); trees route here via base upload's tar.
         await self._require_sandbox().filesystem.copy_from_local.aio(str(local_file), remote_file)
 
     async def download_file(self, remote_file: str, local_file: Path | str) -> None:
-        # Native streamed copy to a temp file then atomic rename; creates local
-        # parent dirs. ``remote_file`` must be absolute.
+        # Native streamed copy (creates local parent dirs); ``remote_file`` must be absolute.
         await self._require_sandbox().filesystem.copy_to_local.aio(remote_file, str(local_file))
 
     async def expose_port(self, port: int) -> str:
-        # Modal requires ports to be declared via ``encrypted_ports`` at sandbox
-        # creation (put them in ``sandbox_kwargs``); a running
-        # ``sleep infinity`` sandbox cannot open one on demand. Once declared,
-        # implement this via ``self._sandbox.tunnels()``.
+        # Modal needs ports declared via ``encrypted_ports`` at creation (in
+        # ``sandbox_kwargs``); once declared, implement via ``self._sandbox.tunnels()``.
         raise NotImplementedError("ModalSandbox.expose_port requires encrypted_ports at sandbox creation time")

@@ -42,11 +42,8 @@ class ExecResult:
 class SandboxConfig(BaseModel):
     """Which provider to run, plus its construction kwargs.
 
-    ``provider`` is a registry key (see :data:`uni_agent.sandbox.SANDBOX_REGISTRY`);
-    it is a free-form string rather than an enum so new providers can register
-    without touching this model. The standard fields below are what a provider's
-    :meth:`Sandbox.from_config` may consume; anything provider-specific rides
-    along in ``sandbox_kwargs``.
+    Standard fields feed a provider's :meth:`Sandbox.from_config`; anything
+    provider-specific rides along in ``sandbox_kwargs``.
     """
 
     provider: str = Field(
@@ -68,15 +65,11 @@ class SandboxConfig(BaseModel):
 
 @runtime_checkable
 class SandboxBackend(Protocol):
-    """Narrow data-plane surface that tools and their channels depend on.
+    """Narrow data-plane surface that tools depend on.
 
-    This is exactly the *subset* of :class:`Sandbox` a tool needs to do its
-    work -- exec, file transfer and an optional port tunnel -- and pointedly
-    excludes lifecycle (``start`` / ``stop``). Tools annotate their sandbox
-    against this protocol, so although they are usually handed the whole
-    :class:`Sandbox`, they can only reach the data plane (a shell can't
-    terminate the sandbox it lives in). Any object structurally providing these
-    methods satisfies it -- a real :class:`Sandbox`, or a test double.
+    The subset of :class:`Sandbox` a tool needs -- exec, file transfer and an
+    optional port tunnel -- deliberately excluding lifecycle (``start`` /
+    ``stop``). Any object structurally providing these methods satisfies it.
     """
 
     async def exec(
@@ -109,13 +102,11 @@ class SandboxBackend(Protocol):
 
 
 class Sandbox(abc.ABC):
-    """One provider = one class: owns lifecycle *and* is the data-plane backend.
+    """One provider = one class: owns lifecycle and is the data-plane backend.
 
-    Required of a provider: :meth:`start`, :meth:`stop`, :meth:`exec`. Provided
-    here: the ``bash -lc`` convenience and the exec-based file floor
-    (:meth:`read_file` / :meth:`write_file` / :meth:`upload` / :meth:`download`).
-    :meth:`expose_port` is an optional capability (raises until a provider
-    implements it).
+    Providers implement :meth:`start`, :meth:`stop` and :meth:`exec`; the
+    ``bash -lc`` helper and exec-based file transfer are provided here.
+    :meth:`expose_port` is optional (raises until a provider implements it).
     """
 
     #: Registry key for this provider, stamped by ``@register_sandbox``.
@@ -125,9 +116,8 @@ class Sandbox(abc.ABC):
     def from_config(cls, config: SandboxConfig) -> Sandbox:
         """Build an instance from a :class:`SandboxConfig`.
 
-        Default: construct with no args (good for host-local providers). A
-        provider that takes constructor kwargs (image, timeout, ...) overrides
-        this to map them off ``config`` (see :class:`ModalSandbox`).
+        Default: construct with no args; providers that take constructor kwargs
+        override this to map them off ``config``.
         """
         return cls()
 
@@ -207,12 +197,10 @@ class Sandbox(abc.ABC):
             raise RuntimeError(f"write_file {path!r} failed: {res.stderr.strip()}")
 
     async def upload(self, local_path: Path | str, remote_path: str) -> None:
-        """Upload a host file *or* directory tree into the sandbox.
+        """Upload a host file or directory tree into the sandbox.
 
-        A file goes through :meth:`upload_file`. A directory is packed into one
-        gzipped tar locally, shipped as that single archive, and unpacked into
-        ``remote_path`` -- preserving modes / symlinks / empty dirs and avoiding
-        a round-trip per file (needs ``tar`` and ``gzip`` in the sandbox image).
+        A file goes through :meth:`upload_file`; a directory ships as one gzipped
+        tar and is unpacked into ``remote_path`` (needs ``tar`` and ``gzip``).
         """
         src = Path(local_path)
         if src.is_dir():
@@ -221,12 +209,10 @@ class Sandbox(abc.ABC):
             await self.upload_file(src, str(remote_path))
 
     async def download(self, remote_path: str, local_path: Path | str) -> None:
-        """Download a sandbox file *or* directory tree to the host.
+        """Download a sandbox file or directory tree to the host.
 
-        The remote path's type is probed once (``test -d``): a file goes through
-        :meth:`download_file`; a directory is archived in the sandbox, pulled as
-        one archive, and extracted locally (tar's ``data`` filter guards against
-        path traversal). Directory transfer needs ``tar`` and ``gzip``.
+        A file goes through :meth:`download_file`; a directory is archived,
+        pulled as one archive, and extracted locally (needs ``tar`` and ``gzip``).
         """
         remote = str(remote_path)
         if (await self.exec_shell(f"test -d {shlex.quote(remote)}")).exit_code == 0:
@@ -238,8 +224,7 @@ class Sandbox(abc.ABC):
     async def upload_file(self, local_file: Path | str, remote_file: str) -> None:
         """Upload one host file into the sandbox (floor: inline via :meth:`write_file`).
 
-        The override point for a provider-native single-file fast path. Whole
-        trees go through :meth:`upload`'s tar path, which routes the archive here.
+        The override seam for a provider-native single-file fast path.
         """
         await self.write_file(remote_file, Path(local_file).read_bytes())
 

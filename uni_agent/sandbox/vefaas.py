@@ -11,6 +11,7 @@ from .base import ExecResult, Sandbox, _to_str
 from .registry import register_sandbox
 
 if TYPE_CHECKING:
+    import aiohttp
     from swerex.runtime.abstract import Command
 
     from .base import SandboxConfig
@@ -22,11 +23,10 @@ _RUNTIME_PORT = 8000
 
 
 class _VefaasRuntime:
-    """Minimal async swerex client that speaks veFaaS routing.
+    """Minimal async swerex client for veFaaS routing.
 
-    Covers just what the sandbox needs -- ``execute`` for exec, liveness, and
-    ``close`` -- posting to the function-route base URL with the veFaaS headers
-    (``X-API-Key`` + ``X-Faas-Instance-Name``) and swerex's own pydantic models.
+    Posts to the function-route base URL with the veFaaS headers (``X-API-Key``
+    + ``X-Faas-Instance-Name``); covers ``execute``, liveness and ``close``.
     """
 
     def __init__(
@@ -66,8 +66,36 @@ class _VefaasRuntime:
                 headers=headers,
                 timeout=aiohttp.ClientTimeout(total=total),
             ) as resp:
-                resp.raise_for_status()
+                await self._raise_for_error(resp)
                 return output_cls(**(await resp.json()))
+
+    async def _raise_for_error(self, resp: aiohttp.ClientResponse) -> None:
+        """Raise the exception a swerex server reported over HTTP.
+
+        swerex returns a server-side exception as HTTP 511 with a
+        ``swerexception`` body: re-raise a timeout as ``CommandTimeoutError`` and
+        any other runtime error as ``SwerexException``. Other statuses raise via
+        ``raise_for_status``.
+        """
+        if resp.status < 400:
+            return
+
+        from swerex.exceptions import CommandTimeoutError, SwerexException
+
+        data: Any = None
+        try:
+            data = await resp.json()
+        except Exception:
+            pass
+        if resp.status == 511 and isinstance(data, dict) and isinstance(data.get("swerexception"), dict):
+            info = data["swerexception"]
+            message = str(info.get("message") or "swerex runtime error")
+            if info.get("traceback"):
+                logger.debug("veFaaS runtime traceback:\n%s", info["traceback"])
+            if str(info.get("class_path") or "").rpartition(".")[2] == "CommandTimeoutError":
+                raise CommandTimeoutError(message)
+            raise SwerexException(message)
+        resp.raise_for_status()
 
     async def is_alive(self, *, timeout: float | None = None) -> bool:
         import aiohttp
@@ -123,9 +151,7 @@ def _get_vefaas_client():
     proxy = os.getenv("SANDBOX_PROXY")
 
     if not (access_key and secret_key):
-        raise ValueError(
-            "VefaasSandbox needs Volcengine credentials: set VOLCE_ACCESS_KEY / VOLCE_SECRET_KEY."
-        )
+        raise ValueError("VefaasSandbox needs Volcengine credentials: set VOLCE_ACCESS_KEY / VOLCE_SECRET_KEY.")
 
     configuration = volcenginesdkcore.Configuration()
     configuration.ak = access_key
@@ -147,7 +173,7 @@ class VefaasSandbox(Sandbox):
     def __init__(
         self,
         *,
-        image: str,
+        image: str = "enterprise-public-2-cn-beijing.cr.volces.com/vefaas-public/python:3.12",
         runtime_timeout: float = 3600.0,
         startup_timeout: float = 120.0,
     ) -> None:
@@ -179,9 +205,13 @@ class VefaasSandbox(Sandbox):
         self._client = _get_vefaas_client()
 
         token = uuid.uuid4().hex
-        command = f"curl -fsSL https://vefaas-swe.tos-cn-beijing.ivolces.com/swe-rex/install_1.4.0.sh | bash -s -- {token}"
+        command = (
+            f"curl -fsSL https://vefaas-swe.tos-cn-beijing.ivolces.com/swe-rex/install_1.4.0.sh | bash -s -- {token}"
+        )
         instance_image_info = volcenginesdkvefaas.InstanceImageInfoForCreateSandboxInput(
-            image=self.image, port=_RUNTIME_PORT, command=command,
+            image=self.image,
+            port=_RUNTIME_PORT,
+            command=command,
         )
         request = volcenginesdkvefaas.CreateSandboxRequest(
             function_id=self._function_id,
@@ -213,9 +243,7 @@ class VefaasSandbox(Sandbox):
         if self._sandbox_id is not None and self._client is not None:
             import volcenginesdkvefaas
 
-            request = volcenginesdkvefaas.KillSandboxRequest(
-                function_id=self._function_id, sandbox_id=self._sandbox_id
-            )
+            request = volcenginesdkvefaas.KillSandboxRequest(function_id=self._function_id, sandbox_id=self._sandbox_id)
             # kill_sandbox is a blocking SDK call; run it off the event loop.
             await asyncio.to_thread(self._client.kill_sandbox, request)
             self._sandbox_id = None
@@ -235,13 +263,18 @@ class VefaasSandbox(Sandbox):
         workdir: str | None = None,
         env: dict[str, str] | None = None,
     ) -> ExecResult:
-        # ``execute`` runs argv once in a fresh session on the swerex server (no
-        # implicit shell). Command's cwd / env / timeout map straight onto our args.
+        from swerex.exceptions import CommandTimeoutError, SwerexException
         from swerex.runtime.abstract import Command
 
-        resp = await self._require_runtime().execute(
-            Command(command=list(argv), shell=False, cwd=workdir, env=env or None, timeout=timeout)
-        )
+        runtime = self._require_runtime()
+        try:
+            resp = await runtime.execute(
+                Command(command=list(argv), shell=False, cwd=workdir, env=env or None, timeout=timeout)
+            )
+        except CommandTimeoutError as e:
+            return ExecResult(exit_code=-1, stdout="", stderr=str(e))
+        except SwerexException as e:
+            return ExecResult(exit_code=1, stdout="", stderr=str(e))
         return ExecResult(
             exit_code=int(resp.exit_code or 0),
             stdout=_to_str(resp.stdout),
