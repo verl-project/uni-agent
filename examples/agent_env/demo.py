@@ -53,7 +53,7 @@ def _indent(text, prefix: str = "    | ") -> str:
 def build_sandbox_config() -> SandboxConfig:
     return SandboxConfig(
         provider=os.getenv("SANDBOX_PROVIDER", "modal"),
-        image=os.getenv("IMAGE", "python:3.12"),
+        image=os.getenv("IMAGE", "enterprise-public-2-cn-beijing.cr.volces.com/vefaas-public/python:3.12"),
         runtime_timeout=3600,
     )
 

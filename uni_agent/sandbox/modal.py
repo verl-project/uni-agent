@@ -23,19 +23,18 @@ class ModalSandbox(Sandbox):
         image: str = "python:3.12-slim",
         app_name: str = "agent-sandbox",
         runtime_timeout: float = 3600.0,
-        modal_sandbox_kwargs: dict | None = None,
+        **modal_sandbox_kwargs,
     ):
         self.image = image
         self.app_name = app_name
         self.runtime_timeout = runtime_timeout
-        self.modal_sandbox_kwargs = dict(modal_sandbox_kwargs or {})
+        self.modal_sandbox_kwargs = dict(modal_sandbox_kwargs)
         self._app = None
         self._sandbox: modal.Sandbox | None = None
 
     @classmethod
     def from_config(cls, config: SandboxConfig) -> ModalSandbox:
-        # Standard fields map to constructor args; provider-specific extras
-        # (app_name, modal_sandbox_kwargs, ...) ride along in sandbox_kwargs.
+
         return cls(image=config.image, runtime_timeout=config.runtime_timeout, **config.sandbox_kwargs)
 
     # ----- control plane -----
@@ -128,7 +127,7 @@ class ModalSandbox(Sandbox):
 
     async def expose_port(self, port: int) -> str:
         # Modal requires ports to be declared via ``encrypted_ports`` at sandbox
-        # creation (pass through ``modal_sandbox_kwargs``); a running
+        # creation (put them in ``sandbox_kwargs``); a running
         # ``sleep infinity`` sandbox cannot open one on demand. Once declared,
         # implement this via ``self._sandbox.tunnels()``.
         raise NotImplementedError("ModalSandbox.expose_port requires encrypted_ports at sandbox creation time")

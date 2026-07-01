@@ -60,8 +60,7 @@ class SandboxConfig(BaseModel):
     image: str = Field(default="python:3.12", description="Container image for remote providers (e.g. modal).")
     sandbox_kwargs: dict[str, Any] = Field(
         default_factory=dict,
-        description="Extra provider-specific kwargs forwarded to the sandbox constructor "
-        "(e.g. modal: app_name, modal_sandbox_kwargs).",
+        description="Extra provider-specific kwargs forwarded to the sandbox constructor.",
     )
 
     model_config = ConfigDict(extra="forbid")
