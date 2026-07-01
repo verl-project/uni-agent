@@ -19,12 +19,10 @@ Values below are illustrative defaults -- the shape is the point.
 
 from __future__ import annotations
 
-from typing import Any
 from uuid import uuid4
 
 from pydantic import Field
 
-from ...agents.code_act import CodeActConfig
 from ...reward import load_reward_spec
 from ..base import Task, TaskConfig, TaskResult
 from ..registry import register_task
@@ -32,7 +30,6 @@ from .reward import reward_config
 
 
 class SWEBenchTaskConfig(TaskConfig):
-
     run_gold_patch: bool = Field(
         default=False,
         description="Oracle mode: skip the agent and score the dataset's gold patch directly.",
