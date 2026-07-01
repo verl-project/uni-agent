@@ -38,7 +38,9 @@ def get_task(name: str, config: TaskConfig) -> Task:
     """Instantiate a registered task by name with the given ``config``.
 
     There is no default config -- the caller must supply a :class:`TaskConfig`
-    (a task-specific subclass, e.g. ``SWEBenchTaskConfig``).
+    (a task-specific subclass, e.g. ``SWEBenchTaskConfig``). The gateway is not passed
+    here: a task fetches the process-global one via
+    :func:`~uni_agent.gateway.get_gateway_manager` when it needs a model.
     """
     if name not in TASK_REGISTRY and name in TASK_MODULES:
         import_module(TASK_MODULES[name])

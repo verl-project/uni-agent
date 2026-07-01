@@ -7,10 +7,14 @@ A *task* is the top-level unit a trainer / evaluator instantiates. The base
 * **agent**   -- *who* solves it and *how it is launched*, picked from the agent
   layer (an :class:`~uni_agent.agents.AgentConfig`; see :mod:`uni_agent.agents`).
 
-The **gateway** (the LLM the agent talks to) is a live runtime object, not config:
-the runner passes a :class:`~uni_agent.gateway.manager.GatewayManager` straight to
-:meth:`Task.run`. White-box agents drive the policy through it; black-box agents
-(e.g. Claude Code, which use their own model in the sandbox) just ignore it.
+The **gateway** (the LLM the agent talks to) is a live runtime object, not config.
+The runner installs one process-global
+:class:`~uni_agent.gateway.manager.GatewayManager` (via
+:func:`~uni_agent.gateway.set_gateway_manager`) and the task reads it with
+:func:`~uni_agent.gateway.get_gateway_manager` inside :meth:`run`, so ``run`` takes
+no arguments. White-box agents drive the policy through it; black-box agents point
+their own process at its session URL. A task that needs no model (e.g. an oracle
+gold-patch run) never fetches it.
 
 Reward is **not** a base concern either: each task declares its scorer
 (``reward.py``) and calls :func:`~uni_agent.reward.load_reward_spec` itself inside
@@ -46,7 +50,6 @@ from ..sandbox import SandboxConfig
 
 if TYPE_CHECKING:
     from ..agents import Agent
-    from ..gateway.manager import GatewayManager
     from ..sandbox import Sandbox
 
 
@@ -62,6 +65,7 @@ class TaskConfig(BaseModel):
         default_factory=AgentConfig,
         description="Agent that solves the task; a concrete AgentConfig subclass.",
     )
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
     model_config = ConfigDict(extra="forbid")
 
@@ -90,12 +94,14 @@ class Task(ABC):
         self.config = config
 
     @abstractmethod
-    async def run(self, sample: dict[str, Any], *, gateway: GatewayManager | None = None) -> TaskResult:
-        """Run one episode for ``sample`` and return its score.
+    async def run(self) -> TaskResult:
+        """Run one episode and return its score.
 
-        ``gateway`` is the live :class:`~uni_agent.gateway.manager.GatewayManager`
-        the runner owns; white-box tasks serve the policy through it. Black-box
-        tasks ignore it (the agent uses its own model inside the sandbox).
+        Takes no arguments: the sample is :attr:`TaskConfig.metadata` and, when a
+        model is needed, the gateway is the process-global
+        :func:`~uni_agent.gateway.get_gateway_manager` (installed by the runner).
+        White-box tasks serve the policy through it; black-box tasks point their own
+        process at its session URL.
         """
         ...
 

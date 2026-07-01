@@ -19,7 +19,7 @@ Values below are illustrative defaults -- the shape is the point.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import Any
 from uuid import uuid4
 
 from pydantic import Field
@@ -30,27 +30,32 @@ from ..base import Task, TaskConfig, TaskResult
 from ..registry import register_task
 from .reward import reward_config
 
-if TYPE_CHECKING:
-    from ...gateway.manager import GatewayManager
-
 
 class SWEBenchTaskConfig(TaskConfig):
-    """SWE-bench config: the white-box code_act agent + dataset knobs."""
 
-    agent: CodeActConfig = Field(default_factory=CodeActConfig)
-    dataset: str = "princeton-nlp/SWE-bench_Verified"
-    split: str = "test"
+    run_gold_patch: bool = Field(
+        default=False,
+        description="Oracle mode: skip the agent and score the dataset's gold patch directly.",
+    )
 
 
 @register_task("swe_bench")
 class SWEBenchTask(Task):
     name = "swe_bench"
 
-    async def run(self, sample: dict[str, Any], *, gateway: GatewayManager | None = None) -> TaskResult:
+    async def run(self) -> TaskResult:
         """Run one episode -- white-box or black-box -- then score it.
 
-        The task owns every runtime lifecycle (the agent only solves the problem),
-        mirroring the driver in :mod:`uni_agent.framework.framework`:
+        ``run`` takes no arguments: the sample is :attr:`SWEBenchTaskConfig.metadata`
+        and, when a model is needed, the gateway is the process-global
+        :func:`~uni_agent.gateway.get_gateway_manager` the runner installed.
+
+        If :attr:`SWEBenchTaskConfig.run_gold_patch` is set, short-circuit to an
+        oracle run: score the dataset's gold patch directly, with no agent (and so
+        no gateway or sandbox). It should pass all tests -- a sanity baseline.
+
+        Otherwise the task owns every runtime lifecycle (the agent only solves the
+        problem), mirroring the driver in :mod:`uni_agent.framework.framework`:
 
         1. **Sandbox** -- entered with ``async with``: ``start`` on enter (cleaned
            up if start fails), ``stop`` always on exit.
@@ -62,10 +67,27 @@ class SWEBenchTask(Task):
            is launched in the sandbox pointed at the same URL.
         3. **Reward** -- score the patch the agent left in the sandbox.
         """
-        if gateway is None:
-            raise ValueError(
-                "swe_bench: run(...) requires a gateway -- every agent drives the model through the session URL"
+        cfg: SWEBenchTaskConfig = self.config  # type: ignore[assignment]
+        sample = cfg.metadata  # the dataset sample now lives on the config
+
+        # Oracle baseline: score the dataset's gold patch directly -- no agent, and
+        # so no gateway or sandbox. Useful as a sanity check (it should pass).
+        if cfg.run_gold_patch:
+            gold_patch = sample.get("patch")
+            if not gold_patch:
+                raise ValueError("swe_bench: run_gold_patch=True but sample has no 'patch' (the gold patch)")
+            reward_spec = load_reward_spec(reward_config())
+            reward, info = await reward_spec.compute_reward(
+                {"sample": sample, "patch": gold_patch, "transcript": [], "trajectories": []}
             )
+            return TaskResult(reward=reward, info={"gold_patch": True, "patch": gold_patch, "eval": info})
+
+        # Every agent drives the model through the gateway's session URL, so fetch the
+        # process-global manager the runner installed (raises if none). Imported lazily
+        # like build_sandbox / build_agent so a gold-patch run pulls in no gateway deps.
+        from ...gateway import get_gateway_manager
+
+        gateway = get_gateway_manager()
         agent = self.build_agent()
         session_id = f"swe-bench-{uuid4().hex}"
 
