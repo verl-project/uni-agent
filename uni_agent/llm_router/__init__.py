@@ -1,5 +1,6 @@
 """KV-cache-aware LLM Router configuration and routing primitives."""
 
+from uni_agent.llm_router.collectors import MetricKey, RouteDataProvider
 from uni_agent.llm_router.config import (
     CacheStoreConfig,
     CollectorConfig,
@@ -10,13 +11,12 @@ from uni_agent.llm_router.config import (
 )
 from uni_agent.llm_router.strategies import (
     KVCacheAwareStrategy,
+    ReplicaInfo,
     RoutingStrategy,
     StrategyError,
     StrategyRegistry,
     route,
 )
-from uni_agent.llm_router.collectors import MetricKey, RouteDataProvider
-from uni_agent.llm_router.strategies import ReplicaInfo
 
 __all__ = [
     "CacheStoreConfig",

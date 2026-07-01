@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from uni_agent.llm_router.metric_spec import MetricKey
 from uni_agent.llm_router.config.strategy import KVCAwareStrategyConfig
 from uni_agent.llm_router.logging import get_router_logger
+from uni_agent.llm_router.metric_spec import MetricKey
 from uni_agent.llm_router.strategies.load_score import (
     DEFAULT_LOAD_WEIGHTS,
     LOAD_FNS,
@@ -52,9 +52,7 @@ class KVCacheAwareStrategy:
             raise StrategyError(f"load_threshold must be in (0, 1), got {load_threshold}")
         _valid_tiers = {"gpu", "cpu", "ssd"}
         if set(layer_weights.keys()) != _valid_tiers:
-            raise StrategyError(
-                f"layer_weights keys must be {_valid_tiers}, got {set(layer_weights.keys())}"
-            )
+            raise StrategyError(f"layer_weights keys must be {_valid_tiers}, got {set(layer_weights.keys())}")
         for tier, tier_weight in layer_weights.items():
             if tier_weight < 0:
                 raise StrategyError(f"layer_weights[{tier}] must be >= 0, got {tier_weight}")
@@ -88,7 +86,7 @@ class KVCacheAwareStrategy:
         )
 
     @classmethod
-    def from_config(cls, cfg: KVCAwareStrategyConfig) -> "KVCacheAwareStrategy":
+    def from_config(cls, cfg: KVCAwareStrategyConfig) -> KVCacheAwareStrategy:
         """Construct a strategy instance carrying its parsed config fields.
 
         Load-function selection (``load_fn`` / ``load_weights``) is code-level —
@@ -107,16 +105,24 @@ class KVCacheAwareStrategy:
     # ── Load scoring ──
 
     def _compute_load(
-        self, kv_usage: float, running: int | float, waiting: int | float,
+        self,
+        kv_usage: float,
+        running: int | float,
+        waiting: int | float,
     ) -> float:
         """Compute ``load ∈ [0,1]`` (bigger = more loaded) via the selected fn."""
         return self._load_fn(
-            kv_usage, running, waiting,
-            max_num_seqs=self._max_num_seqs, weights=self.load_weights,
+            kv_usage,
+            running,
+            waiting,
+            max_num_seqs=self._max_num_seqs,
+            weights=self.load_weights,
         )
 
     def is_overloaded(
-        self, provider: "RouteDataProvider", replica: "ReplicaInfo",
+        self,
+        provider: RouteDataProvider,
+        replica: ReplicaInfo,
     ) -> bool:
         """Return True if ``replica`` is overloaded (``load > load_threshold``).
 
@@ -132,8 +138,8 @@ class KVCacheAwareStrategy:
 
     def _sticky_shortcut(
         self,
-        provider: "RouteDataProvider",
-        replicas: list["ReplicaInfo"],
+        provider: RouteDataProvider,
+        replicas: list[ReplicaInfo],
         request_id: str | None,
         sticky_table: Any,
     ) -> list[float] | None:
@@ -163,8 +169,7 @@ class KVCacheAwareStrategy:
                 )
                 if load > self.load_threshold:
                     logger.info(
-                        f"score(): STICKY replica={sticky_id} OVERLOADED [{metrics_str}] "
-                        f"→ fallback to COMBINED scoring"
+                        f"score(): STICKY replica={sticky_id} OVERLOADED [{metrics_str}] → fallback to COMBINED scoring"
                     )
                     return None
                 logger.info(
@@ -183,8 +188,8 @@ class KVCacheAwareStrategy:
     def score(
         self,
         prompt_ids: list[int] | None,
-        provider: "RouteDataProvider",
-        replicas: list["ReplicaInfo"],
+        provider: RouteDataProvider,
+        replicas: list[ReplicaInfo],
         request_id: str | None = None,
         sticky_table: Any = None,
     ) -> list[float]:
@@ -244,8 +249,8 @@ class KVCacheAwareStrategy:
 
     def _cache_score(
         self,
-        provider: "RouteDataProvider",
-        replica: "ReplicaInfo",
+        provider: RouteDataProvider,
+        replica: ReplicaInfo,
         prompt_ids: list[int],
         gpu_hit_pct: dict[str, float],
     ) -> float:

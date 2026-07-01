@@ -25,8 +25,8 @@ from uni_agent.llm_router.config import KVCAwareConfig
 from uni_agent.llm_router.logging import get_router_logger
 from uni_agent.llm_router.strategies import (
     ReplicaInfo,
-    StrategyRegistry,
     StickySessionTable,
+    StrategyRegistry,
     route,
 )
 
@@ -41,8 +41,7 @@ class KVCAwareBalancer:
             raise ValueError("servers must be non-empty")
         self._config = KVCAwareConfig.from_config(router_config)
         self._strategies: list[tuple[Any, float]] = [
-            (StrategyRegistry.get(type(cfg)).from_config(cfg), cfg.weight)
-            for cfg in self._config.strategies
+            (StrategyRegistry.get(type(cfg)).from_config(cfg), cfg.weight) for cfg in self._config.strategies
         ]
         self._servers: dict[str, Any] = dict(servers)
         self._route_calls = 0
@@ -69,9 +68,7 @@ class KVCAwareBalancer:
         """
         import ray
 
-        collection_names = sorted(
-            {name for cfg in self._config.strategies for name in cfg.collector_names}
-        )
+        collection_names = sorted({name for cfg in self._config.strategies for name in cfg.collector_names})
         server_addresses: dict[str, str] = {}
         kv_event_endpoints: dict[str, list[str]] = {}
         for replica_id, handle in self._servers.items():
@@ -87,7 +84,8 @@ class KVCAwareBalancer:
             if endpoints is not None:
                 kv_event_endpoints[replica_id] = endpoints
         self._provider = RouteDataProvider(
-            self._config.collector, collection_names,
+            self._config.collector,
+            collection_names,
             server_addresses=server_addresses,
             kv_event_endpoints=kv_event_endpoints,
         )
@@ -115,9 +113,7 @@ class KVCAwareBalancer:
     def release_server(self, server_id: str) -> None:
         """Release a server after a request completes. No-op in v1 (no inflight)."""
 
-    def acquire_server(
-        self, request_id: str, prompt_ids: list[int] | None = None
-    ) -> tuple[str, Any]:
+    def acquire_server(self, request_id: str, prompt_ids: list[int] | None = None) -> tuple[str, Any]:
         """Acquire the best server for a request: delegate to ``route()``, map back.
 
         Builds ``ReplicaInfo`` candidates from the pool, asks ``route()`` for a
@@ -134,8 +130,12 @@ class KVCAwareBalancer:
         replicas = [ReplicaInfo(replica_id=sid) for sid in self._servers]
         self._route_calls += 1
         ranking = route(
-            self._strategies, prompt_ids, self._provider, replicas,
-            request_id, self._sticky,
+            self._strategies,
+            prompt_ids,
+            self._provider,
+            replicas,
+            request_id,
+            self._sticky,
         )
         if not ranking:
             raise RuntimeError("no available replica to route to")

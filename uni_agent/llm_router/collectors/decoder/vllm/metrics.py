@@ -7,7 +7,6 @@ to MetricsStore.
 from __future__ import annotations
 
 import logging
-
 from typing import Any
 
 from uni_agent.llm_router.collectors.decoder.base import Decoder
@@ -30,7 +29,7 @@ class VLLMMetricsDecoder(Decoder):
     store_cls = MetricsStore
 
     _PROMETHEUS_MAP: dict[str, str] = {
-        "vllm:kv_cache_usage_perc":  MetricKey.KV_CACHE_USAGE_PERC,
+        "vllm:kv_cache_usage_perc": MetricKey.KV_CACHE_USAGE_PERC,
         "vllm:num_requests_running": MetricKey.NUM_REQUESTS_RUNNING,
         "vllm:num_requests_waiting": MetricKey.NUM_REQUESTS_WAITING,
     }

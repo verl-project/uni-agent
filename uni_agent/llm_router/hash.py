@@ -37,7 +37,9 @@ def compute_hash(parent_hash: int, block_bytes: bytes, seed: int = 0) -> int:
 
 
 def get_prefix_hashes(
-    prompt_ids: list[int], block_size: int, seed: int = 0,
+    prompt_ids: list[int],
+    block_size: int,
+    seed: int = 0,
 ) -> list[int]:
     """Compute prefix hash sequence for prompt token IDs.
 

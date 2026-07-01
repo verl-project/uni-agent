@@ -26,7 +26,6 @@ class StrategyRegistry:
         """Look up the runtime strategy class registered for ``config_cls``."""
         if config_cls not in cls._registry:
             raise KeyError(
-                f"No strategy registered for config type {config_cls!r}; "
-                f"registered: {list(cls._registry.keys())}"
+                f"No strategy registered for config type {config_cls!r}; registered: {list(cls._registry.keys())}"
             )
         return cls._registry[config_cls]

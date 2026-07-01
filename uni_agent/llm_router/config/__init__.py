@@ -1,5 +1,4 @@
-"""KVCAware LLM Router configuration package.
-"""
+"""KVCAware LLM Router configuration package."""
 
 from uni_agent.llm_router.config.base import (
     ConfigError,

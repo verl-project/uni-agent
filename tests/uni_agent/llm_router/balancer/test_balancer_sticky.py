@@ -6,9 +6,7 @@ from omegaconf import OmegaConf
 from uni_agent.llm_router.balancer import KVCAwareBalancer
 
 from ._helpers import (
-    _FakeProvider,
     _router_config,
-    _fake_init_provider,
 )
 
 pytestmark = [pytest.mark.ut, pytest.mark.cpu]
@@ -50,12 +48,6 @@ class _MetricsProvider:
     def get_tier_prefix_hit_rate(self, replica_id, prompt_ids, tier):
         return 0.0
 
-    def get_gpu_prefix_hit_rate(self, prompt_ids):
-        return {}
-
-    def get_tier_prefix_hit_rate(self, replica_id, prompt_ids, tier):
-        return 0.0
-
 
 def _kv_metrics(per_replica: dict[str, dict]) -> dict[str, dict]:
     """Normalize {sid: {kv, running, waiting}} into MetricKey-keyed dicts.
@@ -80,8 +72,6 @@ class TestStickyEndToEnd:
 
     def _make_balancer_with_metrics(self, servers, metrics):
         """Build a balancer whose provider returns the given per-replica metrics."""
-        import uni_agent.llm_router.balancer as balancer_mod
-        from uni_agent.llm_router import metric_spec
 
         provider = _MetricsProvider(metrics)
 
@@ -103,7 +93,8 @@ class TestStickyEndToEnd:
         """
         # s0/s1 both healthy (kv=0.3 → load=0.12, not overloaded)
         balancer = self._make_balancer_with_metrics(
-            {"s0": "h0", "s1": "h1"}, _kv_metrics({"s0": {}, "s1": {}}),
+            {"s0": "h0", "s1": "h1"},
+            _kv_metrics({"s0": {}, "s1": {}}),
         )
         sid1, _ = balancer.acquire_server("r1", [1, 2])
         sid2, _ = balancer.acquire_server("r1", [1, 2])
@@ -118,14 +109,17 @@ class TestStickyEndToEnd:
         monkeypatch.setenv("MAX_NUM_SEQS", "64")  # pin the load formula's running term
         # turn1: both healthy, cold start
         balancer = self._make_balancer_with_metrics(
-            {"s0": "h0", "s1": "h1"}, _kv_metrics({"s0": {}, "s1": {}}),
+            {"s0": "h0", "s1": "h1"},
+            _kv_metrics({"s0": {}, "s1": {}}),
         )
         sid1, _ = balancer.acquire_server("r1", [1, 2])
         # mutate metrics: s0 now saturated (load>0.9), s1 healthy
-        balancer._provider._metrics = _kv_metrics({
-            "s0": {"kv": 1.0, "running": 64, "waiting": 1000},
-            "s1": {"kv": 0.3},
-        })
+        balancer._provider._metrics = _kv_metrics(
+            {
+                "s0": {"kv": 1.0, "running": 64, "waiting": 1000},
+                "s1": {"kv": 0.3},
+            }
+        )
         sid2, _ = balancer.acquire_server("r1", [1, 2])
         assert sid2 == "s1", f"expected fallback to s1, got {sid2} (turn1 was {sid1})"
 
@@ -151,7 +145,8 @@ class TestStickyEndToEnd:
         Expectation: sticky_size == 2
         """
         balancer = self._make_balancer_with_metrics(
-            {"s0": "h0", "s1": "h1"}, _kv_metrics({"s0": {}, "s1": {}}),
+            {"s0": "h0", "s1": "h1"},
+            _kv_metrics({"s0": {}, "s1": {}}),
         )
         balancer.acquire_server("r1", [1])
         balancer.acquire_server("r2", [1])
@@ -163,20 +158,24 @@ class TestStickyEndToEnd:
         Description: build a balancer with sticky_max_size overridden in config
         Expectation: balancer._sticky.max_size == overridden value
         """
-        cfg = OmegaConf.create({
-            "router_class": "uni_agent.llm_router.balancer.KVCAwareBalancer",
-            "sticky_max_size": 42,
-            "strategies": [
-                {
-                    "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
-                    "weight": 1.0,
-                    "collector_names": ["vllm_zmq"],
-                },
-            ],
-        })
+        cfg = OmegaConf.create(
+            {
+                "router_class": "uni_agent.llm_router.balancer.KVCAwareBalancer",
+                "sticky_max_size": 42,
+                "strategies": [
+                    {
+                        "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
+                        "weight": 1.0,
+                        "collector_names": ["vllm_zmq"],
+                    },
+                ],
+            }
+        )
         orig = KVCAwareBalancer._init_provider
         KVCAwareBalancer._init_provider = lambda self: setattr(
-            self, "_provider", _MetricsProvider(_kv_metrics({"s0": {}})),
+            self,
+            "_provider",
+            _MetricsProvider(_kv_metrics({"s0": {}})),
         )
         try:
             balancer = KVCAwareBalancer({"s0": "h0"}, cfg)

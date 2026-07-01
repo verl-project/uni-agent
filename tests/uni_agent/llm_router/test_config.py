@@ -14,7 +14,6 @@ import pytest
 from hydra.errors import InstantiationException
 from omegaconf import OmegaConf
 
-
 # -- Public API via package __init__ --
 from uni_agent.llm_router import (
     CacheStoreConfig,
@@ -36,8 +35,9 @@ _CN = ["vllm_zmq"]
 # -- ① Input/output normal cases --
 
 
-
 pytestmark = [pytest.mark.ut, pytest.mark.cpu]
+
+
 class TestStrategyNormalInput:
     """S01-S12: normal input/output cases"""
 
@@ -250,9 +250,7 @@ class TestStrategyAbnormalInput:
         Expectation: raises ConfigError matching "layer_weights"
         """
         with pytest.raises(ConfigError, match="layer_weights"):
-            KVCAwareStrategyConfig(
-                weight=1.0, layer_weights={"gpu": 0.7, "cpu": 0.2, "disk": 0.1}, collector_names=_CN
-            )
+            KVCAwareStrategyConfig(weight=1.0, layer_weights={"gpu": 0.7, "cpu": 0.2, "disk": 0.1}, collector_names=_CN)
 
     def test_s21_layer_weights_missing_key(self):
         """
@@ -261,9 +259,7 @@ class TestStrategyAbnormalInput:
         Expectation: raises ConfigError matching "layer_weights"
         """
         with pytest.raises(ConfigError, match="layer_weights"):
-            KVCAwareStrategyConfig(
-                weight=1.0, layer_weights={"gpu": 0.7, "cpu": 0.3}, collector_names=_CN
-            )
+            KVCAwareStrategyConfig(weight=1.0, layer_weights={"gpu": 0.7, "cpu": 0.3}, collector_names=_CN)
 
     def test_s21b_layer_weights_sum_below_one(self):
         """
@@ -272,9 +268,7 @@ class TestStrategyAbnormalInput:
         Expectation: raises ConfigError matching "layer_weights"
         """
         with pytest.raises(ConfigError, match="layer_weights"):
-            KVCAwareStrategyConfig(
-                weight=1.0, layer_weights={"gpu": 0.5, "cpu": 0.2, "ssd": 0.1}, collector_names=_CN
-            )
+            KVCAwareStrategyConfig(weight=1.0, layer_weights={"gpu": 0.5, "cpu": 0.2, "ssd": 0.1}, collector_names=_CN)
 
     def test_s21c_layer_weights_sum_above_one(self):
         """
@@ -283,9 +277,7 @@ class TestStrategyAbnormalInput:
         Expectation: raises ConfigError matching "layer_weights"
         """
         with pytest.raises(ConfigError, match="layer_weights"):
-            KVCAwareStrategyConfig(
-                weight=1.0, layer_weights={"gpu": 0.7, "cpu": 0.2, "ssd": 0.2}, collector_names=_CN
-            )
+            KVCAwareStrategyConfig(weight=1.0, layer_weights={"gpu": 0.7, "cpu": 0.2, "ssd": 0.2}, collector_names=_CN)
 
     def test_s22_collector_names_not_list_type(self):
         """
@@ -302,14 +294,22 @@ class TestStrategyAbnormalInput:
         Description: from_config with two strategies each weighted 0.4
         Expectation: raises ConfigError matching "weight"
         """
-        kwargs = OmegaConf.create({
-            "strategies": [
-                {"_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
-                 "weight": 0.4, "collector_names": ["vllm_zmq"]},
-                {"_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
-                 "weight": 0.4, "collector_names": ["mooncake_prometheus"]},
-            ],
-        })
+        kwargs = OmegaConf.create(
+            {
+                "strategies": [
+                    {
+                        "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
+                        "weight": 0.4,
+                        "collector_names": ["vllm_zmq"],
+                    },
+                    {
+                        "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
+                        "weight": 0.4,
+                        "collector_names": ["mooncake_prometheus"],
+                    },
+                ],
+            }
+        )
         with pytest.raises(ConfigError, match="weight"):
             KVCAwareConfig.from_config(kwargs)
 
@@ -356,12 +356,15 @@ class TestStrategyHydraNormal:
         Description: instantiate a strategy OmegaConf entry with _target_
         Expectation: result is a KVCAwareStrategyConfig instance
         """
-        entry = OmegaConf.create({
-            "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
-            "weight": 1.0,
-            "collector_names": ["vllm_zmq"],
-        })
+        entry = OmegaConf.create(
+            {
+                "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
+                "weight": 1.0,
+                "collector_names": ["vllm_zmq"],
+            }
+        )
         from hydra.utils import instantiate
+
         result = instantiate(entry)
         assert isinstance(result, KVCAwareStrategyConfig)
 
@@ -371,12 +374,15 @@ class TestStrategyHydraNormal:
         Description: instantiate a strategy entry then assert base type
         Expectation: result is a StrategyConfig instance and weight==1.0
         """
-        entry = OmegaConf.create({
-            "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
-            "weight": 1.0,
-            "collector_names": ["vllm_zmq"],
-        })
+        entry = OmegaConf.create(
+            {
+                "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
+                "weight": 1.0,
+                "collector_names": ["vllm_zmq"],
+            }
+        )
         from hydra.utils import instantiate
+
         result = instantiate(entry)
         assert isinstance(result, StrategyConfig)
         assert result.weight == 1.0
@@ -387,12 +393,15 @@ class TestStrategyHydraNormal:
         Description: instantiate a strategy entry with only weight/collector_names
         Expectation: alpha/load_threshold/layer_weights equal defaults
         """
-        entry = OmegaConf.create({
-            "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
-            "weight": 1.0,
-            "collector_names": ["vllm_zmq"],
-        })
+        entry = OmegaConf.create(
+            {
+                "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
+                "weight": 1.0,
+                "collector_names": ["vllm_zmq"],
+            }
+        )
         from hydra.utils import instantiate
+
         result = instantiate(entry)
         assert result.alpha == 0.7
         assert result.load_threshold == 0.9
@@ -414,6 +423,7 @@ class TestStrategyHydraAbnormal:
         """
         entry = OmegaConf.create({"_target_": "nonexistent.Module.Class"})
         from hydra.utils import instantiate
+
         with pytest.raises((InstantiationException, ImportError, ConfigError)):
             instantiate(entry)
 
@@ -423,10 +433,13 @@ class TestStrategyHydraAbnormal:
         Description: instantiate an entry whose _target_ points to config.NonExistClass
         Expectation: raises InstantiationException/AttributeError/ConfigError
         """
-        entry = OmegaConf.create({
-            "_target_": "uni_agent.llm_router.config.NonExistClass",
-        })
+        entry = OmegaConf.create(
+            {
+                "_target_": "uni_agent.llm_router.config.NonExistClass",
+            }
+        )
         from hydra.utils import instantiate
+
         with pytest.raises((InstantiationException, AttributeError, ConfigError)):
             instantiate(entry)
 
@@ -446,12 +459,17 @@ class TestStrategyHydraAbnormal:
         Description: from_config with a strategy item whose _target_ is CacheStoreConfig
         Expectation: raises ConfigError matching "StrategyConfig"
         """
-        kwargs = OmegaConf.create({
-            "strategies": [
-                {"_target_": "uni_agent.llm_router.config.CacheStoreConfig",
-                 "kv_cache_store_type": "list", "ttl": 30},
-            ],
-        })
+        kwargs = OmegaConf.create(
+            {
+                "strategies": [
+                    {
+                        "_target_": "uni_agent.llm_router.config.CacheStoreConfig",
+                        "kv_cache_store_type": "list",
+                        "ttl": 30,
+                    },
+                ],
+            }
+        )
         with pytest.raises(ConfigError, match="StrategyConfig"):
             KVCAwareConfig.from_config(kwargs)
 
@@ -535,10 +553,14 @@ class TestMetricsNormalInput:
         Description: construct CollectorConfig with custom long_connection
         Expectation: base_retry_delay/max_retry_delay equal custom values
         """
-        cfg = CollectorConfig(long_connection={
-            "base_retry_delay": 2.0, "max_retry_delay": 60.0,
-            "max_retry_attempts": 10, "retry_backoff_factor": 3.0,
-        })
+        cfg = CollectorConfig(
+            long_connection={
+                "base_retry_delay": 2.0,
+                "max_retry_delay": 60.0,
+                "max_retry_attempts": 10,
+                "retry_backoff_factor": 3.0,
+            }
+        )
         assert cfg.long_connection["base_retry_delay"] == 2.0
         assert cfg.long_connection["max_retry_delay"] == 60.0
 
@@ -551,6 +573,7 @@ class TestMetricsNormalInput:
         Expectation: field set is {http_polling, long_connection}
         """
         import dataclasses
+
         field_names = {f.name for f in dataclasses.fields(CollectorConfig)}
         assert field_names == {"http_polling", "long_connection"}
 
@@ -561,6 +584,7 @@ class TestMetricsNormalInput:
         Expectation: is_dataclass returns True
         """
         import dataclasses
+
         assert dataclasses.is_dataclass(CollectorConfig)
 
 
@@ -613,9 +637,12 @@ class TestMetricsAbnormalInput:
         Expectation: raises ConfigError matching "max_retry_delay"
         """
         with pytest.raises(ConfigError, match="max_retry_delay"):
-            CollectorConfig(long_connection={
-                "base_retry_delay": 5, "max_retry_delay": 3,
-            })
+            CollectorConfig(
+                long_connection={
+                    "base_retry_delay": 5,
+                    "max_retry_delay": 3,
+                }
+            )
 
     def test_m15_max_retry_attempts_zero(self):
         """
@@ -652,17 +679,24 @@ class TestMetricsOther:
         Description: from_config with a config containing only strategies
         Expectation: http_polling/long_connection equal defaults
         """
-        kwargs = OmegaConf.create({
-            "strategies": [
-                {"_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
-                 "weight": 1.0, "collector_names": ["vllm_zmq"]},
-            ],
-        })
+        kwargs = OmegaConf.create(
+            {
+                "strategies": [
+                    {
+                        "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
+                        "weight": 1.0,
+                        "collector_names": ["vllm_zmq"],
+                    },
+                ],
+            }
+        )
         result = KVCAwareConfig.from_config(kwargs)
         assert result.collector.http_polling == {"polling_interval": 5.0, "http_timeout": 10.0}
         assert result.collector.long_connection == {
-            "base_retry_delay": 1.0, "max_retry_delay": 30.0,
-            "max_retry_attempts": 5, "retry_backoff_factor": 2.0,
+            "base_retry_delay": 1.0,
+            "max_retry_delay": 30.0,
+            "max_retry_attempts": 5,
+            "retry_backoff_factor": 2.0,
         }
 
     def test_m19_collector_null_default(self):
@@ -671,13 +705,18 @@ class TestMetricsOther:
         Description: from_config with collector=None
         Expectation: result.collector is a CollectorConfig instance
         """
-        kwargs = OmegaConf.create({
-            "strategies": [
-                {"_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
-                 "weight": 1.0, "collector_names": ["vllm_zmq"]},
-            ],
-            "collector": None,
-        })
+        kwargs = OmegaConf.create(
+            {
+                "strategies": [
+                    {
+                        "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
+                        "weight": 1.0,
+                        "collector_names": ["vllm_zmq"],
+                    },
+                ],
+                "collector": None,
+            }
+        )
         result = KVCAwareConfig.from_config(kwargs)
         assert isinstance(result.collector, CollectorConfig)
 
@@ -687,15 +726,20 @@ class TestMetricsOther:
         Description: from_config with config overriding polling_interval
         Expectation: http_polling["polling_interval"] == 3.0
         """
-        kwargs = OmegaConf.create({
-            "strategies": [
-                {"_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
-                 "weight": 1.0, "collector_names": ["vllm_zmq"]},
-            ],
-            "collector": {
-                "http_polling": {"polling_interval": 3},
-            },
-        })
+        kwargs = OmegaConf.create(
+            {
+                "strategies": [
+                    {
+                        "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
+                        "weight": 1.0,
+                        "collector_names": ["vllm_zmq"],
+                    },
+                ],
+                "collector": {
+                    "http_polling": {"polling_interval": 3},
+                },
+            }
+        )
         result = KVCAwareConfig.from_config(kwargs)
         assert result.collector.http_polling["polling_interval"] == 3.0
 
@@ -795,13 +839,18 @@ class TestCacheStoreAbnormalInput:
         Description: from_config with cache_store="list"
         Expectation: raises ConfigError matching "cache_store"
         """
-        kwargs = OmegaConf.create({
-            "strategies": [
-                {"_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
-                 "weight": 1.0, "collector_names": ["vllm_zmq"]},
-            ],
-            "cache_store": "list",
-        })
+        kwargs = OmegaConf.create(
+            {
+                "strategies": [
+                    {
+                        "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
+                        "weight": 1.0,
+                        "collector_names": ["vllm_zmq"],
+                    },
+                ],
+                "cache_store": "list",
+            }
+        )
         with pytest.raises(ConfigError, match="cache_store"):
             KVCAwareConfig.from_config(kwargs)
 
@@ -818,12 +867,17 @@ class TestCacheStoreOther:
         Description: from_config with a config containing only strategies
         Expectation: kv_cache_store_type/ttl equal defaults
         """
-        kwargs = OmegaConf.create({
-            "strategies": [
-                {"_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
-                 "weight": 1.0, "collector_names": ["vllm_zmq"]},
-            ],
-        })
+        kwargs = OmegaConf.create(
+            {
+                "strategies": [
+                    {
+                        "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
+                        "weight": 1.0,
+                        "collector_names": ["vllm_zmq"],
+                    },
+                ],
+            }
+        )
         result = KVCAwareConfig.from_config(kwargs)
         assert result.cache_store.kv_cache_store_type == "list"
         assert result.cache_store.ttl == 30.0
@@ -834,13 +888,18 @@ class TestCacheStoreOther:
         Description: from_config with cache_store=None
         Expectation: result.cache_store is a CacheStoreConfig instance
         """
-        kwargs = OmegaConf.create({
-            "strategies": [
-                {"_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
-                 "weight": 1.0, "collector_names": ["vllm_zmq"]},
-            ],
-            "cache_store": None,
-        })
+        kwargs = OmegaConf.create(
+            {
+                "strategies": [
+                    {
+                        "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
+                        "weight": 1.0,
+                        "collector_names": ["vllm_zmq"],
+                    },
+                ],
+                "cache_store": None,
+            }
+        )
         result = KVCAwareConfig.from_config(kwargs)
         assert isinstance(result.cache_store, CacheStoreConfig)
 
@@ -861,21 +920,28 @@ class TestKVCAwareNormalInput:
         Description: from_config with a full config of strategies/collector/cache_store
         Expectation: result is a KVCAwareConfig and field types are correct
         """
-        kwargs = OmegaConf.create({
-            "strategies": [
-                {"_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
-                 "weight": 1.0, "alpha": 0.7, "collector_names": ["vllm_zmq", "mooncake_prometheus"]},
-            ],
-            "collector": {
-                "http_polling": {"polling_interval": 5, "http_timeout": 10},
-                "long_connection": {
-                    "base_retry_delay": 1.0, "max_retry_delay": 30.0,
-                    "max_retry_attempts": 5, "retry_backoff_factor": 2.0,
+        kwargs = OmegaConf.create(
+            {
+                "strategies": [
+                    {
+                        "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
+                        "weight": 1.0,
+                        "alpha": 0.7,
+                        "collector_names": ["vllm_zmq", "mooncake_prometheus"],
+                    },
+                ],
+                "collector": {
+                    "http_polling": {"polling_interval": 5, "http_timeout": 10},
+                    "long_connection": {
+                        "base_retry_delay": 1.0,
+                        "max_retry_delay": 30.0,
+                        "max_retry_attempts": 5,
+                        "retry_backoff_factor": 2.0,
+                    },
                 },
-
-            },
-            "cache_store": {"kv_cache_store_type": "list", "ttl": 30},
-        })
+                "cache_store": {"kv_cache_store_type": "list", "ttl": 30},
+            }
+        )
         result = KVCAwareConfig.from_config(kwargs)
         assert isinstance(result, KVCAwareConfig)
         assert isinstance(result.strategies[0], KVCAwareStrategyConfig)
@@ -895,11 +961,13 @@ class TestKVCAwareAbnormalInput:
         Description: from_config with empty strategies/illegal collector/illegal cache_store
         Expectation: raises ConfigError and message contains relevant field names
         """
-        kwargs = OmegaConf.create({
-            "strategies": [],
-            "collector": {"http_polling": {"polling_interval": -1}},
-            "cache_store": {"ttl": 0},
-        })
+        kwargs = OmegaConf.create(
+            {
+                "strategies": [],
+                "collector": {"http_polling": {"polling_interval": -1}},
+                "cache_store": {"ttl": 0},
+            }
+        )
         with pytest.raises(ConfigError) as exc_info:
             KVCAwareConfig.from_config(kwargs)
         error_msg = str(exc_info.value)
@@ -911,13 +979,18 @@ class TestKVCAwareAbnormalInput:
         Description: from_config with collector="vllm"
         Expectation: raises ConfigError matching "collector"
         """
-        kwargs = OmegaConf.create({
-            "strategies": [
-                {"_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
-                 "weight": 1.0, "collector_names": ["vllm_zmq"]},
-            ],
-            "collector": "vllm",
-        })
+        kwargs = OmegaConf.create(
+            {
+                "strategies": [
+                    {
+                        "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
+                        "weight": 1.0,
+                        "collector_names": ["vllm_zmq"],
+                    },
+                ],
+                "collector": "vllm",
+            }
+        )
         with pytest.raises(ConfigError, match="collector"):
             KVCAwareConfig.from_config(kwargs)
 
@@ -934,16 +1007,21 @@ class TestKVCAwareHydraNormal:
         Description: from_config with an OmegaConf containing all three sections
         Expectation: result is a KVCAwareConfig instance
         """
-        kwargs = OmegaConf.create({
-            "strategies": [
-                {"_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
-                 "weight": 1.0, "collector_names": ["vllm_zmq"]},
-            ],
-            "collector": {
-                "http_polling": {"polling_interval": 5, "http_timeout": 10},
-            },
-            "cache_store": {"kv_cache_store_type": "list", "ttl": 30},
-        })
+        kwargs = OmegaConf.create(
+            {
+                "strategies": [
+                    {
+                        "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
+                        "weight": 1.0,
+                        "collector_names": ["vllm_zmq"],
+                    },
+                ],
+                "collector": {
+                    "http_polling": {"polling_interval": 5, "http_timeout": 10},
+                },
+                "cache_store": {"kv_cache_store_type": "list", "ttl": 30},
+            }
+        )
         result = KVCAwareConfig.from_config(kwargs)
         assert isinstance(result, KVCAwareConfig)
 
@@ -953,13 +1031,18 @@ class TestKVCAwareHydraNormal:
         Description: from_config with config overriding http_polling
         Expectation: result.collector is CollectorConfig and polling_interval==3.0
         """
-        kwargs = OmegaConf.create({
-            "strategies": [
-                {"_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
-                 "weight": 1.0, "collector_names": ["vllm_zmq"]},
-            ],
-            "collector": {"http_polling": {"polling_interval": 3}},
-        })
+        kwargs = OmegaConf.create(
+            {
+                "strategies": [
+                    {
+                        "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
+                        "weight": 1.0,
+                        "collector_names": ["vllm_zmq"],
+                    },
+                ],
+                "collector": {"http_polling": {"polling_interval": 3}},
+            }
+        )
         result = KVCAwareConfig.from_config(kwargs)
         assert isinstance(result.collector, CollectorConfig)
         assert result.collector.http_polling["polling_interval"] == 3.0
@@ -970,13 +1053,18 @@ class TestKVCAwareHydraNormal:
         Description: from_config with config overriding cache_store
         Expectation: result.cache_store fields equal custom values
         """
-        kwargs = OmegaConf.create({
-            "strategies": [
-                {"_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
-                 "weight": 1.0, "collector_names": ["vllm_zmq"]},
-            ],
-            "cache_store": {"kv_cache_store_type": "radix_tree", "ttl": 60},
-        })
+        kwargs = OmegaConf.create(
+            {
+                "strategies": [
+                    {
+                        "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
+                        "weight": 1.0,
+                        "collector_names": ["vllm_zmq"],
+                    },
+                ],
+                "cache_store": {"kv_cache_store_type": "radix_tree", "ttl": 60},
+            }
+        )
         result = KVCAwareConfig.from_config(kwargs)
         assert isinstance(result.cache_store, CacheStoreConfig)
         assert result.cache_store.kv_cache_store_type == "radix_tree"
@@ -988,15 +1076,17 @@ class TestKVCAwareHydraNormal:
         Description: from_config with strategies in dict form
         Expectation: result.strategies is a list and element types/values are correct
         """
-        kwargs = OmegaConf.create({
-            "strategies": {
-                "kvc_aware": {
-                    "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
-                    "weight": 1.0,
-                    "collector_names": ["vllm_zmq"],
+        kwargs = OmegaConf.create(
+            {
+                "strategies": {
+                    "kvc_aware": {
+                        "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
+                        "weight": 1.0,
+                        "collector_names": ["vllm_zmq"],
+                    },
                 },
-            },
-        })
+            }
+        )
         result = KVCAwareConfig.from_config(kwargs)
         assert isinstance(result.strategies, list)
         assert len(result.strategies) == 1
@@ -1016,16 +1106,22 @@ class TestKVCAwareHydraAbnormal:
         Description: from_config with a config containing router_class
         Expectation: result is KVCAwareConfig and fields exclude router_class
         """
-        kwargs = OmegaConf.create({
-            "router_class": "uni_agent.llm_router.balancer.KVCAwareBalancer",
-            "strategies": [
-                {"_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
-                 "weight": 1.0, "collector_names": ["vllm_zmq"]},
-            ],
-        })
+        kwargs = OmegaConf.create(
+            {
+                "router_class": "uni_agent.llm_router.balancer.KVCAwareBalancer",
+                "strategies": [
+                    {
+                        "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
+                        "weight": 1.0,
+                        "collector_names": ["vllm_zmq"],
+                    },
+                ],
+            }
+        )
         result = KVCAwareConfig.from_config(kwargs)
         assert isinstance(result, KVCAwareConfig)
         import dataclasses
+
         field_names = {f.name for f in dataclasses.fields(result)}
         assert "router_class" not in field_names
 
@@ -1035,13 +1131,18 @@ class TestKVCAwareHydraAbnormal:
         Description: from_config with collector containing unknown_key
         Expectation: raises exception matching "unknown_key"
         """
-        kwargs = OmegaConf.create({
-            "strategies": [
-                {"_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
-                 "weight": 1.0, "collector_names": ["vllm_zmq"]},
-            ],
-            "collector": {"unknown_key": 123, "http_polling": {"polling_interval": 5}},
-        })
+        kwargs = OmegaConf.create(
+            {
+                "strategies": [
+                    {
+                        "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
+                        "weight": 1.0,
+                        "collector_names": ["vllm_zmq"],
+                    },
+                ],
+                "collector": {"unknown_key": 123, "http_polling": {"polling_interval": 5}},
+            }
+        )
         with pytest.raises(Exception, match="unknown_key"):
             KVCAwareConfig.from_config(kwargs)
 
@@ -1051,20 +1152,27 @@ class TestKVCAwareHydraAbnormal:
         Description: from_config then call repr and inspect output
         Expectation: repr contains newline and starts with KVCAwareConfig(
         """
-        kwargs = OmegaConf.create({
-            "strategies": [
-                {"_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
-                 "weight": 1.0, "collector_names": ["vllm_zmq", "mooncake_prometheus"]},
-            ],
-            "collector": {
-                "http_polling": {"polling_interval": 5, "http_timeout": 10},
-                "long_connection": {
-                    "base_retry_delay": 1.0, "max_retry_delay": 30.0,
-                    "max_retry_attempts": 5, "retry_backoff_factor": 2.0,
+        kwargs = OmegaConf.create(
+            {
+                "strategies": [
+                    {
+                        "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
+                        "weight": 1.0,
+                        "collector_names": ["vllm_zmq", "mooncake_prometheus"],
+                    },
+                ],
+                "collector": {
+                    "http_polling": {"polling_interval": 5, "http_timeout": 10},
+                    "long_connection": {
+                        "base_retry_delay": 1.0,
+                        "max_retry_delay": 30.0,
+                        "max_retry_attempts": 5,
+                        "retry_backoff_factor": 2.0,
+                    },
                 },
-            },
-            "cache_store": {"kv_cache_store_type": "list", "ttl": 30},
-        })
+                "cache_store": {"kv_cache_store_type": "list", "ttl": 30},
+            }
+        )
         result = KVCAwareConfig.from_config(kwargs)
         r = repr(result)
         assert "\n" in r
@@ -1085,12 +1193,17 @@ class TestKVCAwareOther:
         Description: from_config with a config containing only strategies
         Expectation: collector/cache_store are their Config types
         """
-        kwargs = OmegaConf.create({
-            "strategies": [
-                {"_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
-                 "weight": 1.0, "collector_names": ["vllm_zmq"]},
-            ],
-        })
+        kwargs = OmegaConf.create(
+            {
+                "strategies": [
+                    {
+                        "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
+                        "weight": 1.0,
+                        "collector_names": ["vllm_zmq"],
+                    },
+                ],
+            }
+        )
         result = KVCAwareConfig.from_config(kwargs)
         assert isinstance(result.collector, CollectorConfig)
         assert isinstance(result.cache_store, CacheStoreConfig)
@@ -1101,14 +1214,22 @@ class TestKVCAwareOther:
         Description: from_config with a config containing two strategies
         Expectation: each strategy is a StrategyConfig instance
         """
-        kwargs = OmegaConf.create({
-            "strategies": [
-                {"_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
-                 "weight": 0.7, "collector_names": ["vllm_zmq"]},
-                {"_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
-                 "weight": 0.3, "collector_names": ["vllm_prometheus"]},
-            ],
-        })
+        kwargs = OmegaConf.create(
+            {
+                "strategies": [
+                    {
+                        "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
+                        "weight": 0.7,
+                        "collector_names": ["vllm_zmq"],
+                    },
+                    {
+                        "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
+                        "weight": 0.3,
+                        "collector_names": ["vllm_prometheus"],
+                    },
+                ],
+            }
+        )
         result = KVCAwareConfig.from_config(kwargs)
         for s in result.strategies:
             assert isinstance(s, StrategyConfig)
@@ -1120,10 +1241,12 @@ class TestKVCAwareOther:
         Expectation: all fields match the YAML config
         """
         from pathlib import Path
-        from hydra import initialize_config_dir, compose
 
-        config_dir = str((Path(__file__).parent.parent.parent.parent
-                          / "uni_agent" / "llm_router" / "configs").resolve())
+        from hydra import compose, initialize_config_dir
+
+        config_dir = str(
+            (Path(__file__).parent.parent.parent.parent / "uni_agent" / "llm_router" / "configs").resolve()
+        )
         with initialize_config_dir(config_dir=config_dir, version_base=None):
             cfg = compose(config_name="kvc_aware_router")
 
@@ -1143,8 +1266,10 @@ class TestKVCAwareOther:
         assert strategy.collector_names == ["vllm_zmq", "vllm_metrics"]
         assert result.collector.http_polling == {"polling_interval": 5.0, "http_timeout": 10.0}
         assert result.collector.long_connection == {
-            "base_retry_delay": 1.0, "max_retry_delay": 30.0,
-            "max_retry_attempts": 5, "retry_backoff_factor": 2.0,
+            "base_retry_delay": 1.0,
+            "max_retry_delay": 30.0,
+            "max_retry_attempts": 5,
+            "retry_backoff_factor": 2.0,
         }
 
         # ── cache_store ──
@@ -1166,24 +1291,31 @@ class TestDropInIntegration:
     verl/tests/workers/rollout/test_router.py.
     """
 
-    def _make_full_config(self) -> "OmegaConf":
+    def _make_full_config(self) -> OmegaConf:
         """Helper: build a full config for drop-in tests."""
-        return OmegaConf.create({
-            "router_class": "uni_agent.llm_router.balancer.KVCAwareBalancer",
-            "strategies": [
-                {"_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
-                 "weight": 1.0, "alpha": 0.7, "collector_names": ["vllm_zmq", "mooncake_prometheus"]},
-            ],
-            "collector": {
-                "http_polling": {"polling_interval": 5, "http_timeout": 10},
-                "long_connection": {
-                    "base_retry_delay": 1.0, "max_retry_delay": 30.0,
-                    "max_retry_attempts": 5, "retry_backoff_factor": 2.0,
+        return OmegaConf.create(
+            {
+                "router_class": "uni_agent.llm_router.balancer.KVCAwareBalancer",
+                "strategies": [
+                    {
+                        "_target_": "uni_agent.llm_router.config.strategy.KVCAwareStrategyConfig",
+                        "weight": 1.0,
+                        "alpha": 0.7,
+                        "collector_names": ["vllm_zmq", "mooncake_prometheus"],
+                    },
+                ],
+                "collector": {
+                    "http_polling": {"polling_interval": 5, "http_timeout": 10},
+                    "long_connection": {
+                        "base_retry_delay": 1.0,
+                        "max_retry_delay": 30.0,
+                        "max_retry_attempts": 5,
+                        "retry_backoff_factor": 2.0,
+                    },
                 },
-
-            },
-            "cache_store": {"kv_cache_store_type": "list", "ttl": 30},
-        })
+                "cache_store": {"kv_cache_store_type": "list", "ttl": 30},
+            }
+        )
 
     def test_d05_compose_expands_defaults(self):
         """
@@ -1192,10 +1324,12 @@ class TestDropInIntegration:
         Expectation: strategies/collector/cache_store/router_class all present
         """
         from pathlib import Path
-        from hydra import initialize_config_dir, compose
 
-        config_dir = str((Path(__file__).parent.parent.parent.parent
-                          / "uni_agent" / "llm_router" / "configs").resolve())
+        from hydra import compose, initialize_config_dir
+
+        config_dir = str(
+            (Path(__file__).parent.parent.parent.parent / "uni_agent" / "llm_router" / "configs").resolve()
+        )
         with initialize_config_dir(config_dir=config_dir, version_base=None):
             cfg = compose(config_name="kvc_aware_router")
         assert "strategies" in cfg and "collector" in cfg and "cache_store" in cfg
@@ -1226,7 +1360,7 @@ class TestDropInIntegration:
         cfg = self._make_full_config()
         result = KVCAwareConfig.from_config(cfg)
         s = result.strategies[0]
-        assert type(s) == KVCAwareStrategyConfig
+        assert type(s) is KVCAwareStrategyConfig
         assert s.collector_names == ["vllm_zmq", "mooncake_prometheus"]
         assert s.weight == 1.0
 
@@ -1239,6 +1373,7 @@ class TestDropInIntegration:
         cfg = self._make_full_config()
         result = KVCAwareConfig.from_config(cfg)
         import dataclasses
+
         field_names = {f.name for f in dataclasses.fields(result)}
         assert "router_class" not in field_names
         assert not hasattr(result, "router_class")
@@ -1271,11 +1406,13 @@ class TestDropInIntegration:
         Expectation: all field types/values are correct and router_class is ignored
         """
         from pathlib import Path
-        from hydra import initialize_config_dir, compose
+
+        from hydra import compose, initialize_config_dir
         from hydra.core.global_hydra import GlobalHydra
 
-        config_dir = str((Path(__file__).parent.parent.parent.parent
-                          / "uni_agent" / "llm_router" / "configs").resolve())
+        config_dir = str(
+            (Path(__file__).parent.parent.parent.parent / "uni_agent" / "llm_router" / "configs").resolve()
+        )
 
         GlobalHydra.instance().clear()
         with initialize_config_dir(config_dir=config_dir, version_base=None):
@@ -1303,4 +1440,5 @@ class TestDropInIntegration:
         assert result.cache_store.ttl == 30.0
         # router_class does not appear in KVCAwareConfig fields
         import dataclasses
+
         assert "router_class" not in {f.name for f in dataclasses.fields(result)}

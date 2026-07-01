@@ -25,22 +25,17 @@ def _format_value(value: Any, indent: int) -> str:
     """Format a value for multi-line repr, recursing into nested containers."""
     if is_dataclass(value) and not isinstance(value, type):
         return _multiline_repr(value, indent)
-    if isinstance(value, (list, ListConfig)):
+    if isinstance(value, list | ListConfig):
         items = list(value)
         if not items:
             return "[]"
-        inner = ",\n".join(
-            f"{' ' * (indent + 2)}{_format_value(v, indent + 2)}" for v in items
-        )
+        inner = ",\n".join(f"{' ' * (indent + 2)}{_format_value(v, indent + 2)}" for v in items)
         return f"[\n{inner},\n{' ' * indent}]"
-    if isinstance(value, (dict, DictConfig)):
+    if isinstance(value, dict | DictConfig):
         pairs = list(value.items())
         if not pairs:
             return "{}"
-        inner = ",\n".join(
-            f"{' ' * (indent + 2)}{k!r}: {_format_value(v, indent + 2)}"
-            for k, v in pairs
-        )
+        inner = ",\n".join(f"{' ' * (indent + 2)}{k!r}: {_format_value(v, indent + 2)}" for k, v in pairs)
         return "{\n" + inner + f",\n{' ' * indent}}}"
     return repr(value)
 
@@ -79,6 +74,7 @@ def _multiline_repr(obj: Any, indent: int = 0) -> str:
 # Strategy base class
 # ============================================================
 
+
 @dataclass(repr=False)
 class StrategyConfig:
     """Base config for routing strategies.
@@ -97,10 +93,8 @@ class StrategyConfig:
     def __post_init__(self) -> None:
         if not (0 < self.weight <= 1):
             raise ConfigError(f"weight must be in (0, 1], got {self.weight}")
-        if not isinstance(self.collector_names, (list, ListConfig)):
-            raise ConfigError(
-                f"collector_names must be a list, got {type(self.collector_names).__name__}"
-            )
+        if not isinstance(self.collector_names, list | ListConfig):
+            raise ConfigError(f"collector_names must be a list, got {type(self.collector_names).__name__}")
         # Normalize ListConfig → plain list for consistent downstream use
         if isinstance(self.collector_names, ListConfig):
             object.__setattr__(self, "collector_names", list(self.collector_names))

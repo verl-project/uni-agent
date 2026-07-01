@@ -13,8 +13,8 @@ from __future__ import annotations
 import time
 
 import pytest
+from conftest import NODE_ID, VLLM_MODEL, ZMQ_REPLAY_PORT, ZMQ_SUB_PORT, send_inference_request
 
-from conftest import NODE_ID, ZMQ_SUB_PORT, ZMQ_REPLAY_PORT, VLLM_MODEL, send_inference_request
 from uni_agent.llm_router.collectors.registry import BUILTIN_REGISTRY
 from uni_agent.llm_router.store.kv_cache_store import KVCacheStore
 
@@ -50,9 +50,7 @@ class TestVLLMKVEventCollectorWithRealService:
 
         assert store.block_size is not None, "block_size should be learned from KV events"
         assert store.block_size > 0
-        assert len(store.replicas_by_block) > 0, (
-            "replicas_by_block should be non-empty after BlockStored events"
-        )
+        assert len(store.replicas_by_block) > 0, "replicas_by_block should be non-empty after BlockStored events"
         replica_found = any(NODE_ID in replicas for replicas in store.replicas_by_block.values())
         assert replica_found, f"Expected NODE_ID '{NODE_ID}' in at least one block's replica set"
 
@@ -143,9 +141,7 @@ class TestVLLMKVEventCollectorWithRealService:
         collector.stop()
 
         mapping = collector._decoder.remote_to_local_block_hash
-        assert len(mapping) > 0, (
-            "remote_to_local_block_hash should have entries after processing events"
-        )
+        assert len(mapping) > 0, "remote_to_local_block_hash should have entries after processing events"
         for remote_bh, local_bh in mapping.items():
             assert isinstance(remote_bh, str)
             assert isinstance(local_bh, str)

@@ -6,7 +6,6 @@ from dataclasses import dataclass
 
 from uni_agent.llm_router.config.base import ConfigError, _multiline_repr
 
-
 _VALID_KV_CACHE_STORE_TYPES = {"list", "radix_tree"}
 
 
@@ -20,8 +19,7 @@ class CacheStoreConfig:
     def __post_init__(self) -> None:
         if self.kv_cache_store_type not in _VALID_KV_CACHE_STORE_TYPES:
             raise ConfigError(
-                f"kv_cache_store_type must be one of {_VALID_KV_CACHE_STORE_TYPES}, "
-                f"got '{self.kv_cache_store_type}'"
+                f"kv_cache_store_type must be one of {_VALID_KV_CACHE_STORE_TYPES}, got '{self.kv_cache_store_type}'"
             )
         if self.ttl <= 0:
             raise ConfigError(f"ttl must be > 0, got {self.ttl}")

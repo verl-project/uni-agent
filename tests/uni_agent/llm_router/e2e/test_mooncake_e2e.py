@@ -27,8 +27,7 @@ _PROJECT_ROOT = os.path.abspath(os.path.join(_SCRIPT_DIR, "..", "..", "..", ".."
 _RUN_INFER = os.path.join(_PROJECT_ROOT, "examples", "llm_router", "run_infer.sh")
 _AGENT_CONFIG = os.path.join(_PROJECT_ROOT, "examples", "llm_router", "agent_config_simulated.yaml")
 _MODEL = os.environ.get("VLLM_MODEL", "/data1/models/Qwen/Qwen3-4B-Instruct-2507")
-_DATASET = os.environ.get("SWEBENCH_DATASET",
-                          "/data1/hgq/uni-agent/scripts/swe_bench_verified_modal.parquet")
+_DATASET = os.environ.get("SWEBENCH_DATASET", "/data1/hgq/uni-agent/scripts/swe_bench_verified_modal.parquet")
 _ROUTER = "pkg://uni_agent.llm_router.configs/kvc_aware_router.yaml"
 _MC_CONFIG = os.environ.get("MOONCAKE_CONFIG_PATH", "/data1/hgq/uni-agent/mooncake_config.json")
 _LOG_DIR = "/tmp/e2e_mooncake_logs"
@@ -51,17 +50,28 @@ def _run_infer_with_mooncake(timeout: int = 600) -> str:
     cuda_vis = os.environ.get("CUDA_VISIBLE_DEVICES", "0,1,2,3,4,5,6,7")
     num_gpus = len(cuda_vis.split(","))
     cmd = [
-        "bash", _RUN_INFER,
-        _MODEL, _DATASET, _AGENT_CONFIG,
-        "--num-workers", "1",
-        "--n-gpus-per-node", str(num_gpus),
-        "--tensor-parallel-size", "2",
-        "--max-samples", "4",
-        "--n", "2",
-        "--max-model-len", "8192",
-        "--router-config-path", _ROUTER,
+        "bash",
+        _RUN_INFER,
+        _MODEL,
+        _DATASET,
+        _AGENT_CONFIG,
+        "--num-workers",
+        "1",
+        "--n-gpus-per-node",
+        str(num_gpus),
+        "--tensor-parallel-size",
+        "2",
+        "--max-samples",
+        "4",
+        "--n",
+        "2",
+        "--max-model-len",
+        "8192",
+        "--router-config-path",
+        _ROUTER,
         "--enable-mooncake",
-        "--mooncake-config-path", _MC_CONFIG,
+        "--mooncake-config-path",
+        _MC_CONFIG,
     ]
     env = os.environ.copy()
     env["HF_HUB_OFFLINE"] = "1"
@@ -76,7 +86,8 @@ def _run_infer_with_mooncake(timeout: int = 600) -> str:
     master_log = open(os.path.join(_LOG_DIR, "mooncake_master.log"), "w")
     master_proc = subprocess.Popen(
         ["mooncake_master", "--port", "50051", "--default_kv_lease_ttl", "60000"],
-        stdout=master_log, stderr=subprocess.STDOUT,
+        stdout=master_log,
+        stderr=subprocess.STDOUT,
     )
     time.sleep(5)
 
@@ -117,8 +128,9 @@ class TestMooncakeRouterE2E:
 
         # 4. Trajectory logs produced (log_dir from agent config yaml)
         traj_dir = _get_traj_dir()
-        traj_count = len([d for d in os.listdir(traj_dir)
-                         if os.path.isfile(os.path.join(traj_dir, d, "interaction_result.json"))])
+        traj_count = len(
+            [d for d in os.listdir(traj_dir) if os.path.isfile(os.path.join(traj_dir, d, "interaction_result.json"))]
+        )
         assert traj_count > 0, f"No trajectory logs in {traj_dir}"
 
         # 5. No TCP transport errors
@@ -135,9 +147,11 @@ class TestMooncakeRouterE2E:
         # zero TCP errors (check 5) already prove mooncake is wired correctly.
         if "External prefix cache hit" not in log:
             import warnings
+
             warnings.warn(
                 "No External prefix cache hit in log — small-sample e2e may not "
                 "produce enough cross-replica prefix overlap to trigger it. "
                 "Connector is created (check 1) and TCP is clean (check 5), "
-                "so mooncake wiring is correct."
+                "so mooncake wiring is correct.",
+                stacklevel=2,
             )

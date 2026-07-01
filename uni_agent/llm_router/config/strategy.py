@@ -28,13 +28,9 @@ class KVCAwareStrategyConfig(StrategyConfig):
             raise ConfigError(f"load_threshold must be in (0, 1), got {self.load_threshold}")
         valid_keys = {"gpu", "cpu", "ssd"}
         if not set(self.layer_weights.keys()) == valid_keys:
-            raise ConfigError(
-                f"layer_weights keys must be {valid_keys} only, got {set(self.layer_weights.keys())}"
-            )
+            raise ConfigError(f"layer_weights keys must be {valid_keys} only, got {set(self.layer_weights.keys())}")
         weights_sum = sum(self.layer_weights.values())
         if abs(weights_sum - 1.0) > 1e-6:
-            raise ConfigError(
-                f"layer_weights values must sum to 1.0, got {weights_sum}"
-            )
+            raise ConfigError(f"layer_weights values must sum to 1.0, got {weights_sum}")
 
     __repr__ = _multiline_repr

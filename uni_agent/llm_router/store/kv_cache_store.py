@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import threading
-
 from collections.abc import Iterable
 
 from uni_agent.llm_router.hash import get_prefix_hashes
@@ -126,7 +125,10 @@ class KVCacheStore:
             return prefix_match_replicas
 
     def get_tier_prefix_hit_rate(
-        self, node_id: str, prompt_ids: list[int], tier: str,
+        self,
+        node_id: str,
+        prompt_ids: list[int],
+        tier: str,
     ) -> float:
         """Query tier-level prefix cache hit rate (slow-path data).
 

@@ -15,11 +15,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from uni_agent.llm_router.config.router import CollectorConfig
-from uni_agent.llm_router.store.kv_cache_store import KVCacheStore
-from uni_agent.llm_router.store.metrics_store import MetricsStore
 from uni_agent.llm_router.collectors.registry import BUILTIN_REGISTRY
 from uni_agent.llm_router.logging import get_router_logger
+from uni_agent.llm_router.store.kv_cache_store import KVCacheStore
+from uni_agent.llm_router.store.metrics_store import MetricsStore
 
 logger = get_router_logger("provider")
 
@@ -88,11 +87,12 @@ class RouteDataProvider:
     def start(self) -> None:
         """Start all collectors."""
         logger.info("RouteDataProvider starting %d collector(s)", len(self._collectors))
-        for name, collector in zip(self._collection_names, self._collectors):
+        for name, collector in zip(self._collection_names, self._collectors, strict=False):
             collector.start()
             logger.info(
                 "collector started: name=%s type=%s",
-                name, type(collector).__name__,
+                name,
+                type(collector).__name__,
             )
 
     def stop(self) -> None:
@@ -130,7 +130,10 @@ class RouteDataProvider:
         return MetricsStore.default().get(node_id, key)
 
     def get_tier_prefix_hit_rate(
-        self, node_id: str, prompt_ids: list[int], tier: str,
+        self,
+        node_id: str,
+        prompt_ids: list[int],
+        tier: str,
     ) -> float | None:
         """Tier-level (cpu/ssd) prefix-cache hit rate, or ``None`` if unavailable.
 

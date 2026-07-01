@@ -33,9 +33,7 @@ def ray_runtime():
 
 
 def _router_config() -> RouterConfig:
-    return RouterConfig(
-        router_strategy="plugin_extension", router_config_path=_ROUTER_YAML
-    )
+    return RouterConfig(router_strategy="plugin_extension", router_config_path=_ROUTER_YAML)
 
 
 class TestPluginExtensionEndToEnd:

@@ -15,9 +15,9 @@ from uni_agent.llm_router.strategies.sticky_session import (
     StickySessionTable,
 )
 
-
-
 pytestmark = [pytest.mark.ut, pytest.mark.cpu]
+
+
 class TestStickySessionTable:
     """S01-Snn: StickySessionTable construction + access semantics."""
 

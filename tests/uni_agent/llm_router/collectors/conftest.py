@@ -19,9 +19,8 @@ import subprocess
 import sys
 import time
 
-import pytest
 import httpx
-
+import pytest
 
 # ── Shared configuration constants ───────────────────────────────────────
 
@@ -35,6 +34,7 @@ ZMQ_REPLAY_PORT = int(os.environ.get("ZMQ_REPLAY_PORT", "5556"))
 
 
 # ── Shared helper ────────────────────────────────────────────────────────
+
 
 def send_inference_request(node_id: str, model: str, prompt: str = "hello") -> bool:
     """POST a chat-completions request to trigger KV cache events.
@@ -59,6 +59,7 @@ def send_inference_request(node_id: str, model: str, prompt: str = "hello") -> b
 
 # ── Session-scoped vLLM fixture ──────────────────────────────────────────
 
+
 @pytest.fixture(scope="session")
 def vllm_kv_service():
     """Start one vLLM server with ZMQ KV events for the entire test session.
@@ -70,27 +71,39 @@ def vllm_kv_service():
 
     Yields ``node_id`` (``"host:port"``).  The process is SIGTERM'd on teardown.
     """
-    kv_events_config = json.dumps({
-        "enable_kv_cache_events": True,
-        "publisher": "zmq",
-        "topic": "kv-events",
-        "endpoint": f"tcp://*:{ZMQ_SUB_PORT}",
-        "replay_endpoint": f"tcp://*:{ZMQ_REPLAY_PORT}",
-    })
+    kv_events_config = json.dumps(
+        {
+            "enable_kv_cache_events": True,
+            "publisher": "zmq",
+            "topic": "kv-events",
+            "endpoint": f"tcp://*:{ZMQ_SUB_PORT}",
+            "replay_endpoint": f"tcp://*:{ZMQ_REPLAY_PORT}",
+        }
+    )
 
     cmd = [
-        sys.executable, "-m", "vllm.entrypoints.openai.api_server",
-        "--model", VLLM_MODEL,
-        "--host", VLLM_HOST,
-        "--port", str(VLLM_PORT),
+        sys.executable,
+        "-m",
+        "vllm.entrypoints.openai.api_server",
+        "--model",
+        VLLM_MODEL,
+        "--host",
+        VLLM_HOST,
+        "--port",
+        str(VLLM_PORT),
         "--trust-remote-code",
-        "--tensor_parallel_size", "2",
-        "--dtype", "bfloat16",
-        "--gpu_memory_utilization", "0.6",
-        "--max-model-len", "8192",
+        "--tensor_parallel_size",
+        "2",
+        "--dtype",
+        "bfloat16",
+        "--gpu_memory_utilization",
+        "0.6",
+        "--max-model-len",
+        "8192",
         "--override_generation_config",
         '{"temperature": 0.8, "top_k": -1, "top_p": 0.9, "repetition_penalty": 1.0, "max_new_tokens": 4096}',
-        "--kv-events-config", kv_events_config,
+        "--kv-events-config",
+        kv_events_config,
     ]
 
     proc = subprocess.Popen(cmd)
@@ -117,9 +130,7 @@ def vllm_kv_service():
         except subprocess.TimeoutExpired:
             proc.kill()
             proc.wait()
-        pytest.skip(
-            f"vLLM server for {VLLM_MODEL} did not become ready within {max_wait}s"
-        )
+        pytest.skip(f"vLLM server for {VLLM_MODEL} did not become ready within {max_wait}s")
 
     yield NODE_ID
 

@@ -1,5 +1,4 @@
-"""Top-level KVCAwareConfig and parsing logic.
-"""
+"""Top-level KVCAwareConfig and parsing logic."""
 
 from __future__ import annotations
 
@@ -17,7 +16,6 @@ from uni_agent.llm_router.config.base import (
 )
 from uni_agent.llm_router.config.cache import CacheStoreConfig
 from uni_agent.llm_router.config.collector import CollectorConfig
-
 
 # ============================================================
 # Top-level KVCAwareConfig
@@ -60,7 +58,7 @@ class KVCAwareConfig:
         Step 2: Manual traversal of strategies (list or dict from Hydra
                 defaults composition) — instantiate each ``_target_`` entry.
         """
-        if not isinstance(cfg, (DictConfig, dict)):
+        if not isinstance(cfg, DictConfig | dict):
             raise ConfigError(f"cfg must be DictConfig or dict, got {type(cfg)}")
 
         cfg = OmegaConf.create(cfg)
@@ -75,10 +73,12 @@ class KVCAwareConfig:
         strategies_raw = _extract_strategies(cfg)
 
         # ── Step 1: merge dataclass-typed fields (collector, cache_store) ──
-        defaults = OmegaConf.create({
-            "collector": OmegaConf.structured(CollectorConfig),
-            "cache_store": OmegaConf.structured(CacheStoreConfig),
-        })
+        defaults = OmegaConf.create(
+            {
+                "collector": OmegaConf.structured(CollectorConfig),
+                "cache_store": OmegaConf.structured(CacheStoreConfig),
+            }
+        )
         kwargs_for_merge = OmegaConf.create(cfg)
         # Remove polymorphic sections to avoid ReadonlyConfigError
         for key in ("strategies", "_target_"):
@@ -88,18 +88,18 @@ class KVCAwareConfig:
                 OmegaConf.set_struct(kwargs_for_merge, True)
 
         # Validate non-dict types for collector/cache_store
-        if ("collector" in kwargs_for_merge
-                and kwargs_for_merge.collector is not None
-                and not isinstance(kwargs_for_merge.collector, (dict, DictConfig))):
-            raise ConfigError(
-                f"collector must be a dict, got {type(kwargs_for_merge.collector).__name__}"
-            )
-        if ("cache_store" in kwargs_for_merge
-                and kwargs_for_merge.cache_store is not None
-                and not isinstance(kwargs_for_merge.cache_store, (dict, DictConfig))):
-            raise ConfigError(
-                f"cache_store must be a dict, got {type(kwargs_for_merge.cache_store).__name__}"
-            )
+        if (
+            "collector" in kwargs_for_merge
+            and kwargs_for_merge.collector is not None
+            and not isinstance(kwargs_for_merge.collector, dict | DictConfig)
+        ):
+            raise ConfigError(f"collector must be a dict, got {type(kwargs_for_merge.collector).__name__}")
+        if (
+            "cache_store" in kwargs_for_merge
+            and kwargs_for_merge.cache_store is not None
+            and not isinstance(kwargs_for_merge.cache_store, dict | DictConfig)
+        ):
+            raise ConfigError(f"cache_store must be a dict, got {type(kwargs_for_merge.cache_store).__name__}")
 
         merged = OmegaConf.merge(defaults, kwargs_for_merge)
         config_obj = OmegaConf.to_object(merged)
@@ -117,9 +117,7 @@ class KVCAwareConfig:
         # ── Step 2: parse strategies (polymorphic list) ────────────
         if strategies_raw is None:
             raise ConfigError("strategies is required — must be explicitly configured")
-        strategies = _parse_polymorphic_list(
-            strategies_raw, StrategyConfig, "strategies"
-        )
+        strategies = _parse_polymorphic_list(strategies_raw, StrategyConfig, "strategies")
 
         # ── Validate and construct ─────────────────────────────────
         result = cls(
@@ -142,9 +140,7 @@ class KVCAwareConfig:
         else:
             total_weight = sum(s.weight for s in self.strategies)
             if not (0.9 <= total_weight <= 1.1):
-                errors.append(
-                    f"sum of strategy weights must be ~1.0, got {total_weight}"
-                )
+                errors.append(f"sum of strategy weights must be ~1.0, got {total_weight}")
 
         if self.sticky_max_size <= 0:
             errors.append(f"sticky_max_size must be > 0, got {self.sticky_max_size}")
@@ -173,9 +169,9 @@ def _extract_strategies(cfg: DictConfig) -> list[Any] | None:
     val = cfg["strategies"]
     if val is None:
         return None
-    if isinstance(val, (list, ListConfig)):
+    if isinstance(val, list | ListConfig):
         return list(val)
-    if isinstance(val, (dict, DictConfig)):
+    if isinstance(val, dict | DictConfig):
         # Hydra defaults composition → dict of {name: strategy_cfg}
         return list(val.values())
     # Not a list or dict — will be caught by validation
@@ -196,27 +192,22 @@ def _parse_polymorphic_list(
         return result
 
     for i, item in enumerate(items):
-        if not isinstance(item, (dict, DictConfig)):
+        if not isinstance(item, dict | DictConfig):
             raise ConfigError(f"{list_name}[{i}] must be a dict, got {type(item)}")
 
         item_conf = OmegaConf.create(item) if isinstance(item, dict) else item
 
         if "_target_" not in item_conf:
-            raise ConfigError(
-                f"{list_name}[{i}] must have '_target_' key, got keys: {list(item_conf.keys())}"
-            )
+            raise ConfigError(f"{list_name}[{i}] must have '_target_' key, got keys: {list(item_conf.keys())}")
 
         try:
             parsed = instantiate(item_conf)
         except (InstantiationException, ImportError, AttributeError) as e:
-            raise ConfigError(
-                f"{list_name}[{i}] failed to instantiate _target_ '{item_conf._target_}': {e}"
-            ) from e
+            raise ConfigError(f"{list_name}[{i}] failed to instantiate _target_ '{item_conf._target_}': {e}") from e
 
         if not isinstance(parsed, base_class):
             raise ConfigError(
-                f"{list_name}[{i}] _target_ must inherit {base_class.__name__}, "
-                f"got {type(parsed).__name__}"
+                f"{list_name}[{i}] _target_ must inherit {base_class.__name__}, got {type(parsed).__name__}"
             )
 
         result.append(parsed)

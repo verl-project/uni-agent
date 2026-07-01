@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-
 from typing import Callable
 
 import httpx
@@ -37,9 +36,7 @@ class HTTPTransport(Transport):
         interval: float = 5.0,
         http_timeout: float = 10.0,
     ) -> None:
-        self._endpoints: dict[str, str] = {
-            nid: f"http://{addr}/metrics" for nid, addr in endpoints.items()
-        }
+        self._endpoints: dict[str, str] = {nid: f"http://{addr}/metrics" for nid, addr in endpoints.items()}
         self._interval = interval
         self._http_timeout = http_timeout
         self._client: httpx.AsyncClient | None = None
@@ -56,7 +53,7 @@ class HTTPTransport(Transport):
             while True:
                 coros = {nid: self._client.get(url) for nid, url in self._endpoints.items()}
                 responses = await asyncio.gather(*coros.values(), return_exceptions=True)
-                for nid, resp in zip(coros.keys(), responses):
+                for nid, resp in zip(coros.keys(), responses, strict=False):
                     if isinstance(resp, Exception):
                         continue  # failed node — handler falls back to defaults
                     try:

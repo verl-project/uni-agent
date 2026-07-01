@@ -14,18 +14,17 @@ import pytest
 def _conditional_patch(request):
     """Patch RouteDataProvider + _init_provider — only if balancer ut tests run."""
     has_balancer_ut = any(
-        "balancer" in str(item.fspath) and item.get_closest_marker("ut")
-        for item in request.session.items
+        "balancer" in str(item.fspath) and item.get_closest_marker("ut") for item in request.session.items
     )
     if not has_balancer_ut:
         yield
         return
 
-    from tests.uni_agent.llm_router.balancer._helpers import (
-        _FakeProvider,
-        _fake_init_provider,
-    )
     import uni_agent.llm_router.collectors as _collectors_mod
+    from tests.uni_agent.llm_router.balancer._helpers import (
+        _fake_init_provider,
+        _FakeProvider,
+    )
     from uni_agent.llm_router.balancer import KVCAwareBalancer
 
     _orig_provider = _collectors_mod.RouteDataProvider

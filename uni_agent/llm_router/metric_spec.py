@@ -11,9 +11,9 @@ from __future__ import annotations
 
 from typing import Any
 
-
 # ── Canonical key constants ──────────────────────────────────────────
 # Strategies reference keys via MetricKey constants — never raw strings.
+
 
 class MetricKey:
     """Canonical metric key names — backend-agnostic, strategy-layer unified."""

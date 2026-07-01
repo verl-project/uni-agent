@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-
 from dataclasses import dataclass
 from typing import Callable
 
@@ -80,9 +79,7 @@ class ZMQTransport(Transport):
         for node_id in self._sub_endpoints:
             sub_addr = self._sub_endpoints[node_id]
             replay_addr = self._replay_endpoints[node_id]
-            t = asyncio.create_task(
-                self._subscribe_for_replica(node_id, sub_addr, replay_addr, handler)
-            )
+            t = asyncio.create_task(self._subscribe_for_replica(node_id, sub_addr, replay_addr, handler))
             self._sub_tasks[node_id] = t
             sub_tasks.append(t)
         try:
@@ -102,7 +99,8 @@ class ZMQTransport(Transport):
             try:
                 if self._loop is not None:
                     done_future = asyncio.run_coroutine_threadsafe(
-                        self._wait_task(task), self._loop,
+                        self._wait_task(task),
+                        self._loop,
                     )
                     done_future.result(timeout=10)
             except (asyncio.CancelledError, Exception) as exc:
@@ -120,7 +118,10 @@ class ZMQTransport(Transport):
     # ── ZMQ connection management ───────────────────────────────────────
 
     async def _connect_zmq_for(
-        self, node_id: str, sub_addr: str, replay_addr: str,
+        self,
+        node_id: str,
+        sub_addr: str,
+        replay_addr: str,
     ) -> bool:
         """Create ZMQ context and replay + sub dual socket for a single replica."""
         try:
@@ -162,13 +163,16 @@ class ZMQTransport(Transport):
             self._close_zmq_sockets_for(node_id)
 
     async def _reconnect_with_backoff_for(
-        self, node_id: str, sub_addr: str, replay_addr: str,
+        self,
+        node_id: str,
+        sub_addr: str,
+        replay_addr: str,
     ) -> bool:
         """Exponential backoff reconnect for a single replica."""
         retry_count = self._retry_counts.get(node_id, 0)
         while retry_count < self._max_retry_attempts:
             delay = min(
-                self._base_retry_delay * (self._retry_backoff_factor ** retry_count),
+                self._base_retry_delay * (self._retry_backoff_factor**retry_count),
                 self._max_retry_delay,
             )
             await asyncio.sleep(delay)
@@ -183,7 +187,10 @@ class ZMQTransport(Transport):
     # ── Per-replica subscription ────────────────────────────────────────
 
     async def _subscribe_for_replica(
-        self, node_id: str, sub_addr: str, replay_addr: str,
+        self,
+        node_id: str,
+        sub_addr: str,
+        replay_addr: str,
         handler: Callable[[bytes | str, str], None],
     ) -> None:
         """Per-replica subscription: connect → replay → subscribe loop."""
@@ -217,7 +224,9 @@ class ZMQTransport(Transport):
     # ── Replay ──────────────────────────────────────────────────────────
 
     async def _replay_historical_data_for(
-        self, node_id: str, handler: Callable[[bytes | str, str], None],
+        self,
+        node_id: str,
+        handler: Callable[[bytes | str, str], None],
     ) -> None:
         """Request replay of historical data for a single replica.
         Degrade to subscription-only on failure."""
@@ -230,7 +239,8 @@ class ZMQTransport(Transport):
 
             try:
                 replay_data = await asyncio.wait_for(
-                    sockets.replay_socket.recv(), timeout=5.0,
+                    sockets.replay_socket.recv(),
+                    timeout=5.0,
                 )
             except asyncio.TimeoutError:
                 return  # timeout → degrade to subscription-only

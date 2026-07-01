@@ -7,10 +7,8 @@ from uni_agent.llm_router.balancer import KVCAwareBalancer
 from uni_agent.llm_router.strategies import KVCacheAwareStrategy
 
 from ._helpers import (
-    _FakeProvider,
-    _router_config,
-    _fake_init_provider,
     _make_balancer,
+    _router_config,
 )
 
 pytestmark = [pytest.mark.ut, pytest.mark.cpu]
@@ -312,7 +310,7 @@ class TestEndToEndFlows:
         import importlib
 
         mod = importlib.import_module("uni_agent.llm_router.balancer")
-        assert getattr(mod, "KVCAwareBalancer") is KVCAwareBalancer
+        assert mod.KVCAwareBalancer is KVCAwareBalancer
 
 
 # ============================================================
@@ -351,12 +349,6 @@ class _MetricsProvider:
     def get_tier_prefix_hit_rate(self, replica_id, prompt_ids, tier):
         return 0.0
 
-    def get_gpu_prefix_hit_rate(self, prompt_ids):
-        return {}
-
-    def get_tier_prefix_hit_rate(self, replica_id, prompt_ids, tier):
-        return 0.0
-
 
 def _kv_metrics(per_replica: dict[str, dict]) -> dict[str, dict]:
     """Normalize {sid: {kv, running, waiting}} into MetricKey-keyed dicts.
@@ -374,5 +366,3 @@ def _kv_metrics(per_replica: dict[str, dict]) -> dict[str, dict]:
             MetricKey.NUM_REQUESTS_WAITING: m.get("waiting", 0),
         }
     return out
-
-

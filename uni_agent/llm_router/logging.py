@@ -15,8 +15,8 @@ from __future__ import annotations
 
 import sys
 
+import loguru
 from loguru import logger
-
 
 # ── Ensure a stdout sink exists for the Ray actor process ────────────────
 # Equivalent to the old per-file ``if not logger.handlers: … StreamHandler
@@ -53,7 +53,8 @@ _ensure_stdout_sink()
 
 # ── Per-component logger factory ─────────────────────────────────────────
 
-def get_router_logger(name: str) -> "loguru.Logger":
+
+def get_router_logger(name: str) -> loguru.Logger:
     """Return a loguru bound logger for an llm_router component.
 
     Unlike the full ``async_logging.get_logger(name, run_id)`` which binds

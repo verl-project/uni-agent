@@ -86,7 +86,11 @@ def route(
         name = type(strategy).__name__
         try:
             scores = strategy.score(
-                prompt_ids, provider, replicas, request_id, sticky_table,
+                prompt_ids,
+                provider,
+                replicas,
+                request_id,
+                sticky_table,
             )
             if len(scores) != n:
                 raise ValueError(f"{name}.score() returned {len(scores)} scores, expected {n}")
@@ -101,8 +105,6 @@ def route(
             final[idx] += weight * scores[idx]
 
     ranking = sorted(range(n), key=lambda idx: _rank_key(final[idx]), reverse=True)
-    scores_str = ", ".join(
-        f"{replicas[idx].replica_id}={final[idx]:.4f}" for idx in ranking
-    )
+    scores_str = ", ".join(f"{replicas[idx].replica_id}={final[idx]:.4f}" for idx in ranking)
     logger.info(f"route(): replicas={n} ranking=[{scores_str}]")
     return [replicas[idx].replica_id for idx in ranking]

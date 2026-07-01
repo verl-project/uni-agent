@@ -63,7 +63,8 @@ class VLLMKVDecoder(Decoder):
         except (msgpack.UnpackException, ValueError, TypeError) as exc:
             logger.warning(
                 "Failed to decode msgpack payload from node %s: %s",
-                node_id, exc,
+                node_id,
+                exc,
             )
 
     def _apply_event(
@@ -93,9 +94,7 @@ class VLLMKVDecoder(Decoder):
         if event.token_ids is not None:
             local_parent_hash = seed
             if event.parent_block_hash is not None:
-                local_parent_str = self.remote_to_local_block_hash.get(
-                    event.parent_block_hash
-                )
+                local_parent_str = self.remote_to_local_block_hash.get(event.parent_block_hash)
                 if local_parent_str is not None:
                     local_parent_hash = int(local_parent_str)
 
@@ -104,7 +103,9 @@ class VLLMKVDecoder(Decoder):
                 if i >= len(event.block_hashes):
                     break
                 local_hash_int = compute_hash(
-                    local_parent_hash, block_bytes, seed=seed,
+                    local_parent_hash,
+                    block_bytes,
+                    seed=seed,
                 )
                 local_hash_str = str(local_hash_int)
                 bh = event.block_hashes[i]
@@ -118,9 +119,7 @@ class VLLMKVDecoder(Decoder):
         """Handle BlockRemoved: convert remote hashes to local, remove from store."""
         store = self._store
         local_hashes = [
-            self.remote_to_local_block_hash[bh]
-            for bh in event.block_hashes
-            if bh in self.remote_to_local_block_hash
+            self.remote_to_local_block_hash[bh] for bh in event.block_hashes if bh in self.remote_to_local_block_hash
         ]
         store.remove_blocks(replica_id, local_hashes)
         for bh in event.block_hashes:

@@ -25,9 +25,9 @@ from uni_agent.llm_router.strategies.load_score import (
     resolve_max_num_seqs,
 )
 
-
-
 pytestmark = [pytest.mark.ut, pytest.mark.cpu]
+
+
 # --------------------------------------------------------------------------- #
 # load_normalized
 # --------------------------------------------------------------------------- #

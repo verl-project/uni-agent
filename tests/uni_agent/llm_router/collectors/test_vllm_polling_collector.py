@@ -12,8 +12,8 @@ from __future__ import annotations
 import time
 
 import pytest
+from conftest import NODE_ID
 
-from conftest import NODE_ID, VLLM_MODEL
 from uni_agent.llm_router.collectors.registry import BUILTIN_REGISTRY
 from uni_agent.llm_router.metric_spec import MetricKey
 from uni_agent.llm_router.store.metrics_store import MetricsStore
@@ -51,9 +51,7 @@ class TestVLLMMetricsCollectorWithRealService:
         time.sleep(POLL_INTERVAL + 3.0)
         collector.stop()
 
-        assert NODE_ID in store.all_ids(), (
-            f"Expected node_id '{NODE_ID}' in store, got {store.all_ids()}"
-        )
+        assert NODE_ID in store.all_ids(), f"Expected node_id '{NODE_ID}' in store, got {store.all_ids()}"
         assert isinstance(store.get(NODE_ID, MetricKey.KV_CACHE_USAGE_PERC), float)
         assert isinstance(store.get(NODE_ID, MetricKey.NUM_REQUESTS_RUNNING), int)
         assert isinstance(store.get(NODE_ID, MetricKey.NUM_REQUESTS_WAITING), int)

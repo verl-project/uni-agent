@@ -25,8 +25,7 @@ _PROJECT_ROOT = os.path.abspath(os.path.join(_SCRIPT_DIR, "..", "..", "..", ".."
 _RUN_INFER = os.path.join(_PROJECT_ROOT, "examples", "llm_router", "run_infer.sh")
 _AGENT_CONFIG = os.path.join(_PROJECT_ROOT, "examples", "llm_router", "agent_config_simulated.yaml")
 _MODEL = os.environ.get("VLLM_MODEL", "/data1/models/Qwen/Qwen3-4B-Instruct-2507")
-_DATASET = os.environ.get("SWEBENCH_DATASET",
-                          "/data1/hgq/uni-agent/scripts/swe_bench_verified_modal.parquet")
+_DATASET = os.environ.get("SWEBENCH_DATASET", "/data1/hgq/uni-agent/scripts/swe_bench_verified_modal.parquet")
 _ROUTER = "pkg://uni_agent.llm_router.configs/kvc_aware_router.yaml"
 _LOG_DIR = "/tmp/e2e_router_logs"
 
@@ -48,15 +47,25 @@ def _run_infer(timeout: int = 600) -> str:
     cuda_vis = os.environ.get("CUDA_VISIBLE_DEVICES", "0,1,2,3,4,5,6,7")
     num_gpus = len(cuda_vis.split(","))
     cmd = [
-        "bash", _RUN_INFER,
-        _MODEL, _DATASET, _AGENT_CONFIG,
-        "--num-workers", "1",
-        "--n-gpus-per-node", str(num_gpus),
-        "--tensor-parallel-size", "2",
-        "--max-samples", "4",
-        "--n", "2",
-        "--max-model-len", "8192",
-        "--router-config-path", _ROUTER,
+        "bash",
+        _RUN_INFER,
+        _MODEL,
+        _DATASET,
+        _AGENT_CONFIG,
+        "--num-workers",
+        "1",
+        "--n-gpus-per-node",
+        str(num_gpus),
+        "--tensor-parallel-size",
+        "2",
+        "--max-samples",
+        "4",
+        "--n",
+        "2",
+        "--max-model-len",
+        "8192",
+        "--router-config-path",
+        _ROUTER,
     ]
     env = os.environ.copy()
     env["HF_HUB_OFFLINE"] = "1"
@@ -96,6 +105,7 @@ class TestKVCAwareRouterE2E:
 
         # 4. Trajectory logs produced (log_dir from agent config yaml)
         traj_dir = _get_traj_dir()
-        traj_count = len([d for d in os.listdir(traj_dir)
-                         if os.path.isfile(os.path.join(traj_dir, d, "interaction_result.json"))])
+        traj_count = len(
+            [d for d in os.listdir(traj_dir) if os.path.isfile(os.path.join(traj_dir, d, "interaction_result.json"))]
+        )
         assert traj_count > 0, f"No trajectory logs in {traj_dir}"

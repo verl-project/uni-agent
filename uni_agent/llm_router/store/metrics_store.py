@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import threading
-
 from typing import Any
 
 from uni_agent.llm_router.metric_spec import METRIC_SPECS
@@ -51,10 +50,7 @@ class MetricsStore:
         """
         if key is not None:
             if key not in METRIC_SPECS:
-                raise KeyError(
-                    f"Unknown metric key '{key}'. "
-                    f"Valid keys: {sorted(METRIC_SPECS.keys())}"
-                )
+                raise KeyError(f"Unknown metric key '{key}'. Valid keys: {sorted(METRIC_SPECS.keys())}")
             with self._lock:
                 node = self._data.get(node_id, {})
                 if key in node:
@@ -87,7 +83,7 @@ class MetricsStore:
         """Return all node IDs currently in the store."""
         with self._lock:
             return list(self._data.keys())
-        
+
     def get_metric(self, node_id: str, key: str) -> Any:
         """Query a polling metric by canonical key.
 

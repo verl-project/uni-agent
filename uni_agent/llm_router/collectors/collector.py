@@ -11,11 +11,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-
 from concurrent.futures import Future
 
-from uni_agent.llm_router.collectors.transport.base import Transport
 from uni_agent.llm_router.collectors.decoder.base import Decoder
+from uni_agent.llm_router.collectors.transport.base import Transport
 
 logger = logging.getLogger(__name__)
 

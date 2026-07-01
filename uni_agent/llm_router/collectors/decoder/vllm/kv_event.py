@@ -55,16 +55,16 @@ class KVCacheEvent:
         Raises:
             ValueError: If the top-level format is invalid.
         """
-        if not isinstance(raw_data, (list, tuple)) or len(raw_data) < 2:
+        if not isinstance(raw_data, list | tuple) or len(raw_data) < 2:
             raise ValueError(f"Expected list with >= 2 elements, got {type(raw_data)}")
 
         event_list = raw_data[1]
-        if not isinstance(event_list, (list, tuple)):
+        if not isinstance(event_list, list | tuple):
             raise ValueError(f"Expected raw_data[1] as event list, got {type(event_list)}")
 
         results: list[KVCacheEvent] = []
         for event_entry in event_list:
-            if not isinstance(event_entry, (list, tuple)) or len(event_entry) < 1:
+            if not isinstance(event_entry, list | tuple) or len(event_entry) < 1:
                 continue
 
             tag = event_entry[0]
@@ -87,7 +87,10 @@ class KVCacheEvent:
 
     @classmethod
     def _build_event(
-        cls, event_type: str, fields: list | tuple, replica_id: str,
+        cls,
+        event_type: str,
+        fields: list | tuple,
+        replica_id: str,
     ) -> KVCacheEvent | None:
         """Dispatch to the appropriate builder by event_type."""
         if event_type == "stored":
@@ -120,11 +123,7 @@ class KVCacheEvent:
         block_size = int(fields[3])
 
         # Chop and encode token IDs into block-sized uint32 big-endian bytes
-        token_ids = (
-            _convert_token_ids(raw_token_ids, block_size)
-            if raw_token_ids is not None
-            else None
-        )
+        token_ids = _convert_token_ids(raw_token_ids, block_size) if raw_token_ids is not None else None
 
         return cls(
             event_type="stored",
@@ -132,7 +131,7 @@ class KVCacheEvent:
             block_hashes=block_hashes,
             parent_block_hash=parent_block_hash,
             token_ids=token_ids,
-            block_size=block_size
+            block_size=block_size,
         )
 
     @classmethod
@@ -152,7 +151,7 @@ class KVCacheEvent:
             block_hashes=block_hashes,
             parent_block_hash=None,
             token_ids=None,
-            block_size=None
+            block_size=None,
         )
 
     @classmethod
@@ -164,7 +163,7 @@ class KVCacheEvent:
             block_hashes=[],
             parent_block_hash=None,
             token_ids=None,
-            block_size=None
+            block_size=None,
         )
 
     # ── Tag resolution ───────────────────────────────────────────────────
@@ -233,9 +232,7 @@ def _convert_token_ids(raw_ids: list[int], block_size: int) -> list[bytes]:
     if block_size <= 0:
         raise ValueError(f"block_size must be > 0, got {block_size}")
     if len(raw_ids) % block_size != 0:
-        raise ValueError(
-            f"token_ids len={len(raw_ids)} not divisible by block_size={block_size}"
-        )
+        raise ValueError(f"token_ids len={len(raw_ids)} not divisible by block_size={block_size}")
     num_blocks = len(raw_ids) // block_size
     result: list[bytes] = []
     for i in range(num_blocks):

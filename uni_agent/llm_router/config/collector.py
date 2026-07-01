@@ -11,7 +11,6 @@ from dataclasses import dataclass, field
 
 from uni_agent.llm_router.config.base import ConfigError, _multiline_repr
 
-
 _DEFAULT_HTTP_POLLING: dict[str, float] = {
     "polling_interval": 5.0,
     "http_timeout": 10.0,
@@ -55,8 +54,7 @@ def _validate_long_connection(params: dict[str, float | int]) -> None:
         raise ConfigError(f"base_retry_delay must be > 0, got {brd}")
     if "max_retry_delay" in params and mrd < brd:
         raise ConfigError(
-            f"max_retry_delay must be >= base_retry_delay, "
-            f"got max_retry_delay={mrd} < base_retry_delay={brd}"
+            f"max_retry_delay must be >= base_retry_delay, got max_retry_delay={mrd} < base_retry_delay={brd}"
         )
     if "max_retry_attempts" in params and mra < 1:
         raise ConfigError(f"max_retry_attempts must be >= 1, got {mra}")

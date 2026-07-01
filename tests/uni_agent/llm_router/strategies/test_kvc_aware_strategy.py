@@ -16,24 +16,22 @@ from __future__ import annotations
 
 import pytest
 
+from uni_agent.llm_router.metric_spec import MetricKey
 from uni_agent.llm_router.strategies import (
     KVCacheAwareStrategy,
     RoutingStrategy,
-    StrategyError,
-    StrategyRegistry,
     StickySessionTable,
+    StrategyError,
     route,
 )
 from uni_agent.llm_router.strategies.base import ReplicaInfo
 from uni_agent.llm_router.strategies.kvc_aware import STICKY_TOP_SCORE
-from uni_agent.llm_router.metric_spec import MetricKey
-
-
 
 pytestmark = [pytest.mark.ut, pytest.mark.cpu]
 # --------------------------------------------------------------------------- #
 # Helpers
 # --------------------------------------------------------------------------- #
+
 
 def _strat(**kwargs) -> KVCacheAwareStrategy:
     """Build a KVCacheAwareStrategy with required boilerplate fields filled in.
@@ -140,6 +138,7 @@ class RaisingStrategy:
 
 pytestmark = [pytest.mark.ut, pytest.mark.cpu]
 
+
 class TestKVCAwareCombinedScore:
     def test_three_layer_cache_weighted_sum(self):
         """
@@ -152,10 +151,20 @@ class TestKVCAwareCombinedScore:
         strat = _strat()
         provider = FakeRouteDataProvider(
             {
-                "rep_a": {"kv_cache_usage_perc": 0.2, "num_requests_running": 0, "num_requests_waiting": 0,
-                          "gpu_hit_pct": 80, "tiers": {"cpu": 0.6, "ssd": 0.2}},
-                "rep_b": {"kv_cache_usage_perc": 0.4, "num_requests_running": 0, "num_requests_waiting": 0,
-                          "gpu_hit_pct": 0, "tiers": {"cpu": 0.3, "ssd": 0.4}},
+                "rep_a": {
+                    "kv_cache_usage_perc": 0.2,
+                    "num_requests_running": 0,
+                    "num_requests_waiting": 0,
+                    "gpu_hit_pct": 80,
+                    "tiers": {"cpu": 0.6, "ssd": 0.2},
+                },
+                "rep_b": {
+                    "kv_cache_usage_perc": 0.4,
+                    "num_requests_running": 0,
+                    "num_requests_waiting": 0,
+                    "gpu_hit_pct": 0,
+                    "tiers": {"cpu": 0.3, "ssd": 0.4},
+                },
             }
         )
         scores = strat.score(PROMPT_IDS, provider, _replicas("rep_a", "rep_b"))
@@ -173,10 +182,20 @@ class TestKVCAwareCombinedScore:
         strat = _strat()
         provider = FakeRouteDataProvider(
             {
-                "rep_a": {"kv_cache_usage_perc": 0.2, "num_requests_running": 0, "num_requests_waiting": 0,
-                          "gpu_hit_pct": 70, "tiers": {"cpu": 0.0, "ssd": 0.0}},
-                "rep_b": {"kv_cache_usage_perc": 0.4, "num_requests_running": 0, "num_requests_waiting": 0,
-                          "gpu_hit_pct": 0, "tiers": {"cpu": 0.0, "ssd": 0.0}},
+                "rep_a": {
+                    "kv_cache_usage_perc": 0.2,
+                    "num_requests_running": 0,
+                    "num_requests_waiting": 0,
+                    "gpu_hit_pct": 70,
+                    "tiers": {"cpu": 0.0, "ssd": 0.0},
+                },
+                "rep_b": {
+                    "kv_cache_usage_perc": 0.4,
+                    "num_requests_running": 0,
+                    "num_requests_waiting": 0,
+                    "gpu_hit_pct": 0,
+                    "tiers": {"cpu": 0.0, "ssd": 0.0},
+                },
             }
         )
         scores = strat.score(PROMPT_IDS, provider, _replicas("rep_a", "rep_b"))
@@ -195,10 +214,20 @@ class TestKVCAwareCombinedScore:
         strat = _strat()
         provider = FakeRouteDataProvider(
             {
-                "loaded": {"kv_cache_usage_perc": 1.0, "num_requests_running": 64, "num_requests_waiting": 1000,
-                           "gpu_hit_pct": 90, "tiers": {"cpu": 0.0, "ssd": 0.0}},
-                "light":  {"kv_cache_usage_perc": 0.2, "num_requests_running": 0, "num_requests_waiting": 0,
-                           "gpu_hit_pct": 50, "tiers": {"cpu": 0.0, "ssd": 0.0}},
+                "loaded": {
+                    "kv_cache_usage_perc": 1.0,
+                    "num_requests_running": 64,
+                    "num_requests_waiting": 1000,
+                    "gpu_hit_pct": 90,
+                    "tiers": {"cpu": 0.0, "ssd": 0.0},
+                },
+                "light": {
+                    "kv_cache_usage_perc": 0.2,
+                    "num_requests_running": 0,
+                    "num_requests_waiting": 0,
+                    "gpu_hit_pct": 50,
+                    "tiers": {"cpu": 0.0, "ssd": 0.0},
+                },
             }
         )
         scores = strat.score(PROMPT_IDS, provider, _replicas("loaded", "light"))
@@ -217,10 +246,20 @@ class TestKVCAwareCombinedScore:
         strat = _strat()
         provider = FakeRouteDataProvider(
             {
-                "idle": {"kv_cache_usage_perc": 0.0, "num_requests_running": 0, "num_requests_waiting": 0,
-                         "gpu_hit_pct": 0, "tiers": {"cpu": 0.0, "ssd": 0.0}},
-                "full": {"kv_cache_usage_perc": 1.0, "num_requests_running": 0, "num_requests_waiting": 0,
-                         "gpu_hit_pct": 0, "tiers": {"cpu": 0.0, "ssd": 0.0}},
+                "idle": {
+                    "kv_cache_usage_perc": 0.0,
+                    "num_requests_running": 0,
+                    "num_requests_waiting": 0,
+                    "gpu_hit_pct": 0,
+                    "tiers": {"cpu": 0.0, "ssd": 0.0},
+                },
+                "full": {
+                    "kv_cache_usage_perc": 1.0,
+                    "num_requests_running": 0,
+                    "num_requests_waiting": 0,
+                    "gpu_hit_pct": 0,
+                    "tiers": {"cpu": 0.0, "ssd": 0.0},
+                },
             }
         )
         scores = strat.score(PROMPT_IDS, provider, _replicas("idle", "full"))
@@ -230,6 +269,7 @@ class TestKVCAwareCombinedScore:
 # --------------------------------------------------------------------------- #
 # StrategyRegistry
 # --------------------------------------------------------------------------- #
+
 
 class TestKVCAwareLoad:
     def test_load_formula_monotonic_in_kv(self):
@@ -244,12 +284,27 @@ class TestKVCAwareLoad:
         strat = _strat()
         provider = FakeRouteDataProvider(
             {
-                "idle":    {"kv_cache_usage_perc": 0.0, "num_requests_running": 0, "num_requests_waiting": 0,
-                            "gpu_hit_pct": 0, "tiers": {"cpu": 0.0, "ssd": 0.0}},
-                "mid":     {"kv_cache_usage_perc": 0.5, "num_requests_running": 0, "num_requests_waiting": 0,
-                            "gpu_hit_pct": 0, "tiers": {"cpu": 0.0, "ssd": 0.0}},
-                "loaded":  {"kv_cache_usage_perc": 1.0, "num_requests_running": 64, "num_requests_waiting": 0,
-                            "gpu_hit_pct": 0, "tiers": {"cpu": 0.0, "ssd": 0.0}},
+                "idle": {
+                    "kv_cache_usage_perc": 0.0,
+                    "num_requests_running": 0,
+                    "num_requests_waiting": 0,
+                    "gpu_hit_pct": 0,
+                    "tiers": {"cpu": 0.0, "ssd": 0.0},
+                },
+                "mid": {
+                    "kv_cache_usage_perc": 0.5,
+                    "num_requests_running": 0,
+                    "num_requests_waiting": 0,
+                    "gpu_hit_pct": 0,
+                    "tiers": {"cpu": 0.0, "ssd": 0.0},
+                },
+                "loaded": {
+                    "kv_cache_usage_perc": 1.0,
+                    "num_requests_running": 64,
+                    "num_requests_waiting": 0,
+                    "gpu_hit_pct": 0,
+                    "tiers": {"cpu": 0.0, "ssd": 0.0},
+                },
             }
         )
         scores = strat.score(PROMPT_IDS, provider, _replicas("idle", "mid", "loaded"))
@@ -268,12 +323,27 @@ class TestKVCAwareLoad:
         strat = _strat()
         provider = FakeRouteDataProvider(
             {
-                "r0":  {"kv_cache_usage_perc": 0.5, "num_requests_running": 0, "num_requests_waiting": 0,
-                        "gpu_hit_pct": 0, "tiers": {"cpu": 0.0, "ssd": 0.0}},
-                "r32": {"kv_cache_usage_perc": 0.5, "num_requests_running": 32, "num_requests_waiting": 0,
-                        "gpu_hit_pct": 0, "tiers": {"cpu": 0.0, "ssd": 0.0}},
-                "r64": {"kv_cache_usage_perc": 0.5, "num_requests_running": 64, "num_requests_waiting": 0,
-                        "gpu_hit_pct": 0, "tiers": {"cpu": 0.0, "ssd": 0.0}},
+                "r0": {
+                    "kv_cache_usage_perc": 0.5,
+                    "num_requests_running": 0,
+                    "num_requests_waiting": 0,
+                    "gpu_hit_pct": 0,
+                    "tiers": {"cpu": 0.0, "ssd": 0.0},
+                },
+                "r32": {
+                    "kv_cache_usage_perc": 0.5,
+                    "num_requests_running": 32,
+                    "num_requests_waiting": 0,
+                    "gpu_hit_pct": 0,
+                    "tiers": {"cpu": 0.0, "ssd": 0.0},
+                },
+                "r64": {
+                    "kv_cache_usage_perc": 0.5,
+                    "num_requests_running": 64,
+                    "num_requests_waiting": 0,
+                    "gpu_hit_pct": 0,
+                    "tiers": {"cpu": 0.0, "ssd": 0.0},
+                },
             }
         )
         scores = strat.score(PROMPT_IDS, provider, _replicas("r0", "r32", "r64"))
@@ -291,10 +361,20 @@ class TestKVCAwareLoad:
         strat = _strat()
         provider = FakeRouteDataProvider(
             {
-                "w0":  {"kv_cache_usage_perc": 0.0, "num_requests_running": 0, "num_requests_waiting": 0,
-                        "gpu_hit_pct": 0, "tiers": {"cpu": 0.0, "ssd": 0.0}},
-                "w10": {"kv_cache_usage_perc": 0.0, "num_requests_running": 0, "num_requests_waiting": 10,
-                        "gpu_hit_pct": 0, "tiers": {"cpu": 0.0, "ssd": 0.0}},
+                "w0": {
+                    "kv_cache_usage_perc": 0.0,
+                    "num_requests_running": 0,
+                    "num_requests_waiting": 0,
+                    "gpu_hit_pct": 0,
+                    "tiers": {"cpu": 0.0, "ssd": 0.0},
+                },
+                "w10": {
+                    "kv_cache_usage_perc": 0.0,
+                    "num_requests_running": 0,
+                    "num_requests_waiting": 10,
+                    "gpu_hit_pct": 0,
+                    "tiers": {"cpu": 0.0, "ssd": 0.0},
+                },
             }
         )
         scores = strat.score(PROMPT_IDS, provider, _replicas("w0", "w10"))
@@ -324,9 +404,7 @@ class TestKVCAwareCacheScore:
         Expectation: 0.7*0.8 + 0.2*0.6 + 0.1*0.2 = 0.70
         """
         strat = _strat()
-        provider = FakeRouteDataProvider(
-            {"rep": {"gpu_hit_pct": 80, "tiers": {"cpu": 0.6, "ssd": 0.2}}}
-        )
+        provider = FakeRouteDataProvider({"rep": {"gpu_hit_pct": 80, "tiers": {"cpu": 0.6, "ssd": 0.2}}})
         gpu_hit_pct = provider.get_gpu_prefix_hit_rate(PROMPT_IDS)  # {"rep": 80}
         assert strat._cache_score(provider, ReplicaInfo("rep"), PROMPT_IDS, gpu_hit_pct) == pytest.approx(0.70)
 
@@ -336,6 +414,7 @@ class TestKVCAwareCacheScore:
         Description: provider returns None for tiers (mooncake placeholder); gpu_hit_pct=80
         Expectation: 0.7*0.8 + 0 + 0 = 0.56
         """
+
         class _NoneProvider(FakeRouteDataProvider):
             def get_tier_prefix_hit_rate(self, replica_id, prompt_ids, tier):
                 return None
@@ -362,9 +441,7 @@ class TestKVCAwareCacheScore:
         Expectation: 0.5 + 0.3 + 0.2 = 1.0
         """
         strat = _strat(layer_weights={"gpu": 0.5, "cpu": 0.3, "ssd": 0.2})
-        provider = FakeRouteDataProvider(
-            {"rep": {"gpu_hit_pct": 100, "tiers": {"cpu": 1.0, "ssd": 1.0}}}
-        )
+        provider = FakeRouteDataProvider({"rep": {"gpu_hit_pct": 100, "tiers": {"cpu": 1.0, "ssd": 1.0}}})
         gpu_hit_pct = {"rep": 100}
         assert strat._cache_score(provider, ReplicaInfo("rep"), PROMPT_IDS, gpu_hit_pct) == pytest.approx(1.0)
 
@@ -384,10 +461,20 @@ class TestKVCAwareTierWeights:
         strat = _strat()
         provider = FakeRouteDataProvider(
             {
-                "cpu_hit": {"kv_cache_usage_perc": 0.5, "num_requests_running": 0, "num_requests_waiting": 0,
-                            "gpu_hit_pct": 0, "tiers": {"cpu": 0.6, "ssd": 0.0}},
-                "ssd_hit": {"kv_cache_usage_perc": 0.5, "num_requests_running": 0, "num_requests_waiting": 0,
-                            "gpu_hit_pct": 0, "tiers": {"cpu": 0.0, "ssd": 0.8}},
+                "cpu_hit": {
+                    "kv_cache_usage_perc": 0.5,
+                    "num_requests_running": 0,
+                    "num_requests_waiting": 0,
+                    "gpu_hit_pct": 0,
+                    "tiers": {"cpu": 0.6, "ssd": 0.0},
+                },
+                "ssd_hit": {
+                    "kv_cache_usage_perc": 0.5,
+                    "num_requests_running": 0,
+                    "num_requests_waiting": 0,
+                    "gpu_hit_pct": 0,
+                    "tiers": {"cpu": 0.0, "ssd": 0.8},
+                },
             }
         )
         scores = strat.score(PROMPT_IDS, provider, _replicas("cpu_hit", "ssd_hit"))
@@ -401,14 +488,22 @@ class TestKVCAwareTierWeights:
         Expectation: score = (1-α)·s_load (S_cache=0), no TypeError
           rep: load=0.2→s_load=0.8; s_cache=0; score=0.3·0.8=0.24
         """
+
         class _NoneProvider(FakeRouteDataProvider):
             def get_tier_prefix_hit_rate(self, replica_id, prompt_ids, tier):
                 return None
 
         strat = _strat()
         provider = _NoneProvider(
-            {"rep": {"kv_cache_usage_perc": 0.5, "num_requests_running": 0, "num_requests_waiting": 0,
-                     "gpu_hit_pct": 0, "tiers": {}}}
+            {
+                "rep": {
+                    "kv_cache_usage_perc": 0.5,
+                    "num_requests_running": 0,
+                    "num_requests_waiting": 0,
+                    "gpu_hit_pct": 0,
+                    "tiers": {},
+                }
+            }
         )
         scores = strat.score(PROMPT_IDS, provider, _replicas("rep"))
         assert scores == pytest.approx([0.24])
@@ -418,20 +513,23 @@ class TestKVCAwareTierWeights:
 # Construction validation
 # --------------------------------------------------------------------------- #
 class TestKVCAwareConstruction:
-    @pytest.mark.parametrize("kwargs", [
-        {"alpha": 1.5},
-        {"alpha": -0.1},
-        {"load_threshold": 0},
-        {"load_threshold": 1.0},
-        {"layer_weights": {"gpu": 0.7, "cpu": 0.2, "ssd": -0.1}},   # negative weight
-        {"layer_weights": {"nvme": 1.0}},                            # illegal key
-        {"layer_weights": {"gpu": 1.0, "cpu": 0.2, "ssd": 0.1}},    # sum 1.3 != 1
-        {"layer_weights": {"gpu": 0.7, "cpu": 0.3}},                 # missing ssd
-        {"load_fn": "does-not-exist"},                               # unknown load fn
-        {"load_weights": (0.5, 0.3)},                                # len != 3
-        {"load_weights": (0.5, 0.5, 0.5)},                           # sum 1.5 != 1
-        {"load_weights": (-0.1, 0.6, 0.5)},                          # negative
-    ])
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"alpha": 1.5},
+            {"alpha": -0.1},
+            {"load_threshold": 0},
+            {"load_threshold": 1.0},
+            {"layer_weights": {"gpu": 0.7, "cpu": 0.2, "ssd": -0.1}},  # negative weight
+            {"layer_weights": {"nvme": 1.0}},  # illegal key
+            {"layer_weights": {"gpu": 1.0, "cpu": 0.2, "ssd": 0.1}},  # sum 1.3 != 1
+            {"layer_weights": {"gpu": 0.7, "cpu": 0.3}},  # missing ssd
+            {"load_fn": "does-not-exist"},  # unknown load fn
+            {"load_weights": (0.5, 0.3)},  # len != 3
+            {"load_weights": (0.5, 0.5, 0.5)},  # sum 1.5 != 1
+            {"load_weights": (-0.1, 0.6, 0.5)},  # negative
+        ],
+    )
     def test_invalid_construction_raises(self, kwargs):
         """
         Feature: invalid constructor arguments raise StrategyError
@@ -482,10 +580,20 @@ class TestStrategyContract:
         strat = _strat()
         provider = FakeRouteDataProvider(
             {
-                "rep_a": {"kv_cache_usage_perc": 0.3, "num_requests_running": 1, "num_requests_waiting": 0,
-                          "gpu_hit_pct": 90, "tiers": {"cpu": 0.0, "ssd": 0.0}},
-                "rep_b": {"kv_cache_usage_perc": 0.5, "num_requests_running": 2, "num_requests_waiting": 0,
-                          "gpu_hit_pct": 10, "tiers": {"cpu": 0.0, "ssd": 0.0}},
+                "rep_a": {
+                    "kv_cache_usage_perc": 0.3,
+                    "num_requests_running": 1,
+                    "num_requests_waiting": 0,
+                    "gpu_hit_pct": 90,
+                    "tiers": {"cpu": 0.0, "ssd": 0.0},
+                },
+                "rep_b": {
+                    "kv_cache_usage_perc": 0.5,
+                    "num_requests_running": 2,
+                    "num_requests_waiting": 0,
+                    "gpu_hit_pct": 10,
+                    "tiers": {"cpu": 0.0, "ssd": 0.0},
+                },
             }
         )
         replicas = _replicas("rep_a", "rep_b")
@@ -499,10 +607,20 @@ class TestStrategyContract:
         strat = _strat()
         provider = FakeRouteDataProvider(
             {
-                "rep_a": {"kv_cache_usage_perc": 0.3, "num_requests_running": 1, "num_requests_waiting": 0,
-                          "gpu_hit_pct": 80, "tiers": {"cpu": 0.0, "ssd": 0.0}},
-                "rep_b": {"kv_cache_usage_perc": 0.5, "num_requests_running": 2, "num_requests_waiting": 0,
-                          "gpu_hit_pct": 0, "tiers": {"cpu": 0.5, "ssd": 0.0}},
+                "rep_a": {
+                    "kv_cache_usage_perc": 0.3,
+                    "num_requests_running": 1,
+                    "num_requests_waiting": 0,
+                    "gpu_hit_pct": 80,
+                    "tiers": {"cpu": 0.0, "ssd": 0.0},
+                },
+                "rep_b": {
+                    "kv_cache_usage_perc": 0.5,
+                    "num_requests_running": 2,
+                    "num_requests_waiting": 0,
+                    "gpu_hit_pct": 0,
+                    "tiers": {"cpu": 0.5, "ssd": 0.0},
+                },
             }
         )
         replicas = _replicas("rep_a", "rep_b")
@@ -512,6 +630,7 @@ class TestStrategyContract:
 # --------------------------------------------------------------------------- #
 # route() composition
 # --------------------------------------------------------------------------- #
+
 
 class TestFromConfig:
     def test_from_config_correct_fields(self):
@@ -524,16 +643,18 @@ class TestFromConfig:
         from uni_agent.llm_router.config.strategy import KVCAwareStrategyConfig
 
         cfg = KVCAwareStrategyConfig(
-            alpha=0.6, load_threshold=0.85,
+            alpha=0.6,
+            load_threshold=0.85,
             layer_weights={"gpu": 0.6, "cpu": 0.3, "ssd": 0.1},
-            weight=0.9, collector_names=["vllm_zmq"],
+            weight=0.9,
+            collector_names=["vllm_zmq"],
         )
         strat = KVCacheAwareStrategy.from_config(cfg)
         assert strat.alpha == pytest.approx(0.6)
         assert strat.load_threshold == pytest.approx(0.85)
         assert strat.layer_weights == {"gpu": 0.6, "cpu": 0.3, "ssd": 0.1}
-        assert strat.load_fn == "normalized"          # code default
-        assert strat.load_weights == (0.4, 0.3, 0.3)   # code default
+        assert strat.load_fn == "normalized"  # code default
+        assert strat.load_weights == (0.4, 0.3, 0.3)  # code default
 
     def test_from_config_scores_match_direct(self, monkeypatch):
         """
@@ -545,18 +666,30 @@ class TestFromConfig:
 
         monkeypatch.setenv("MAX_NUM_SEQS", "64")  # from_config resolves max_num_seqs from env
         cfg = KVCAwareStrategyConfig(
-            alpha=0.7, load_threshold=0.9,
+            alpha=0.7,
+            load_threshold=0.9,
             layer_weights={"gpu": 0.7, "cpu": 0.2, "ssd": 0.1},
-            weight=1.0, collector_names=["vllm_zmq"],
+            weight=1.0,
+            collector_names=["vllm_zmq"],
         )
         strat_from_cfg = KVCacheAwareStrategy.from_config(cfg)
         strat_direct = _strat()  # max_num_seqs=64 pinned
         provider = FakeRouteDataProvider(
             {
-                "rep_a": {"kv_cache_usage_perc": 0.3, "num_requests_running": 1, "num_requests_waiting": 0,
-                          "gpu_hit_pct": 80, "tiers": {"cpu": 0.0, "ssd": 0.0}},
-                "rep_b": {"kv_cache_usage_perc": 0.92, "num_requests_running": 0, "num_requests_waiting": 0,
-                          "gpu_hit_pct": 0, "tiers": {"cpu": 0.0, "ssd": 0.0}},
+                "rep_a": {
+                    "kv_cache_usage_perc": 0.3,
+                    "num_requests_running": 1,
+                    "num_requests_waiting": 0,
+                    "gpu_hit_pct": 80,
+                    "tiers": {"cpu": 0.0, "ssd": 0.0},
+                },
+                "rep_b": {
+                    "kv_cache_usage_perc": 0.92,
+                    "num_requests_running": 0,
+                    "num_requests_waiting": 0,
+                    "gpu_hit_pct": 0,
+                    "tiers": {"cpu": 0.0, "ssd": 0.0},
+                },
             }
         )
         replicas = _replicas("rep_a", "rep_b")
@@ -586,7 +719,9 @@ class TestStickyShortCircuit:
         Expectation: overloaded
         """
         strat = _strat(load_threshold=0.9)
-        provider = self._provider(rep_a={"kv_cache_usage_perc": 1.0, "num_requests_running": 64, "num_requests_waiting": 1000})
+        provider = self._provider(
+            rep_a={"kv_cache_usage_perc": 1.0, "num_requests_running": 64, "num_requests_waiting": 1000}
+        )
         assert strat.is_overloaded(provider, ReplicaInfo("rep_a")) is True
 
     def test_is_overloaded_false_when_light(self):
@@ -627,7 +762,12 @@ class TestStickyShortCircuit:
         strat = _strat(load_threshold=0.9)
         provider = self._provider(
             rep_a={"kv_cache_usage_perc": 0.2, "num_requests_running": 0, "gpu_hit_pct": 80},
-            rep_b={"kv_cache_usage_perc": 1.0, "num_requests_running": 64, "num_requests_waiting": 1000, "gpu_hit_pct": 0},
+            rep_b={
+                "kv_cache_usage_perc": 1.0,
+                "num_requests_running": 64,
+                "num_requests_waiting": 1000,
+                "gpu_hit_pct": 0,
+            },
         )
         replicas = _replicas("rep_a", "rep_b")
         sticky = StickySessionTable()

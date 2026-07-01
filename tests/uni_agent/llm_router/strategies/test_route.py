@@ -25,7 +25,6 @@ pytestmark = [pytest.mark.ut, pytest.mark.cpu]
 # ============================================================
 
 
-
 class TestKVCacheAwareStrategy:
     """R02-Rnn: KVCacheAwareStrategy construction seam."""
 
@@ -35,9 +34,7 @@ class TestKVCacheAwareStrategy:
         Description: KVCacheAwareStrategy.from_config(KVCAwareStrategyConfig(weight=0.7))
         Expectation: returns a KVCacheAwareStrategy carrying the config's strategy fields
         """
-        cfg = KVCAwareStrategyConfig(
-            weight=0.7, alpha=0.7, load_threshold=0.1, collector_names=["vllm_zmq"]
-        )
+        cfg = KVCAwareStrategyConfig(weight=0.7, alpha=0.7, load_threshold=0.1, collector_names=["vllm_zmq"])
         strategy = KVCacheAwareStrategy.from_config(cfg)
         assert isinstance(strategy, KVCacheAwareStrategy)
         assert strategy.alpha == 0.7
@@ -47,7 +44,6 @@ class TestKVCacheAwareStrategy:
 # ============================================================
 # ReplicaInfo
 # ============================================================
-
 
 
 class TestReplicaInfo:
@@ -69,8 +65,8 @@ class TestReplicaInfo:
 # ============================================================
 
 
-
 # ---- Strategy registry + route (comprehensive, from test_strategy.py) ----
+
 
 class TestStrategyRegistry:
     def test_builtin_registered(self):
@@ -80,6 +76,7 @@ class TestStrategyRegistry:
         Expectation: returns KVCacheAwareStrategy class
         """
         from uni_agent.llm_router.config.strategy import KVCAwareStrategyConfig
+
         assert StrategyRegistry.get(KVCAwareStrategyConfig) is KVCacheAwareStrategy
 
     def test_register_and_get(self):
@@ -88,6 +85,7 @@ class TestStrategyRegistry:
         Description: register a dummy config class, then call get() with it
         Expectation: get() returns the registered strategy class
         """
+
         class _DummyConfig:
             pass
 
@@ -107,6 +105,7 @@ class TestStrategyRegistry:
         Description: call get() with a class that was never registered
         Expectation: raises KeyError
         """
+
         class _UnknownConfig:
             pass
 
@@ -118,38 +117,59 @@ class TestStrategyRegistry:
 # Test doubles for route() composition tests
 # --------------------------------------------------------------------------- #
 
+
 class FakeRouteDataProvider:
     def __init__(self, data=None):
         self._data = data or {}
-    def get_metrics(self, replica_id): return {}
-    def get_metric(self, replica_id, key): return 0.0
-    def get_gpu_prefix_hit_rate(self, prompt_ids): return {}
-    def get_tier_prefix_hit_rate(self, replica_id, prompt_ids, tier): return 0.0
+
+    def get_metrics(self, replica_id):
+        return {}
+
+    def get_metric(self, replica_id, key):
+        return 0.0
+
+    def get_gpu_prefix_hit_rate(self, prompt_ids):
+        return {}
+
+    def get_tier_prefix_hit_rate(self, replica_id, prompt_ids, tier):
+        return 0.0
+
 
 class ConstantStrategy:
-    def __init__(self, scores): self._scores = scores
+    def __init__(self, scores):
+        self._scores = scores
+
     def score(self, prompt_ids, provider, replicas, request_id=None, sticky_table=None):
         return list(self._scores)
+
 
 class BadLengthStrategy:
     def score(self, prompt_ids, provider, replicas, request_id=None, sticky_table=None):
         return [1.0]
 
+
 class RaisingStrategy:
     def score(self, prompt_ids, provider, replicas, request_id=None, sticky_table=None):
         raise KeyError("boom")
 
+
 def _replicas(*ids):
     return [ReplicaInfo(replica_id=rid) for rid in ids]
 
+
 PROMPT_IDS = [1, 2, 3]
+
 
 def _strat(**kwargs):
     defaults = dict(
-        alpha=0.7, load_threshold=0.9,
+        alpha=0.7,
+        load_threshold=0.9,
         layer_weights={"gpu": 0.7, "cpu": 0.2, "ssd": 0.1},
-        collector_names=["vllm_zmq"], weight=1.0,
-        load_fn="normalized", load_weights=(0.4, 0.3, 0.3), max_num_seqs=64,
+        collector_names=["vllm_zmq"],
+        weight=1.0,
+        load_fn="normalized",
+        load_weights=(0.4, 0.3, 0.3),
+        max_num_seqs=64,
     )
     defaults.update(kwargs)
     return KVCacheAwareStrategy(**defaults)
@@ -159,6 +179,7 @@ def _strat(**kwargs):
 # route() — real ranking
 # --------------------------------------------------------------------------- #
 
+
 class TestRoute:
     def test_single_strategy_descending(self):
         """
@@ -167,7 +188,9 @@ class TestRoute:
         provider = FakeRouteDataProvider({})
         ranking = route(
             [(ConstantStrategy([0.2, 0.5, 0.1]), 1.0)],
-            PROMPT_IDS, provider, _replicas("rep_a", "rep_b", "rep_c"),
+            PROMPT_IDS,
+            provider,
+            _replicas("rep_a", "rep_b", "rep_c"),
         )
         assert ranking == ["rep_b", "rep_a", "rep_c"]
 
@@ -190,12 +213,27 @@ class TestRoute:
         strat = _strat()
         provider = FakeRouteDataProvider(
             {
-                "rep_a":     {"kv_cache_usage_perc": 0.3, "num_requests_running": 1, "num_requests_waiting": 0,
-                              "gpu_hit_pct": 80, "tiers": {"cpu": 0.0, "ssd": 0.0}},
-                "rep_b":     {"kv_cache_usage_perc": 0.5, "num_requests_running": 1, "num_requests_waiting": 0,
-                              "gpu_hit_pct": 30, "tiers": {"cpu": 0.0, "ssd": 0.0}},
-                "overloaded": {"kv_cache_usage_perc": 0.92, "num_requests_running": 0, "num_requests_waiting": 0,
-                               "gpu_hit_pct": 90, "tiers": {"cpu": 0.0, "ssd": 0.0}},
+                "rep_a": {
+                    "kv_cache_usage_perc": 0.3,
+                    "num_requests_running": 1,
+                    "num_requests_waiting": 0,
+                    "gpu_hit_pct": 80,
+                    "tiers": {"cpu": 0.0, "ssd": 0.0},
+                },
+                "rep_b": {
+                    "kv_cache_usage_perc": 0.5,
+                    "num_requests_running": 1,
+                    "num_requests_waiting": 0,
+                    "gpu_hit_pct": 30,
+                    "tiers": {"cpu": 0.0, "ssd": 0.0},
+                },
+                "overloaded": {
+                    "kv_cache_usage_perc": 0.92,
+                    "num_requests_running": 0,
+                    "num_requests_waiting": 0,
+                    "gpu_hit_pct": 90,
+                    "tiers": {"cpu": 0.0, "ssd": 0.0},
+                },
             }
         )
         ranking = route([(strat, 1.0)], PROMPT_IDS, provider, _replicas("rep_a", "rep_b", "overloaded"))
@@ -214,7 +252,9 @@ class TestRoute:
         """
         ranking = route(
             [(BadLengthStrategy(), 1.0)],
-            PROMPT_IDS, FakeRouteDataProvider({}), _replicas("rep_a", "rep_b"),
+            PROMPT_IDS,
+            FakeRouteDataProvider({}),
+            _replicas("rep_a", "rep_b"),
         )
         assert set(ranking) == {"rep_a", "rep_b"}
 
@@ -232,7 +272,9 @@ class TestRoute:
         provider = FakeRouteDataProvider({})
         ranking = route(
             [(ConstantStrategy([float("nan"), 0.1, 0.5]), 1.0)],
-            PROMPT_IDS, provider, _replicas("nan_rep", "low_rep", "high_rep"),
+            PROMPT_IDS,
+            provider,
+            _replicas("nan_rep", "low_rep", "high_rep"),
         )
         assert ranking[0] == "high_rep"
         assert ranking[-1] == "nan_rep"

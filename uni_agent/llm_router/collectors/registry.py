@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import importlib
 import logging
-
 from typing import Any
 
 from uni_agent.llm_router.collectors.collector import Collector
@@ -62,9 +61,7 @@ class Registry:
         """
         entry = self._entries.get(name)
         if entry is None:
-            raise ValueError(
-                f"Unknown collector: '{name}'. Registered: {sorted(self._entries.keys())}"
-            )
+            raise ValueError(f"Unknown collector: '{name}'. Registered: {sorted(self._entries.keys())}")
 
         transport_cls = self._resolve(entry["transport"], "transport", name)
         decoder_cls = self._resolve(entry["decoder"], "decoder", name)
@@ -81,9 +78,7 @@ class Registry:
         """
         entry = self._entries.get(name)
         if entry is None:
-            raise ValueError(
-                f"Unknown store: '{name}'. Registered: {sorted(self._entries.keys())}"
-            )
+            raise ValueError(f"Unknown store: '{name}'. Registered: {sorted(self._entries.keys())}")
         decoder_cls = self._resolve(entry["decoder"], "decoder", name)
         return decoder_cls.store_cls
 
