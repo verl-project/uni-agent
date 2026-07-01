@@ -138,7 +138,7 @@ class AgentChatModel:
         return response_str, [], rollout_cache, generation_info
 
     async def _get_new_message_ids(self, new_messages: list[dict[str, Any]]) -> list[int]:
-        from verl.utils.chat_template import apply_chat_template
+        from verl.utils.tokenizer.chat_template import apply_chat_template
         from verl.utils.tokenizer import normalize_token_ids
 
         tokenized_prompt = await self.loop.run_in_executor(
@@ -154,7 +154,7 @@ class AgentChatModel:
 
     @cached_property
     def message_boundary_tokens(self) -> list[int]:
-        from verl.utils.chat_template import apply_chat_template
+        from verl.utils.tokenizer.chat_template import apply_chat_template
         from verl.utils.tokenizer import normalize_token_ids
 
         dummy_history = [

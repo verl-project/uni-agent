@@ -17,6 +17,13 @@ elif impl == "vefaas":
         assert len(parts) == 2
         instance_number = parts[1].lower()
         return PUB_VOLCES_IMG_URL_R2E.format(instance_number=instance_number)
+elif impl == "openyuanrong":
+
+    def get_image_name(dataset_id: str, instance_id: str) -> str:
+        parts = instance_id.split("__")
+        assert len(parts) == 2
+        instance_number = parts[1].lower()
+        return f"swr.cn-east-3.myhuaweicloud.com/openyuanrong/r2e-gym-subset/{instance_number}:latest"
 else:
     raise ValueError(f"Invalid deployment implementation: {impl}")
 

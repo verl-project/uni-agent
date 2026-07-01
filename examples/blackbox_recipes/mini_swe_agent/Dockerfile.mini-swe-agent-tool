@@ -1,0 +1,45 @@
+# Mini-swe-agent sidecar tool image.
+#
+# Contains a self-contained Python venv at /opt/mini-swe-agent with
+# mini-swe-agent + litellm installed.  When mounted into a sandbox at
+# /opt/mini-swe-agent, the agent can be invoked via:
+#
+#   /opt/mini-swe-agent/bin/python /opt/mini-swe-agent/bin/run_agent.py ...
+#
+# Uses python-build-standalone for maximum portability across different
+# glibc versions (built against older glibc, forward-compatible).
+#
+# Build:
+#   docker build -f Dockerfile.mini-swe-agent-tool -t mini-swe-agent-tool:latest .
+#
+
+FROM debian:bullseye-slim AS builder
+
+ARG PBS_RELEASE="20260602"
+ARG PBS_PYTHON="3.12.13"
+ARG PIP_INDEX_URL=""
+
+# Download and extract python-build-standalone (stripped, 32MB)
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates wget \
+    && rm -rf /var/lib/apt/lists/* \
+    && wget -q \
+        "https://github.com/astral-sh/python-build-standalone/releases/download/${PBS_RELEASE}/cpython-${PBS_PYTHON}%2B${PBS_RELEASE}-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz" \
+        -O /tmp/python.tar.gz \
+    && mkdir -p /opt/mini-swe-agent \
+    && tar -xzf /tmp/python.tar.gz -C /opt/mini-swe-agent --strip-components=1 \
+    && rm /tmp/python.tar.gz
+
+# Install mini-swe-agent + litellm
+RUN /opt/mini-swe-agent/bin/pip install --no-cache-dir \
+    ${PIP_INDEX_URL:+-i ${PIP_INDEX_URL}} \
+    "mini-swe-agent==2.2.8" \
+    "litellm==1.81.7"
+
+# Copy the in-sandbox runner script
+COPY run_agent.py /opt/mini-swe-agent/bin/run_agent.py
+
+# Final scratch image: files are at the image root level so that when
+# akernel_sdk.Mount(target="/opt/mini-swe-agent") overlays this image,
+# the files appear at /opt/mini-swe-agent/bin/python etc.
+FROM scratch
+COPY --from=builder /opt/mini-swe-agent /
