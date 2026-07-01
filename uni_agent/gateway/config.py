@@ -29,6 +29,10 @@ class GatewayActorConfig:
         vision_info_extractor_kwargs: Static kwargs forwarded to the extractor.
         prompt_length: Optional prompt-token budget stored on gateway sessions.
         response_length: Optional response-token budget stored on gateway sessions.
+        enable_parallel_session_generation: Allow concurrent backend generation
+            calls within one gateway session while serializing prepare/commit.
+        ignore_cch_for_prefix_hash: Treat Claude Code ``cch=...`` hash churn as
+            non-semantic only for prefix-hash comparison.
     """
 
     tokenizer: Any
@@ -41,3 +45,11 @@ class GatewayActorConfig:
     vision_info_extractor_kwargs: dict[str, Any] | None = None
     prompt_length: int | None = None
     response_length: int | None = None
+    enable_parallel_session_generation: bool = False
+    ignore_cch_for_prefix_hash: bool = False
+
+    def __post_init__(self) -> None:
+        for name in ("enable_parallel_session_generation", "ignore_cch_for_prefix_hash"):
+            value = getattr(self, name)
+            if type(value) is not bool:
+                raise ValueError(f"{name} must be a bool, got {type(value).__name__}")

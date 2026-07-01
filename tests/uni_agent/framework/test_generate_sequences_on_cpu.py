@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from uni_agent.framework.framework import OpenAICompatibleAgentFramework
-from uni_agent.gateway.session import SessionHandle, Trajectory
+from uni_agent.gateway.session import GatewaySession, MessageCodec, SessionHandle, Trajectory
 from verl.utils import tensordict_utils as tu
 
 _RUNNER_CALLS = []
@@ -96,6 +98,182 @@ async def _build_framework_with_agent_runners(
     )
 
 
+def test_build_gateway_manager_wires_gateway_config_defaults(monkeypatch):
+    from omegaconf import OmegaConf
+
+    from uni_agent.framework import entry as entry_module
+
+    class _ModelConfig:
+        tokenizer = object()
+        processor = None
+
+    captured = {}
+
+    class _FakeGatewayManager:
+        def __init__(self, *, llm_client, gateway_count, gateway_actor_config):
+            captured["llm_client"] = llm_client
+            captured["gateway_count"] = gateway_count
+            captured["gateway_actor_config"] = gateway_actor_config
+
+    monkeypatch.setattr(entry_module, "omega_conf_to_dataclass", lambda _config: _ModelConfig())
+    monkeypatch.setattr(entry_module, "GatewayManager", _FakeGatewayManager)
+
+    llm_client = object()
+    config = OmegaConf.create(
+        {
+            "actor_rollout_ref": {
+                "model": {},
+                "rollout": {
+                    "prompt_length": 128,
+                    "response_length": 64,
+                    "multi_turn": {"format": "hermes"},
+                    "custom": {"agent_framework": {"gateway_count": 2}},
+                },
+            }
+        }
+    )
+
+    manager = entry_module.build_gateway_manager(config=config, llm_client=llm_client)
+
+    assert isinstance(manager, _FakeGatewayManager)
+    assert captured["llm_client"] is llm_client
+    assert captured["gateway_count"] == 2
+    assert captured["gateway_actor_config"].prompt_length == 128
+    assert captured["gateway_actor_config"].response_length == 64
+    assert captured["gateway_actor_config"].tool_parser_name == "hermes"
+    assert captured["gateway_actor_config"].enable_parallel_session_generation is False
+    assert captured["gateway_actor_config"].ignore_cch_for_prefix_hash is False
+
+
+def test_build_gateway_manager_wires_ignore_cch_for_prefix_hash(monkeypatch):
+    from omegaconf import OmegaConf
+
+    from uni_agent.framework import entry as entry_module
+
+    class _ModelConfig:
+        tokenizer = object()
+        processor = None
+
+    captured = {}
+
+    class _FakeGatewayManager:
+        def __init__(self, *, llm_client, gateway_count, gateway_actor_config):
+            captured["llm_client"] = llm_client
+            captured["gateway_count"] = gateway_count
+            captured["gateway_actor_config"] = gateway_actor_config
+
+    monkeypatch.setattr(entry_module, "omega_conf_to_dataclass", lambda _config: _ModelConfig())
+    monkeypatch.setattr(entry_module, "GatewayManager", _FakeGatewayManager)
+
+    config = OmegaConf.create(
+        {
+            "actor_rollout_ref": {
+                "model": {},
+                "rollout": {
+                    "prompt_length": 128,
+                    "response_length": 64,
+                    "multi_turn": {"format": None},
+                    "custom": {
+                        "agent_framework": {
+                            "gateway_count": 2,
+                            "ignore_cch_for_prefix_hash": True,
+                        }
+                    },
+                },
+            }
+        }
+    )
+
+    manager = entry_module.build_gateway_manager(config=config, llm_client=object())
+
+    assert isinstance(manager, _FakeGatewayManager)
+    assert captured["gateway_actor_config"].enable_parallel_session_generation is False
+    assert captured["gateway_actor_config"].ignore_cch_for_prefix_hash is True
+
+
+def test_build_gateway_manager_wires_enable_parallel_session_generation(monkeypatch):
+    from omegaconf import OmegaConf
+
+    from uni_agent.framework import entry as entry_module
+
+    class _ModelConfig:
+        tokenizer = object()
+        processor = None
+
+    captured = {}
+
+    class _FakeGatewayManager:
+        def __init__(self, *, llm_client, gateway_count, gateway_actor_config):
+            captured["llm_client"] = llm_client
+            captured["gateway_count"] = gateway_count
+            captured["gateway_actor_config"] = gateway_actor_config
+
+    monkeypatch.setattr(entry_module, "omega_conf_to_dataclass", lambda _config: _ModelConfig())
+    monkeypatch.setattr(entry_module, "GatewayManager", _FakeGatewayManager)
+
+    config = OmegaConf.create(
+        {
+            "actor_rollout_ref": {
+                "model": {},
+                "rollout": {
+                    "prompt_length": 128,
+                    "response_length": 64,
+                    "multi_turn": {"format": None},
+                    "custom": {
+                        "agent_framework": {
+                            "gateway_count": 2,
+                            "enable_parallel_session_generation": True,
+                        }
+                    },
+                },
+            }
+        }
+    )
+
+    manager = entry_module.build_gateway_manager(config=config, llm_client=object())
+
+    assert isinstance(manager, _FakeGatewayManager)
+    assert captured["gateway_actor_config"].enable_parallel_session_generation is True
+    assert captured["gateway_actor_config"].ignore_cch_for_prefix_hash is False
+
+
+@pytest.mark.parametrize(
+    ("flag_name", "bad_value"),
+    [
+        ("enable_parallel_session_generation", "true"),
+        ("enable_parallel_session_generation", 1),
+        ("ignore_cch_for_prefix_hash", "true"),
+        ("ignore_cch_for_prefix_hash", 1),
+    ],
+)
+def test_build_gateway_manager_rejects_non_bool_m2_flags(flag_name, bad_value):
+    from omegaconf import OmegaConf
+
+    from uni_agent.framework import entry as entry_module
+
+    config = OmegaConf.create(
+        {
+            "actor_rollout_ref": {
+                "model": {},
+                "rollout": {
+                    "prompt_length": 128,
+                    "response_length": 64,
+                    "multi_turn": {"format": None},
+                    "custom": {
+                        "agent_framework": {
+                            "gateway_count": 2,
+                            flag_name: bad_value,
+                        }
+                    },
+                },
+            }
+        }
+    )
+
+    with pytest.raises(ValueError, match=f"agent_framework.{flag_name} must be a bool"):
+        entry_module.build_gateway_manager(config=config, llm_client=object())
+
+
 class _FakeTransferQueue:
     def __init__(self):
         self.puts = []
@@ -179,6 +357,7 @@ def _trajectory(
     prompt_ids: list[int] | None = None,
     response_ids: list[int] | None = None,
     response_logprobs: list[float] | None = None,
+    reward_info: dict[str, object] | None = None,
     num_turns: int = 2,
     extra_fields: dict[str, object] | None = None,
 ):
@@ -189,6 +368,7 @@ def _trajectory(
         response_ids=response_ids,
         response_mask=[1] * len(response_ids),
         response_logprobs=response_logprobs,
+        reward_info=dict(reward_info or {}),
         reward_score=None,
         num_turns=num_turns,
         multi_modal_data={"images": ["raw-image-should-not-be-written"]},
@@ -331,6 +511,329 @@ async def test_generate_sequences_writes_tq_schema_for_each_session(monkeypatch,
     assert tu.get(fields, "global_steps") == [7]
     assert fields["num_turns"].tolist() == [2]
     assert "multi_modal_data" not in fields.keys()
+
+
+@pytest.mark.asyncio
+async def test_generate_sequences_preserves_sorted_trajectory_order_and_rewards_final_target(fake_tq):
+    class _Tokenizer:
+        def apply_chat_template(self, messages, tokenize=True, add_generation_prompt=True, tools=None, **kwargs):
+            parts = []
+            for message in messages:
+                content = message.get("content", "")
+                if content is None:
+                    content = ""
+                parts.append(f"{message['role']}:{content}\n")
+            if add_generation_prompt:
+                parts.append("assistant:")
+            text = "".join(parts)
+            if tokenize:
+                return [ord(char) for char in text]
+            return text
+
+        def decode(self, token_ids, skip_special_tokens=True):
+            if hasattr(token_ids, "tolist"):
+                token_ids = token_ids.tolist()
+            return "".join(chr(int(token_id.item() if hasattr(token_id, "item") else token_id)) for token_id in token_ids)
+
+        def encode(self, text, add_special_tokens=False):
+            return [ord(char) for char in text]
+
+    class _Backend:
+        def __init__(self, steps):
+            self.steps = list(steps)
+
+        async def generate(self, request_id, *, prompt_ids, sampling_params, image_data=None, video_data=None):
+            del request_id, prompt_ids, sampling_params, image_data, video_data
+            text = self.steps.pop(0)
+            token_ids = [ord(char) for char in text]
+            return SimpleNamespace(
+                token_ids=token_ids,
+                log_probs=[-0.1] * len(token_ids),
+                stop_reason="completed",
+            )
+
+    class _ComputeScoreRemote:
+        def __init__(self):
+            self.calls = []
+
+        async def remote(self, data):
+            self.calls.append(data)
+            return {"reward_score": 0.5, "reward_extra_info": {"target": "final-main"}}
+
+    class _StubWorker:
+        def __init__(self):
+            self.compute_score = _ComputeScoreRemote()
+
+    worker = _StubWorker()
+    tokenizer = _Tokenizer()
+    real_session = GatewaySession(
+        SessionHandle(session_id="real-sorted-order"),
+        MessageCodec(tokenizer),
+        response_length=len("MAIN1") + 1,
+    )
+    backend = _Backend(["MAIN1", "SUB"])
+    main_first = [
+        {"role": "system", "content": "You are helpful."},
+        {"role": "user", "content": "main"},
+    ]
+    subagent = [
+        {"role": "system", "content": "You are a focused subagent."},
+        {"role": "user", "content": "sub"},
+    ]
+    main_too_long = [
+        {"role": "system", "content": "You are helpful."},
+        {"role": "user", "content": "main"},
+        {"role": "assistant", "content": "MAIN1"},
+        {"role": "user", "content": "too long"},
+    ]
+
+    await real_session.run_generation({"model": "dummy-model", "messages": main_first}, backend)
+    await real_session.run_generation({"model": "dummy-model", "messages": subagent}, backend)
+    outcome = await real_session.run_generation({"model": "dummy-model", "messages": main_too_long}, backend)
+    await real_session.set_reward_info({"branch": "main", "target": "final-main"})
+    trajectories = await real_session.finalize()
+
+    assert outcome.finish_reason == "length"
+    assert backend.steps == []
+    assert [tokenizer.decode(trajectory.response_ids) for trajectory in trajectories] == ["SUB", "MAIN1"]
+    assert trajectories[-1].extra_fields == {"finish_reason": "length"}
+    runtime = _FakeGatewayManager({"session-0-0": trajectories})
+    framework = await _build_framework_with_agent_runners(
+        agent_runners={"runner": _inline_runner_config(_async_noop_runner)},
+        gateway_manager=runtime,
+        reward_loop_worker_handles=[worker],
+        n=1,
+        val_n=1,
+    )
+
+    await framework.generate_sequences(_build_prompts(count=1, global_steps=12))
+
+    assert len(worker.compute_score.calls) == 1
+    data = worker.compute_score.calls[0]
+    final_trajectory = trajectories[-1]
+    assert data.batch["prompts"].tolist() == [final_trajectory.prompt_ids]
+    assert data.batch["responses"].tolist() == [final_trajectory.response_ids]
+    assert data.non_tensor_batch["extra_info"].tolist() == [
+        {"index": 0, "branch": "main", "target": "final-main"}
+    ]
+    assert data.non_tensor_batch["__num_turns__"].tolist() == [final_trajectory.num_turns]
+
+    assert len(fake_tq.batch_puts) == 1
+    batch_put = fake_tq.batch_puts[0]
+    assert batch_put["keys"] == ["uid-0_0_0", "uid-0_0_1"]
+    assert [tag.get("finish_reason") for tag in batch_put["tags"]] == [None, "length"]
+    fields = batch_put["fields"]
+    assert [fields["prompts"][i].tolist() for i in range(len(trajectories))] == [
+        trajectory.prompt_ids for trajectory in trajectories
+    ]
+    assert [fields["responses"][i].tolist() for i in range(len(trajectories))] == [
+        trajectory.response_ids for trajectory in trajectories
+    ]
+    assert [tokenizer.decode(fields["responses"][i]) for i in range(len(trajectories))] == ["SUB", "MAIN1"]
+    for index, trajectory in enumerate(trajectories):
+        assert fields["rollout_log_probs"][index].tolist() == pytest.approx(trajectory.response_logprobs)
+    assert [fields["rm_scores"][i].tolist() for i in range(len(trajectories))] == [
+        [0.0] * (len(trajectory.response_ids) - 1) + [0.5] for trajectory in trajectories
+    ]
+    assert tu.get(fields, "reward_extra_info") == [
+        {"target": "final-main"},
+        {"target": "final-main"},
+    ]
+    assert fake_tq.puts == [{"key": "uid-0", "partition_id": "train", "tag": {"status": "finished"}}]
+
+
+@pytest.mark.asyncio
+async def test_generate_sequences_preserves_normal_multiple_chain_order_and_rewards_final_main(fake_tq):
+    class _Tokenizer:
+        def apply_chat_template(self, messages, tokenize=True, add_generation_prompt=True, tools=None, **kwargs):
+            parts = []
+            for message in messages:
+                content = message.get("content", "")
+                if content is None:
+                    content = ""
+                parts.append(f"{message['role']}:{content}\n")
+            if add_generation_prompt:
+                parts.append("assistant:")
+            text = "".join(parts)
+            if tokenize:
+                return [ord(char) for char in text]
+            return text
+
+        def decode(self, token_ids, skip_special_tokens=True):
+            if hasattr(token_ids, "tolist"):
+                token_ids = token_ids.tolist()
+            return "".join(chr(int(token_id.item() if hasattr(token_id, "item") else token_id)) for token_id in token_ids)
+
+        def encode(self, text, add_special_tokens=False):
+            return [ord(char) for char in text]
+
+    class _Backend:
+        def __init__(self, steps):
+            self.steps = list(steps)
+            self.calls = []
+
+        async def generate(self, request_id, *, prompt_ids, sampling_params, image_data=None, video_data=None):
+            self.calls.append(
+                {
+                    "request_id": request_id,
+                    "prompt_ids": list(prompt_ids),
+                    "sampling_params": dict(sampling_params),
+                    "image_data": image_data,
+                    "video_data": video_data,
+                }
+            )
+            text = self.steps.pop(0)
+            token_ids = [ord(char) for char in text]
+            return SimpleNamespace(
+                token_ids=token_ids,
+                log_probs=[-0.1] * len(token_ids),
+                stop_reason="completed",
+            )
+
+    class _ComputeScoreRemote:
+        def __init__(self):
+            self.calls = []
+
+        async def remote(self, data):
+            self.calls.append(data)
+            return {"reward_score": 0.75, "reward_extra_info": {"target": "final-main", "mode": "normal"}}
+
+    class _StubWorker:
+        def __init__(self):
+            self.compute_score = _ComputeScoreRemote()
+
+    worker = _StubWorker()
+    tokenizer = _Tokenizer()
+    real_session = GatewaySession(
+        SessionHandle(session_id="real-normal-success-order"),
+        MessageCodec(tokenizer),
+    )
+    backend = _Backend(["MAIN1", "SUB", "MAIN2"])
+    main_first = [
+        {"role": "system", "content": "You are helpful."},
+        {"role": "user", "content": "main"},
+    ]
+    subagent = [
+        {"role": "system", "content": "You are a focused subagent."},
+        {"role": "user", "content": "sub"},
+    ]
+    main_continuation = [
+        {"role": "system", "content": "You are helpful."},
+        {"role": "user", "content": "main"},
+        {"role": "assistant", "content": "MAIN1"},
+        {"role": "user", "content": "continue main"},
+    ]
+
+    outcomes = [
+        await real_session.run_generation({"model": "dummy-model", "messages": main_first}, backend),
+        await real_session.run_generation({"model": "dummy-model", "messages": subagent}, backend),
+        await real_session.run_generation({"model": "dummy-model", "messages": main_continuation}, backend),
+    ]
+    await real_session.set_reward_info({"branch": "main", "target": "final-main"})
+    trajectories = await real_session.finalize()
+
+    assert [outcome.finish_reason for outcome in outcomes] == ["stop", "stop", "stop"]
+    assert backend.steps == []
+    assert len(backend.calls) == 3
+    decoded = [tokenizer.decode(trajectory.response_ids) for trajectory in trajectories]
+    assert len(trajectories) == 2
+    assert decoded[0] == "SUB"
+    assert decoded[1].startswith("MAIN1")
+    assert decoded[1].endswith("MAIN2")
+    assert all("finish_reason" not in trajectory.extra_fields for trajectory in trajectories)
+    assert 0 in trajectories[-1].response_mask
+    assert trajectories[-1].response_mask[-len("MAIN2") :] == [1] * len("MAIN2")
+
+    runtime = _FakeGatewayManager({"session-0-0": trajectories})
+    framework = await _build_framework_with_agent_runners(
+        agent_runners={"runner": _inline_runner_config(_async_noop_runner)},
+        gateway_manager=runtime,
+        reward_loop_worker_handles=[worker],
+        n=1,
+        val_n=1,
+    )
+
+    await framework.generate_sequences(_build_prompts(count=1, global_steps=13))
+
+    assert len(worker.compute_score.calls) == 1
+    data = worker.compute_score.calls[0]
+    final_trajectory = trajectories[-1]
+    assert data.batch["prompts"].tolist() == [final_trajectory.prompt_ids]
+    assert data.batch["responses"].tolist() == [final_trajectory.response_ids]
+    assert data.non_tensor_batch["extra_info"].tolist() == [
+        {"index": 0, "branch": "main", "target": "final-main"}
+    ]
+    assert data.non_tensor_batch["__num_turns__"].tolist() == [final_trajectory.num_turns]
+
+    assert len(fake_tq.batch_puts) == 1
+    batch_put = fake_tq.batch_puts[0]
+    assert batch_put["keys"] == ["uid-0_0_0", "uid-0_0_1"]
+    assert all("finish_reason" not in tag for tag in batch_put["tags"])
+    fields = batch_put["fields"]
+    assert [fields["prompts"][i].tolist() for i in range(len(trajectories))] == [
+        trajectory.prompt_ids for trajectory in trajectories
+    ]
+    assert [fields["responses"][i].tolist() for i in range(len(trajectories))] == [
+        trajectory.response_ids for trajectory in trajectories
+    ]
+    tq_decoded = [tokenizer.decode(fields["responses"][i]) for i in range(len(trajectories))]
+    assert tq_decoded[0] == "SUB"
+    assert tq_decoded[1].startswith("MAIN1")
+    assert tq_decoded[1].endswith("MAIN2")
+    for index, trajectory in enumerate(trajectories):
+        assert fields["rollout_log_probs"][index].tolist() == pytest.approx(trajectory.response_logprobs)
+    assert [fields["rm_scores"][i].tolist() for i in range(len(trajectories))] == [
+        [0.0] * (len(trajectory.response_ids) - 1) + [0.75] for trajectory in trajectories
+    ]
+    assert tu.get(fields, "reward_extra_info") == [
+        {"target": "final-main", "mode": "normal"},
+        {"target": "final-main", "mode": "normal"},
+    ]
+    assert fake_tq.puts == [{"key": "uid-0", "partition_id": "train", "tag": {"status": "finished"}}]
+
+
+@pytest.mark.asyncio
+async def test_multiple_chains_tq_writes_preserve_sorted_trajectory_order(fake_tq):
+    """``_write_session_trajectories_to_tq()`` preserves the finalized
+    (order_seq-sorted) trajectory order: keys are written as
+    ``uid_sessionIndex_0..N`` in input order without re-sorting, so the last key
+    carries the highest-order_seq chain (the last visible session interaction and
+    reward-scoring target)."""
+    framework = await _build_framework_with_agent_runners(
+        agent_runners={"runner": _inline_runner_config(_async_noop_runner)},
+        gateway_manager=_FakeGatewayManager({}),
+        n=1,
+        val_n=1,
+    )
+
+    # GatewaySession.finalize() returns trajectories already sorted by order_seq:
+    # the lower-order_seq subagent chain first, the highest-order_seq main chain
+    # last. Distinct response_ids and a marker tag let us prove each key maps to
+    # the right chain and that the write preserves order rather than re-deriving it.
+    subagent = _trajectory(response_ids=[201, 202])
+    final_main = _trajectory(response_ids=[211, 212, 213], extra_fields={"finish_reason": "length"})
+    trajectories = [subagent, final_main]
+
+    await framework._write_session_trajectories_to_tq(
+        uid="uid-7",
+        session_index=3,
+        trajectories=trajectories,
+        sample_fields={"uid": "uid-7"},
+        global_steps=5,
+        partition_id="train",
+    )
+
+    assert len(fake_tq.batch_puts) == 1
+    batch_put = fake_tq.batch_puts[0]
+    assert batch_put["partition_id"] == "train"
+    assert batch_put["keys"] == ["uid-7_3_0", "uid-7_3_1"]
+
+    fields = batch_put["fields"]
+    assert fields["responses"][0].tolist() == subagent.response_ids
+    assert fields["responses"][1].tolist() == final_main.response_ids
+    # Highest-order_seq chain (final_main) lands on the last key, carrying its marker tag.
+    assert batch_put["tags"][0].get("finish_reason") is None
+    assert batch_put["tags"][1].get("finish_reason") == "length"
 
 
 @pytest.mark.asyncio
@@ -514,3 +1017,55 @@ async def test_score_trajectories_merges_final_reward_info_into_reward_extra_inf
         (0.42, {"acc": 1.0, "format": 0.8}),
         (0.42, {"acc": 1.0, "format": 0.8}),
     ]
+
+
+@pytest.mark.asyncio
+async def test_score_trajectories_uses_last_finalized_trajectory_as_reward_target():
+    class _ComputeScoreRemote:
+        def __init__(self):
+            self.calls = []
+
+        async def remote(self, data):
+            self.calls.append(data)
+            return {"reward_score": 0.7, "reward_extra_info": {"target": "main"}}
+
+    class _StubWorker:
+        def __init__(self):
+            self.compute_score = _ComputeScoreRemote()
+
+    worker = _StubWorker()
+    framework = await _build_framework_with_agent_runners(
+        agent_runners={"runner": _inline_runner_config(_async_noop_runner)},
+        gateway_manager=_FakeGatewayManager({}),
+        reward_loop_worker_handles=[worker],
+        n=1,
+        val_n=1,
+    )
+
+    subagent_trajectory = Trajectory(
+        prompt_ids=[1],
+        response_ids=[2],
+        response_mask=[1],
+        reward_info={"branch": "subagent"},
+    )
+    last_main_trajectory = Trajectory(
+        prompt_ids=[10],
+        response_ids=[20],
+        response_mask=[1],
+        reward_info={"branch": "main", "finish_reason": "length"},
+        extra_fields={"finish_reason": "length"},
+    )
+
+    annotations = await framework._score_trajectories(
+        [subagent_trajectory, last_main_trajectory],
+        {"data_source": "test", "extra_info": {"branch": "sample"}},
+    )
+
+    assert len(worker.compute_score.calls) == 1
+    data = worker.compute_score.calls[0]
+    assert data.batch["prompts"].tolist() == [[10]]
+    assert data.batch["responses"].tolist() == [[20]]
+    assert data.non_tensor_batch["extra_info"].tolist() == [
+        {"branch": "main", "finish_reason": "length"}
+    ]
+    assert annotations == [(0.7, {"target": "main"}), (0.7, {"target": "main"})]
