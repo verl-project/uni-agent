@@ -83,7 +83,8 @@ def main() -> None:
 
     dataset = load_dataset("parquet", data_files=args.data_path, split="train")
     dataset = dataset.filter(
-        lambda x: x["extra_info"]["tools_kwargs"]["task"]["metadata"]["instance_id"] in [
+        lambda x: x["extra_info"]["tools_kwargs"]["task"]["metadata"]["instance_id"]
+        in [
             "pylint-dev__pylint-6528",
             "pylint-dev__pylint-7080",
             "pylint-dev__pylint-7277",

@@ -199,7 +199,9 @@ class VefaasSandbox(Sandbox):
     def from_config(cls, config: SandboxConfig) -> VefaasSandbox:
         # Standard fields map to constructor args; veFaaS specifics (function_id,
         # function_route, proxy, ...) ride along in sandbox_kwargs.
-        return cls(image=_to_vefaas_image(config.image), runtime_timeout=config.runtime_timeout, **config.sandbox_kwargs)
+        return cls(
+            image=_to_vefaas_image(config.image), runtime_timeout=config.runtime_timeout, **config.sandbox_kwargs
+        )
 
     # ----- control plane -----
     async def start(self) -> None:
