@@ -1,0 +1,409 @@
+# Simulated sandbox observation templates.
+#
+# Structure: route_key -> list of {weight, text}. Sampling is weighted; weights
+# are HAND-TUNED. Text STRUCTURE follows real SWE-bench samples (pytest banner,
+# python traceback, find listing, editor cat -n).
+#
+# Design notes:
+# - pytest (test_output) is weighted HEAVILY toward success (~8:2). Real agent
+#   loops that see tests pass tend to submit (finished) rather than spin to the
+#   max_turns limit, so a high pass rate yields a more realistic trajectory
+#   length distribution for perf testing.
+# - Each key has MANY diverse entries (varied file names / paths / function
+#   names) to reduce token-block repetition across trajectories, so prefix-cache
+#   hit doesn't read artificially high. Long-tail (very large) entries are kept
+#   at low weight to model real accidental dumps.
+# - Tunable at perf time: raise a weight, add entries. observation_scale
+#   (in SimulatedRuntime) multiplies every entry's length globally.
+
+# ---------------------------------------------------------------------------
+# pytest / test runs -- ~80% success so models reach `submit` (finished).
+# ---------------------------------------------------------------------------
+test_output:
+  - weight: 6
+    text: |-
+      ============================= test session starts ==============================
+      platform linux -- Python 3.9.20, pytest-7.4.0, pluggy-1.3.0
+      rootdir: /testbed
+      collecting ... collected 5 items
+
+      tests/test_filters.py .....                                            [100%]
+
+      =============================== 5 passed in 2.13s ===============================
+  - weight: 5
+    text: |-
+      ============================= test session starts ==============================
+      platform linux -- Python 3.9.20, pytest-7.4.0
+      rootdir: /testbed
+      collecting ... collected 12 items
+
+      tests/test_models.py ............                                      [100%]
+
+      ============================== 12 passed in 3.41s ==============================
+  - weight: 4
+    text: |-
+      ============================= test session starts ==============================
+      collecting ... collected 8 items
+
+      tests/test_views.py ........                                           [100%]
+
+      =============================== 8 passed in 1.87s ===============================
+  - weight: 4
+    text: |-
+      ============================= test session starts ==============================
+      collecting ... collected 3 items
+
+      tests/test_admin.py ...                                                [100%]
+
+      =============================== 3 passed in 0.92s ===============================
+  - weight: 3
+    text: |-
+      ============================= test session starts ==============================
+      collecting ... collected 10 items
+
+      tests/test_utils.py ..........                                         [100%]
+
+      -------- coverage: platform linux, python 3.9.20 --------
+      ============================== 10 passed in 2.55s ==============================
+  - weight: 3
+    text: |-
+      ============================= test session starts ==============================
+      collecting ... collected 6 items
+
+      tests/test_forms.py ....s.                                             [100%]
+      ========================= 5 passed, 1 skipped in 1.44s ========================
+  - weight: 3
+    text: "PASSED tests/test_query.py::test_ordering\nPASSED tests/test_query.py::test_filtering\nPASSED tests/test_query.py::test_distinct\n3 passed"
+  - weight: 2
+    text: |-
+      ============================= test session starts ==============================
+      collecting ... collected 9 items
+
+      tests/test_serializers.py ........F                                    [100%]
+      =================================== FAILURES ===================================
+      ______________________________ test_to_representation __________________________
+          def test_to_representation(self):
+              data = Serializer(instance).data
+      >       assert data['name'] == 'expected'
+      E       AssertionError: assert 'got' == 'expected'
+      =========================== short test summary info ===========================
+      FAILED tests/test_serializers.py::test_to_representation - AssertionError
+      ========================= 1 failed, 8 passed in 2.20s ==========================
+  - weight: 1
+    text: |-
+      ============================= test session starts ==============================
+      collecting ... collected 0 items
+      ============================ no tests ran in 0.02s =============================
+      ERROR: file or directory not found: tests/test_missing.py
+  - weight: 1
+    text: |-
+      ============================= test session starts ==============================
+      collecting ... collected 15 items
+
+      tests/test_pipeline.py FFFFFFFFFFFFFFFF.                               [100%]
+      ImportError: cannot import name 'RelatedFieldListFilter'
+
+# ---------------------------------------------------------------------------
+# editor view -- many distinct file contents to cut block repetition.
+# ---------------------------------------------------------------------------
+editor:view:
+  - weight: 3
+    text: |-
+      Here's the result of running `cat -n` on /testbed/views.py:
+           1	from django.shortcuts import render
+           2	from .models import Article
+           3
+           4
+           5	def list_view(request):
+           6	    qs = Article.objects.all().order_by('-published')
+           7	    return render(request, 'list.html', {'articles': qs})
+  - weight: 3
+    text: |-
+      Here's the result of running `cat -n` on /testbed/models.py:
+           1	from django.db import models
+           2
+           3
+           4	class Author(models.Model):
+           5	    name = models.CharField(max_length=100)
+           6	    email = models.EmailField(unique=True)
+           7
+           8	    def __str__(self):
+           9	        return self.name
+  - weight: 3
+    text: |-
+      Here's the result of running `cat -n` on /testbed/filters.py:
+           1	from django.contrib.admin import ListFilter
+           2
+           3
+           4	class RelatedFieldListFilter(ListFilter):
+           5	    def __init__(self, field, request, params, model, model_admin, field_path):
+           6	        self.ordering = model_admin.ordering or ()
+           7	        super().__init__(field, request, params, model, model_admin, field_path)
+           8
+           9	    def field_choices(self, field, request, model_admin):
+          10	        ordering = self.field_admin_ordering(field, request, model_admin)
+          11	        return field.get_choices(include_blank=False, ordering=ordering)
+  - weight: 3
+    text: |-
+      Here's the result of running `cat -n` on /testbed/admin.py:
+           1	from django.contrib import admin
+           2	from .models import Author, Article
+           3
+           4
+           5	@admin.register(Article)
+           6	class ArticleAdmin(admin.ModelAdmin):
+           7	    list_display = ('title', 'author', 'published')
+           8	    ordering = ('-published',)
+  - weight: 3
+    text: |-
+      Here's the result of running `cat -n` on /testbed/utils.py:
+           1	import hashlib
+           2	import re
+           3
+           4
+           5	def slugify(value):
+           6	    value = re.sub(r'[^\w\s-]', '', value).strip().lower()
+           7	    return re.sub(r'[-\s]+', '-', value)
+           8
+           9
+          10	def checksum(data):
+          11	    return hashlib.sha256(data.encode()).hexdigest()
+  - weight: 2
+    text: |-
+      Here's the result of running `cat -n` on /testbed/forms.py:
+           1	from django import forms
+           2	from .models import Comment
+           3
+           4
+           5	class CommentForm(forms.ModelForm):
+           6	    class Meta:
+           7	        model = Comment
+           8	        fields = ('body',)
+  - weight: 2
+    text: |-
+      Here's the result of running `cat -n` on /testbed/serializers.py:
+           1	from rest_framework import serializers
+           2	from .models import Article
+           3
+           4
+           5	class ArticleSerializer(serializers.ModelSerializer):
+           6	    author_name = serializers.ReadOnlyField(source='author.name')
+           7
+           8	    class Meta:
+           9	        model = Article
+          10	        fields = '__all__'
+  - weight: 2
+    text: |-
+      Here's the result of running `cat -n` on /testbed/urls.py:
+           1	from django.urls import path
+           2	from . import views
+           3
+           4
+           5	urlpatterns = [
+           6	    path('articles/', views.list_view, name='article-list'),
+           7	    path('articles/<int:pk>/', views.detail_view, name='article-detail'),
+           8	]
+  - weight: 2
+    text: |-
+      Here's the result of running `cat -n` on /testbed/settings.py:
+           1	DEBUG = True
+           2	INSTALLED_APPS = [
+           3	    'django.contrib.admin',
+           4	    'django.contrib.auth',
+           5	    'blog',
+           6	]
+           7	DATABASES = {'default': {'ENGINE': 'django.db.backends.sqlite3', 'NAME': 'db.sqlite3'}}
+  - weight: 2
+    text: |-
+      Here's the result of running `cat -n` on /testbed/middleware.py:
+           1	import time
+           2
+           3
+           4	class TimingMiddleware:
+           5	    def __init__(self, get_response):
+           6	        self.get_response = get_response
+           7
+           8	    def __call__(self, request):
+           9	        start = time.perf_counter()
+          10	        response = self.get_response(request)
+          11	        response['X-Duration'] = f'{time.perf_counter() - start:.4f}'
+          12	        return response
+  - weight: 1
+    text: "ERROR: No such file or directory: /testbed/missing.py"
+
+# ---------------------------------------------------------------------------
+# editor create -- mostly success.
+# ---------------------------------------------------------------------------
+editor:create:
+  - weight: 8
+    text: "File created successfully at: /testbed/reproduce_issue.py"
+  - weight: 4
+    text: "File created successfully at: /testbed/fix_patch.py"
+  - weight: 2
+    text: "ERROR: file already exists at /testbed/x.py. Use str_replace to edit it instead."
+
+# ---------------------------------------------------------------------------
+# editor edits -- mostly success with varied confirmations.
+# ---------------------------------------------------------------------------
+editor:str_replace:
+  - weight: 5
+    text: |-
+      The file /testbed/filters.py has been edited. Here's the result of running `cat -n` on a snippet:
+          10	    def field_choices(self, field, request, model_admin):
+          11	        ordering = self.field_admin_ordering(field, request, model_admin)
+          12	        return field.get_choices(include_blank=False, ordering=ordering)
+  - weight: 5
+    text: |-
+      The file /testbed/views.py has been edited. Here's the result of running `cat -n` on a snippet:
+           5	def list_view(request):
+           6	    qs = Article.objects.filter(published=True).order_by('-published')
+           7	    return render(request, 'list.html', {'articles': qs})
+  - weight: 4
+    text: "The file /testbed/models.py has been edited. Here's the result of running `cat -n` on a snippet:\n    10\t    ordering = ('name',)"
+  - weight: 4
+    text: |-
+      The file /testbed/utils.py has been edited. Here's the result of running `cat -n` on a snippet:
+           5	def slugify(value):
+           6	    value = value.strip().lower()
+           7	    return value
+  - weight: 1
+    text: "ERROR: old_str was not found in /testbed/x.py. Make sure it matches exactly and is unique."
+
+editor:insert:
+  - weight: 8
+    text: "The file /testbed/views.py has been edited. Inserted text after line 11."
+  - weight: 4
+    text: "The file /testbed/models.py has been edited. Inserted text after line 7."
+  - weight: 1
+    text: "ERROR: insert_line out of range for /testbed/x.py."
+
+editor:undo_edit:
+  - weight: 9
+    text: "Last edit to /testbed/views.py has been reverted."
+  - weight: 1
+    text: "ERROR: nothing to undo for /testbed/x.py."
+
+# ---------------------------------------------------------------------------
+# python script -- mostly small successful output.
+# ---------------------------------------------------------------------------
+python_script:
+  - weight: 6
+    text: |-
+      ok
+      {'count': 3, 'ordering': ('name',)}
+  - weight: 5
+    text: "All checks passed.\n"
+  - weight: 4
+    text: "instance: <Author: Jane Doe>\nrelated count: 5\nordering applied: True\n"
+  - weight: 4
+    text: "slug: hello-world\nchecksum: 9b74c9...\n"
+  - weight: 3
+    text: "migrated 7 operations\nok\n"
+  - weight: 2
+    text: |-
+      Traceback (most recent call last):
+        File "/testbed/reproduce_issue.py", line 12, in <module>
+          main()
+        File "/testbed/reproduce_issue.py", line 8, in main
+          qs = Author.objects.filter(name='x')
+      AttributeError: 'NoneType' object has no attribute 'objects'
+  - weight: 1
+    text: "/bin/bash: line 1: python: command not found"
+
+# ---------------------------------------------------------------------------
+# listing -- varied file sets.
+# ---------------------------------------------------------------------------
+listing:
+  - weight: 4
+    text: |-
+      /testbed/setup.py
+      /testbed/manage.py
+      /testbed/blog/__init__.py
+      /testbed/blog/models.py
+      /testbed/blog/views.py
+      /testbed/blog/admin.py
+      /testbed/blog/urls.py
+  - weight: 3
+    text: |-
+      /testbed/blog/migrations/0001_initial.py
+      /testbed/blog/migrations/0002_author_email.py
+      /testbed/blog/migrations/0003_article_published.py
+  - weight: 3
+    text: |-
+      /testbed/tests/__init__.py
+      /testbed/tests/test_models.py
+      /testbed/tests/test_views.py
+      /testbed/tests/test_filters.py
+      /testbed/tests/test_forms.py
+  - weight: 2
+    text: "/testbed"
+  - weight: 1
+    text: |-
+      /testbed/.git/objects/01/2345...
+      /testbed/.git/objects/02/3456...
+      /testbed/node_modules/react/index.js
+      # (long-tail: an accidental `ls`/`find` dumping the whole tree)
+
+# ---------------------------------------------------------------------------
+# search -- varied grep hits, including no-match.
+# ---------------------------------------------------------------------------
+search:
+  - weight: 4
+    text: |-
+      /testbed/blog/filters.py:196:        ordering = ()
+      /testbed/blog/filters.py:422:        return field.get_choices(include_blank=False)
+      /testbed/blog/admin.py:88:    ordering = None
+  - weight: 3
+    text: |-
+      /testbed/blog/models.py:14:    ordering = ('-published',)
+      /testbed/blog/views.py:6:    qs = Article.objects.all().order_by('-published')
+  - weight: 3
+    text: |-
+      /testbed/blog/utils.py:6:    value = re.sub(r'[^\w\s-]', '', value)
+      /testbed/blog/serializers.py:9:        fields = '__all__'
+  - weight: 3
+    text: "Your command ran successfully and did not produce any output."
+  - weight: 1
+    text: |-
+      /testbed/blog/db/models/query.py:42:    def filter(self):
+      /testbed/blog/db/models/query.py:88:    def exclude(self):
+      /testbed/blog/db/models/query.py:120:   def order_by(self):
+      # (long-tail: many matches across a large codebase)
+
+# ---------------------------------------------------------------------------
+# file view -- varied small contents.
+# ---------------------------------------------------------------------------
+file_view:
+  - weight: 5
+    text: |-
+      import os
+
+
+      class Model:
+          pass
+  - weight: 4
+    text: |-
+      DEBUG = True
+      SECRET_KEY = 'dev-key'
+      ALLOWED_HOSTS = ['*']
+  - weight: 3
+    text: "django\npytest\nrest_framework\n"
+  - weight: 3
+    text: "Your command ran successfully and did not produce any output."
+  - weight: 1
+    text: "cat: /testbed/x.py: No such file or directory"
+
+# ---------------------------------------------------------------------------
+# default -- generic bash output.
+# ---------------------------------------------------------------------------
+default:
+  - weight: 6
+    text: "Your command ran successfully and did not produce any output."
+  - weight: 3
+    text: |-
+      done
+      exit status: 0
+  - weight: 2
+    text: "Switched to branch 'fix-ordering'\n"
+  - weight: 1
+    text: "command returned non-zero exit status 1"
