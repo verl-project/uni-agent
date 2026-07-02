@@ -22,6 +22,12 @@ logger = logging.getLogger(__name__)
 _RUNTIME_PORT = 8000
 
 
+def _to_vefaas_image(image: str) -> str:
+    if image.startswith("swebench/"):
+        return image.replace("swebench/", "enterprise-public-cn-beijing.cr.volces.com/swe-bench-verified/") + ":v2"
+    return image
+
+
 class _VefaasRuntime:
     """Minimal async swerex client for veFaaS routing.
 
@@ -193,7 +199,7 @@ class VefaasSandbox(Sandbox):
     def from_config(cls, config: SandboxConfig) -> VefaasSandbox:
         # Standard fields map to constructor args; veFaaS specifics (function_id,
         # function_route, proxy, ...) ride along in sandbox_kwargs.
-        return cls(image=config.image, runtime_timeout=config.runtime_timeout, **config.sandbox_kwargs)
+        return cls(image=_to_vefaas_image(config.image), runtime_timeout=config.runtime_timeout, **config.sandbox_kwargs)
 
     # ----- control plane -----
     async def start(self) -> None:

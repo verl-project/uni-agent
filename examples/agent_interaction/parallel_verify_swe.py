@@ -23,7 +23,7 @@ from uni_agent.tasks import get_task
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 logger = logging.getLogger(__name__)
 
-GLOBAL_CONCURRENCY = int(os.getenv("GLOBAL_CONCURRENCY", 512))
+GLOBAL_CONCURRENCY = int(os.getenv("GLOBAL_CONCURRENCY", 128))
 NUM_WORKERS = int(os.getenv("NUM_WORKERS", 8))
 SANDBOX_PROVIDER = os.getenv("SANDBOX_PROVIDER", "modal")
 RUNTIME_TIMEOUT = float(os.getenv("RUNTIME_TIMEOUT", 3600))
@@ -82,6 +82,13 @@ def main() -> None:
     # ray.init()
 
     dataset = load_dataset("parquet", data_files=args.data_path, split="train")
+    dataset = dataset.filter(
+        lambda x: x["extra_info"]["tools_kwargs"]["task"]["metadata"]["instance_id"] in [
+            "pylint-dev__pylint-6528",
+            "pylint-dev__pylint-7080",
+            "pylint-dev__pylint-7277",
+        ]
+    )
     samples = dataset.to_list()
     if args.limit is not None:
         samples = samples[: args.limit]
