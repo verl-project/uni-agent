@@ -1,11 +1,11 @@
 """CodeAct: the white-box agent driven by our own framework loop.
 
-Our loop runs *outside* the task image: it serves the policy at the task-supplied
-``base_url`` / ``api_key`` (an OpenAI-compatible endpoint), exposes host-side tools
-(bound to the task's live sandbox), and feeds tool observations back to the policy
-until it stops or hits :attr:`CodeActConfig.max_steps`. The actual policy step is
-owned by the framework (:meth:`CodeActAgent._policy_step`, stubbed here so the
-layer stays decoupled).
+Our loop runs *outside* the task image: it calls the policy at its configured
+endpoint (:attr:`~uni_agent.agents.AgentConfig.model` -- an OpenAI-compatible
+``base_url`` / ``api_key``), exposes host-side tools (bound to the task's live
+sandbox), and feeds tool observations back to the policy until it stops or hits
+:attr:`CodeActConfig.max_steps`. The actual policy step is owned by the framework
+(:meth:`CodeActAgent._policy_step`, stubbed here so the layer stays decoupled).
 """
 
 from __future__ import annotations
@@ -46,17 +46,17 @@ class CodeActAgent(Agent):
         self,
         *,
         sandbox: Sandbox,
-        base_url: str,
-        api_key: str,
         messages: list[dict[str, Any]],
     ) -> AgentResult:
         cfg: CodeActConfig = self.config  # type: ignore[assignment]
+        if cfg.model.base_url is None:
+            raise ValueError("code_act: config.model.base_url is not set (the endpoint the policy calls)")
         transcript: list[dict[str, Any]] = list(messages)  # seed the conversation
         toolbox = Toolbox.from_specs(cfg.tools, sandbox=sandbox)
         try:
-            schemas = toolbox.schemas()  # handed to the policy at base_url
+            schemas = toolbox.schemas()  # handed to the policy at model.base_url
             for _step in range(cfg.max_steps):
-                action = await self._policy_step(base_url, api_key, schemas, transcript)
+                action = await self._policy_step(cfg.model.base_url, cfg.model.api_key, schemas, transcript)
                 if action is None:  # policy decided it is done
                     break
                 obs = await toolbox.call(action["name"], action.get("args"))

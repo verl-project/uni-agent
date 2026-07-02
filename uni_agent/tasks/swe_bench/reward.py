@@ -19,11 +19,6 @@ from swebench.harness.utils import get_modified_files
 
 
 def _make_eval_script_list(instance, specs, env_name, repo_directory, base_commit, test_patch):
-    """
-    Same as swebench's make_eval_script_list_py, but when test_patch only adds new files,
-    get_modified_files returns [] and swebench would run `git checkout base_commit` (no paths),
-    which resets the whole repo (e.g. reverts tox.ini). We use no-op instead.
-    """
     _HEREDOC_DELIMITER = "EOF_114329324912"
     base_commit = instance["base_commit"]
     test_files = get_modified_files(test_patch)

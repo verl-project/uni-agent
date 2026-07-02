@@ -1,25 +1,21 @@
 """Agent layer: *who* solves a task and *how it is launched*.
 
-An :class:`Agent` turns an :class:`AgentConfig` into a runnable solver over a
-live sandbox. Every agent talks to the model through an OpenAI-compatible
-``base_url`` + ``api_key`` the *task* supplies (it derives them from the gateway
-session it owns); agents never see the session itself. They differ in *where the
-agent loop runs* and *whether we control it*:
+An :class:`Agent` turns an :class:`AgentConfig` into a runnable solver over a live
+sandbox, talking to the model at its own :attr:`AgentConfig.model` endpoint (the
+runner fills it in; in RL it points at the current policy server). Agents differ
+in where the loop runs and whether we control it:
 
 * **white-box** (e.g. ``code_act``) -- our framework loop runs host-side, drives
-  host-side tools, and calls the policy at ``base_url``.
+  host-side tools, and calls the policy itself.
 * **black-box** (e.g. ``claude_code``) -- an opaque solver launched *inside* the
-  sandbox with its own loop + tools, pointed at the *same* ``base_url`` so its
-  model calls still become trainable trajectories. It's "black-box" because we
-  don't drive its loop -- not because it uses a different model.
+  sandbox with its own loop + tools, pointed at the *same* endpoint so its model
+  calls still become trainable trajectories.
 
-A concrete agent lives under ``agents/<name>/`` and registers itself with
-:func:`~uni_agent.agents.registry.register_agent`; a task loads one by name with
-:func:`~uni_agent.agents.registry.build_agent`. The agent owns **neither** the
-sandbox nor the gateway-session lifecycle: the task starts the sandbox, provisions
-the instance, creates the gateway session, then hands the *live* sandbox plus a
-``base_url`` / ``api_key`` / ``messages`` to :meth:`Agent.run`, finalizes the
-session, stops the sandbox, and scores whatever artifacts the agent returns.
+Each agent lives under ``agents/<name>/`` and registers itself
+(:func:`~uni_agent.agents.registry.register_agent`); a task builds one by name
+(:func:`~uni_agent.agents.registry.build_agent`). The agent owns neither the
+sandbox nor its lifecycle: the task hands it a *live* sandbox plus ``messages``,
+then stops the sandbox and scores whatever :meth:`Agent.run` returns.
 """
 
 from __future__ import annotations
@@ -34,18 +30,34 @@ if TYPE_CHECKING:
     from ..sandbox import Sandbox
 
 
-class AgentConfig(BaseModel):
-    """Base config for a registered agent (this replaces the old ``AgentSpec``).
+class ModelConfig(BaseModel):
+    """The OpenAI-compatible LLM endpoint the agent's policy talks to, plus sampling knobs."""
 
-    Near-empty on purpose: white-box and black-box agents take very different
-    launch params, so each agent under ``agents/<name>/`` defines its own
-    subclass with the fields it needs. The one shared field is :attr:`name` --
-    the registry key that tells :func:`~uni_agent.agents.registry.build_agent`
-    which agent to construct (mirrors ``SandboxConfig.provider``). Subclasses
-    default :attr:`name` to their own registry key.
+    base_url: str | None = Field(
+        default=None, description="Endpoint URL; the runner fills this in (in RL, the current policy server)."
+    )
+    api_key: str = Field(default="EMPTY", description="Bearer key (the gateway accepts any non-empty value).")
+    sampling_params: dict[str, Any] = Field(
+        default_factory=dict, description="Sampling knobs (temperature, top_p, max_tokens, ...)."
+    )
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class AgentConfig(BaseModel):
+    """Base config for a registered agent.
+
+    Nearly empty on purpose: agents take very different launch params, so each
+    defines its own subclass under ``agents/<name>/``. The two shared fields are
+    :attr:`name` (the registry key :func:`~uni_agent.agents.registry.build_agent`
+    dispatches on; subclasses default it to their own key) and :attr:`model` (the
+    endpoint the agent's policy talks to).
     """
 
     name: str = Field(default="", description="Registered agent name (key in AGENT_REGISTRY).")
+    model: ModelConfig = Field(
+        default_factory=ModelConfig, description="LLM endpoint + sampling params for the policy."
+    )
 
     model_config = ConfigDict(extra="forbid", protected_namespaces=())
 
@@ -55,9 +67,7 @@ class AgentResult:
     """Artifacts one agent produced for an episode -- the task scores these.
 
     * :attr:`output` -- the solution payload the task's reward consumes (e.g. a
-      ``patch`` for SWE-bench, plus any extras the scorer keys on). A task
-      typically merges this with the ``sample`` and passes it to
-      :func:`~uni_agent.reward.load_reward_spec`'s ``compute_reward``.
+      ``patch`` for SWE-bench).
     * :attr:`transcript` -- the step-by-step trace; white-box loops fill it, a
       black box may leave it empty.
     * :attr:`info` -- free-form diagnostics (exit codes, token usage, ...).
@@ -73,14 +83,13 @@ class Agent(ABC):
 
     Concrete agents live under ``agents/<name>/`` (set :attr:`config_model`,
     register with ``@register_agent("<name>")`` which stamps :attr:`name`) and
-    implement :meth:`run`. Every agent talks to the model at the ``base_url`` /
-    ``api_key`` the task passes in -- white-box loops call it from our framework,
-    black-box solvers are launched in the sandbox pointed at the same endpoint.
+    implement :meth:`run`, talking to the model at their own
+    :attr:`~AgentConfig.model` endpoint.
     """
 
     #: Registry key, stamped by ``@register_agent``.
     name: ClassVar[str] = ""
-    #: Pydantic config subclass this agent is built from.
+    #: Pydantic config subclass this agent is built from (carries :attr:`AgentConfig.model`).
     config_model: ClassVar[type[AgentConfig]] = AgentConfig
 
     def __init__(self, config: AgentConfig | None = None) -> None:
@@ -96,24 +105,17 @@ class Agent(ABC):
         self,
         *,
         sandbox: Sandbox,
-        base_url: str,
-        api_key: str,
         messages: list[dict[str, Any]],
     ) -> AgentResult:
         """Solve the task described by ``messages`` inside ``sandbox``.
 
-        Everything is owned by the *task*, not the agent:
-
         * ``sandbox`` is already *live* -- the task started it and did any
-          per-instance provisioning (e.g. cloning the repo at the base commit).
-        * ``base_url`` / ``api_key`` point at an OpenAI-compatible endpoint (the
-          task derives them from the gateway session it created). Agents never see
-          the session: white-box loops call ``base_url`` from our framework,
-          black-box solvers are launched in the sandbox pointed at the same URL.
+          per-instance provisioning (e.g. cloning the repo at the base commit), and
+          stops it after this returns.
         * ``messages`` is the task prompt in OpenAI chat form (a ``user`` turn,
-          optionally preceded by a ``system`` turn). A white-box loop seeds its
-          conversation with it; a black-box solver maps it onto its own launch.
+          optionally preceded by a ``system`` turn).
 
-        The task finalizes the session and stops the sandbox after this returns.
+        The model endpoint is the agent's own :attr:`config.model`; returns the
+        artifacts the task scores (see :class:`AgentResult`).
         """
         ...

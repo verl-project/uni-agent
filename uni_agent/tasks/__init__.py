@@ -19,13 +19,12 @@ themselves, and are built with :func:`get_task` -- from either a config instance
 
 from __future__ import annotations
 
-from .base import ModelConfig, Task, TaskConfig, TaskResult
+from .base import Task, TaskConfig, TaskResult
 from .registry import TASK_REGISTRY, get_task, register_task
 
 __all__ = [
     "Task",
     "TaskConfig",
-    "ModelConfig",
     "TaskResult",
     "register_task",
     "get_task",

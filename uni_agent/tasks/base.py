@@ -7,14 +7,11 @@ A *task* is the top-level unit a trainer / evaluator instantiates. The base
 * **agent**   -- *who* solves it and *how it is launched*, picked from the agent
   layer (an :class:`~uni_agent.agents.AgentConfig`; see :mod:`uni_agent.agents`).
 
-The **gateway** (the LLM the agent talks to) is a live runtime object, not config.
-The runner installs one process-global
-:class:`~uni_agent.gateway.manager.GatewayManager` (via
-:func:`~uni_agent.gateway.set_gateway_manager`) and the task reads it with
-:func:`~uni_agent.gateway.get_gateway_manager` inside :meth:`run`, so ``run`` takes
-no arguments. White-box agents drive the policy through it; black-box agents point
-their own process at its session URL. A task that needs no model (e.g. an oracle
-gold-patch run) never fetches it.
+The **model** the agent talks to is *not* a task-level concern: it lives on the
+agent (:attr:`~uni_agent.agents.AgentConfig.model` -- an OpenAI-compatible
+``base_url`` / ``api_key`` / ``sampling_params``), which the runner fills in (in RL
+it points at the current policy server). A task that needs no model (e.g. an oracle
+gold-patch run) simply never builds an agent.
 
 Reward is **not** a base concern either: each task declares its scorer
 (``reward.py``) and calls :func:`~uni_agent.reward.load_reward_spec` itself inside
@@ -53,29 +50,18 @@ if TYPE_CHECKING:
     from ..sandbox import Sandbox
 
 
-class ModelConfig(BaseModel):
-    """The OpenAI-compatible LLM endpoint the policy talks to, plus sampling knobs."""
-
-    base_url: str | None = Field(default=None, description="Endpoint URL; None = use the gateway session's URL.")
-    api_key: str = Field(default="EMPTY", description="Bearer key (the gateway accepts any non-empty value).")
-    sampling_params: dict[str, Any] = Field(
-        default_factory=dict, description="Sampling knobs (temperature, top_p, max_tokens, ...)."
-    )
-
-    model_config = ConfigDict(extra="forbid")
-
-
 class TaskConfig(BaseModel):
-    """Base task config: only the fields every task shares."""
+    """Base task config: only the fields every task shares.
+
+    The model the agent talks to is *not* here -- it lives on :attr:`agent`'s
+    :attr:`~uni_agent.agents.AgentConfig.model`.
+    """
 
     name: str = Field(default="", description="Registered task name (key in TASK_REGISTRY).")
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig, description="Execution sandbox.")
     agent: AgentConfig = Field(
         default_factory=AgentConfig,
-        description="Agent that solves the task; a concrete AgentConfig subclass.",
-    )
-    model: ModelConfig = Field(
-        default_factory=ModelConfig, description="LLM endpoint + sampling params for the policy."
+        description="Agent that solves the task (carries its own model endpoint); a concrete AgentConfig subclass.",
     )
     metadata: dict[str, Any] = Field(default_factory=dict)
 
@@ -110,11 +96,9 @@ class Task(ABC):
     async def run(self) -> TaskResult:
         """Run one episode and return its score.
 
-        Takes no arguments: the sample is :attr:`TaskConfig.metadata` and, when a
-        model is needed, the gateway is the process-global
-        :func:`~uni_agent.gateway.get_gateway_manager` (installed by the runner).
-        White-box tasks serve the policy through it; black-box tasks point their own
-        process at its session URL.
+        Takes no arguments: the sample is :attr:`TaskConfig.metadata` and the model
+        the agent talks to lives on :attr:`TaskConfig.agent`'s
+        :attr:`~uni_agent.agents.AgentConfig.model` (filled in by the runner).
         """
         ...
 

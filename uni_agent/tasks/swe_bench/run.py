@@ -32,16 +32,9 @@ class SWEBenchTask(Task):
                 await sandbox.exec(["git", "apply", "--whitespace=fix", "/tmp/gold_patch.patch"], workdir="/testbed")
             else:
                 agent = self.build_agent()
-                if cfg.model.base_url is None:
-                    raise ValueError("swe_bench: cfg.model.base_url is not set (the endpoint the agent calls)")
                 messages = [{"role": "user", "content": sample.get("problem_statement", "")}]
-
-                result = await agent.run(
-                    sandbox=sandbox,
-                    base_url=cfg.model.base_url,
-                    api_key=cfg.model.api_key,
-                    messages=messages,
-                )
+                # The endpoint the agent calls lives on cfg.agent.model (the agent validates it).
+                await agent.run(sandbox=sandbox, messages=messages)
 
             # compute reward
             from .reward import compute_reward
