@@ -8,7 +8,6 @@
 
 from uni_agent.tasks import get_task
 
-
 task_config = {
     "name": "swe_bench",
     "sandbox": {

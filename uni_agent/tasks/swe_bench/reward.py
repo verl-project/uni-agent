@@ -1,7 +1,9 @@
 from __future__ import annotations
-import uuid
+
+import json
 import time
-import re
+import uuid
+
 from swebench.harness.constants import (
     END_TEST_OUTPUT,
     FAIL_ONLY_REPOS,
@@ -10,12 +12,10 @@ from swebench.harness.constants import (
     EvalType,
     ResolvedStatus,
 )
-import json
 from swebench.harness.grading import get_eval_tests_report, get_resolution_status
 from swebench.harness.log_parsers import MAP_REPO_TO_PARSER
 from swebench.harness.test_spec.python import get_test_directives
 from swebench.harness.utils import get_modified_files
-from typing import Any
 
 
 def _make_eval_script_list(instance, specs, env_name, repo_directory, base_commit, test_patch):
@@ -64,6 +64,7 @@ def _make_eval_script_list(instance, specs, env_name, repo_directory, base_commi
     ]
     return eval_commands
 
+
 def _get_logs_eval(metadata, eval_output: str):
     instance = metadata
     repo = instance["repo"]
@@ -75,6 +76,7 @@ def _get_logs_eval(metadata, eval_output: str):
     else:
         status_map = {}
         return status_map, False
+
 
 def _get_eval_report(metadata, eval_output: str):
     eval_report = {

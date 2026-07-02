@@ -74,7 +74,9 @@ class TaskConfig(BaseModel):
         default_factory=AgentConfig,
         description="Agent that solves the task; a concrete AgentConfig subclass.",
     )
-    model: ModelConfig = Field(default_factory=ModelConfig, description="LLM endpoint + sampling params for the policy.")
+    model: ModelConfig = Field(
+        default_factory=ModelConfig, description="LLM endpoint + sampling params for the policy."
+    )
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     model_config = ConfigDict(extra="forbid", protected_namespaces=())

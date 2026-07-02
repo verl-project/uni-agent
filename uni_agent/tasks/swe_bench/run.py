@@ -28,7 +28,7 @@ class SWEBenchTask(Task):
         async with self.build_sandbox() as sandbox:
             # run gold patch or agent
             if cfg.run_gold_patch:
-                await sandbox.write_file(f"/tmp/gold_patch.patch", sample["patch"])
+                await sandbox.write_file("/tmp/gold_patch.patch", sample["patch"])
                 await sandbox.exec(["git", "apply", "--whitespace=fix", "/tmp/gold_patch.patch"], workdir="/testbed")
             else:
                 agent = self.build_agent()
@@ -45,6 +45,7 @@ class SWEBenchTask(Task):
 
             # compute reward
             from .reward import compute_reward
+
             result = await compute_reward(sample, sandbox)
 
             return TaskResult(
