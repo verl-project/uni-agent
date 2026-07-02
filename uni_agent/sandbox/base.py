@@ -47,7 +47,6 @@ class SandboxConfig(BaseModel):
     """
 
     provider: str = Field(
-        default="local",
         description="Registered sandbox provider name (key in SANDBOX_REGISTRY), e.g. 'local' or 'modal'.",
     )
     runtime_timeout: float = Field(

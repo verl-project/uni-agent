@@ -53,21 +53,31 @@ if TYPE_CHECKING:
     from ..sandbox import Sandbox
 
 
+class ModelConfig(BaseModel):
+    """The OpenAI-compatible LLM endpoint the policy talks to, plus sampling knobs."""
+
+    base_url: str | None = Field(default=None, description="Endpoint URL; None = use the gateway session's URL.")
+    api_key: str = Field(default="EMPTY", description="Bearer key (the gateway accepts any non-empty value).")
+    sampling_params: dict[str, Any] = Field(
+        default_factory=dict, description="Sampling knobs (temperature, top_p, max_tokens, ...)."
+    )
+
+    model_config = ConfigDict(extra="forbid")
+
+
 class TaskConfig(BaseModel):
-    """Base task config: only the fields every task shares.
+    """Base task config: only the fields every task shares."""
 
-    Concrete tasks subclass this to narrow :attr:`agent` to a concrete
-    :class:`~uni_agent.agents.AgentConfig` subclass and to add their own typed knobs.
-    """
-
+    name: str = Field(default="", description="Registered task name (key in TASK_REGISTRY).")
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig, description="Execution sandbox.")
     agent: AgentConfig = Field(
         default_factory=AgentConfig,
         description="Agent that solves the task; a concrete AgentConfig subclass.",
     )
+    model: ModelConfig = Field(default_factory=ModelConfig, description="LLM endpoint + sampling params for the policy.")
     metadata: dict[str, Any] = Field(default_factory=dict)
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", protected_namespaces=())
 
 
 @dataclasses.dataclass
@@ -89,6 +99,7 @@ class Task(ABC):
     """
 
     name: ClassVar[str] = ""
+    config_model: ClassVar[type[TaskConfig]] = TaskConfig
 
     def __init__(self, config: TaskConfig) -> None:
         self.config = config

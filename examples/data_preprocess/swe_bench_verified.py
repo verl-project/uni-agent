@@ -1,25 +1,28 @@
 # ruff: noqa: E501
+"""Preprocess SWE-bench Verified into the new-framework SWE task format.
+
+Provider-agnostic on purpose: the row only carries the canonical *open-source*
+image ref (the published ``swebench/sweb.eval.x86_64.<id>``); mapping that to a
+service-provider image is a provider concern (``provider.py``), decided at run
+time, not baked into the dataset.
+
+Example::
+
+    python examples/data_preprocess/swe_bench_verified.py --local-save-dir ~/data/swe_agent
+"""
+
 import argparse
 import os
 
 from datasets import load_dataset
 
-impl = os.getenv("DEPLOYMENT", "vefaas").lower()
-if impl == "local":
-    raise NotImplementedError("Local deployment is not implemented yet")
-elif impl == "vefaas":
-    from uni_agent.deployment.vefaas.deployment import get_vefaas_image_name as get_image_name
-elif impl == "modal":
 
-    def get_image_name(dataset_id: str, instance_id: str) -> str:
-        assert dataset_id == "swe-bench-verified"
-        parts = instance_id.split("__")
-        assert len(parts) == 2
-        project_name = parts[0].lower()
-        instance_number = parts[1].lower()
-        return f"swebench/sweb.eval.x86_64.{project_name}_1776_{instance_number}"
-else:
-    raise ValueError(f"Invalid deployment implementation: {impl}")
+def get_image_name(instance_id: str) -> str:
+    """Canonical open-source image ref (mirrors swebench's ``instance_image_key``).
+
+    Provider-agnostic; a provider maps this to its own registry at run time.
+    """
+    return f"swebench/sweb.eval.x86_64.{instance_id.lower().replace('__', '_1776_')}"
 
 
 SYSTEM_PROMPT = """
@@ -104,46 +107,69 @@ A successful resolution means:
 """.strip()
 
 
-def build_swe_bench_verified():
-    def process_swe_bench_verified(example):
-        dataset_id = "swe-bench-verified"
+def build_swe_bench_verified(max_instances: int | None = None):
+    def process(example):
         instance_id = example["instance_id"]
-        image_name = get_image_name(dataset_id, instance_id)
-        reset_cmds = []
-        reset_script = " && ".join(reset_cmds)
-        sample = {
+
+        metadata = {
+            "instance_id": instance_id,
+            "repo": example["repo"],
+            "version": str(example["version"]),
+            "base_commit": example["base_commit"],
+            "patch": example["patch"],
+            "test_patch": example["test_patch"],
+            "problem_statement": example["problem_statement"],
+            "FAIL_TO_PASS": example["FAIL_TO_PASS"],
+            "PASS_TO_PASS": example["PASS_TO_PASS"],
+        }
+
+        task = {
+            "name": "swe_bench",
+            "sandbox": {"image": get_image_name(instance_id)},
+            "metadata": metadata,
+        }
+
+        return {
+            "data_source": "princeton-nlp/SWE-bench_Verified",
             "prompt": [
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": USER_PROMPT.format(problem_statement=example["problem_statement"])},
             ],
             "agent_name": "swe_agent",
             "extra_info": {
-                "tools_kwargs": {
-                    "env": {
-                        "deployment": {"image": image_name},
-                        "post_setup_cmd": reset_script,
-                    },
-                    "reward": {
-                        "name": "swe_bench",
-                        "metadata": example,
-                    },
-                },
+                "instance_id": instance_id,
+                "tools_kwargs": {"task": task},
             },
         }
-        return sample
 
     data_source = "princeton-nlp/SWE-bench_Verified"
     print(f"Loading the {data_source} dataset from huggingface...", flush=True)
     dataset = load_dataset(data_source, split="test")
-    dataset = dataset.map(process_swe_bench_verified, remove_columns=dataset.column_names)
+    print(f"Loaded {len(dataset)} raw instances", flush=True)
+
+    if max_instances is not None and max_instances >= 0:
+        dataset = dataset.select(range(min(max_instances, len(dataset))))
+        print(f"Capped to {len(dataset)} instances", flush=True)
+
+    dataset = dataset.map(process, remove_columns=dataset.column_names)
     return dataset
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--local-save-dir", default="~/data/swe_agent")
-
+    parser.add_argument(
+        "--max-instances",
+        type=int,
+        default=None,
+        help="Optional cap on the number of instances kept (smoke testing).",
+    )
     args = parser.parse_args()
 
-    sbv_dataset = build_swe_bench_verified()
-    sbv_dataset.to_parquet(f"{args.local_save_dir}/swe_bench_verified_{impl}.parquet")
+    save_dir = os.path.expanduser(args.local_save_dir)
+    os.makedirs(save_dir, exist_ok=True)
+
+    dataset = build_swe_bench_verified(max_instances=args.max_instances)
+    out_path = f"{save_dir}/swe_bench_verified.parquet"
+    dataset.to_parquet(out_path)
+    print(f"Wrote {len(dataset)} instances to {out_path}", flush=True)
