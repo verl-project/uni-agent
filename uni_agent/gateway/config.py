@@ -29,6 +29,10 @@ class GatewayActorConfig:
         vision_info_extractor_kwargs: Static kwargs forwarded to the extractor.
         prompt_length: Optional prompt-token budget stored on gateway sessions.
         response_length: Optional response-token budget stored on gateway sessions.
+        gateway_trie_enabled: When True, sessions store turns in a prefix trie
+            (multi-branch reattachment, best-of-N, sub-agent, warm-start) instead
+            of a single linear active trajectory. Off by default; flag-off must
+            reproduce the legacy single-active behavior exactly.
     """
 
     tokenizer: Any
@@ -41,3 +45,4 @@ class GatewayActorConfig:
     vision_info_extractor_kwargs: dict[str, Any] | None = None
     prompt_length: int | None = None
     response_length: int | None = None
+    gateway_trie_enabled: bool = False

@@ -29,6 +29,28 @@ class SessionHandle:
 
 
 @dataclass
+class TrajectoryBuffer:
+    """Mutable token buffer for a trajectory under construction.
+
+    Lives in ``types`` so both ``session`` and ``trie`` can reference it without
+    a circular import (``trie`` must stay free of the verl-importing codec).
+
+    Attributes:
+        prompt_ids: Prompt token IDs for the current trajectory.
+        response_ids: Accumulated response-side token IDs.
+        response_mask: Labels aligned with ``response_ids``; ``1`` for model
+            output and ``0`` for continuation context tokens.
+        response_logprobs: Log probabilities aligned with ``response_ids`` when
+            present; continuation context tokens use ``0.0``.
+    """
+
+    prompt_ids: list[int]
+    response_ids: list[int] = field(default_factory=list)
+    response_mask: list[int] = field(default_factory=list)
+    response_logprobs: list[float] = field(default_factory=list)
+
+
+@dataclass
 class Trajectory:
     """Token-level training trajectory produced when a gateway session finalizes.
 

@@ -8,8 +8,8 @@ surface (consumed by the framework runners).
 
 from .codec import MalformedRequestError, MessageCodec
 from .protocol import ChatCompletionRequest, ChatCompletionResponse
-from .session import GatewaySession, TrajectoryBuffer
-from .types import SessionHandle, Trajectory
+from .session import GatewaySession
+from .types import SessionHandle, Trajectory, TrajectoryBuffer
 
 __all__ = [
     "ChatCompletionRequest",

@@ -51,6 +51,7 @@ class _GatewayActor:
         )
         self._prompt_length = config.prompt_length
         self._response_length = config.response_length
+        self._trie_enabled = config.gateway_trie_enabled
         self._sessions: dict[str, GatewaySession] = {}
         self._app = FastAPI()
         self._server_port: int | None = None
@@ -198,6 +199,7 @@ class _GatewayActor:
             codec=self._codec,
             prompt_length=self._prompt_length,
             response_length=self._response_length,
+            trie_enabled=self._trie_enabled,
         )
         return handle
 
