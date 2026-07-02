@@ -18,6 +18,10 @@ class ClaudeCodeConfig(AgentConfig):
 
     name: str = "claude_code"
     command: list[str] = Field(default_factory=lambda: ["claude", "-p"], description="Launch argv inside the sandbox.")
+    install_command: str | None = Field(
+        default="command -v claude >/dev/null 2>&1 || npm install -g @anthropic-ai/claude-code",
+        description="Shell run once before launch to ensure the CLI is on PATH; set to None to skip.",
+    )
     model: str | None = Field(default="claude-sonnet-4", description="Model the agent should use.")
     max_turns: int | None = Field(default=50, description="Turn budget passed to the agent.")
     allowed_tools: list[str] = Field(
@@ -62,6 +66,14 @@ class ClaudeCodeAgent(Agent):
             "ANTHROPIC_BASE_URL": base_url,
             "ANTHROPIC_API_KEY": api_key,
         }
+        # Ensure the CLI is on PATH (no-op if the image already ships it).
+        if cfg.install_command:
+            res = await sandbox.exec_shell(cfg.install_command)
+            if res.exit_code != 0:
+                raise RuntimeError(
+                    f"claude_code install step failed (exit {res.exit_code}); "
+                    f"ensure Node/npm are available in the sandbox image. stderr: {res.stderr.strip()}"
+                )
         # No client-side timeout: the sandbox's runtime_timeout bounds the run.
         proc = await sandbox.exec(argv, env=env)
         patch = (await sandbox.exec_shell("git diff")).stdout

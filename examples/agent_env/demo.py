@@ -1,32 +1,4 @@
-# ruff: noqa: E501
-"""Minimal demo of the sandbox + tools stack (no Environment wrapper).
-
-The agent (this script) runs on the host and never enters the task image. It picks
-a sandbox provider, then builds a :class:`~uni_agent.tools.Toolbox` directly from a
-``{name, ...kwargs}`` tool spec. There is no session layer -- each tool owns its
-own state: ``shell`` keeps a persistent shell channel, opened lazily on first use,
-while the editor is stateless:
-
-    build_sandbox(SandboxConfig(...))       # pick a provider
-        async with sandbox: ...             # start() on enter, stop() on exit
-    Toolbox.from_specs(tools, sandbox=...)  # build the tool surface
-        -> call("shell", {...})             # one action -> Observation
-        -> close()                          # close tools (release channels)
-
-In the real stack the *task* owns the sandbox lifecycle and the *agent* owns the
-toolbox; this script just wires them by hand to show the lower layers in isolation.
-
-Flow: install a dep -> create a script with the editor tool -> run it, writing
-output to a file -> cat the file (showing the sandbox persists state across calls).
-
-Run:
-    pip install modal && modal token set ...          # one-time Modal auth
-    python examples/agent_env/demo.py
-    # local (host) instead of Modal, no creds needed:
-    SANDBOX_PROVIDER=local python examples/agent_env/demo.py
-    # override the Modal image:
-    IMAGE=python:3.12 python examples/agent_env/demo.py
-"""
+"""Minimal demo of the sandbox + tools stack."""
 
 import asyncio
 import os
@@ -84,9 +56,7 @@ async def main() -> None:
     print("  (shell keeps a persistent shell channel; the editor is stateless)")
 
     sandbox = build_sandbox(sandbox_config)
-    async with sandbox:  # start() on enter, stop() on exit
-        print(await sandbox.exec(["tmux", "-V"]))
-        # exit()
+    async with sandbox:
         toolbox = Toolbox.from_specs(tool_specs, sandbox=sandbox)
         schemas = toolbox.schemas()
         print(f"  -> tool schemas  : {[s['function']['name'] for s in schemas]}")

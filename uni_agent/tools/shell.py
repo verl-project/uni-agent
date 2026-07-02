@@ -85,7 +85,6 @@ def _capture_wrapper(command: str, out: str, err: str, rc: str, *, signal: str |
 # exec to keep round-trips low.
 _INSTALL_TMUX = r"""
 if command -v apt-get >/dev/null 2>&1; then
-  DEBIAN_FRONTEND=noninteractive apt-get update -qq
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq tmux
 elif command -v dnf >/dev/null 2>&1; then dnf install -y tmux
 elif command -v yum >/dev/null 2>&1; then yum install -y tmux
