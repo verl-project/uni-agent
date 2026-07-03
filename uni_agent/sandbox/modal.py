@@ -76,11 +76,14 @@ class ModalSandbox(Sandbox):
         workdir: str | None = None,
         env: dict[str, str] | None = None,
     ) -> ExecResult:
+        final_env: dict[str, str] = dict(env) if env else {}
+        final_env.setdefault("PYTHONPATH", "")
+
         proc = await self._require_sandbox().exec.aio(
             *argv,
             timeout=int(timeout) if timeout else None,
             workdir=workdir,
-            env=env or None,
+            env=final_env or None,
         )
 
         async def _read(stream) -> str:
