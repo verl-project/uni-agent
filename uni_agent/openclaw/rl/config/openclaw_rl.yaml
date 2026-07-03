@@ -1,0 +1,23 @@
+# OpenClaw RL deltas over openclaw_base.
+
+hydra:
+  searchpath:
+    - pkg://verl.trainer.config
+    - pkg://uni_agent.openclaw.config
+
+defaults:
+  - openclaw_base
+  - _self_
+
+rollout:
+  n_gpus_per_node: 2
+
+reward:
+  reward_model:
+    n_gpus_per_node: 2
+    rollout:
+      tensor_model_parallel_size: 2
+
+trainer:
+  n_gpus_per_node: 4
+

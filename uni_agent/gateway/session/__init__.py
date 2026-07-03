@@ -9,7 +9,7 @@ surface (consumed by the framework runners).
 from .codec import MalformedRequestError, MessageCodec
 from .protocol import ChatCompletionRequest, ChatCompletionResponse
 from .session import GatewaySession, TrajectoryBuffer
-from .types import SessionHandle, Trajectory
+from .types import SessionHandle, Trajectory, TurnCapture
 
 __all__ = [
     "ChatCompletionRequest",
@@ -19,5 +19,6 @@ __all__ = [
     "MessageCodec",
     "SessionHandle",
     "Trajectory",
+    "TurnCapture",
     "TrajectoryBuffer",
 ]
