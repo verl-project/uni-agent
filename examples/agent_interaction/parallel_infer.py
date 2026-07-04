@@ -1,203 +1,197 @@
+# ruff: noqa: E501
+"""Parallel agent inference for SWE-bench.
+
+Point it at an already-running server and a preprocessed parquet:
+
+    BASE_URL=http://localhost:8000/v1 MODEL=Qwen3-Coder-30B-A3B-Instruct \
+        python examples/agent_interaction/parallel_infer.py --limit 8
+"""
+
 import argparse
-import json
+import asyncio
 import logging
 import os
-from pathlib import Path
+import time
 
-import numpy as np
 import ray
 from datasets import load_dataset
-from omegaconf import DictConfig
+from tqdm import tqdm
 
-import verl
-from verl import DataProto
-from verl.experimental.agent_loop import AgentLoopManager
-from verl.protocol import pad_dataproto_to_divisor, unpad_dataproto
-from verl.workers.rollout.llm_server import LLMServerManager
+from uni_agent.agents import get_agent_cls
+from uni_agent.tasks import get_task
 
-# Setup basic logging
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=os.getenv("VERL_LOGGING_LEVEL", "INFO")
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 logger = logging.getLogger(__name__)
 
-
-def init_config(args: argparse.Namespace) -> DictConfig:
-    """Initialize the configuration from hydra and override with command-line arguments."""
-    from hydra import compose, initialize_config_dir
-
-    # config_dir = os.path.abspath("verl/trainer/config")
-    config_dir = str(Path(verl.__file__).resolve().parent / "trainer" / "config")
-    with initialize_config_dir(config_dir=config_dir, version_base=None):
-        config = compose(config_name="ppo_trainer")
-
-    # Override rollout configs
-    config.actor_rollout_ref.rollout.agent.agent_loop_config_path = os.path.expanduser(args.agent_config_path)
-    config.actor_rollout_ref.rollout.agent.num_workers = args.num_workers
-    config.actor_rollout_ref.rollout.multi_turn.max_assistant_turns = args.max_turns
-    config.actor_rollout_ref.rollout.multi_turn.max_parallel_calls = 1
-
-    # Validation / sampling kwargs
-    config.actor_rollout_ref.rollout.temperature = args.temperature
-    config.actor_rollout_ref.rollout.top_p = args.top_p
-    config.actor_rollout_ref.rollout.val_kwargs.temperature = args.temperature
-    config.actor_rollout_ref.rollout.val_kwargs.top_p = args.top_p
-    config.actor_rollout_ref.rollout.calculate_log_probs = True
-
-    # Hardware configs
-    config.actor_rollout_ref.rollout.nnodes = args.nnodes
-    config.actor_rollout_ref.rollout.n_gpus_per_node = args.n_gpus_per_node
-    config.trainer.nnodes = args.nnodes
-    config.trainer.n_gpus_per_node = args.n_gpus_per_node
-
-    # Model and engine configs
-    config.actor_rollout_ref.model.path = os.path.expanduser(args.model_path)
-    config.actor_rollout_ref.rollout.name = args.engine
-    config.actor_rollout_ref.rollout.mode = "async"
-    config.actor_rollout_ref.rollout.prompt_length = args.prompt_length
-    config.actor_rollout_ref.rollout.response_length = args.response_length
-    config.actor_rollout_ref.rollout.n = args.n
-    config.actor_rollout_ref.rollout.tensor_model_parallel_size = args.tensor_parallel_size
-    config.actor_rollout_ref.rollout.gpu_memory_utilization = 0.9
-
-    # Data configs
-    config.data.return_raw_chat = True
-    config.data.max_prompt_length = args.prompt_length
-    config.data.max_response_length = args.response_length
-
-    return config
+# Infra knobs, injected via env (same as parallel_verify_swe.py).
+GLOBAL_CONCURRENCY = int(os.getenv("GLOBAL_CONCURRENCY", 128))
+NUM_WORKERS = int(os.getenv("NUM_WORKERS", 8))
+SANDBOX_PROVIDER = os.getenv("SANDBOX_PROVIDER", "modal")
+RUNTIME_TIMEOUT = float(os.getenv("RUNTIME_TIMEOUT", 3600))
 
 
-def run_inference(args: argparse.Namespace):
-    """Run the inference pipeline using the provided arguments."""
-    # 1. Init Ray
-    ray.init()
+@ray.remote
+class InferenceActor:
+    _semaphore = asyncio.Semaphore(max(1, GLOBAL_CONCURRENCY // NUM_WORKERS))
 
-    # 2. Init rollout manager
-    logger.info("Initializing configuration and AgentLoopManager...")
-    config = init_config(args)
-    llm_server_manager = LLMServerManager.create(config=config)
-    agent_loop_manager = AgentLoopManager.create(
-        config=config,
-        llm_client=llm_server_manager.get_client(),
-    )
-
-    # 3. Load dataset
-    data_path = os.path.expanduser(args.data_path)
-    logger.info(f"Loading dataset from: {data_path}")
-    samples = load_dataset("parquet", data_files=data_path, split="train").to_list()
-
-    # Limit number of samples (-1 = no limit)
-    if args.max_samples > 0:
-        samples = samples[: args.max_samples]
-        logger.info("Using first %d samples (--max-samples=%d)", len(samples), args.max_samples)
-
-    # 4. Prepare batch data
-    logger.info("Preparing data batch...")
-    batch = DataProto(
-        non_tensor_batch={
-            "raw_prompt": np.array([sample["prompt"] for sample in samples], dtype=object),
-            "agent_name": np.array([sample["agent_name"] for sample in samples], dtype=object),
-            "tools_kwargs": np.array([sample["extra_info"]["tools_kwargs"] for sample in samples], dtype=object),
-        },
-        meta_info={"validate": True},
-    ).repeat(config.actor_rollout_ref.rollout.n)
-
-    # 5. Generate sequences
-    logger.info("Starting sequence generation...")
-    size_divisor = config.actor_rollout_ref.rollout.agent.num_workers
-    batch_padded, pad_size = pad_dataproto_to_divisor(batch, size_divisor)
-    output_padded = agent_loop_manager.generate_sequences(batch_padded)
-    output = unpad_dataproto(output_padded, pad_size=pad_size)
-
-    # 6. Process results
-    rm_scores = output.batch["rm_scores"].sum(dim=-1).tolist()
-    mean_score = float(np.mean(rm_scores)) if len(rm_scores) > 0 else 0.0
-
-    logger.info(f"Generation completed. Mean RM Score: {mean_score:.4f}")
-    print(f"\n=> Mean RM Score: {mean_score:.4f}\n")
-
-    # 7. Optionally persist a machine-readable result file (used by eval_checkpoints.py).
-    if args.result_path:
-        result_path = os.path.expanduser(args.result_path)
-        os.makedirs(os.path.dirname(result_path) or ".", exist_ok=True)
-        result = {
-            "model_path": os.path.expanduser(args.model_path),
-            "data_path": data_path,
-            "agent_config_path": os.path.expanduser(args.agent_config_path),
-            "n": config.actor_rollout_ref.rollout.n,
-            "num_samples": len(rm_scores),
-            "mean_rm_score": mean_score,
-            "rm_scores": rm_scores,
-        }
-        with open(result_path, "w") as f:
-            json.dump(result, f, indent=2)
-        logger.info(f"Wrote result file to: {result_path}")
-
-    return mean_score
+    async def run_single(self, sample: dict, agent_cfg: dict) -> dict:
+        async with self._semaphore:
+            task = sample["extra_info"]["tools_kwargs"]["task"]
+            instance_id = task["metadata"]["instance_id"]
+            try:
+                # Splice inference-time knobs onto the dataset's task dict, then let
+                # get_task parse it (the agent registry resolves the concrete config).
+                task["sandbox"]["provider"] = SANDBOX_PROVIDER
+                task["sandbox"]["runtime_timeout"] = RUNTIME_TIMEOUT
+                task["agent"] = agent_cfg
+                result = await get_task(task).run()
+                info = result.info or {}
+                resolved = bool(info.get("resolved", result.reward))
+                return {
+                    "instance_id": instance_id,
+                    "resolved": resolved,
+                    "eval_completed": bool(info.get("eval_completed", True)),
+                    "eval_execution_time": info.get("eval_execution_time"),
+                }
+            except Exception as e:
+                logger.error(f"error running {instance_id}: {type(e).__name__}: {e}")
+                return {
+                    "instance_id": instance_id,
+                    "resolved": False,
+                    "eval_completed": False,
+                    "eval_execution_time": None,
+                    "error": f"{type(e).__name__}: {e}",
+                }
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Uni-Agent Inference Runner")
+def _rule(text: str = "", width: int = 50, ch: str = "-") -> str:
+    """A centered-title horizontal rule."""
+    if not text:
+        return ch * width
+    pad = max(0, width - len(text) - 2)
+    return f"{ch * (pad // 2)} {text} {ch * (pad - pad // 2)}"
 
-    # Input / Output configs
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Parallel agent inference for SWE-bench.")
     parser.add_argument(
         "--data-path",
-        type=str,
-        default="~/data/swe_agent/swe_bench_verified.parquet",
-        help="Path to the input dataset (Parquet format).",
+        default=os.getenv("DATA_PATH", os.path.expanduser("~/data/swe_agent/swe_bench_verified.parquet")),
     )
-    parser.add_argument(
-        "--model-path",
-        "--model",
-        type=str,
-        default="~/models/Qwen3-Coder-30B-A3B-Instruct",
-        help="Path to the local model checkpoint.",
-    )
-    parser.add_argument(
-        "--agent-config-path",
-        type=str,
-        default="examples/agent_interaction/agent_config.yaml",
-        help="Path to the agent loop configuration YAML.",
-    )
-    parser.add_argument(
-        "--result-path",
-        type=str,
-        default=None,
-        help="Optional path to write a JSON result file (mean reward and per-rollout scores).",
-    )
+    parser.add_argument("--num-workers", type=int, default=NUM_WORKERS)
+    parser.add_argument("--limit", type=int, default=None, help="Only run the first N samples (smoke testing).")
+    parser.add_argument("--agent", default=os.getenv("AGENT", "code_act"), help="Registered agent name to run.")
 
-    # Inference parameters
-    parser.add_argument("--max-turns", type=int, default=100, help="Maximum number of interaction turns per episode.")
-    parser.add_argument("--prompt-length", type=int, default=4096, help="Maximum prompt length (tokens).")
-    parser.add_argument("--response-length", type=int, default=65536, help="Maximum response length (tokens).")
-    parser.add_argument("--temperature", type=float, default=0.8, help="Sampling temperature.")
-    parser.add_argument("--top-p", type=float, default=0.9, help="Sampling top-p (nucleus sampling).")
-    parser.add_argument("--n", type=int, default=1, help="Number of rollouts per prompt (N).")
-    parser.add_argument(
-        "--max-samples",
-        type=int,
-        default=-1,
-        help="Max number of samples to run (default -1). Use -1 for no limit (full dataset).",
-    )
+    # Policy endpoint: the server is started out-of-band; we only point at it.
+    parser.add_argument("--base-url", default=os.getenv("BASE_URL"), help="OpenAI-compatible endpoint (env BASE_URL).")
+    parser.add_argument("--api-key", default=os.getenv("API_KEY", "EMPTY"), help="Bearer key (env API_KEY).")
+    parser.add_argument("--model", default=os.getenv("MODEL", ""), help="Served model name (env MODEL).")
 
-    # Execution / Engine configs
-    parser.add_argument(
-        "--engine",
-        type=str,
-        default="vllm",
-        choices=["vllm", "sglang"],
-        help="Inference engine backend (e.g., vllm or sglang).",
-    )
-    parser.add_argument("--num-workers", type=int, default=8, help="Number of agent rollout workers.")
-    parser.add_argument("--nnodes", type=int, default=1, help="Number of nodes to run the job.")
-    parser.add_argument("--n-gpus-per-node", type=int, default=8, help="Number of GPUs per node.")
-    parser.add_argument(
-        "--tensor-parallel-size", "--tp", type=int, default=4, help="Tensor parallel size for the model."
-    )
-
+    # Sampling / rollout knobs.
+    parser.add_argument("--temperature", type=float, default=0.8)
+    parser.add_argument("--top-p", type=float, default=0.9)
+    parser.add_argument("--max-tokens", type=int, default=32768, help="Max tokens per model response.")
+    parser.add_argument("--max-steps", type=int, default=50, help="Max tool-calling turns per episode.")
+    parser.add_argument("--n", type=int, default=1, help="Rollouts per instance (pass rate averages over all).")
     args = parser.parse_args()
-    run_inference(args)
+
+    if not args.base_url:
+        logger.error("no policy endpoint: set BASE_URL (or --base-url) to the OpenAI-compatible server")
+        return
+
+    sampling_params: dict = {"temperature": args.temperature, "top_p": args.top_p, "max_tokens": args.max_tokens}
+    if args.model:
+        sampling_params["model"] = args.model  # forwarded to the OpenAI chat.completions call
+    agent_cfg: dict = {
+        "name": args.agent,
+        "model": {"base_url": args.base_url, "api_key": args.api_key, "sampling_params": sampling_params},
+    }
+    # max_steps is code_act's turn budget; include it only for agents that declare it.
+    if "max_steps" in get_agent_cls(args.agent).config_model.model_fields:
+        agent_cfg["max_steps"] = args.max_steps
+
+    dataset = load_dataset("parquet", data_files=args.data_path, split="train")
+    samples = dataset.to_list()
+    if args.limit is not None:
+        samples = samples[: args.limit]
+    n = max(1, args.n)
+    samples = [s for s in samples for _ in range(n)]  # fan out N rollouts per instance
+    if not samples:
+        logger.warning("no samples selected; exiting")
+        return
+
+    logger.info(f"loaded {len(samples)} rollouts ({n}x) from {args.data_path}")
+    logger.info(f"agent={args.agent} provider={SANDBOX_PROVIDER} endpoint={args.base_url} model={args.model or '<default>'}")
+    logger.info(f"workers={args.num_workers} concurrency={GLOBAL_CONCURRENCY} sampling={sampling_params}")
+
+    num_workers = min(args.num_workers, len(samples))
+    workers = [InferenceActor.remote() for _ in range(num_workers)]
+    # One future per rollout (round-robin across workers) so we can stream
+    # per-rollout progress; the actor semaphore still bounds real concurrency.
+    futures = [workers[i % num_workers].run_single.remote(s, agent_cfg) for i, s in enumerate(samples)]
+    fut_to_idx = {f: i for i, f in enumerate(futures)}
+
+    begin_time = time.time()
+    results: list = [None] * len(futures)
+    ok = wa = tle = 0
+    remaining = list(futures)
+    with tqdm(
+        total=len(futures),
+        desc="infer",
+        unit="roll",
+        dynamic_ncols=True,
+        bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]{postfix}",
+    ) as pbar:
+        while remaining:
+            done, remaining = ray.wait(remaining, num_returns=1)
+            for d in done:
+                res = ray.get(d)
+                results[fut_to_idx[d]] = res
+                if res.get("resolved"):
+                    ok += 1
+                elif res.get("eval_completed"):
+                    wa += 1
+                else:
+                    tle += 1
+                rate = ok / (pbar.n + 1) * 100
+                pbar.set_postfix_str(f"resolved={ok} WA={wa} TLE={tle} | {rate:.0f}% pass")
+                pbar.update(1)
+    wall = time.time() - begin_time
+
+    all_num = len(results)
+    success_num = sum(1 for r in results if r.get("resolved"))
+    fail_wa_num = sum(1 for r in results if not r.get("resolved") and r.get("eval_completed"))
+    fail_tle_num = sum(1 for r in results if not r.get("resolved") and not r.get("eval_completed"))
+
+    fail_wa_names = sorted({r["instance_id"] for r in results if not r.get("resolved") and r.get("eval_completed")})
+    fail_tle_names = sorted({r["instance_id"] for r in results if not r.get("resolved") and not r.get("eval_completed")})
+
+    exec_times = [r["eval_execution_time"] for r in results if r.get("eval_execution_time") is not None]
+    avg_exec_time = sum(exec_times) / len(exec_times) if exec_times else 0.0
+    pass_rate = success_num / all_num * 100 if all_num else 0.0
+
+    summary = "\n".join(
+        [
+            "",
+            _rule("inference summary"),
+            f"  resolved    {success_num:>4}   ({pass_rate:.1f}%)",
+            f"  wrong-ans   {fail_wa_num:>4}",
+            f"  timeout/err {fail_tle_num:>4}",
+            f"  total       {all_num:>4}",
+            _rule(f"avg {avg_exec_time:.1f}s | wall {wall:.1f}s | n={len(exec_times)}"),
+            "",
+        ]
+    )
+    print(summary)
+
+    logger.info(f"fail_wa instance names: {fail_wa_names}")
+    logger.info(f"fail_tle instance names: {fail_tle_names}")
+
+    errored = [(r["instance_id"], r["error"]) for r in results if r.get("error")]
+    if errored:
+        logger.warning(f"{len(errored)} rollouts raised exceptions (showing up to 10):")
+        for name, err in errored[:10]:
+            logger.warning(f"  {name}: {err}")
 
 
 if __name__ == "__main__":

@@ -38,9 +38,10 @@ from __future__ import annotations
 
 import dataclasses
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, ClassVar
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny, field_validator
 
 from ..agents import AgentConfig
 from ..sandbox import SandboxConfig
@@ -55,17 +56,42 @@ class TaskConfig(BaseModel):
 
     The model the agent talks to is *not* here -- it lives on :attr:`agent`'s
     :attr:`~uni_agent.agents.AgentConfig.model`.
+
+    :attr:`agent` is polymorphic: it is typed as the base
+    :class:`~uni_agent.agents.AgentConfig` but also accepts a ``{"name", ...}``
+    mapping, which :meth:`_resolve_agent` parses into the concrete subclass
+    registered under that name (so subclass fields like ``max_steps`` are kept
+    instead of rejected by the base's ``extra="forbid"``). ``SerializeAsAny`` keeps
+    those subclass fields on ``model_dump`` too, so a dict round-trip is lossless.
     """
 
     name: str = Field(default="", description="Registered task name (key in TASK_REGISTRY).")
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig, description="Execution sandbox.")
-    agent: AgentConfig = Field(
+    agent: SerializeAsAny[AgentConfig] = Field(
         default_factory=AgentConfig,
-        description="Agent that solves the task (carries its own model endpoint); a concrete AgentConfig subclass.",
+        description="A concrete AgentConfig subclass, or a {name, ...} mapping resolved via the agent registry.",
     )
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     model_config = ConfigDict(extra="forbid", protected_namespaces=())
+
+    @field_validator("agent", mode="before")
+    @classmethod
+    def _resolve_agent(cls, v: Any) -> Any:
+        """Parse an agent mapping into its concrete AgentConfig subclass.
+
+        The field is typed as the base AgentConfig (``extra="forbid"``), so a plain
+        dict would validate against the base and reject subclass fields. Dispatch on
+        ``name`` via the agent registry instead (mirrors get_task / get_tool).
+        """
+        if isinstance(v, Mapping):
+            from ..agents import get_agent_cls
+
+            name = v.get("name")
+            if not name:
+                raise ValueError("task 'agent' config needs a 'name'")
+            return get_agent_cls(name).config_model(**v)
+        return v
 
 
 @dataclasses.dataclass
