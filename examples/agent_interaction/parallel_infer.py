@@ -121,7 +121,9 @@ def main() -> None:
         return
 
     logger.info(f"loaded {len(samples)} rollouts ({n}x) from {args.data_path}")
-    logger.info(f"agent={args.agent} provider={SANDBOX_PROVIDER} endpoint={args.base_url} model={args.model or '<default>'}")
+    logger.info(
+        f"agent={args.agent} provider={SANDBOX_PROVIDER} endpoint={args.base_url} model={args.model or '<default>'}"
+    )
     logger.info(f"workers={args.num_workers} concurrency={GLOBAL_CONCURRENCY} sampling={sampling_params}")
 
     num_workers = min(args.num_workers, len(samples))
@@ -164,7 +166,9 @@ def main() -> None:
     fail_tle_num = sum(1 for r in results if not r.get("resolved") and not r.get("eval_completed"))
 
     fail_wa_names = sorted({r["instance_id"] for r in results if not r.get("resolved") and r.get("eval_completed")})
-    fail_tle_names = sorted({r["instance_id"] for r in results if not r.get("resolved") and not r.get("eval_completed")})
+    fail_tle_names = sorted(
+        {r["instance_id"] for r in results if not r.get("resolved") and not r.get("eval_completed")}
+    )
 
     exec_times = [r["eval_execution_time"] for r in results if r.get("eval_execution_time") is not None]
     avg_exec_time = sum(exec_times) / len(exec_times) if exec_times else 0.0
