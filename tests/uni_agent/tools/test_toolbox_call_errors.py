@@ -124,7 +124,9 @@ def test_to_observation_clips_over_max_length():
     assert clipped.startswith("Observation:\n" + "x" * 10)
     assert "<response clipped>" in clipped
     assert "40" in clipped  # the elided-character count is reported
-    assert ToolResult(text=text).to_observation(max_length=1000) == f"Observation:\n{text}"  # under cap -> verbatim body
+    assert (
+        ToolResult(text=text).to_observation(max_length=1000) == f"Observation:\n{text}"
+    )  # under cap -> verbatim body
 
 
 if __name__ == "__main__":
