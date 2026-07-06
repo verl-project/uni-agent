@@ -8,6 +8,16 @@ Configuration (environment variables):
   OPENCLAW_ENDPOINT_MODE  "gateway" (default) or "openai"
   OPENCLAW_AGENT_MODEL    model name sent to the agent endpoint (default: default)
   OPENCLAW_WORKSPACE      workspace path (default: ~/.openclaw/workspace)
+
+  Sampling:
+  OPENCLAW_DRIVER_TEMPERATURE         (default: 0.7)
+  OPENCLAW_DRIVER_TOP_P               (default: 0.8)
+  OPENCLAW_DRIVER_MAX_TOKENS          (default: 2048)
+  OPENCLAW_DRIVER_REPETITION_PENALTY  (default: 1.1)
+  OPENCLAW_AGENT_TEMPERATURE          (default: 0.7)
+  OPENCLAW_AGENT_TOP_P                (default: 0.8)
+  OPENCLAW_AGENT_MAX_TOKENS           (default: 4096)
+  OPENCLAW_AGENT_REPETITION_PENALTY   (default: 1.1)
 """
 
 from __future__ import annotations
@@ -23,6 +33,12 @@ import requests
 
 DEFAULT_DRIVER_HISTORY_MAX_CHARS = 20000
 DEFAULT_AGENT_REPLY_MAX_CHARS = 12000
+
+DEFAULT_TEMPERATURE = 0.7
+DEFAULT_TOP_P = 0.8
+DEFAULT_DRIVER_MAX_TOKENS = 2048
+DEFAULT_AGENT_MAX_TOKENS = 4096
+DEFAULT_REPETITION_PENALTY = 1.1
 
 
 def strip_thinking(text: str) -> str:
@@ -47,6 +63,37 @@ def get_int_env(name: str, default: int) -> int:
     except ValueError:
         print(f"Warning: ignoring invalid integer env {name}={val!r}; using {default}")
         return default
+
+
+def get_float_env(name: str, default: float) -> float:
+    val = os.environ.get(name, "").strip()
+    if not val:
+        return default
+    try:
+        return float(val)
+    except ValueError:
+        print(f"Warning: ignoring invalid float env {name}={val!r}; using {default}")
+        return default
+
+
+def get_driver_sampling() -> dict:
+    """Sampling params for the role-playing driver LLM (env-overridable)."""
+    return {
+        "temperature": get_float_env("OPENCLAW_DRIVER_TEMPERATURE", DEFAULT_TEMPERATURE),
+        "top_p": get_float_env("OPENCLAW_DRIVER_TOP_P", DEFAULT_TOP_P),
+        "max_tokens": get_int_env("OPENCLAW_DRIVER_MAX_TOKENS", DEFAULT_DRIVER_MAX_TOKENS),
+        "repetition_penalty": get_float_env("OPENCLAW_DRIVER_REPETITION_PENALTY", DEFAULT_REPETITION_PENALTY),
+    }
+
+
+def get_agent_sampling() -> dict:
+    """Sampling params for the agent under test (env-overridable)."""
+    return {
+        "temperature": get_float_env("OPENCLAW_AGENT_TEMPERATURE", DEFAULT_TEMPERATURE),
+        "top_p": get_float_env("OPENCLAW_AGENT_TOP_P", DEFAULT_TOP_P),
+        "max_tokens": get_int_env("OPENCLAW_AGENT_MAX_TOKENS", DEFAULT_AGENT_MAX_TOKENS),
+        "repetition_penalty": get_float_env("OPENCLAW_AGENT_REPETITION_PENALTY", DEFAULT_REPETITION_PENALTY),
+    }
 
 
 def truncate_text_middle(text: str, max_chars: int) -> str:
@@ -196,6 +243,7 @@ class AgentEndpoint:
             "stream": False,
             "user": session_id,
             "messages": [{"role": "user", "content": user_message}],
+            **get_agent_sampling(),
         }
         out = self._post(payload, max_retries)
         return out["choices"][0]["message"]["content"]
@@ -207,6 +255,7 @@ class AgentEndpoint:
             "model": self.model,
             "stream": False,
             "messages": list(history),
+            **get_agent_sampling(),
         }
         out = self._post(payload, max_retries)
         reply = out["choices"][0]["message"]["content"]
@@ -242,9 +291,17 @@ def generate_driver_message(
     """Have the role-playing driver LLM decide what to say next."""
     max_chars = get_int_env("OPENCLAW_DRIVER_HISTORY_MAX_CHARS", DEFAULT_DRIVER_HISTORY_MAX_CHARS)
     messages = build_driver_messages(system_prompt, conversation_history, max_chars)
+    sampling = get_driver_sampling()
+    # repetition_penalty is a vLLM extension, not a standard OpenAI param.
+    repetition_penalty = sampling.pop("repetition_penalty")
     for attempt in range(max_retries + 1):
         try:
-            resp = client.chat.completions.create(model=model, messages=messages)
+            resp = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                extra_body={"repetition_penalty": repetition_penalty},
+                **sampling,
+            )
             return strip_thinking(resp.choices[0].message.content)
         except Exception as e:
             if attempt < max_retries:
