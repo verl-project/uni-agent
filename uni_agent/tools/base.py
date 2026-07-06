@@ -44,22 +44,16 @@ class ToolResult:
         return self.text if self.text is not None else ""
 
     def to_observation(self, max_length: int = 100_000) -> str:
-        """Render the next-turn content the policy sees (text only; ``status`` is
-        internal bookkeeping). Output over ``max_length`` chars is clipped with a
-        short note nudging the model to narrow its next call -- the single, shared
-        cap so no one noisy call blows up the context.
-        """
         text = self.text or ""
         if len(text) > max_length:
             elided = len(text) - max_length
-            return (
+            text = (
                 f"{text[:max_length]}\n<response clipped>\n"
                 f"<NOTE>The observation exceeded {max_length} characters, so {elided} were elided. "
                 "Retry with something that yields less output (e.g. head/tail/grep, or redirect to "
                 "a file); do not use interactive pagers.</NOTE>"
             )
-        observation = f"Observation: {text}"
-        return observation
+        return f"Observation:\n{text}"
 
 
 class ToolError(Exception):

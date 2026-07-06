@@ -113,18 +113,18 @@ def test_call_status(name, raw, expected_status):
 # --------------------------- to_observation() ---------------------------
 
 
-def test_to_observation_returns_the_plain_text():
-    assert ToolResult(text="hello").to_observation() == "hello"
-    assert ToolResult().to_observation() == ""  # no text channel -> empty string
+def test_to_observation_prepends_the_label():
+    assert ToolResult(text="hello").to_observation() == "Observation:\nhello"
+    assert ToolResult().to_observation() == "Observation:\n"  # no text channel -> just the label
 
 
 def test_to_observation_clips_over_max_length():
     text = "x" * 50
     clipped = ToolResult(text=text).to_observation(max_length=10)
-    assert clipped.startswith("x" * 10)
+    assert clipped.startswith("Observation:\n" + "x" * 10)
     assert "<response clipped>" in clipped
     assert "40" in clipped  # the elided-character count is reported
-    assert ToolResult(text=text).to_observation(max_length=1000) == text  # under the cap -> verbatim
+    assert ToolResult(text=text).to_observation(max_length=1000) == f"Observation:\n{text}"  # under cap -> verbatim body
 
 
 if __name__ == "__main__":

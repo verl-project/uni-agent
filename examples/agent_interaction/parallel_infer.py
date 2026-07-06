@@ -115,12 +115,7 @@ def _deep_merge(base: dict, overrides: dict) -> dict:
 
 
 def _load_task_yaml(path: str) -> dict:
-    """Load a YAML task-config file into a dict.
-
-    Accepts either a bare mapping or a one-item ``- name: ...`` list wrapping it
-    (the list form is the convention used elsewhere in the repo, e.g. the agent-loop
-    configs loaded via ``yaml.safe_load(...)[0]``).
-    """
+    """Load a YAML task-config file into a dict."""
     raw = yaml.safe_load(Path(path).expanduser().read_text())
     if isinstance(raw, list):
         if not raw or not isinstance(raw[0], dict):
@@ -132,17 +127,7 @@ def _load_task_yaml(path: str) -> dict:
 
 
 def build_task_overrides(args: argparse.Namespace) -> dict:
-    """Build the task-config dict deep-merged onto every sample's task.
-
-    Two sources, one shape:
-
-    * ``--task-config FILE`` -- a (partial) task config YAML; its ``agent`` section
-      supersedes the per-flag knobs.
-    * otherwise -- the per-flag agent knobs wrapped as ``{"agent": {...}}``.
-
-    Either way, the endpoint (``--base-url`` / ``--model`` / ``--api-key``, env
-    ``BASE_URL`` / ``MODEL`` / ``API_KEY``) is then layered onto ``agent.model``.
-    """
+    """Build the task-config dict deep-merged onto every sample's task."""
     if args.task_config:
         overrides = _load_task_yaml(args.task_config)
     else:
@@ -246,7 +231,7 @@ def main() -> None:
     )
 
     num_workers = min(NUM_WORKERS, len(samples))
-    workers = [ray.remote(InferenceActor)() for _ in range(num_workers)]
+    workers = [ray.remote(InferenceActor).remote() for _ in range(num_workers)]
     futures = [workers[i % num_workers].run_single.remote(s, task_overrides) for i, s in enumerate(samples)]
 
     fut_to_idx = {f: i for i, f in enumerate(futures)}
