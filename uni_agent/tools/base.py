@@ -22,9 +22,6 @@ if TYPE_CHECKING:
     from ..sandbox import SandboxBackend
 
 
-#: How one tool call turned out, for the loop's counters. ``"ok"``, or a way the
-#: call failed without aborting the episode: a malformed call (``"format_error"``),
-#: a tool-raised failure (``"error"``), or a timeout (``"timeout"``).
 ToolStatus = Literal["ok", "format_error", "error", "timeout"]
 
 
