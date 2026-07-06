@@ -76,7 +76,6 @@ class CodeActAgent(Agent):
         )
 
         transcript: list[dict[str, Any]] = list(messages)
-        logger.info("Initial prompt:")
         for message in messages:
             logger.info(f"{str(message.get('role', '')).upper()} PROMPT:\n{message.get('content', '')}")
         trajectory_info: dict[str, Any] = {

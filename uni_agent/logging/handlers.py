@@ -10,9 +10,25 @@ import threading
 from pathlib import Path
 from typing import TextIO
 
-from .context import _DATE_FORMAT, _FLUSH_EACH_LINE, _LOG_FORMAT, _debug_enabled, resolve_run_id
+from .context import _DATE_FORMAT, _FLUSH_EACH_LINE, _LOG_FORMAT, _NAME_WIDTH, _debug_enabled, resolve_run_id
 
-_formatter = logging.Formatter(_LOG_FORMAT, datefmt=_DATE_FORMAT)
+
+class _AlignedFormatter(logging.Formatter):
+    """Compact the logger name into a fixed-width ``shortname`` so the ``|`` columns line
+    up: drop the ``uni_agent.`` prefix, and if still too long keep the (informative) tail
+    behind an ellipsis."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        name = record.name
+        if name.startswith("uni_agent."):
+            name = name[len("uni_agent.") :]
+        if len(name) > _NAME_WIDTH:
+            name = "…" + name[-(_NAME_WIDTH - 1) :]
+        record.shortname = name
+        return super().format(record)
+
+
+_formatter = _AlignedFormatter(_LOG_FORMAT, datefmt=_DATE_FORMAT)
 
 
 class _RunFileDispatch(logging.Handler):

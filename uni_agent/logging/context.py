@@ -14,7 +14,10 @@ import os
 # filter to route/gate records.
 _current_run_id: contextvars.ContextVar[str | None] = contextvars.ContextVar("uni_agent_run_id", default=None)
 
-_LOG_FORMAT = "%(asctime)s | %(name)-12s | %(levelname)-8s | %(message)s"
+# Fixed-width logger-name column so the ``|`` separators line up; _AlignedFormatter
+# trims each name to _NAME_WIDTH and fills ``shortname``.
+_NAME_WIDTH = 22
+_LOG_FORMAT = f"%(asctime)s | %(shortname)-{_NAME_WIDTH}s | %(levelname)-8s | %(message)s"
 _DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 
