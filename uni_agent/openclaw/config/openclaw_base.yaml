@@ -1,0 +1,75 @@
+# Shared base config for OpenClaw fully_async training.
+
+defaults:
+  - ppo_trainer
+  - _self_
+
+ray_kwargs:
+  ray_init:
+    runtime_env:
+      worker_process_setup_hook: uni_agent.openclaw.losses.ensure_registered
+
+async_training:
+  staleness_threshold: 0
+  trigger_parameter_sync_step: 1
+  require_batches: 1
+  partial_rollout: False
+  use_trainer_do_validate: False
+
+rollout:
+  nnodes: 1
+  n_gpus_per_node: 1
+  n: 1
+  total_rollout_steps: 1000
+
+data:
+  train_files: null
+  val_files: null
+  train_batch_size: 0
+  gen_batch_size: 1
+  return_raw_chat: True
+
+actor_rollout_ref:
+  hybrid_engine: False
+
+  model:
+    use_remove_padding: True
+
+  rollout:
+    mode: async
+    name: vllm
+    calculate_log_probs: True
+    multi_turn:
+      enable: False
+    checkpoint_engine:
+      backend: nccl
+
+  actor:
+    use_rollout_log_probs: True
+    ppo_mini_batch_size: 8
+
+algorithm:
+  adv_estimator: grpo
+  use_kl_in_reward: False
+  rollout_correction:
+    bypass_mode: True
+
+reward:
+  reward_model:
+    enable: True
+    enable_resource_pool: True
+    n_gpus_per_node: 1
+    nnodes: 1
+    rollout:
+      name: vllm
+      tensor_model_parallel_size: 1
+
+trainer:
+  nnodes: 1
+  n_gpus_per_node: 2
+  total_epochs: 1
+  val_before_train: False
+  test_freq: 1000
+  save_freq: -1
+  critic_warmup: 0
+

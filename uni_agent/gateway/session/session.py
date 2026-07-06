@@ -11,7 +11,7 @@ from typing import Any
 from fastapi import HTTPException
 
 from uni_agent.gateway.session.codec import MalformedRequestError, MessageCodec
-from uni_agent.gateway.session.types import SessionHandle, Trajectory
+from uni_agent.gateway.session.types import SessionHandle, Trajectory, TurnCapture
 
 
 class SessionPhase(str, Enum):
@@ -138,6 +138,9 @@ class GatewaySession:
         # Serializes in-flight generation against the single-active state model.
         # This is an implementation detail, not GatewaySession's public contract.
         self.generation_lock = asyncio.Lock()
+        self._turn_captures: list[TurnCapture] = []
+        self._turn_capture_seq = 0
+        self._turn_index = 0
 
     async def run_generation(self, payload: dict[str, Any], backend) -> GenerationOutcome:
         """Run one chat-completion request and return its business outcome.
@@ -192,8 +195,9 @@ class GatewaySession:
             response_ids = list(output.token_ids)
             encoded.buffer.response_ids.extend(response_ids)
             encoded.buffer.response_mask.extend([1] * len(response_ids))
-            if output.log_probs is not None:
-                encoded.buffer.response_logprobs.extend(list(output.log_probs))
+            response_logprobs = list(output.log_probs) if output.log_probs is not None else [0.0] * len(response_ids)
+            if response_logprobs:
+                encoded.buffer.response_logprobs.extend(response_logprobs)
 
             assistant_msg, finish_reason = await self._codec.decode_response(
                 response_ids,
@@ -214,6 +218,23 @@ class GatewaySession:
                 self.image_data = list(encoded.image_data) if encoded.image_data is not None else None
                 self.video_data = list(encoded.video_data) if encoded.video_data is not None else None
                 self.active_tool_schemas = encoded.tools
+                should_capture_turn = bool(payload.get("openclaw_capture_turn", True))
+                if should_capture_turn and response_ids:
+                    self._turn_capture_seq += 1
+                    self._turn_captures.append(
+                        TurnCapture(
+                            turn_index=self._turn_index,
+                            seq=self._turn_capture_seq,
+                            prompt_ids=list(encoded.context_ids),
+                            response_ids=list(response_ids),
+                            response_logprobs=list(response_logprobs),
+                            assistant_msg=dict(assistant_msg),
+                            finish_reason=finish_reason,
+                            messages=[dict(m) for m in encoded.messages],
+                            tools=[dict(t) for t in encoded.tools] if encoded.tools else None,
+                        )
+                    )
+                    self._turn_index += 1
                 self._touch()
                 return GenerationOutcome(
                     assistant_msg=assistant_msg,
@@ -424,3 +445,9 @@ class GatewaySession:
 
     def _touch(self) -> None:
         self.updated_at = time.time()
+
+    def pop_turn_captures(self) -> list[TurnCapture]:
+        """Pop and return all queued turn captures for this session."""
+        captures = self._turn_captures
+        self._turn_captures = []
+        return captures

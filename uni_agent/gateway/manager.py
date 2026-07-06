@@ -12,6 +12,7 @@ import asyncio
 import ray
 
 from uni_agent.gateway.config import GatewayActorConfig
+from uni_agent.gateway.session import TurnCapture
 from verl.workers.rollout.llm_server import LLMServerClient
 
 
@@ -114,3 +115,13 @@ class GatewayManager:
         self.gateway_count = 0
         self.active_sessions_per_gateway = []
         self._session_to_gateway_index = {}
+
+    async def chat_completions(self, session_id: str, payload: dict) -> dict:
+        """Run one chat completion on the owning gateway actor."""
+        gateway, _ = self._get_gateway(session_id)
+        return await gateway.chat_completions.remote(session_id=session_id, payload=payload)
+
+    async def pop_turn_captures(self, session_id: str) -> list[TurnCapture]:
+        """Pop queued turn captures from the owning gateway actor."""
+        gateway, _ = self._get_gateway(session_id)
+        return await gateway.pop_turn_captures.remote(session_id=session_id)

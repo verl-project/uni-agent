@@ -20,6 +20,7 @@ from uni_agent.gateway.session import (
     MessageCodec,
     SessionHandle,
     Trajectory,
+    TurnCapture,
 )
 from verl.workers.rollout.utils import run_uvicorn
 
@@ -85,7 +86,8 @@ class _GatewayActor:
         @self._app.post("/sessions/{session_id}/v1/chat/completions")
         async def _chat_completions(session_id: str, request: Request):
             payload = await request.json()
-            return await self._handle_chat_completions(session_id=session_id, payload=payload)
+            response = await self.chat_completions(session_id=session_id, payload=payload)
+            return JSONResponse(response)
 
         @self._app.post("/sessions/{session_id}/reward_info")
         async def _reward_info(session_id: str, request: Request):
@@ -109,12 +111,12 @@ class _GatewayActor:
             raise KeyError(f"Unknown session_id: {session_id}")
         return session
 
-    async def _handle_chat_completions(
+    async def chat_completions(
         self,
         session_id: str,
         payload: ChatCompletionRequest,
-    ) -> JSONResponse:
-        """Validate a chat-completion payload and serialize the session outcome."""
+    ) -> ChatCompletionResponse:
+        """Validate a chat-completion payload and return OpenAI-compatible response."""
         session = self._sessions.get(session_id)
         if session is None:
             raise HTTPException(status_code=404, detail=f"Unknown session_id: {session_id}")
@@ -160,6 +162,15 @@ class _GatewayActor:
                 "total_tokens": outcome.prompt_tokens + outcome.completion_tokens,
             },
         }
+        return response
+
+    async def _handle_chat_completions(
+        self,
+        session_id: str,
+        payload: ChatCompletionRequest,
+    ) -> JSONResponse:
+        """Backward-compatible wrapper returning JSONResponse."""
+        response = await self.chat_completions(session_id=session_id, payload=payload)
         return JSONResponse(response)
 
     async def start(self) -> None:
@@ -225,6 +236,11 @@ class _GatewayActor:
         """Return a snapshot of a live session's state."""
         session = self._get_session(session_id)
         return session.snapshot_state()
+
+    async def pop_turn_captures(self, session_id: str) -> list[TurnCapture]:
+        """Pop queued turn captures for the given session."""
+        session = self._get_session(session_id)
+        return session.pop_turn_captures()
 
 
 GatewayActor = ray.remote(_GatewayActor)

@@ -60,3 +60,30 @@ class Trajectory:
     routed_experts: torch.Tensor | np.ndarray | None = None
     multi_modal_data: dict[str, Any] | None = None
     extra_fields: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class TurnCapture:
+    """One generated turn exported from a live gateway session.
+
+    Attributes:
+        turn_index: Monotonic turn index within the session.
+        seq: Monotonic event sequence id, used for exactly-once popping.
+        prompt_ids: Context token IDs sent to the backend for this generation.
+        response_ids: Generated token IDs for this turn.
+        response_logprobs: Log probabilities aligned with ``response_ids``.
+        assistant_msg: Decoded assistant message payload.
+        finish_reason: OpenAI-compatible finish reason for this turn.
+        messages: Normalized request messages used to build ``prompt_ids``.
+        tools: Tool schemas bound to this request, when provided.
+    """
+
+    turn_index: int
+    seq: int
+    prompt_ids: list[int]
+    response_ids: list[int]
+    response_logprobs: list[float]
+    assistant_msg: dict[str, Any]
+    finish_reason: str
+    messages: list[dict[str, Any]]
+    tools: list[dict[str, Any]] | None = None
