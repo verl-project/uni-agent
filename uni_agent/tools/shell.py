@@ -1,25 +1,16 @@
-"""``shell`` tool + the stateful shell channel it owns, in one place.
+"""``shell`` tool + the stateful shell channel it owns.
 
-The agent-facing unit is :class:`ShellTool` (registry key ``stateful_shell``,
-surfaced to the model as ``shell``): it holds a live shell channel -- a detached
-tmux shell -- opened lazily on first use and torn down in :meth:`ShellTool.close`.
-Commands run in that one shell, so cwd / exports / background jobs persist across
-calls (a ``cd`` sticks). The agent runs on the host; only the command text crosses
-into the container.
+The agent-facing unit is :class:`ShellTool` (registry key ``stateful_shell``, seen
+by the model as ``shell``): it holds a live :class:`ShellChannel` -- a detached tmux
+shell opened lazily and closed in :meth:`ShellTool.close` -- so cwd / exports /
+background jobs persist across calls. Only the command text crosses into the
+container; the agent stays on the host.
 
-The channel itself (:class:`ShellChannel`) is an implementation detail of the
-tool, not an agent-facing layer:
-
-* **File-capture protocol.** Every command redirects its ``stdout`` / ``stderr``
-  to its own files and records an exit code; the shell is held by
-  ``tmux new-session -d`` so the same pane can be screen-scraped (``capture-pane``),
-  keyed (``send-keys``) and ``resize``-d.
-* **Driven through one-shot exec.** Every tmux verb is issued through the backend's
-  exec primitive (:class:`SandboxBackend`), so nothing resident is installed in the
-  image beyond ``tmux``. A ``tmux wait -S`` completion signal, consumed by a
-  blocking ``timeout … tmux wait``, wakes the waiter the instant a command
-  finishes; a ``tmux -V`` preflight and a ``--`` end-of-options guard on
-  ``send-keys`` keep commands starting with ``-`` literal.
+:class:`ShellChannel` is a tool-private detail: it drives tmux entirely through the
+backend's one-shot :meth:`SandboxBackend.exec` (nothing resident installed beyond
+``tmux``). Each command redirects stdout/stderr to files and writes its exit code
+last as an unambiguous completion marker, with a ``tmux wait -S`` signal to wake the
+waiter the instant it finishes.
 """
 
 from __future__ import annotations
@@ -34,7 +25,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from ..sandbox import SandboxBackend
-from .base import Observation, Tool, ToolError, register_tool
+from .base import Tool, ToolError, ToolResult, register_tool
 
 
 @dataclasses.dataclass
@@ -56,17 +47,13 @@ class CommandResult:
 
 
 def _capture_wrapper(command: str, out: str, err: str, rc: str, *, signal: str | None) -> str:
-    """Build the shell line that runs ``command`` under the file-capture protocol.
+    """Build the shell line running ``command`` under the file-capture protocol.
 
-    The command body is base64-encoded so arbitrary quoting / newlines survive
-    being typed into a live shell, then ``eval``-ed *in that same shell* so cwd
-    and exported variables persist across calls (this statefulness is the whole
-    point of the channel). ``stdout`` / ``stderr`` are redirected to their own
-    files and the exit code is written last and atomically (``.part`` + ``mv``)
-    so its presence is an unambiguous completion marker for :meth:`poll`.
-
-    ``signal`` (tmux only) appends a ``tmux wait -S`` so a blocking waiter can be
-    woken the instant the command finishes.
+    The body is base64-encoded (so arbitrary quoting/newlines survive being typed
+    into the shell) then ``eval``-ed *in that same shell* so cwd/exports persist.
+    stdout/stderr go to their own files; the exit code is written last and
+    atomically (``.part`` + ``mv``) as an unambiguous completion marker for
+    :meth:`poll`. ``signal`` (tmux) appends ``tmux wait -S`` to wake a blocking waiter.
     """
     b64 = base64.b64encode(command.encode()).decode("ascii")
     line = (
@@ -80,11 +67,12 @@ def _capture_wrapper(command: str, out: str, err: str, rc: str, *, signal: str |
     return line
 
 
-# Best-effort tmux install for ShellChannel.start() when the image lacks it: pick
-# the first package manager on PATH and install non-interactively, all in a single
-# exec to keep round-trips low.
+# Best-effort tmux install when the image lacks it: first package manager on PATH,
+# non-interactive, one exec. apt needs an index refresh first (minimal images ship
+# an empty lists dir); `|| true` tolerates a flaky mirror if tmux still resolves.
 _INSTALL_TMUX = r"""
 if command -v apt-get >/dev/null 2>&1; then
+  DEBIAN_FRONTEND=noninteractive apt-get update -qq || true
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq tmux
 elif command -v dnf >/dev/null 2>&1; then dnf install -y tmux
 elif command -v yum >/dev/null 2>&1; then yum install -y tmux
@@ -101,11 +89,9 @@ fi
 class ShellChannel:
     """Stateful shell held by a detached ``tmux`` session, driven via exec.
 
-    The persistent handle the shell tool owns -- not an agent-facing layer. Works
-    on any provider that offers a one-shot exec (Modal, docker, ...). Every tmux
-    verb (``new-session`` / ``send-keys`` / ``capture-pane`` / ``resize-window`` /
-    ``wait``) is issued through :meth:`SandboxBackend.exec`, so nothing resident
-    is installed into the task image beyond ``tmux`` itself.
+    The persistent handle the shell tool owns. Every tmux verb goes through
+    :meth:`SandboxBackend.exec`, so it works on any provider with a one-shot exec
+    (Modal, docker, ...) and installs nothing resident beyond ``tmux``.
     """
 
     def __init__(
@@ -151,9 +137,8 @@ class ShellChannel:
                     f"{(res.stderr or '').strip()[:500]}"
                 )
         await self.backend.exec(["mkdir", "-p", self._dir])
-        # Launch the pane's shell under ``env K=V ... <shell>`` so the whole
-        # channel (and every command it spawns) inherits this channel's env,
-        # without echoing exports into the pane.
+        # Launch the shell under ``env K=V ... <shell>`` so the channel inherits its
+        # env without echoing exports into the pane.
         launch = [
             "env",
             *(f"{key}={value}" for key, value in self._env.items()),
@@ -179,13 +164,8 @@ class ShellChannel:
         await self.backend.exec(["tmux", "kill-session", "-t", self.session_id])
         await self.backend.exec(["rm", "-rf", self._dir])
 
-    async def observe(self) -> Observation:
-        text = await self.capture_pane()
-        return Observation(
-            text=text,
-            structured={"session_id": self.session_id, "last_command_id": self._counter},
-            meta={"transport": "tmux"},
-        )
+    async def observe(self) -> ToolResult:
+        return ToolResult(text=await self.capture_pane())
 
     # ----- shell actions -----
     async def start_command(self, command: str) -> int:
@@ -210,7 +190,7 @@ class ShellChannel:
         text = res.stdout.strip()
         return int(text) if text else None
 
-    async def run(self, command: str, *, timeout: float = 180.0) -> CommandResult:
+    async def run(self, command: str, *, timeout: float = 120.0) -> CommandResult:
         start = time.monotonic()
         cid = await self.start_command(command)
         out, err, rc = self._paths(cid)
@@ -228,10 +208,9 @@ class ShellChannel:
                 code = await self.poll(cid)
                 timed_out = code is None
                 break
-            # Event-driven wakeup: block on the command's tmux wait channel so we
-            # return the instant it signals. poll() above remains the source of
-            # truth, so a wait-signal lost to a race only costs one bounded slice
-            # instead of hanging.
+            # Event-driven wakeup: block on the command's tmux wait channel to
+            # return the instant it signals. poll() stays the source of truth, so a
+            # lost signal costs one bounded slice, not a hang.
             slice_s = max(0.1, min(2.0, timeout - elapsed))
             await self.backend.exec_shell(
                 f"timeout {slice_s} tmux wait {shlex.quote(chan)} 2>/dev/null || true",
@@ -284,26 +263,38 @@ class ShellChannel:
 # ===================== the agent-facing tool =====================
 
 DESCRIPTION = "Execute a bash command in the terminal."
-MAX_OUTPUT_LEN = 16000
-_CLIP = "\n<response clipped: output truncated>"
 
 
-def _truncate(text: str) -> str:
-    if len(text) <= MAX_OUTPUT_LEN:
-        return text
-    return text[:MAX_OUTPUT_LEN] + _CLIP
-
-
-def _format(stdout: str, stderr: str, exit_code: int | None, *, timed_out: bool = False) -> str:
+def _format(stdout: str, stderr: str, exit_code: int | None) -> str:
     out = (stdout or "").rstrip()
     err = (stderr or "").rstrip()
     header = f"[exit code: {exit_code if exit_code is not None else 'unknown'}]"
-    if timed_out:
-        header += " [timed out]"
     parts = [header, "[stdout]", out if out else "(empty)"]
     if err:
         parts += ["[stderr]", err]
-    return _truncate("\n".join(parts))
+    return "\n".join(parts)
+
+
+def _format_timeout(timeout: float, stdout: str, stderr: str) -> str:
+    """Observation for a command the channel had to interrupt (soft timeout).
+
+    Mirrors the training-time message: say what happened, steer toward a faster /
+    non-interactive command, and still surface partial output. The length cap is
+    applied centrally later by :meth:`ToolResult.to_observation`.
+    """
+    parts = [
+        f"The command was cancelled because it took more than {timeout:g} seconds. "
+        "Please try a different command that completes more quickly. A common cause "
+        "is a command that is interactive or waits for input -- this environment "
+        "cannot provide input, so such a command never completes."
+    ]
+    out = (stdout or "").rstrip()
+    err = (stderr or "").rstrip()
+    if out:
+        parts += ["[partial stdout]", out]
+    if err:
+        parts += ["[partial stderr]", err]
+    return "\n".join(parts)
 
 
 class ShellArguments(BaseModel):
@@ -354,21 +345,27 @@ class ShellTool(Tool):
             self._shell = shell
         return self._shell
 
-    async def run(self, args: dict[str, Any]) -> Observation:
+    async def start(self) -> None:
+        # Open the channel now so the one-time tmux install/session setup happens
+        # up front rather than on the first command.
+        await self._ensure_shell()
+
+    async def run(self, args: dict[str, Any], *, timeout: float | None = None) -> ToolResult:
         command = args.get("command")
         if not command or not str(command).strip():
             raise ToolError("Parameter `command` is required for shell.")
 
+        command_timeout = timeout if timeout is not None else self.config.command_timeout
         shell = await self._ensure_shell()
-        result = await shell.run(command, timeout=self.config.command_timeout)
-        return Observation(
-            text=_format(
-                result.stdout,
-                result.stderr,
-                result.exit_code,
-                timed_out=result.timed_out,
-            ),
-            structured={"exit_code": result.exit_code, "timed_out": result.timed_out},
+        result = await shell.run(command, timeout=command_timeout)
+        if result.timed_out:
+            return ToolResult(
+                text=_format_timeout(command_timeout, result.stdout, result.stderr),
+                status="timeout",
+            )
+        return ToolResult(
+            text=_format(result.stdout, result.stderr, result.exit_code),
+            status="ok",
         )
 
     async def close(self) -> None:

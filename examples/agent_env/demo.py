@@ -18,15 +18,14 @@ def banner(title: str) -> None:
 
 
 def _indent(text, prefix: str = "    | ") -> str:
-    # `text` may be an Observation; str() yields its text channel.
+    # `text` may be a ToolResult; str() yields its text channel.
     return "\n".join(prefix + line for line in str(text).splitlines()) + "\n"
 
 
 def build_sandbox_config() -> SandboxConfig:
     return SandboxConfig(
         provider=os.getenv("SANDBOX_PROVIDER", "modal"),
-        image=os.getenv("IMAGE", "enterprise-public-2-cn-beijing.cr.volces.com/vefaas-public/python:3.12"),
-        # image=os.getenv("IMAGE", "python:3.12"),
+        image=os.getenv("IMAGE", "python:3.12"),
         runtime_timeout=3600,
     )
 
@@ -58,6 +57,7 @@ async def main() -> None:
     sandbox = build_sandbox(sandbox_config)
     async with sandbox:
         toolbox = Toolbox.from_specs(tool_specs, sandbox=sandbox)
+        await toolbox.start()
         schemas = toolbox.schemas()
         print(f"  -> tool schemas  : {[s['function']['name'] for s in schemas]}")
 

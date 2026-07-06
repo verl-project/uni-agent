@@ -1,18 +1,10 @@
 """``str_replace_editor``: view / create / edit files over the sandbox data plane.
 
-A host-side file editor (view / create / str_replace / insert / undo_edit) driven
-entirely through the sandbox data plane:
-
-* File I/O goes through ``sandbox.read_file`` / ``sandbox.write_file`` instead of
-  the local filesystem, so the same tool drives any provider (local, Modal, ...).
-* **Undo history lives on the tool instance** (``self._history``), held by the
-  :class:`~uni_agent.tools.base.Toolbox` for the rollout -- there is no
-  ``/root/editor_state.json`` written into the container.
-
-The five commands and their messages are kept stable so the model sees consistent
-behaviour across rollouts. Optional ``filemap`` / window-expansion niceties are
-intentionally dropped to keep this layer dependency-free; because the tool runs in
-the harness they can be re-added later without touching the task image.
+A host-side file editor (view / create / str_replace / insert / undo_edit): all I/O
+goes through ``sandbox.read_file`` / ``sandbox.write_file`` (not the local FS), so it
+drives any provider, and undo history lives on the tool instance (``self._history``),
+not in the container. Command messages are kept stable so the model sees consistent
+behaviour across rollouts.
 """
 
 from __future__ import annotations
@@ -23,7 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 
-from .base import Observation, Tool, ToolError, register_tool
+from .base import Tool, ToolError, ToolResult, register_tool
 
 if TYPE_CHECKING:
     from ..sandbox import SandboxBackend
@@ -119,8 +111,9 @@ class EditFileTool(Tool):
         return data.decode("utf-8", errors="replace")
 
     # ----- dispatch -----
-    async def run(self, args: dict[str, Any]) -> Observation:
-        return Observation(text=await self._apply(args))
+    async def run(self, args: dict[str, Any], *, timeout: float | None = None) -> ToolResult:
+        # Edits are fast and local; `timeout` is accepted for interface parity, unused.
+        return ToolResult(text=await self._apply(args))
 
     async def _apply(self, args: dict[str, Any]) -> str:
         sandbox = self.sandbox

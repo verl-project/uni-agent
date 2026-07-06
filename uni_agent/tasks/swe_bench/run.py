@@ -23,20 +23,18 @@ class SWEBenchTask(Task):
 
     async def run(self) -> TaskResult:
         cfg: SWEBenchTaskConfig = self.config  # type: ignore[assignment]
-        sample = cfg.metadata  # the dataset sample now lives on the config
+        sample = cfg.metadata  # the dataset sample is carried on the task config
 
         async with self.build_sandbox() as sandbox:
-            # run gold patch or agent
             if cfg.run_gold_patch:
                 await sandbox.write_file("/tmp/gold_patch.patch", sample["patch"])
                 await sandbox.exec(["git", "apply", "--whitespace=fix", "/tmp/gold_patch.patch"], workdir="/testbed")
             else:
                 agent = self.build_agent()
-                messages = [{"role": "user", "content": sample.get("problem_statement", "")}]
+                messages = cfg.prompt
                 # The endpoint the agent calls lives on cfg.agent.model (the agent validates it).
                 await agent.run(sandbox=sandbox, messages=messages)
 
-            # compute reward
             from .reward import compute_reward
 
             result = await compute_reward(sample, sandbox)

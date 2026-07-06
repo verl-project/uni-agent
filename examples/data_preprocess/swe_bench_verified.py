@@ -122,23 +122,23 @@ def build_swe_bench_verified(max_instances: int | None = None):
             "FAIL_TO_PASS": example["FAIL_TO_PASS"],
             "PASS_TO_PASS": example["PASS_TO_PASS"],
         }
+        prompt = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": USER_PROMPT.format(problem_statement=example["problem_statement"])},
+        ]
 
-        task = {
+        task_config = {
             "name": "swe_bench",
             "sandbox": {"image": get_image_name(instance_id)},
+            "prompt": prompt,
             "metadata": metadata,
         }
 
         return {
             "data_source": "princeton-nlp/SWE-bench_Verified",
-            "prompt": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": USER_PROMPT.format(problem_statement=example["problem_statement"])},
-            ],
-            "agent_name": "swe_agent",
+            "prompt": prompt,
             "extra_info": {
-                "instance_id": instance_id,
-                "tools_kwargs": {"task": task},
+                "tools_kwargs": {"task": task_config},
             },
         }
 

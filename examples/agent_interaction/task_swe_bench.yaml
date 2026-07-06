@@ -1,0 +1,19 @@
+# Task config, deep-merged onto each dataset sample's task (overrides win; the
+# sample's image + metadata survive). Only the endpoint (base_url/model/api_key) is
+# layered on at runtime, so set the sandbox provider here.
+- name: swe_bench
+  sandbox:
+    provider: modal
+  agent:
+    name: code_act
+    max_steps: 100
+    tools:
+      - name: stateful_shell
+        command_timeout: 120
+      - name: str_replace_editor
+      - name: submit
+    model:
+      temperature: 0.8
+      top_p: 0.9
+      top_k: -1
+      max_total_tokens: 65536

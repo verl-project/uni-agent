@@ -1,22 +1,4 @@
-"""Agent layer: *who* solves a task and *how it is launched*.
-
-An :class:`Agent` turns an :class:`AgentConfig` into a runnable solver over a live
-sandbox, talking to the model at its own :attr:`AgentConfig.model` endpoint (the
-runner fills it in; in RL it points at the current policy server). Agents differ
-in where the loop runs and whether we control it:
-
-* **white-box** (e.g. ``code_act``) -- our framework loop runs host-side, drives
-  host-side tools, and calls the policy itself.
-* **black-box** (e.g. ``claude_code``) -- an opaque solver launched *inside* the
-  sandbox with its own loop + tools, pointed at the *same* endpoint so its model
-  calls still become trainable trajectories.
-
-Each agent lives under ``agents/<name>/`` and registers itself
-(:func:`~uni_agent.agents.registry.register_agent`); a task builds one by name
-(:func:`~uni_agent.agents.registry.build_agent`). The agent owns neither the
-sandbox nor its lifecycle: the task hands it a *live* sandbox plus ``messages``,
-then stops the sandbox and scores whatever :meth:`Agent.run` returns.
-"""
+"""Agent layer: *who* solves a task and *how it is launched*."""
 
 from __future__ import annotations
 
@@ -37,22 +19,30 @@ class ModelConfig(BaseModel):
         default=None, description="Endpoint URL; the runner fills this in (in RL, the current policy server)."
     )
     api_key: str = Field(default="EMPTY", description="Bearer key (the gateway accepts any non-empty value).")
-    sampling_params: dict[str, Any] = Field(
-        default_factory=dict, description="Sampling knobs (temperature, top_p, max_tokens, ...)."
+    model_name: str | None = Field(
+        default=None, description="Model name sent to the endpoint (the served model / policy)."
+    )
+
+    # Sampling knobs -- keep aligned with the RL rollout config so inference == training.
+    temperature: float = Field(default=1.0, description="Sampling temperature.")
+    top_p: float = Field(default=1.0, description="Nucleus-sampling probability mass.")
+    top_k: int = Field(default=-1, description="Top-k sampling; -1 disables it.")
+
+    # Generation budget: one turn's generation vs the whole episode's generation.
+    max_total_tokens: int | None = Field(
+        default=None,
+        description="Whole-episode generation budget (sum of completion tokens over all turns)",
+    )
+    max_tokens_per_turn: int | None = Field(
+        default=None,
+        description="Per-turn generation cap, sent as `max_tokens` on each chat-completions call.",
     )
 
     model_config = ConfigDict(extra="forbid")
 
 
 class AgentConfig(BaseModel):
-    """Base config for a registered agent.
-
-    Nearly empty on purpose: agents take very different launch params, so each
-    defines its own subclass under ``agents/<name>/``. The two shared fields are
-    :attr:`name` (the registry key :func:`~uni_agent.agents.registry.build_agent`
-    dispatches on; subclasses default it to their own key) and :attr:`model` (the
-    endpoint the agent's policy talks to).
-    """
+    """Base config for a registered agent."""
 
     name: str = Field(default="", description="Registered agent name (key in AGENT_REGISTRY).")
     model: ModelConfig = Field(
@@ -64,14 +54,7 @@ class AgentConfig(BaseModel):
 
 @dataclasses.dataclass
 class AgentResult:
-    """Artifacts one agent produced for an episode -- the task scores these.
-
-    * :attr:`output` -- the solution payload the task's reward consumes (e.g. a
-      ``patch`` for SWE-bench).
-    * :attr:`transcript` -- the step-by-step trace; white-box loops fill it, a
-      black box may leave it empty.
-    * :attr:`info` -- free-form diagnostics (exit codes, token usage, ...).
-    """
+    """Artifacts one agent produced for an episode -- the task scores these."""
 
     output: dict[str, Any] = dataclasses.field(default_factory=dict)
     transcript: list[dict[str, Any]] = dataclasses.field(default_factory=list)
@@ -79,13 +62,7 @@ class AgentResult:
 
 
 class Agent(ABC):
-    """A solver bound to an :class:`AgentConfig`, runnable over a live sandbox.
-
-    Concrete agents live under ``agents/<name>/`` (set :attr:`config_model`,
-    register with ``@register_agent("<name>")`` which stamps :attr:`name`) and
-    implement :meth:`run`, talking to the model at their own
-    :attr:`~AgentConfig.model` endpoint.
-    """
+    """A solver bound to an :class:`AgentConfig`, runnable over a live sandbox."""
 
     #: Registry key, stamped by ``@register_agent``.
     name: ClassVar[str] = ""
@@ -107,15 +84,10 @@ class Agent(ABC):
         sandbox: Sandbox,
         messages: list[dict[str, Any]],
     ) -> AgentResult:
-        """Solve the task described by ``messages`` inside ``sandbox``.
+        """Solve the task described by ``messages`` inside the live ``sandbox``.
 
-        * ``sandbox`` is already *live* -- the task started it and did any
-          per-instance provisioning (e.g. cloning the repo at the base commit), and
-          stops it after this returns.
-        * ``messages`` is the task prompt in OpenAI chat form (a ``user`` turn,
-          optionally preceded by a ``system`` turn).
-
-        The model endpoint is the agent's own :attr:`config.model`; returns the
-        artifacts the task scores (see :class:`AgentResult`).
+        ``sandbox`` is already started/provisioned (the task stops it afterwards);
+        ``messages`` is the prompt in OpenAI chat form. Talks to the agent's own
+        :attr:`config.model` and returns the artifacts the task scores.
         """
         ...
