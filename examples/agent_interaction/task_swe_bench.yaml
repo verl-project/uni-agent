@@ -8,6 +8,14 @@
     tools:
       - name: stateful_shell
         command_timeout: 120
+        env_vars:
+          PIP_PROGRESS_BAR: "off"
+          PIP_CACHE_DIR: "~/.cache/pip"
+          PAGER: "cat"
+          MANPAGER: "cat"
+          LESS: "-R"
+          TQDM_DISABLE: "1"
+          GIT_PAGER: "cat"
       - name: str_replace_editor
       - name: submit
     model:

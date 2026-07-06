@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import base64
 import dataclasses
+import re
 import shlex
 import time
 import uuid
@@ -264,10 +265,18 @@ class ShellChannel:
 
 DESCRIPTION = "Execute a bash command in the terminal."
 
+# CSI escape sequences (colors, cursor moves, line erases). Tools like pytest/pip emit
+# these even into a pipe, so strip them (plus \r redraws) from what the model sees.
+_ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+
+def _clean(text: str) -> str:
+    return _ANSI_RE.sub("", text).replace("\r", "")
+
 
 def _format(stdout: str, stderr: str, exit_code: int | None) -> str:
-    out = (stdout or "").rstrip()
-    err = (stderr or "").rstrip()
+    out = _clean(stdout or "").rstrip()
+    err = _clean(stderr or "").rstrip()
     header = f"[exit code: {exit_code if exit_code is not None else 'unknown'}]"
     parts = [header, "[stdout]", out if out else "(empty)"]
     if err:
@@ -288,8 +297,8 @@ def _format_timeout(timeout: float, stdout: str, stderr: str) -> str:
         "is a command that is interactive or waits for input -- this environment "
         "cannot provide input, so such a command never completes."
     ]
-    out = (stdout or "").rstrip()
-    err = (stderr or "").rstrip()
+    out = _clean(stdout or "").rstrip()
+    err = _clean(stderr or "").rstrip()
     if out:
         parts += ["[partial stdout]", out]
     if err:
