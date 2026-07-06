@@ -246,13 +246,9 @@ def main() -> None:
     )
 
     num_workers = min(NUM_WORKERS, len(samples))
-    # workers = [ray.remote(InferenceActor)() for _ in range(num_workers)]
-    # futures = [workers[i % num_workers].run_single.remote(s, task_overrides) for i, s in enumerate(samples)]
+    workers = [ray.remote(InferenceActor)() for _ in range(num_workers)]
+    futures = [workers[i % num_workers].run_single.remote(s, task_overrides) for i, s in enumerate(samples)]
 
-    worker = InferenceActor()
-    result = asyncio.run(worker.run_single(samples[30], task_overrides))
-    print(result)
-    exit()
     fut_to_idx = {f: i for i, f in enumerate(futures)}
 
     begin_time = time.time()

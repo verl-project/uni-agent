@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -43,8 +42,7 @@ class CodeActConfig(AgentConfig):
     )
     timeout_budget: int = Field(
         default=3,
-        description="Tool-call timeouts tolerated per episode before it stops "
-        "(exit_reason='timeout_limit').",
+        description="Tool-call timeouts tolerated per episode before it stops (exit_reason='timeout_limit').",
     )
 
 
@@ -180,14 +178,24 @@ class CodeActAgent(Agent):
                 logger.info(f"👀 OBSERVATION ({name}):\n{too_result}")
 
             transcript.append(
-                {"role": "tool", "tool_call_id": tool_call.get("id"), "name": name, "content": too_result.to_observation()}
+                {
+                    "role": "tool",
+                    "tool_call_id": tool_call.get("id"),
+                    "name": name,
+                    "content": too_result.to_observation(),
+                }
             )
 
             if info["timeouts"] > cfg.timeout_budget:
                 logger.warning("Exit: timeout budget exhausted; skipping remaining tool calls this turn.")
                 for tool_call in tool_calls[idx + 1 :]:
                     transcript.append(
-                        {"role": "tool", "tool_call_id": tool_call.get("id"), "name": tool_call.get("function", {}).get("name", ""), "content": "Skipped: timeout budget exhausted."}
+                        {
+                            "role": "tool",
+                            "tool_call_id": tool_call.get("id"),
+                            "name": tool_call.get("function", {}).get("name", ""),
+                            "content": "Skipped: timeout budget exhausted.",
+                        }
                     )
                 return "timeout_limit"
             if name in _FINISH_TOOLS:
