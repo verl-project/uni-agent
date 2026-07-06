@@ -1,7 +1,5 @@
-# Task config, deep-merged onto each dataset sample's task (overrides win; the
-# sample's image + metadata survive). Only the endpoint (base_url/model/api_key) is
-# layered on at runtime, so set the sandbox provider here.
 - name: swe_bench
+  log_dir: /tmp/uni_agent_logs/swe_bench
   sandbox:
     provider: modal
   agent:

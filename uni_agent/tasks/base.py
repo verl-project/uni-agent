@@ -44,6 +44,11 @@ class TaskConfig(BaseModel):
     )
     prompt: list[dict[str, Any]] = Field(default_factory=list, description="The task prompt.")
     metadata: dict[str, Any] = Field(default_factory=dict)
+    log_dir: str = Field(
+        default="",
+        description="Directory for this episode's per-sample log (<log_dir>/<run_id>.log); "
+        "empty falls back to /tmp/uni_agent_logs/<task_name>.",
+    )
 
     model_config = ConfigDict(extra="forbid", protected_namespaces=())
 

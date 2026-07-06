@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 import uuid
 
@@ -16,6 +17,8 @@ from swebench.harness.grading import get_eval_tests_report, get_resolution_statu
 from swebench.harness.log_parsers import MAP_REPO_TO_PARSER
 from swebench.harness.test_spec.python import get_test_directives
 from swebench.harness.utils import get_modified_files
+
+logger = logging.getLogger(__name__)
 
 
 def _make_eval_script_list(instance, specs, env_name, repo_directory, base_commit, test_patch):
@@ -101,7 +104,7 @@ def _get_eval_report(metadata, eval_output: str):
     return eval_report
 
 
-async def compute_reward(metadata, sandbox, eval_timeout: float = 300.0) -> tuple[dict | None, bool]:
+async def compute_reward(metadata, sandbox, eval_timeout: float = 300.0) -> dict:
     result = {
         "eval_completed": False,
         "eval_execution_time": None,
@@ -111,6 +114,7 @@ async def compute_reward(metadata, sandbox, eval_timeout: float = 300.0) -> tupl
 
     # 1. eval script
     instance = metadata
+    instance_id = instance.get("instance_id", "?")
     repo = instance["repo"]
     version = instance.get("version")
     specs = MAP_REPO_VERSION_TO_SPECS[repo][version]
@@ -132,6 +136,7 @@ async def compute_reward(metadata, sandbox, eval_timeout: float = 300.0) -> tupl
     eval_script_container = f"/tmp/eval_script_{uuid.uuid4()}.sh"
     await sandbox.write_file(eval_script_container, eval_script)
 
+    logger.info(f"running eval for {instance_id} (repo={repo}, timeout={eval_timeout:.0f}s)")
     execution_t0 = time.perf_counter()
 
     resp = await sandbox.exec_shell(f"bash {eval_script_container} 2>&1", workdir="/testbed", timeout=eval_timeout)
@@ -139,9 +144,13 @@ async def compute_reward(metadata, sandbox, eval_timeout: float = 300.0) -> tupl
     execution_time = time.perf_counter() - execution_t0
     result["eval_completed"] = exit_code == 0
     result["eval_execution_time"] = execution_time
+    logger.info(f"eval finished in {execution_time:.1f}s (exit_code={exit_code})")
 
     eval_report = _get_eval_report(metadata, output)
     result["eval_report"] = eval_report
     result["resolved"] = eval_report["resolved"]
+    if not eval_report["found_eval_status"]:
+        logger.warning(f"no parseable test output for {instance_id}; marking unresolved")
+    logger.info(f"reward for {instance_id}: resolved={result['resolved']}")
 
     return result

@@ -166,23 +166,24 @@ class CodeActAgent(Agent):
             fn = tool_call.get("function", {})
             name = fn.get("name", "")
             logger.info(f"🎬 ACTION ({name}):\n{fn.get('arguments')}")
-            too_result = await toolbox.call(name, fn.get("arguments"), timeout=cfg.action_timeout)
+            tool_result = await toolbox.call(name, fn.get("arguments"), timeout=cfg.action_timeout)
+            observation = tool_result.to_observation()
             info["num_tool_calls"] += 1
-            if too_result.status == "timeout":  # a tool hit its own timeout (e.g. shell command_timeout)
+            if tool_result.status == "timeout":  # a tool hit its own timeout (e.g. shell command_timeout)
                 info["timeouts"] += 1
                 logger.warning(f"⏳ TIMEOUT ({name}): {info['timeouts']}/{cfg.timeout_budget} budget used")
-            elif too_result.status == "error":  # a tool raised ToolError, skipped by Toolbox.call
+            elif tool_result.status == "error":  # a tool raised ToolError, skipped by Toolbox.call
                 info["errors"] += 1
-                logger.error(f"❌ TOOL ERROR ({name}):\n{too_result}")
+                logger.error(f"❌ TOOL ERROR ({name}):\n{observation}")
             else:
-                logger.info(f"👀 OBSERVATION ({name}):\n{too_result}")
+                logger.info(f"👀 OBSERVATION ({name}):\n{observation}")
 
             transcript.append(
                 {
                     "role": "tool",
                     "tool_call_id": tool_call.get("id"),
                     "name": name,
-                    "content": too_result.to_observation(),
+                    "content": observation,
                 }
             )
 
