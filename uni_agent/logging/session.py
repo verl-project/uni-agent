@@ -58,7 +58,7 @@ class sample_logging:
         if self.log_path is not None:
             cleanup_handlers(self.run_id)
 
-    def __enter__(self) -> "sample_logging":
+    def __enter__(self) -> sample_logging:
         self._enter()
         return self
 
@@ -66,7 +66,7 @@ class sample_logging:
         self._exit()
         return False
 
-    async def __aenter__(self) -> "sample_logging":
+    async def __aenter__(self) -> sample_logging:
         self._enter()
         return self
 
