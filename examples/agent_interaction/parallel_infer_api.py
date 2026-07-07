@@ -1,5 +1,9 @@
 # ruff: noqa: E501
-"""Parallel agent inference for SWE-bench.
+"""Parallel agent inference against a running OpenAI-compatible API.
+
+Talks *directly* to a policy server you started yourself (no GPUs on the driver).
+For the variant that has verl bring the engine up and routes rollouts through the
+agent framework gateway, see ``parallel_infer_verl.py``.
 
 Bring up an OpenAI-compatible policy server, then run this against it:
 
@@ -9,7 +13,7 @@ Bring up an OpenAI-compatible policy server, then run this against it:
         --tensor-parallel-size 4
 
     BASE_URL=http://localhost:8000/v1 MODEL=Qwen3-Coder-30B-A3B-Instruct \
-        python examples/agent_interaction/parallel_infer.py --limit 8
+        python examples/agent_interaction/parallel_infer_api.py --limit 8
 
 By default the agent config is built from the per-flag knobs. Pass ``--task-config``
 to load a YAML task config instead, deep-merged onto each sample's task dict

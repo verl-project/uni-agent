@@ -87,22 +87,22 @@ class CodeActAgent(Agent):
             "exit_reason": "unknown",
         }
         try:
-            await toolbox.start()  # eagerly set up tools (e.g. install tmux) before the first turn
-            for step_idx in range(1, cfg.max_steps + 1):
-                trajectory_info["steps"] = step_idx
-                stop_reason = await self.step(cfg, model, toolbox, transcript, trajectory_info)
-                if stop_reason != "completed":
-                    trajectory_info["exit_reason"] = stop_reason
-                    break
-            else:  # loop ran the full step budget without an early stop
-                trajectory_info["exit_reason"] = "max_steps"
-                logger.warning(f"Reached max steps ({cfg.max_steps}) without finishing.")
+            async with toolbox.entered(retry=3, timeout=60):
+                for step_idx in range(1, cfg.max_steps + 1):
+                    trajectory_info["steps"] = step_idx
+                    stop_reason = await self.step(cfg, model, toolbox, transcript, trajectory_info)
+                    if stop_reason != "completed":
+                        trajectory_info["exit_reason"] = stop_reason
+                        break
+                else:  # loop ran the full step budget without an early stop
+                    trajectory_info["exit_reason"] = "max_steps"
+                    logger.warning(f"Reached max steps ({cfg.max_steps}) without finishing.")
         except Exception as exc:  # keep the partial transcript; the task buckets the failure
             logger.exception("code_act loop failed at step %s", trajectory_info["steps"])
             trajectory_info["exit_reason"] = "unknown_error"
             trajectory_info["error"] = f"{type(exc).__name__}: {exc}"
         finally:
-            await toolbox.close()  # release open channels (the task stops the sandbox)
+            await model.aclose()  # release the keep-alive HTTP session
 
         logger.info(
             f"Episode done: exit_reason={trajectory_info['exit_reason']} steps={trajectory_info['steps']} "

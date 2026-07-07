@@ -7,12 +7,10 @@ through the :class:`~uni_agent.sandbox.SandboxBackend` data plane and returns a
     from uni_agent.sandbox import LocalSandbox
     from uni_agent.tools import Toolbox
 
-    async with LocalSandbox() as sandbox:
-        tools = Toolbox.all(sandbox=sandbox)
+    async with LocalSandbox() as sandbox, Toolbox.all(sandbox=sandbox) as tools:
         schemas = tools.schemas()                       # hand to the model
         obs = await tools.call("shell", {"command": "ls"})
-        print(obs.text)
-        await tools.close()                             # release open channels
+        print(obs.text)                                 # `async with` starts + closes the tools
 
 Importing this package registers the built-ins in :data:`TOOL_REGISTRY`:
 ``stateful_shell`` (seen by the model as ``shell``), ``str_replace_editor``, and the

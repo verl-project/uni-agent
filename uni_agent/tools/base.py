@@ -12,8 +12,12 @@ in :meth:`close`. Every :meth:`run` returns a normalized :class:`ToolResult`
 from __future__ import annotations
 
 import abc
+import asyncio
 import dataclasses
 import json
+import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 from pydantic import BaseModel
@@ -21,6 +25,7 @@ from pydantic import BaseModel
 if TYPE_CHECKING:
     from ..sandbox import SandboxBackend
 
+logger = logging.getLogger(__name__)
 
 ToolStatus = Literal["ok", "format_error", "error", "timeout"]
 
@@ -265,13 +270,80 @@ class Toolbox:
         return [tool.schema() for tool in self._tools.values()]
 
     async def start(self) -> None:
-        """Eagerly set up every tool, front-loading first-use cost.
+        """Eagerly set up every tool once, front-loading first-use cost (no retry).
 
-        Unlike :meth:`close` (best-effort), setup failures propagate so a broken
-        sandbox surfaces before the rollout rather than mid-turn.
+        Prefer ``async with toolbox`` for a rollout: it starts with retries and closes
+        on exit. This bare version is for callers that manage their own lifecycle.
         """
         for tool in self._tools.values():
             await tool.start()
+
+    async def __aenter__(self, retry: int = 3, timeout: float = 60.0) -> Toolbox:
+        """Enter a rollout: start every tool (retrying transient failures) and return
+        the ready toolbox. If a tool can't be started, tools already started are closed
+        before the error propagates; :meth:`close` runs again on normal exit.
+
+        ``async with`` uses the defaults; call ``__aenter__(retry=..., timeout=...)``
+        directly to override. ``timeout`` caps each per-tool start attempt and must exceed
+        a tool's own first-use setup budget (the shell's 300s tmux install).
+        """
+        retry = max(1, retry)
+        try:
+            for tool in self._tools.values():
+                await self._start_tool(tool, retry, timeout)
+        except BaseException:
+            await self.close()  # roll back partially-started tools
+            raise
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> bool:
+        await self.close()
+        return False
+
+    @asynccontextmanager
+    async def entered(self, **start_kwargs: Any) -> AsyncIterator[Toolbox]:
+        """Parametrized ``async with``: same lifecycle as ``async with toolbox``, but
+        forwards ``retry`` / ``timeout`` to :meth:`__aenter__` (the bare ``async with``
+        can't pass args)::
+
+            async with toolbox.entered(retry=5, timeout=90) as tb:
+                ...
+        """
+        await self.__aenter__(**start_kwargs)
+        try:
+            yield self
+        finally:
+            await self.close()
+
+    async def _start_tool(self, tool: Tool, retry: int, timeout: float) -> None:
+        """Start one tool, retrying with backoff on timeout or transient failure.
+
+        Each attempt is bounded by ``asyncio.wait_for(timeout)`` so a hung connect can't
+        block forever; after ``retry`` attempts the last error propagates. A genuine
+        cancellation of our own task is re-raised immediately, never retried.
+        """
+        last_exc: BaseException | None = None
+        for attempt in range(1, retry + 1):
+            try:
+                await asyncio.wait_for(tool.start(), timeout=timeout)
+                return
+            except asyncio.CancelledError as exc:
+                task = asyncio.current_task()
+                if task is not None and task.cancelling() > 0:
+                    raise  # our caller asked to cancel -- honor it
+                last_exc = exc  # a dependency (e.g. Modal connect) leaked a cancel
+            except Exception as exc:  # incl. asyncio.TimeoutError from wait_for
+                last_exc = exc
+            logger.warning(
+                "tool %r failed to start (attempt %d/%d): %r",
+                tool.name, attempt, retry, last_exc,
+            )
+            if attempt < retry:
+                await asyncio.sleep(2 * attempt)
+                timeout = timeout * 2
+        assert last_exc is not None
+        logger.error("tool %r failed to start after %d attempts: %r", tool.name, retry, last_exc)
+        raise last_exc
 
     async def call(
         self, name: str, args: dict[str, Any] | str | None = None, *, timeout: float | None = None
@@ -296,6 +368,11 @@ class Toolbox:
             return ToolResult(text=str(exc), status="format_error")
         except ToolError as exc:
             return ToolResult(text=f"Error: {exc}", status="error")
+        except Exception as exc:
+            # A tool *bug* (not a ToolError) shouldn't kill the whole episode: log the
+            # traceback for visibility, but hand the model a recoverable observation.
+            logger.exception("tool %r raised an unexpected error", name)
+            return ToolResult(text=f"Error: {type(exc).__name__}: {exc}", status="error")
         return result if isinstance(result, ToolResult) else ToolResult(text=str(result))
 
     @staticmethod

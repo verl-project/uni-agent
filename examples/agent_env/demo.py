@@ -61,62 +61,62 @@ async def main() -> None:
         logger.info("(shell keeps a persistent shell channel; the editor is stateless)")
 
         toolbox = Toolbox.from_specs(tool_specs, sandbox=sandbox)
-        await toolbox.start()
-        schemas = toolbox.schemas()
-        logger.info(f"-> tool schemas : {[s['function']['name'] for s in schemas]}")
 
-        banner("Sandbox demo: install dep -> create script -> run -> cat output")
+        async with toolbox.entered(retry=3, timeout=60):
+            schemas = toolbox.schemas()
+            logger.info(f"-> tool schemas : {[s['function']['name'] for s in schemas]}")
 
-        # clean slate: local /tmp persists across runs (a fresh remote sandbox is already clean)
-        await toolbox.call("shell", {"command": "rm -f /tmp/demo.py /tmp/demo_out.txt"})
+            banner("Sandbox demo: install dep -> create script -> run -> cat output")
 
-        logger.info("[Step 0] shell: show shell env from config")
-        result = await toolbox.call("shell", {"command": "echo PAGER=$PAGER TQDM_DISABLE=$TQDM_DISABLE"})
-        logger.info(_indent(result))
+            # clean slate: local /tmp persists across runs (a fresh remote sandbox is already clean)
+            await toolbox.call("shell", {"command": "rm -f /tmp/demo.py /tmp/demo_out.txt"})
 
-        logger.info("[Step 1] shell: pip install numpy (persists in this sandbox)")
-        result = await toolbox.call("shell", {"command": "pip install -q numpy && echo installed"})
-        logger.info(_indent(result))
+            logger.info("[Step 0] shell: show shell env from config")
+            result = await toolbox.call("shell", {"command": "echo PAGER=$PAGER TQDM_DISABLE=$TQDM_DISABLE"})
+            logger.info(_indent(result))
 
-        script = "import numpy as np\nprint('sum =', int(np.array([1, 2, 4]).sum()))\n"
-        logger.info("[Step 2] str_replace_editor create /tmp/demo.py (writes via data plane)")
-        result = await toolbox.call(
-            "str_replace_editor", {"command": "create", "path": "/tmp/demo.py", "file_text": script}
-        )
-        logger.info(_indent(result))
+            logger.info("[Step 1] shell: pip install numpy (persists in this sandbox)")
+            result = await toolbox.call("shell", {"command": "pip install -q numpy && echo installed"})
+            logger.info(_indent(result))
 
-        logger.info("[Step 3] str_replace_editor view /tmp/demo.py")
-        result = await toolbox.call("str_replace_editor", {"command": "view", "path": "/tmp/demo.py"})
-        logger.info(_indent(result))
+            script = "import numpy as np\nprint('sum =', int(np.array([1, 2, 4]).sum()))\n"
+            logger.info("[Step 2] str_replace_editor create /tmp/demo.py (writes via data plane)")
+            result = await toolbox.call(
+                "str_replace_editor", {"command": "create", "path": "/tmp/demo.py", "file_text": script}
+            )
+            logger.info(_indent(result))
 
-        logger.info("[Step 4] shell: run script -> /tmp/demo_out.txt")
-        result = await toolbox.call("shell", {"command": "python3 /tmp/demo.py > /tmp/demo_out.txt 2>&1"})
-        logger.info(_indent(result))
+            logger.info("[Step 3] str_replace_editor view /tmp/demo.py")
+            result = await toolbox.call("str_replace_editor", {"command": "view", "path": "/tmp/demo.py"})
+            logger.info(_indent(result))
 
-        logger.info("[Step 5] shell: cat /tmp/demo_out.txt (proves the file persisted)")
-        result = await toolbox.call("shell", {"command": "cat /tmp/demo_out.txt"})
-        logger.info(_indent(result))
+            logger.info("[Step 4] shell: run script -> /tmp/demo_out.txt")
+            result = await toolbox.call("shell", {"command": "python3 /tmp/demo.py > /tmp/demo_out.txt 2>&1"})
+            logger.info(_indent(result))
 
-        logger.info("[Step 6] str_replace_editor str_replace (sum -> product), then re-run")
-        await toolbox.call(
-            "str_replace_editor",
-            {
-                "command": "str_replace",
-                "path": "/tmp/demo.py",
-                "old_str": "print('sum =', int(np.array([1, 2, 4]).sum()))",
-                "new_str": "print('product =', int(np.array([1, 2, 4]).prod()))",
-            },
-        )
-        result = await toolbox.call("shell", {"command": "python3 /tmp/demo.py"})
-        logger.info(_indent(result))
+            logger.info("[Step 5] shell: cat /tmp/demo_out.txt (proves the file persisted)")
+            result = await toolbox.call("shell", {"command": "cat /tmp/demo_out.txt"})
+            logger.info(_indent(result))
 
-        logger.info("[Step 7] stateful shell: cd /tmp, then a later call still sees it")
-        await toolbox.call("shell", {"command": "cd /tmp"})
-        result = await toolbox.call("shell", {"command": "echo cwd=$(pwd); python3 demo.py"})
-        logger.info(_indent(result))
+            logger.info("[Step 6] str_replace_editor str_replace (sum -> product), then re-run")
+            await toolbox.call(
+                "str_replace_editor",
+                {
+                    "command": "str_replace",
+                    "path": "/tmp/demo.py",
+                    "old_str": "print('sum =', int(np.array([1, 2, 4]).sum()))",
+                    "new_str": "print('product =', int(np.array([1, 2, 4]).prod()))",
+                },
+            )
+            result = await toolbox.call("shell", {"command": "python3 /tmp/demo.py"})
+            logger.info(_indent(result))
 
-        banner("Demo done (toolbox.close() releases the shell channel; async-with stops the sandbox)")
-        await toolbox.close()  # close tools (channels) before the sandbox stops
+            logger.info("[Step 7] stateful shell: cd /tmp, then a later call still sees it")
+            await toolbox.call("shell", {"command": "cd /tmp"})
+            result = await toolbox.call("shell", {"command": "echo cwd=$(pwd); python3 demo.py"})
+            logger.info(_indent(result))
+
+            banner("Demo done")
 
 
 if __name__ == "__main__":

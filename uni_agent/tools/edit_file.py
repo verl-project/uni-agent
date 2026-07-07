@@ -13,7 +13,7 @@ import os
 from collections import defaultdict
 from typing import TYPE_CHECKING, Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from .base import Tool, ToolError, ToolResult, register_tool
 
@@ -117,6 +117,13 @@ class EditFileTool(Tool):
 
     async def _apply(self, args: dict[str, Any]) -> str:
         sandbox = self.sandbox
+        try:
+            args = StrReplaceEditorArguments(**args).model_dump()
+        except ValidationError as exc:
+            details = "; ".join(
+                f"`{'.'.join(str(p) for p in err['loc'])}`: {err['msg']}" for err in exc.errors()
+            )
+            return f"Invalid arguments for str_replace_editor: {details}"
         command = args.get("command")
         path = args.get("path")
         if not command:
@@ -209,8 +216,8 @@ class EditFileTool(Tool):
     async def _str_replace(
         self, sandbox: SandboxBackend, path: str, old_str: str | None, new_str: str | None
     ) -> str:
-        if old_str is None:
-            return "Parameter `old_str` is required for command: str_replace"
+        if not old_str:
+            return "Parameter `old_str` is required for command: str_replace and must be a non-empty string."
         file_content = (await self._read(sandbox, path)).expandtabs()
         old_str = old_str.expandtabs()
         new_str = new_str.expandtabs() if new_str is not None else ""

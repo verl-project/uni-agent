@@ -1,36 +1,29 @@
 """Thin async client for an OpenAI-compatible chat endpoint (the policy server).
 
-Wraps a single ``chat.completions`` call: normalizes the running conversation to
-the API shape, sends the tool schemas, and returns the assistant text plus any
-structured tool calls for the CodeAct loop to execute.
+Talks to ``{base_url}/chat/completions`` directly over ``aiohttp`` (no OpenAI SDK):
+normalizes the running conversation to the API shape, sends the tool schemas, and
+returns the assistant text plus any structured tool calls for the CodeAct loop to
+execute. One keep-alive :class:`aiohttp.ClientSession` is reused across calls, so
+callers should :meth:`aclose` the model (or use it as an async context manager).
 """
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from typing import Any
 
-from openai import AsyncOpenAI
+import aiohttp
 
-#: Sampling keys the OpenAI Python SDK accepts as top-level kwargs. Anything else
-#: (e.g. ``top_k``, ``repetition_penalty``, ``min_p`` -- vLLM/SGLang extensions the
-#: SDK rejects) is forwarded through ``extra_body`` so the server still receives it.
-_OPENAI_SAMPLING_KEYS = frozenset(
-    {
-        "temperature",
-        "top_p",
-        "max_tokens",
-        "max_completion_tokens",
-        "n",
-        "stop",
-        "presence_penalty",
-        "frequency_penalty",
-        "logprobs",
-        "top_logprobs",
-        "seed",
-        "logit_bias",
-        "response_format",
-    }
-)
+logger = logging.getLogger(__name__)
+
+
+class _TransientHTTPError(Exception):
+    """A 429 / 5xx response worth retrying (server busy or a transient hiccup)."""
+
+    def __init__(self, status: int, body: str):
+        super().__init__(f"HTTP {status}: {body[:500]}")
+        self.status = status
 
 
 class OpenAICompatibleChatModel:
@@ -45,6 +38,7 @@ class OpenAICompatibleChatModel:
         sampling_params: dict[str, Any] | None = None,
         tools_schemas: list[dict] | None = None,
         timeout: float = 600.0,
+        max_retries: int = 2,
     ):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
@@ -52,7 +46,30 @@ class OpenAICompatibleChatModel:
         self.sampling_params = sampling_params or {}
         self.tools_schemas = tools_schemas
         self.timeout = timeout
-        self.client = AsyncOpenAI(api_key=api_key, base_url=self.base_url, timeout=timeout)
+        self.max_retries = max(0, max_retries)
+        self._session: aiohttp.ClientSession | None = None
+
+    # ----- session lifecycle -----
+    def _session_for_call(self) -> aiohttp.ClientSession:
+        """Lazily open (and reuse) one keep-alive session, bound to the running loop."""
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=self.timeout),
+                headers={"Authorization": f"Bearer {self.api_key}"},
+            )
+        return self._session
+
+    async def aclose(self) -> None:
+        """Close the underlying session (idempotent; safe if it was never opened)."""
+        if self._session is not None and not self._session.closed:
+            await self._session.close()
+        self._session = None
+
+    async def __aenter__(self) -> OpenAICompatibleChatModel:
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        await self.aclose()
 
     def _normalize_messages_for_api(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Strip locally-added fields the OpenAI API doesn't accept.
@@ -92,37 +109,67 @@ class OpenAICompatibleChatModel:
         # Model name is an endpoint attribute, but tolerate it riding in sampling params.
         model_name = params.pop("model", None) or self.model_name
 
-        # Split standard knobs (passed as top-level kwargs) from server extensions
-        # like top_k, which the SDK forwards only via ``extra_body``.
-        standard = {key: value for key, value in params.items() if key in _OPENAI_SAMPLING_KEYS}
-        extra_body = {key: value for key, value in params.items() if key not in _OPENAI_SAMPLING_KEYS}
-
-        create_kwargs: dict[str, Any] = {
+        # Raw HTTP: every sampling knob (incl. server extensions like top_k) goes
+        # straight into the request body -- there's no SDK to reject unknown keys.
+        body: dict[str, Any] = {
             "model": model_name,
             "messages": self._normalize_messages_for_api(messages),
-            **standard,
+            **params,
         }
-        if extra_body:
-            create_kwargs["extra_body"] = extra_body
         if self.tools_schemas:
-            create_kwargs["tools"] = self.tools_schemas
+            body["tools"] = self.tools_schemas
 
-        chat_completion = await self.client.chat.completions.create(**create_kwargs)
+        data = await self._post_chat_completion(body)
 
-        response_message = chat_completion.choices[0].message
-        response_content = response_message.content or ""
+        response_message = data["choices"][0]["message"]
+        response_content = response_message.get("content") or ""
         serialized_tool_calls: list[dict] = [
             {
-                "id": tool_call.id,
-                "type": tool_call.type,
-                "function": {"name": tool_call.function.name, "arguments": tool_call.function.arguments},
+                "id": tool_call["id"],
+                "type": tool_call.get("type", "function"),
+                "function": {
+                    "name": tool_call["function"]["name"],
+                    "arguments": tool_call["function"]["arguments"],
+                },
             }
-            for tool_call in (response_message.tool_calls or [])
+            for tool_call in (response_message.get("tool_calls") or [])
         ]
 
-        usage = chat_completion.usage
+        usage = data.get("usage") or {}
         generation_info = {
-            "prompt_tokens": usage.prompt_tokens if usage is not None else 0,
-            "completion_tokens": usage.completion_tokens if usage is not None else 0,
+            "prompt_tokens": usage.get("prompt_tokens", 0),
+            "completion_tokens": usage.get("completion_tokens", 0),
         }
         return response_content, serialized_tool_calls, generation_info
+
+    async def _post_chat_completion(self, body: dict[str, Any]) -> dict[str, Any]:
+        """POST ``body`` to ``/chat/completions``, retrying transient failures.
+
+        Retries up to ``max_retries`` (exponential backoff) on connection errors,
+        timeouts, and 429/5xx; any other 4xx fails fast with the server's response text.
+        """
+        url = f"{self.base_url}/chat/completions"
+        session = self._session_for_call()
+        last_exc: Exception | None = None
+        for attempt in range(self.max_retries + 1):
+            try:
+                async with session.post(url, json=body) as resp:
+                    if resp.status == 429 or resp.status >= 500:
+                        raise _TransientHTTPError(resp.status, await resp.text())
+                    if resp.status >= 400:
+                        raise RuntimeError(
+                            f"chat/completions returned HTTP {resp.status}: {(await resp.text())[:1000]}"
+                        )
+                    return await resp.json()
+            except (aiohttp.ClientError, asyncio.TimeoutError, _TransientHTTPError) as exc:
+                last_exc = exc
+                if attempt >= self.max_retries:
+                    break
+                delay = 2.0 * (2**attempt)
+                logger.warning(
+                    "chat/completions attempt %d/%d failed (%r); retrying in %.1fs",
+                    attempt + 1, self.max_retries + 1, exc, delay,
+                )
+                await asyncio.sleep(delay)
+        assert last_exc is not None
+        raise last_exc
