@@ -168,7 +168,10 @@ class OpenAICompatibleChatModel:
                 delay = 2.0 * (2**attempt)
                 logger.warning(
                     "chat/completions attempt %d/%d failed (%r); retrying in %.1fs",
-                    attempt + 1, self.max_retries + 1, exc, delay,
+                    attempt + 1,
+                    self.max_retries + 1,
+                    exc,
+                    delay,
                 )
                 await asyncio.sleep(delay)
         assert last_exc is not None

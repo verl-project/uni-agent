@@ -39,7 +39,6 @@ by the runner -- not a flag.
 """
 
 import argparse
-import asyncio
 import json
 import logging
 import os
@@ -50,21 +49,21 @@ from uuid import uuid4
 
 import numpy as np
 import ray
-import verl
 import yaml
 from datasets import load_dataset
 from omegaconf import OmegaConf
+
+import verl
 
 try:
     import transfer_queue as tq
 except ImportError:  # fall back to verl's shim (mock raises a clear error if TQ is missing)
     from verl.utils.transferqueue_utils import tq
 
-from verl.utils import tensordict_utils as tu
-from verl.workers.rollout.llm_server import LLMServerManager
-
 from uni_agent.agents import get_agent_cls
 from uni_agent.framework.entry import AgentFrameworkRolloutAdapter
+from verl.utils import tensordict_utils as tu
+from verl.workers.rollout.llm_server import LLMServerManager
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 logger = logging.getLogger(__name__)
@@ -293,7 +292,9 @@ def _read_rm_scores(uids: list, *, partition_id: str = PARTITION_ID) -> dict:
     }
 
 
-def _report(read: dict, *, wall: float, num_prompts: int, n: int, args: argparse.Namespace, served_model_name: str) -> None:
+def _report(
+    read: dict, *, wall: float, num_prompts: int, n: int, args: argparse.Namespace, served_model_name: str
+) -> None:
     """Print the mean-rm_scores summary and optionally persist a JSON result file."""
     scores = read["scores"]
     per_uid = read["per_uid"]
@@ -343,7 +344,9 @@ def _report(read: dict, *, wall: float, num_prompts: int, n: int, args: argparse
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Parallel agent inference over a verl-launched engine (framework + TQ).")
+    parser = argparse.ArgumentParser(
+        description="Parallel agent inference over a verl-launched engine (framework + TQ)."
+    )
 
     # Input / output.
     parser.add_argument(
@@ -400,7 +403,9 @@ def main() -> None:
         help="Whole-episode generation budget (sum of completion tokens across turns).",
     )
     parser.add_argument("--max-steps", type=int, default=100, help="Max tool-calling turns per episode.")
-    parser.add_argument("--n", type=int, default=1, help="Rollout sessions per instance (rollout.n; scores average over all).")
+    parser.add_argument(
+        "--n", type=int, default=1, help="Rollout sessions per instance (rollout.n; scores average over all)."
+    )
 
     # Engine / hardware.
     parser.add_argument(
