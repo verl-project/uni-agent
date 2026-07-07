@@ -450,7 +450,7 @@ def main() -> None:
     served_model_name = args.served_model_name or os.path.basename(os.path.expanduser(args.model_path).rstrip("/"))
 
     dataset = load_dataset("parquet", data_files=args.data_path, split="train")
-    samples = dataset.to_list()[30:31]
+    samples = dataset.to_list()
     if args.limit is not None:
         samples = samples[: args.limit]
     if not samples:

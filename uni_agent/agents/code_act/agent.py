@@ -170,7 +170,9 @@ class CodeActAgent(Agent):
             info["num_tool_calls"] += 1
             if tool_result.status == "timeout":  # a tool hit its own timeout (e.g. shell command_timeout)
                 info["timeouts"] += 1
-                logger.warning(f"⏳ TIMEOUT ({name}): {info['timeouts']}/{cfg.timeout_budget} budget used")
+                logger.warning(
+                    f"⏳ TIMEOUT ({name}): {info['timeouts']}/{cfg.timeout_budget} budget used\n{observation}"
+                )
             elif tool_result.status == "error":  # a tool raised ToolError, skipped by Toolbox.call
                 info["errors"] += 1
                 logger.error(f"❌ TOOL ERROR ({name}):\n{observation}")

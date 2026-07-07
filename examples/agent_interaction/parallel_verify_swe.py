@@ -79,17 +79,9 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=None, help="Only verify the first N samples (smoke testing).")
     args = parser.parse_args()
 
-    # ray.init()
+    ray.init()
 
     dataset = load_dataset("parquet", data_files=args.data_path, split="train")
-    dataset = dataset.filter(
-        lambda x: x["extra_info"]["tools_kwargs"]["task"]["metadata"]["instance_id"]
-        in [
-            "pylint-dev__pylint-6528",
-            "pylint-dev__pylint-7080",
-            "pylint-dev__pylint-7277",
-        ]
-    )
     samples = dataset.to_list()
     if args.limit is not None:
         samples = samples[: args.limit]
