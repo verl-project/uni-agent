@@ -1,5 +1,5 @@
 - name: swe_bench
-  log_dir: /tmp/uni_agent_logs/swe_bench_2
+  log_dir: /tmp/uni_agent_logs/swe_bench
   sandbox:
     provider: modal
   agent:
@@ -7,7 +7,7 @@
     max_steps: 100
     tools:
       - name: stateful_shell
-        command_timeout: 120
+        command_timeout: 180
         env_vars:
           PIP_PROGRESS_BAR: "off"
           PIP_CACHE_DIR: "~/.cache/pip"
@@ -21,5 +21,4 @@
     model:
       temperature: 0.8
       top_p: 0.9
-      top_k: -1
       max_total_tokens: 65536

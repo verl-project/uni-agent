@@ -37,7 +37,7 @@ class OpenAICompatibleChatModel:
         model_name: str | None = None,
         sampling_params: dict[str, Any] | None = None,
         tools_schemas: list[dict] | None = None,
-        timeout: float = 600.0,
+        timeout: float | None = None,
         max_retries: int = 2,
     ):
         self.base_url = base_url.rstrip("/")

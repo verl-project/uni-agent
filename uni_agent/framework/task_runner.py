@@ -134,7 +134,7 @@ async def _post_reward_info(reward_info_url: str, result: TaskResult) -> None:
 
     reward_info: dict[str, Any] = {"reward": result.reward, **(result.info or {})}
     try:
-        timeout = aiohttp.ClientTimeout(total=30.0)
+        timeout = aiohttp.ClientTimeout(total=None)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(reward_info_url, json={"reward_info": reward_info}) as response:
                 response.raise_for_status()
