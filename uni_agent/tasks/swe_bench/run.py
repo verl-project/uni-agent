@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import uuid
@@ -37,7 +38,12 @@ class SWEBenchTask(Task):
 
         # Route this episode's logs (agent, tools, sandbox) to <log_dir>/<run_id>.log.
         async with sample_logging(run_id, Path(log_dir) / f"{run_id}.log"):
-            logger.info(f"starting swe_bench task {run_id} (run_gold_patch={cfg.run_gold_patch})")
+            instance_id = sample.get("instance_id", "?") if isinstance(sample, dict) else "?"
+            task_config_dump = cfg.model_dump(mode="json", exclude={"metadata", "prompt"})
+            logger.info(
+                f"starting swe_bench task {run_id} (instance_id={instance_id}, run_gold_patch={cfg.run_gold_patch})\n"
+                f"task config: {json.dumps(task_config_dump, indent=2)}"
+            )
             async with self.build_sandbox() as sandbox:
                 if cfg.run_gold_patch:
                     logger.info("applying gold patch to /testbed")

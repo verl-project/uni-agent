@@ -15,10 +15,10 @@ Bring up an OpenAI-compatible policy server, then run this against it:
     BASE_URL=http://localhost:8000/v1 MODEL=Qwen3-Coder-30B-A3B-Instruct \
         python examples/agent_interaction/parallel_infer_api.py --limit 8
 
-By default the agent config is built from the per-flag knobs. Pass ``--task-config``
-to load a YAML task config instead, deep-merged onto each sample's task dict
-(overriding agent / sandbox / ... while the per-sample image + metadata survive). A
-one-item ``- name: ...`` list wrapper is accepted:
+``--task-config`` (a YAML task config) is required and forms the base, deep-merged
+onto each sample's task dict (overriding agent / sandbox / ... while the per-sample
+image + metadata survive); all agent/model knobs (sampling, ``max_total_tokens``,
+``max_steps``, ...) come from it. A one-item ``- name: ...`` list wrapper is accepted:
 
     - name: swe_bench
       agent:
@@ -34,8 +34,8 @@ one-item ``- name: ...`` list wrapper is accepted:
           top_k: -1
           max_total_tokens: 65536
 
-Either way, the endpoint (--base-url / --model / --api-key or env BASE_URL / MODEL /
-API_KEY) is layered onto agent.model last.
+The endpoint (--base-url / --model / --api-key or env BASE_URL / MODEL / API_KEY) is
+layered onto agent.model last.
 """
 
 import argparse
@@ -50,7 +50,6 @@ import yaml
 from datasets import load_dataset
 from tqdm import tqdm
 
-from uni_agent.agents import get_agent_cls
 from uni_agent.tasks import get_task
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
@@ -69,9 +68,8 @@ class InferenceActor:
             base_task = sample["extra_info"]["tools_kwargs"]["task"]
             instance_id = base_task["metadata"]["instance_id"]
             try:
-                # Deep-merge this run's task config onto the dataset's per-sample task
-                # (overrides win; the sample's image + metadata survive), then let
-                # get_task parse it (the agent registry resolves the concrete config).
+                # Deep-merge this run's task config onto the sample's task (overrides win;
+                # the sample's image + metadata survive), then run it.
                 task = _deep_merge(base_task, task_overrides)
                 result = await get_task(task).run()
                 info = result.info or {}
@@ -131,24 +129,8 @@ def _load_task_yaml(path: str) -> dict:
 
 
 def build_task_overrides(args: argparse.Namespace) -> dict:
-    """Build the task-config dict deep-merged onto every sample's task."""
-    if args.task_config:
-        overrides = _load_task_yaml(args.task_config)
-    else:
-        model_cfg: dict = {
-            "temperature": args.temperature,
-            "top_p": args.top_p,
-            "top_k": args.top_k,
-        }
-        if args.max_tokens is not None:
-            model_cfg["max_tokens_per_turn"] = args.max_tokens
-        if args.max_total_tokens is not None:
-            model_cfg["max_total_tokens"] = args.max_total_tokens
-        agent_cfg: dict = {"name": args.agent, "model": model_cfg}
-        # max_steps is code_act's turn budget; include it only for agents that declare it.
-        if "max_steps" in get_agent_cls(args.agent).config_model.model_fields:
-            agent_cfg["max_steps"] = args.max_steps
-        overrides = {"agent": agent_cfg}
+    """Load the (required) task config: the sole source of the agent/model config."""
+    overrides = _load_task_yaml(args.task_config)
 
     # endpoint = runtime state, layered onto the agent's model.
     agent = overrides.setdefault("agent", {})
@@ -173,9 +155,8 @@ def main() -> None:
     parser.add_argument("--agent", default="code_act", help="Registered agent name to run.")
     parser.add_argument(
         "--task-config",
-        help="Path to a YAML task config (name/sandbox/agent/...) deep-merged onto each sample's task dict. "
-        "Its `agent` section supersedes the per-flag knobs; the endpoint "
-        "(--base-url/--model/--api-key, env BASE_URL/MODEL/API_KEY) is still layered on.",
+        required=True,
+        help="Path to a YAML task config (name/sandbox/agent/...), deep-merged onto each sample's task dict (required)."
     )
 
     # Policy endpoint
@@ -183,23 +164,6 @@ def main() -> None:
     parser.add_argument("--api-key", default=os.getenv("API_KEY", "EMPTY"), help="Bearer key (env API_KEY).")
     parser.add_argument("--model", default=os.getenv("MODEL", ""), help="Served model name (env MODEL).")
 
-    # Sampling / rollout knobs (keep temperature/top_p/top_k aligned with training).
-    parser.add_argument("--temperature", type=float, default=0.8)
-    parser.add_argument("--top-p", type=float, default=0.9)
-    parser.add_argument("--top-k", type=int, default=-1, help="Top-k sampling; -1 disables it.")
-    parser.add_argument(
-        "--max-tokens",
-        type=int,
-        default=None,
-        help="Per-turn generation cap (max_tokens per model response); omit to fall back to --max-total-tokens.",
-    )
-    parser.add_argument(
-        "--max-total-tokens",
-        type=int,
-        default=65536,
-        help="Whole-episode generation budget (sum of completion tokens across turns); omit for unbounded.",
-    )
-    parser.add_argument("--max-steps", type=int, default=100, help="Max tool-calling turns per episode.")
     parser.add_argument("--n", type=int, default=1, help="Rollouts per instance (pass rate averages over all).")
     args = parser.parse_args()
 
@@ -231,7 +195,7 @@ def main() -> None:
         f"sampling=temp{model_cfg.get('temperature')}/top_p{model_cfg.get('top_p')}/top_k{model_cfg.get('top_k')} "
         f"max_tokens_per_turn={model_cfg.get('max_tokens_per_turn')} "
         f"max_total_tokens={model_cfg.get('max_total_tokens')} "
-        f"config={('yaml:' + args.task_config) if args.task_config else 'flags'}"
+        f"config=yaml:{args.task_config}"
     )
 
     num_workers = min(NUM_WORKERS, len(samples))

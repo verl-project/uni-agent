@@ -21,6 +21,7 @@ AGENT_REGISTRY: dict[str, type[Agent]] = {}
 AGENT_MODULES: dict[str, str] = {
     "code_act": "uni_agent.agents.code_act.agent",
     "claude_code": "uni_agent.agents.claude_code.agent",
+    "mini_swe_agent": "uni_agent.agents.mini_swe_agent.agent",
 }
 
 

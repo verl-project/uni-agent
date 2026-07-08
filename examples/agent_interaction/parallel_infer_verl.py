@@ -32,10 +32,10 @@ Example (single node, 4-way tensor parallel)::
         --tool-parser qwen3_coder --tensor-parallel-size 4 \
         --task-config examples/agent_interaction/task_config.yaml --limit 8
 
-As with ``parallel_infer_api.py``, the agent config is built from the per-flag
-knobs unless ``--task-config`` is given (a YAML task config deep-merged onto each
-sample's task dict). Either way the policy endpoint is the gateway session, bound
-by the runner -- not a flag.
+As with ``parallel_infer_api.py``, ``--task-config`` (a YAML task config) is required
+and forms the base, deep-merged onto each sample's task dict; all agent/model knobs
+(sampling, ``max_total_tokens``, ``max_steps``, ...) come from it. The policy endpoint
+is the gateway session, bound by the runner -- not a flag.
 """
 
 import argparse
@@ -60,7 +60,6 @@ try:
 except ImportError:  # fall back to verl's shim (mock raises a clear error if TQ is missing)
     from verl.utils.transferqueue_utils import tq
 
-from uni_agent.agents import get_agent_cls
 from uni_agent.framework.entry import AgentFrameworkRolloutAdapter
 from verl.utils import tensordict_utils as tu
 from verl.workers.rollout.llm_server import LLMServerManager
@@ -71,6 +70,11 @@ logger = logging.getLogger(__name__)
 
 GLOBAL_CONCURRENCY = int(os.getenv("GLOBAL_CONCURRENCY", 128))
 PARTITION_ID = "train"  # framework routes non-"validate" batches to the "train" TQ partition
+
+DEFAULT_TEMPERATURE = 0.8
+DEFAULT_TOP_P = 0.9
+DEFAULT_RESPONSE_LENGTH = 65536
+DEFAULT_PROMPT_LENGTH = 4096
 
 
 def _rule(text: str = "", width: int = 50, ch: str = "-") -> str:
@@ -94,30 +98,14 @@ def _load_task_yaml(path: str) -> dict:
 
 
 def build_task_overrides(args: argparse.Namespace) -> dict:
-    """Build the task-config dict deep-merged onto every sample's task.
+    """Load the (required) task config: the sole source of the agent/model config.
 
     Mirrors ``parallel_infer_api.py`` minus the endpoint: the policy server is the
-    per-sample gateway session, so ``agent.model.base_url`` is filled in at run
-    time by ``run_task`` rather than here.
+    per-sample gateway session, so ``agent.model.base_url`` is filled in at run time by
+    ``run_task`` rather than here. All sampling / ``max_total_tokens`` / ``max_steps``
+    knobs live in the YAML -- there are no per-flag overrides.
     """
-    if args.task_config:
-        overrides = _load_task_yaml(args.task_config)
-    else:
-        model_cfg: dict = {
-            "temperature": args.temperature,
-            "top_p": args.top_p,
-            "top_k": args.top_k,
-        }
-        if args.max_tokens is not None:
-            model_cfg["max_tokens_per_turn"] = args.max_tokens
-        if args.max_total_tokens is not None:
-            model_cfg["max_total_tokens"] = args.max_total_tokens
-        agent_cfg: dict = {"name": args.agent, "model": model_cfg}
-        # max_steps is code_act's turn budget; include it only for agents that declare it.
-        if "max_steps" in get_agent_cls(args.agent).config_model.model_fields:
-            agent_cfg["max_steps"] = args.max_steps
-        overrides = {"agent": agent_cfg}
-
+    overrides = _load_task_yaml(args.task_config)
     agent = overrides.setdefault("agent", {})
     agent.setdefault("name", args.agent)
     agent.setdefault("model", {})
@@ -134,11 +122,20 @@ def init_config(args: argparse.Namespace, *, task_overrides: dict, served_model_
 
     rollout = config.actor_rollout_ref.rollout
 
-    # Sampling (per-request params still win; kept here for engine-side defaults).
-    rollout.temperature = args.temperature
-    rollout.top_p = args.top_p
-    rollout.val_kwargs.temperature = args.temperature
-    rollout.val_kwargs.top_p = args.top_p
+    # Sampling: the task config's per-request params win at call time; these engine-side
+    # defaults just mirror them (or fall back to DEFAULT_*) so the two agree.
+    model_cfg = task_overrides.get("agent", {}).get("model", {})
+    temperature = model_cfg.get("temperature", DEFAULT_TEMPERATURE)
+    top_p = model_cfg.get("top_p", DEFAULT_TOP_P)
+    rollout.temperature = temperature
+    rollout.top_p = top_p
+    rollout.val_kwargs.temperature = temperature
+    rollout.val_kwargs.top_p = top_p
+
+    # response_length = the agent's episode token budget (max_total_tokens: the full
+    # prompt+gen context the loop may consume); DEFAULT_RESPONSE_LENGTH is the fallback.
+    max_total_tokens = model_cfg.get("max_total_tokens", DEFAULT_RESPONSE_LENGTH)
+    response_length = int(max_total_tokens)
 
     # Fan-out: the framework runs rollout.n gateway sessions per prompt.
     rollout.n = max(1, args.n)
@@ -153,8 +150,8 @@ def init_config(args: argparse.Namespace, *, task_overrides: dict, served_model_
     config.actor_rollout_ref.model.path = os.path.expanduser(args.model_path)
     rollout.name = args.engine
     rollout.mode = "async"
-    rollout.prompt_length = args.prompt_length
-    rollout.response_length = args.response_length
+    rollout.prompt_length = DEFAULT_PROMPT_LENGTH
+    rollout.response_length = response_length
     rollout.tensor_model_parallel_size = args.tensor_parallel_size
     rollout.gpu_memory_utilization = args.gpu_memory_utilization
 
@@ -189,8 +186,8 @@ def init_config(args: argparse.Namespace, *, task_overrides: dict, served_model_
 
     # Data.
     config.data.return_raw_chat = True
-    config.data.max_prompt_length = args.prompt_length
-    config.data.max_response_length = args.response_length
+    config.data.max_prompt_length = DEFAULT_PROMPT_LENGTH
+    config.data.max_response_length = response_length
 
     return config
 
@@ -369,8 +366,10 @@ def main() -> None:
     parser.add_argument("--agent", default="code_act", help="Registered agent name to run.")
     parser.add_argument(
         "--task-config",
-        help="Path to a YAML task config (name/sandbox/agent/...) deep-merged onto each sample's task dict. "
-        "Its `agent` section supersedes the per-flag knobs; the endpoint is bound to the gateway session.",
+        required=True,
+        help="Path to a YAML task config (name/sandbox/agent/...), deep-merged onto each sample's task dict "
+        "(required). All agent/model knobs (sampling, max_total_tokens, max_steps, ...) come from it; "
+        "the endpoint is bound to the gateway session.",
     )
     parser.add_argument(
         "--result-path",
@@ -386,23 +385,6 @@ def main() -> None:
         help="Only run the first N samples (smoke testing); omit for the full dataset.",
     )
 
-    # Sampling / rollout knobs (keep temperature/top_p/top_k aligned with training).
-    parser.add_argument("--temperature", type=float, default=0.8)
-    parser.add_argument("--top-p", type=float, default=0.9)
-    parser.add_argument("--top-k", type=int, default=-1, help="Top-k sampling; -1 disables it.")
-    parser.add_argument(
-        "--max-tokens",
-        type=int,
-        default=None,
-        help="Per-turn generation cap (max_tokens per model response); omit to fall back to --max-total-tokens.",
-    )
-    parser.add_argument(
-        "--max-total-tokens",
-        type=int,
-        default=65536,
-        help="Whole-episode generation budget (sum of completion tokens across turns).",
-    )
-    parser.add_argument("--max-steps", type=int, default=100, help="Max tool-calling turns per episode.")
     parser.add_argument(
         "--n", type=int, default=1, help="Rollout sessions per instance (rollout.n; scores average over all)."
     )
@@ -419,8 +401,6 @@ def main() -> None:
     parser.add_argument(
         "--tensor-parallel-size", "--tp", dest="tensor_parallel_size", type=int, default=4, help="Tensor parallel size."
     )
-    parser.add_argument("--prompt-length", type=int, default=4096, help="Max prompt length (tokens).")
-    parser.add_argument("--response-length", type=int, default=65536, help="Max response length (tokens).")
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.9, help="Engine GPU memory fraction.")
     parser.add_argument(
         "--gateway-count",
@@ -467,13 +447,12 @@ def main() -> None:
     logger.info(
         f"gateways={args.gateway_count} concurrency={args.concurrency} "
         f"nnodes={args.nnodes} gpus/node={args.n_gpus_per_node} tp={args.tensor_parallel_size} "
-        f"prompt_len={args.prompt_length} response_len={args.response_length} "
+        f"max_total_tokens={model_cfg.get('max_total_tokens')} "
         f"sampling=temp{model_cfg.get('temperature')}/top_p{model_cfg.get('top_p')}/top_k{model_cfg.get('top_k')} "
-        f"config={('yaml:' + args.task_config) if args.task_config else 'flags'}"
+        f"config=yaml:{args.task_config}"
     )
 
-    # 1. Ray + TransferQueue + verl inference engine.
-    # ray.init()
+    # 1. TransferQueue + verl inference engine (Ray auto-inits via the actors below).
     logger.info("initializing configuration, TransferQueue, and LLMServerManager...")
     config = init_config(args, task_overrides=task_overrides, served_model_name=served_model_name)
     tq.init(config.transfer_queue)
