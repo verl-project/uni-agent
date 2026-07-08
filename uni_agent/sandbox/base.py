@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import abc
+import asyncio
 import base64
 import dataclasses
 import logging
@@ -103,9 +104,10 @@ class SandboxBackend(Protocol):
 class Sandbox(abc.ABC):
     """One provider = one class: owns lifecycle and is the data-plane backend.
 
-    Providers implement :meth:`start`, :meth:`stop` and :meth:`exec`; the
-    ``bash -lc`` helper and exec-based file transfer are provided here.
-    :meth:`expose_port` is optional (raises until a provider implements it).
+    Providers implement :meth:`start`, :meth:`stop` and the :meth:`_exec`
+    primitive; the public :meth:`exec` wraps ``_exec`` with a shared error
+    policy, and the ``bash -lc`` helper and exec-based file transfer build on
+    top. :meth:`expose_port` is optional (raises until a provider implements it).
     """
 
     #: Registry key for this provider, stamped by ``@register_sandbox``.
@@ -145,8 +147,19 @@ class Sandbox(abc.ABC):
     async def __aexit__(self, *exc) -> None:
         await self.stop()
 
-    # ----- data plane: exec is the one required primitive -----
+    # ----- data plane: providers implement the _exec primitive -----
     @abc.abstractmethod
+    async def _exec(
+        self,
+        argv: list[str],
+        *,
+        timeout: float | None = None,
+        workdir: str | None = None,
+        env: dict[str, str] | None = None,
+    ) -> ExecResult:
+        """Run ``argv`` once via the backend and return its captured result."""
+        ...
+
     async def exec(
         self,
         argv: list[str],
@@ -156,7 +169,33 @@ class Sandbox(abc.ABC):
         env: dict[str, str] | None = None,
     ) -> ExecResult:
         """Run ``argv`` once and return its captured result (no implicit shell)."""
-        ...
+        try:
+            return await self._exec(argv, timeout=timeout, workdir=workdir, env=env)
+        except Exception as exc:
+            if self._is_timeout_error(exc):
+                return ExecResult(exit_code=-1, stdout="", stderr=f"exec timed out after {timeout}s: {exc}")
+            if not await self.is_alive():
+                raise
+            return ExecResult(exit_code=127, stdout="", stderr=str(exc))
+
+    def _is_timeout_error(self, exc: BaseException) -> bool:
+        """Whether ``exc`` from :meth:`_exec` represents a command timeout.
+
+        Base recognises the standard :class:`asyncio.TimeoutError` /
+        :class:`TimeoutError`; providers whose SDK raises a bespoke timeout type
+        override this and OR-in their own check.
+        """
+        return isinstance(exc, (asyncio.TimeoutError, TimeoutError))
+
+    async def is_alive(self) -> bool:
+        """Cheap probe for whether the sandbox is still usable.
+
+        Consulted by :meth:`exec` after a non-timeout failure to decide between
+        re-raising (dead sandbox) and downgrading to an error result (live
+        sandbox). The base assumes always-alive; remote providers override with a
+        real probe and must never raise (return ``False`` on any error).
+        """
+        return True
 
     async def exec_shell(
         self,
@@ -237,7 +276,7 @@ class Sandbox(abc.ABC):
     # ----- directory transfer: tar one archive over the single-file seam -----
     async def _upload_tree(self, local_dir: Path, remote_dir: str) -> None:
         """Pack a host dir into one tar, ship via :meth:`upload_file`, unpack in the sandbox."""
-        remote_archive = f"/tmp/uni-upload-{uuid.uuid4().hex}.tar.gz"
+        remote_archive = f"/tmp/uni-agent-upload-{uuid.uuid4().hex}.tar.gz"
         with tempfile.TemporaryDirectory() as tmp:
             archive = Path(tmp) / "upload.tar.gz"
             pack_dir_to_file(local_dir, archive)
@@ -255,7 +294,7 @@ class Sandbox(abc.ABC):
         """Archive a sandbox dir, pull via :meth:`download_file`, extract locally."""
         dst = Path(local_dir)
         dst.mkdir(parents=True, exist_ok=True)
-        remote_archive = f"/tmp/uni-download-{uuid.uuid4().hex}.tar.gz"
+        remote_archive = f"/tmp/uni-agent-download-{uuid.uuid4().hex}.tar.gz"
         try:
             res = await self.exec_shell(remote_pack_command(remote_dir, remote_archive))
             if res.exit_code != 0:

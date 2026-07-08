@@ -23,7 +23,7 @@ from uni_agent.tasks import get_task
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 logger = logging.getLogger(__name__)
 
-GLOBAL_CONCURRENCY = int(os.getenv("GLOBAL_CONCURRENCY", 128))
+GLOBAL_CONCURRENCY = int(os.getenv("GLOBAL_CONCURRENCY", 512))
 NUM_WORKERS = int(os.getenv("NUM_WORKERS", 8))
 SANDBOX_PROVIDER = os.getenv("SANDBOX_PROVIDER", "modal")
 RUNTIME_TIMEOUT = float(os.getenv("RUNTIME_TIMEOUT", 3600))

@@ -67,8 +67,16 @@ class ModalSandbox(Sandbox):
             raise RuntimeError("ModalSandbox not started; call start() first")
         return self._sandbox
 
+    async def is_alive(self) -> bool:
+        if self._sandbox is None:
+            return False
+        try:
+            return await self._sandbox.poll.aio() is None
+        except Exception:
+            return False
+
     # ----- data plane -----
-    async def exec(
+    async def _exec(
         self,
         argv: list[str],
         *,

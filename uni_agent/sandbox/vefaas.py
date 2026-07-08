@@ -263,7 +263,21 @@ class VefaasSandbox(Sandbox):
         return self._runtime
 
     # ----- data plane -----
-    async def exec(
+    async def is_alive(self) -> bool:
+        runtime = self._runtime
+        if runtime is None:
+            return False
+        try:
+            return await runtime.is_alive(timeout=10.0)
+        except Exception:
+            return False
+
+    def _is_timeout_error(self, exc: BaseException) -> bool:
+        # swerex reports a per-command timeout as CommandTimeoutError (surfaced by
+        # _VefaasRuntime); other SwerexExceptions fall through to the liveness path.
+        return type(exc).__name__ == "CommandTimeoutError" or super()._is_timeout_error(exc)
+
+    async def _exec(
         self,
         argv: list[str],
         *,

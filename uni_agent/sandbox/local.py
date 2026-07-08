@@ -21,7 +21,7 @@ class LocalSandbox(Sandbox):
     async def stop(self) -> None:
         pass
 
-    async def exec(
+    async def _exec(
         self,
         argv: list[str],
         *,

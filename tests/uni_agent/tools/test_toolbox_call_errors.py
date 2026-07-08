@@ -43,9 +43,22 @@ class _Slow(Tool):
         return ToolResult(text="partial output", status="timeout")
 
 
+class _Kaboom(Tool):
+    """Raises a non-:class:`ToolError` -- a tool bug or an infra fault (dead sandbox).
+
+    Unlike :class:`_Boom` (a *ToolError*, caught and returned), this is meant to
+    propagate out of :meth:`Toolbox.call` so the caller can end/bucket the episode.
+    """
+
+    name = "kaboom"
+
+    async def run(self, args, *, timeout=None):
+        raise RuntimeError("modal sandbox is not alive")
+
+
 def _toolbox() -> Toolbox:
     sandbox = object()  # the fakes above never touch the sandbox
-    return Toolbox([_Echo(sandbox), _Boom(sandbox), _Slow(sandbox)])
+    return Toolbox([_Echo(sandbox), _Boom(sandbox), _Slow(sandbox), _Kaboom(sandbox)])
 
 
 # --------------------------- Toolbox.call: error returns ---------------------------
@@ -77,6 +90,13 @@ def test_tool_error_is_caught_and_tagged():
     result = asyncio.run(_toolbox().call("boom", "{}"))
     assert result.status == "error"
     assert result.text == "Error: kaboom"
+
+
+def test_unexpected_exception_propagates():
+    # A non-ToolError (tool bug / infra fault) is NOT swallowed into an observation;
+    # it propagates so the caller ends/buckets the episode instead of feeding it back.
+    with pytest.raises(RuntimeError, match="modal sandbox is not alive"):
+        asyncio.run(_toolbox().call("kaboom", "{}"))
 
 
 @pytest.mark.parametrize("raw", ["{}", "", None, '{"a": 1}', {"a": 1}])

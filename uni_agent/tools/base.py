@@ -348,14 +348,7 @@ class Toolbox:
     async def call(
         self, name: str, args: dict[str, Any] | str | None = None, *, timeout: float | None = None
     ) -> ToolResult:
-        """Dispatch one tool call, returning the :class:`ToolResult` for the model.
-
-        The single place call errors are handled: a malformed call and a tool
-        runtime failure are both caught and returned (tagged via
-        :attr:`ToolResult.status`) so the bad call is skipped, not fatal. ``timeout``
-        is an optional per-call cap forwarded to :meth:`Tool.run` (``None`` uses the
-        tool's own default).
-        """
+        """Dispatch one tool call, returning the :class:`ToolResult` for the model."""
         try:
             tool = self._tools.get(name)
             if tool is None:
@@ -368,11 +361,9 @@ class Toolbox:
             return ToolResult(text=str(exc), status="format_error")
         except ToolError as exc:
             return ToolResult(text=f"Error: {exc}", status="error")
-        except Exception as exc:
-            # A tool *bug* (not a ToolError) shouldn't kill the whole episode: log the
-            # traceback for visibility, but hand the model a recoverable observation.
+        except Exception:
             logger.exception("tool %r raised an unexpected error", name)
-            return ToolResult(text=f"Error: {type(exc).__name__}: {exc}", status="error")
+            raise
         return result if isinstance(result, ToolResult) else ToolResult(text=str(result))
 
     @staticmethod
