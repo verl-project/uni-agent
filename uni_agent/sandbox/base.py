@@ -185,7 +185,7 @@ class Sandbox(abc.ABC):
         :class:`TimeoutError`; providers whose SDK raises a bespoke timeout type
         override this and OR-in their own check.
         """
-        return isinstance(exc, (asyncio.TimeoutError, TimeoutError))
+        return isinstance(exc, asyncio.TimeoutError | TimeoutError)
 
     async def is_alive(self) -> bool:
         """Cheap probe for whether the sandbox is still usable.
