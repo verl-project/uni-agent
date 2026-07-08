@@ -302,14 +302,12 @@ async def test_gateway_actor_create_session_forwards_session_budget(monkeypatch)
             prompt_length=None,
             response_length=None,
             enable_parallel_session_generation=False,
-            ignore_cch_for_prefix_hash=False,
         ):
             captured["handle"] = handle
             captured["codec"] = codec
             captured["prompt_length"] = prompt_length
             captured["response_length"] = response_length
             captured["enable_parallel_session_generation"] = enable_parallel_session_generation
-            captured["ignore_cch_for_prefix_hash"] = ignore_cch_for_prefix_hash
 
     monkeypatch.setattr(gateway_mod, "GatewaySession", _RecordingGatewaySession)
     actor = gateway_mod._GatewayActor(
@@ -318,7 +316,6 @@ async def test_gateway_actor_create_session_forwards_session_budget(monkeypatch)
             prompt_length=128,
             response_length=64,
             enable_parallel_session_generation=True,
-            ignore_cch_for_prefix_hash=True,
         ),
         InspectingBackend(),
     )
@@ -330,7 +327,6 @@ async def test_gateway_actor_create_session_forwards_session_budget(monkeypatch)
     assert captured["prompt_length"] == 128
     assert captured["response_length"] == 64
     assert captured["enable_parallel_session_generation"] is True
-    assert captured["ignore_cch_for_prefix_hash"] is True
 
 
 @pytest.mark.asyncio

@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import re
 import time
 from dataclasses import dataclass, field, replace
 from enum import Enum
@@ -18,8 +17,6 @@ from uni_agent.gateway.session.types import SessionHandle, Trajectory
 
 
 _EMPTY_PREFIX_HASH = hashlib.sha256(b"uni-agent-prefix-v1\0empty").hexdigest()
-_CCH_PATTERN = re.compile(r"(?<![A-Za-z0-9_])cch=[A-Za-z0-9_-]+")
-_IGNORED_CCH = "cch=<ignored>"
 
 
 class SessionPhase(str, Enum):
@@ -190,15 +187,13 @@ class GatewaySession:
         prompt_length: int | None = None,
         response_length: int | None = None,
         enable_parallel_session_generation: bool = False,
-        ignore_cch_for_prefix_hash: bool = False,
     ):
         """Create an active session bound to a handle and model codec."""
-        for name, value in (
-            ("enable_parallel_session_generation", enable_parallel_session_generation),
-            ("ignore_cch_for_prefix_hash", ignore_cch_for_prefix_hash),
-        ):
-            if type(value) is not bool:
-                raise ValueError(f"{name} must be a bool, got {type(value).__name__}")
+        if type(enable_parallel_session_generation) is not bool:
+            raise ValueError(
+                "enable_parallel_session_generation must be a bool, "
+                f"got {type(enable_parallel_session_generation).__name__}"
+            )
 
         self.handle = handle
         self._codec = codec
@@ -207,7 +202,6 @@ class GatewaySession:
         self._prompt_length = prompt_length
         self._response_length = response_length
         self._enable_parallel_session_generation = enable_parallel_session_generation
-        self._ignore_cch_for_prefix_hash = ignore_cch_for_prefix_hash
         self.active_chains: list[ChainState] = []
         self.materialized_chains: list[MaterializedChain] = []
         self._next_chain_id = 1
@@ -582,8 +576,6 @@ class GatewaySession:
 
     def _compute_message_hash(self, message: dict[str, Any]) -> str:
         canonical = self._codec.canonicalize_message_for_prefix_comparison(message)
-        if self._ignore_cch_for_prefix_hash:
-            canonical = self._normalize_cch_in_hash_input(canonical)
         canonical_json = json.dumps(
             canonical,
             sort_keys=True,
@@ -591,17 +583,6 @@ class GatewaySession:
             ensure_ascii=False,
         ).encode("utf-8")
         return hashlib.sha256(b"uni-agent-message-v1\0" + canonical_json).hexdigest()
-
-    def _normalize_cch_in_hash_input(self, value: Any) -> Any:
-        if isinstance(value, str):
-            return _CCH_PATTERN.sub(_IGNORED_CCH, value)
-        if isinstance(value, dict):
-            return {key: self._normalize_cch_in_hash_input(item) for key, item in value.items()}
-        if isinstance(value, list):
-            return [self._normalize_cch_in_hash_input(item) for item in value]
-        if isinstance(value, tuple):
-            return tuple(self._normalize_cch_in_hash_input(item) for item in value)
-        return value
 
     def _copy_trajectory_buffer(self, buffer: TrajectoryBuffer) -> TrajectoryBuffer:
         return TrajectoryBuffer(

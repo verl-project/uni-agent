@@ -152,7 +152,6 @@ Start with the script defaults, then tune these first:
 - `max_prompt_length`, `max_response_length`: context budget for the agent trajectory.
 - `staleness_threshold`, `trigger_parameter_sync_step`, `require_batches`, `partial_rollout`: fully async scheduling and weight synchronization behavior.
 - `actor_rollout_ref.rollout.custom.agent_framework.enable_parallel_session_generation` (default `False`): M2 opt-in for overlapping only backend generation. Gateway prepare and commit stay serial.
-- `actor_rollout_ref.rollout.custom.agent_framework.ignore_cch_for_prefix_hash` (default `False`): M2 opt-in prefix-hash compatibility mode for ignoring `cch=` leaves.
 
 Gateway sessions keep multiple active linear chains by default for subagent, compaction, and retry-style flows. In M1, the final finalized trajectory remains the scoring target and its score is broadcast to all trajectories from that session.
 With `enable_parallel_session_generation`, reward still uses the final finalized trajectory target plus final-broadcast semantics. Enable it only when sibling chains should share the same reward, such as best-of-N; do not use it for heterogeneous chains that need separate scoring.

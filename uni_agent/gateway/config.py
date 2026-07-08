@@ -31,8 +31,6 @@ class GatewayActorConfig:
         response_length: Optional response-token budget stored on gateway sessions.
         enable_parallel_session_generation: Allow concurrent backend generation
             calls within one gateway session while serializing prepare/commit.
-        ignore_cch_for_prefix_hash: Treat Claude Code ``cch=...`` hash churn as
-            non-semantic only for prefix-hash comparison.
     """
 
     tokenizer: Any
@@ -46,10 +44,10 @@ class GatewayActorConfig:
     prompt_length: int | None = None
     response_length: int | None = None
     enable_parallel_session_generation: bool = False
-    ignore_cch_for_prefix_hash: bool = False
 
     def __post_init__(self) -> None:
-        for name in ("enable_parallel_session_generation", "ignore_cch_for_prefix_hash"):
-            value = getattr(self, name)
-            if type(value) is not bool:
-                raise ValueError(f"{name} must be a bool, got {type(value).__name__}")
+        if type(self.enable_parallel_session_generation) is not bool:
+            raise ValueError(
+                "enable_parallel_session_generation must be a bool, "
+                f"got {type(self.enable_parallel_session_generation).__name__}"
+            )
