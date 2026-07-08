@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 #: interpreter. Takes ``<config_path> <result_path>`` and never touches
 #: stdout for its result (stdout is polluted by litellm/rich logging) --
 #: it writes a clean JSON result file instead.
-_RUN_AGENT_SCRIPT = '''\
+_RUN_AGENT_SCRIPT = """\
 import json
 import os
 import sys
@@ -81,7 +81,7 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-'''
+"""
 
 
 class MiniSweAgentConfig(AgentConfig):

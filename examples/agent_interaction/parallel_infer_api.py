@@ -156,7 +156,7 @@ def main() -> None:
     parser.add_argument(
         "--task-config",
         required=True,
-        help="Path to a YAML task config (name/sandbox/agent/...), deep-merged onto each sample's task dict (required)."
+        help="Path to a YAML task config (name/sandbox/agent/...), deep-merged onto each sample's task dict (required).",
     )
 
     # Policy endpoint
