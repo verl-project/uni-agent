@@ -407,7 +407,7 @@ def main() -> None:
         "--num-workers",
         dest="gateway_count",
         type=int,
-        default=8,
+        default=1,
         help="Number of gateway actors fronting the engine (each serves many concurrent sessions).",
     )
     parser.add_argument(
