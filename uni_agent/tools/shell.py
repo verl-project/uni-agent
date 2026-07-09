@@ -47,15 +47,8 @@ class CommandResult:
         return self.end_time - self.start_time
 
 
-def _capture_wrapper(command: str, out: str, err: str, rc: str, *, signal: str | None) -> str:
-    """Build the shell line running ``command`` under the file-capture protocol.
-
-    The body is base64-encoded (so arbitrary quoting/newlines survive being typed
-    into the shell) then ``eval``-ed *in that same shell* so cwd/exports persist.
-    stdout/stderr go to their own files; the exit code is written last and
-    atomically (``.part`` + ``mv``) as an unambiguous completion marker for
-    :meth:`poll`. ``signal`` (tmux) appends ``tmux wait -S`` to wake a blocking waiter.
-    """
+def _capture_wrapper(command: str, out: str, err: str, rc: str, *, signal: str | None, sock: str) -> str:
+    """Build the shell line running ``command`` under the file-capture protocol."""
     b64 = base64.b64encode(command.encode()).decode("ascii")
     line = (
         f"eval \"$(printf %s '{b64}' | base64 -d)\" "
@@ -64,7 +57,7 @@ def _capture_wrapper(command: str, out: str, err: str, rc: str, *, signal: str |
         f"&& mv {shlex.quote(rc)}.part {shlex.quote(rc)}"
     )
     if signal is not None:
-        line += f"; tmux wait -S {shlex.quote(signal)}"
+        line += f"; tmux -S {shlex.quote(sock)} wait -S {shlex.quote(signal)}"
     return line
 
 
@@ -112,9 +105,14 @@ class ShellChannel:
         self._shell = shell
         self._env = dict(env or {})
         self._dir = f"/tmp/uni-agent-shell/{self.session_id}"
+        self._sock = f"{self._dir}/tmux.sock"
         self._counter = 0
 
     # ----- helpers -----
+    def _tmux(self, *args: str) -> list[str]:
+        """A tmux argv pinned to our private server socket via ``-S``."""
+        return ["tmux", "-S", self._sock, *args]
+
     def _paths(self, cid: int) -> tuple[str, str, str]:
         base = f"{self._dir}/cmd_{cid}"
         return f"{base}.out", f"{base}.err", f"{base}.rc"
@@ -146,23 +144,23 @@ class ShellChannel:
             self._shell,
         ] if self._env else [self._shell]
         res = await self.backend.exec(
-            [
-                "tmux", "new-session", "-d",
+            self._tmux(
+                "new-session", "-d",
                 "-s", self.session_id,
                 "-x", str(self.width),
                 "-y", str(self.height),
                 *launch,
-            ]
+            )
         )
         if res.exit_code != 0:
             raise RuntimeError(f"failed to start tmux session: {res.stderr.strip()}")
         # Large scrollback so capture_pane(entire=True) can return full history.
         await self.backend.exec(
-            ["tmux", "set-option", "-g", "history-limit", "1000000"]
+            self._tmux("set-option", "-g", "history-limit", "1000000")
         )
 
     async def close(self) -> None:
-        await self.backend.exec(["tmux", "kill-session", "-t", self.session_id])
+        await self.backend.exec(self._tmux("kill-session", "-t", self.session_id))
         await self.backend.exec(["rm", "-rf", self._dir])
 
     async def observe(self) -> ToolResult:
@@ -173,11 +171,11 @@ class ShellChannel:
         cid = self._counter + 1
         self._counter = cid
         out, err, rc = self._paths(cid)
-        line = _capture_wrapper(command, out, err, rc, signal=self._chan(cid))
+        line = _capture_wrapper(command, out, err, rc, signal=self._chan(cid), sock=self._sock)
         # Type the wrapped line then press Enter. `--` ends option parsing so a
         # command starting with `-` is still typed literally.
         res = await self.backend.exec(
-            ["tmux", "send-keys", "-t", self.session_id, "--", line, "Enter"]
+            self._tmux("send-keys", "-t", self.session_id, "--", line, "Enter")
         )
         if res.exit_code != 0:
             raise RuntimeError(f"failed to inject command: {res.stderr.strip()}")
@@ -214,7 +212,7 @@ class ShellChannel:
             # lost signal costs one bounded slice, not a hang.
             slice_s = max(0.1, min(2.0, timeout - elapsed))
             await self.backend.exec_shell(
-                f"timeout {slice_s} tmux wait {shlex.quote(chan)} 2>/dev/null || true",
+                f"timeout {slice_s} tmux -S {shlex.quote(self._sock)} wait {shlex.quote(chan)} 2>/dev/null || true",
                 timeout=slice_s + 10,
             )
 
@@ -233,18 +231,18 @@ class ShellChannel:
     async def send_keys(self, keys: str | list[str]) -> None:
         keys_list = [keys] if isinstance(keys, str) else list(keys)
         res = await self.backend.exec(
-            ["tmux", "send-keys", "-t", self.session_id, "--", *keys_list]
+            self._tmux("send-keys", "-t", self.session_id, "--", *keys_list)
         )
         if res.exit_code != 0:
             raise RuntimeError(f"send_keys failed: {res.stderr.strip()}")
 
     async def interrupt(self) -> None:
         await self.backend.exec(
-            ["tmux", "send-keys", "-t", self.session_id, "C-c"]
+            self._tmux("send-keys", "-t", self.session_id, "C-c")
         )
 
     async def capture_pane(self, *, entire: bool = False) -> str:
-        args = ["tmux", "capture-pane", "-p"]
+        args = self._tmux("capture-pane", "-p")
         if entire:
             args += ["-S", "-"]
         args += ["-t", self.session_id]
@@ -253,8 +251,8 @@ class ShellChannel:
 
     async def resize(self, *, width: int, height: int) -> None:
         res = await self.backend.exec(
-            ["tmux", "resize-window", "-t", self.session_id,
-             "-x", str(width), "-y", str(height)]
+            self._tmux("resize-window", "-t", self.session_id,
+                       "-x", str(width), "-y", str(height))
         )
         if res.exit_code != 0:
             raise RuntimeError(f"resize failed: {res.stderr.strip()}")
