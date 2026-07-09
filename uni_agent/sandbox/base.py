@@ -8,6 +8,8 @@ import logging
 import shlex
 import tempfile
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, ClassVar, Protocol, runtime_checkable
 
@@ -133,19 +135,37 @@ class Sandbox(abc.ABC):
         """Terminate the sandbox and release resources."""
         ...
 
-    async def __aenter__(self) -> Sandbox:
-        try:
-            await self.start()
-        except BaseException:
+    async def __aenter__(self, retry: int = 3) -> Sandbox:
+        """Create the sandbox (retrying transient ``start()`` failures) and return it ready."""
+        retry = max(1, retry)
+        last_exc: BaseException | None = None
+        for attempt in range(1, retry + 1):
             try:
-                await self.stop()
-            except Exception:
-                logger.warning("sandbox stop() failed during start() cleanup", exc_info=True)
-            raise
-        return self
+                await self.start()
+                return self
+            except Exception as exc:
+                last_exc = exc
+                try:
+                    await self.stop()
+                except Exception:
+                    logger.warning("sandbox stop() failed during start() cleanup", exc_info=True)
+            logger.warning("sandbox failed to start (attempt %d/%d): %r", attempt, retry, last_exc)
+            if attempt < retry:
+                await asyncio.sleep(2 * attempt)
+        assert last_exc is not None
+        logger.error("sandbox failed to start after %d attempts: %r", retry, last_exc)
+        raise last_exc
 
     async def __aexit__(self, *exc) -> None:
         await self.stop()
+
+    @asynccontextmanager
+    async def entered(self, **start_kwargs: Any) -> AsyncIterator[Sandbox]:
+        await self.__aenter__(**start_kwargs)
+        try:
+            yield self
+        finally:
+            await self.stop()
 
     # ----- data plane: providers implement the _exec primitive -----
     @abc.abstractmethod
