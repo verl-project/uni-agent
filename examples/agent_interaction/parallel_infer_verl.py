@@ -424,6 +424,8 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    ray.init()
+
     task_overrides = build_task_overrides(args)
     agent_cfg = task_overrides.get("agent", {})
     model_cfg = agent_cfg.get("model", {})
