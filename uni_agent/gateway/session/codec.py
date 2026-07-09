@@ -219,10 +219,8 @@ class MessageCodec:
         tools: list[dict[str, Any]] | None = None,
         image_data: list[Any] | None = None,
         video_data: list[Any] | None = None,
-        request_chat_template_kwargs: dict[str, Any] | None = None,
     ) -> list[int]:
         """Encode a full chat history into prompt token IDs."""
-        chat_template_kwargs = self.effective_chat_template_kwargs(request_chat_template_kwargs)
         if self._processor is not None:
             raw_prompt = _apply_chat_template(
                 self._processor,
@@ -230,7 +228,7 @@ class MessageCodec:
                 tools=tools,
                 add_generation_prompt=True,
                 tokenize=False,
-                **chat_template_kwargs,
+                **self._apply_chat_template_kwargs,
             )
             videos = video_data
             video_metadata = None
@@ -253,7 +251,7 @@ class MessageCodec:
                 messages,
                 tools=tools,
                 add_generation_prompt=True,
-                **chat_template_kwargs,
+                **self._apply_chat_template_kwargs,
             )
         )
 
@@ -263,17 +261,15 @@ class MessageCodec:
         messages: list[dict[str, Any]],
         image_data: list[Any] | None = None,
         video_data: list[Any] | None = None,
-        request_chat_template_kwargs: dict[str, Any] | None = None,
     ) -> list[int]:
         """Encode continuation messages without the cached system prompt prefix."""
-        chat_template_kwargs = self.effective_chat_template_kwargs(request_chat_template_kwargs)
         if self._processor is not None:
             raw_prompt = _apply_chat_template(
                 self._processor,
                 messages,
                 add_generation_prompt=True,
                 tokenize=False,
-                **chat_template_kwargs,
+                **self._apply_chat_template_kwargs,
             )
             videos = video_data
             video_metadata = None
@@ -295,28 +291,10 @@ class MessageCodec:
                     self._tokenizer,
                     messages,
                     add_generation_prompt=True,
-                    **chat_template_kwargs,
+                    **self._apply_chat_template_kwargs,
                 )
             )
-        # Default path: self._system_prompt is already encoder-matched (processor-derived when
-        # a processor is present; see __init__), so it correctly measures the processor's
-        # default-kwargs prefix here too.
-        system_prompt = self._system_prompt
-        if chat_template_kwargs != self._apply_chat_template_kwargs:
-            # Measure the strip prefix with the same encoder that produced `ids`: a processor
-            # renders multimodal-aware token ids whose system-prompt prefix length can differ
-            # from the bare tokenizer's, so slicing by a tokenizer-derived length would
-            # misalign the continuation delta. Fall back to the tokenizer when no processor.
-            prefix_encoder = self._processor if self._processor is not None else self._tokenizer
-            system_prompt = initialize_system_prompt(prefix_encoder, **chat_template_kwargs)
-        return ids[len(system_prompt) :]
-
-    def effective_chat_template_kwargs(
-        self,
-        request_chat_template_kwargs: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        """Return codec defaults merged with per-request chat-template kwargs."""
-        return {**self._apply_chat_template_kwargs, **(request_chat_template_kwargs or {})}
+        return ids[len(self._system_prompt) :]
 
     async def decode_response(
         self,
@@ -355,13 +333,10 @@ class MessageCodec:
         return {"role": "assistant", "content": response_text}, finish_reason
 
     def normalize_request(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Normalize chat messages, tool schemas, and chat-template kwargs."""
+        """Normalize chat messages and tool schemas."""
         messages = payload.get("messages")
         if not isinstance(messages, list) or not messages:
             raise MalformedRequestError("messages must be non-empty")
-        chat_template_kwargs = payload.get("chat_template_kwargs")
-        if chat_template_kwargs is not None and not isinstance(chat_template_kwargs, dict):
-            raise MalformedRequestError("chat_template_kwargs must be an object")
 
         tool_choice_payload = payload.get("tool_choice")
         tool_choice = tool_choice_payload.lower() if isinstance(tool_choice_payload, str) else "auto"
@@ -372,7 +347,6 @@ class MessageCodec:
         return {
             "messages": [_normalize_message(message) for message in messages],
             "tools": tools,
-            "chat_template_kwargs": dict(chat_template_kwargs) if chat_template_kwargs else {},
         }
 
     def canonicalize_message_for_prefix_comparison(self, message: dict[str, Any]) -> dict[str, Any]:

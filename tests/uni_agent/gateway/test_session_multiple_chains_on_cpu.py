@@ -60,7 +60,7 @@ def test_gateway_session_rejects_non_bool_m2_flags(flag_name, bad_value):
         _session("bad-m2-flag", **{flag_name: bad_value})
 
 
-def test_encode_incremental_uses_request_chat_template_kwargs_for_prefix_slice(monkeypatch):
+def test_encode_incremental_uses_config_chat_template_kwargs_for_prefix_slice(monkeypatch):
     import uni_agent.gateway.session.codec as codec_mod
 
     class PrefixChangingTokenizer:
@@ -94,16 +94,15 @@ def test_encode_incremental_uses_request_chat_template_kwargs_for_prefix_slice(m
     monkeypatch.setattr(codec_mod, "initialize_system_prompt", initialize_system_prompt)
 
     tokenizer = PrefixChangingTokenizer()
-    codec = MessageCodec(tokenizer, apply_chat_template_kwargs={"prefix_style": "short"})
+    codec = MessageCodec(tokenizer, apply_chat_template_kwargs={"prefix_style": "long"})
     incremental_ids = codec.encode_incremental(
         [{"role": "user", "content": "delta"}],
-        request_chat_template_kwargs={"prefix_style": "long"},
     )
 
     assert tokenizer.decode(incremental_ids) == "user:delta\nassistant:"
 
 
-def test_encode_incremental_processor_uses_request_chat_template_kwargs_for_prefix_slice(monkeypatch):
+def test_encode_incremental_processor_uses_config_chat_template_kwargs_for_prefix_slice(monkeypatch):
     import torch
 
     import uni_agent.gateway.session.codec as codec_mod
@@ -156,11 +155,10 @@ def test_encode_incremental_processor_uses_request_chat_template_kwargs_for_pref
     codec = MessageCodec(
         _PlainTokenizer(),
         processor=_PrefixChangingProcessor(),
-        apply_chat_template_kwargs={"prefix_style": "short"},
+        apply_chat_template_kwargs={"prefix_style": "long"},
     )
     incremental_ids = codec.encode_incremental(
         [{"role": "user", "content": "delta"}],
-        request_chat_template_kwargs={"prefix_style": "long"},
     )
 
     assert _PlainTokenizer().decode(incremental_ids) == "user:delta\nassistant:"
@@ -223,16 +221,8 @@ def test_encode_incremental_processor_default_kwargs_uses_processor_prefix_for_s
         apply_chat_template_kwargs={"prefix_style": "short"},
     )
 
-    # Request kwargs omitted entirely -> default path.
     omitted = codec.encode_incremental([{"role": "user", "content": "delta"}])
     assert _PlainTokenizer().decode(omitted) == "user:delta\nassistant:"
-
-    # Request kwargs explicitly equal to codec defaults -> still the default path.
-    effective_equal = codec.encode_incremental(
-        [{"role": "user", "content": "delta"}],
-        request_chat_template_kwargs={"prefix_style": "short"},
-    )
-    assert _PlainTokenizer().decode(effective_equal) == "user:delta\nassistant:"
 
 
 class _LogprobBackend:
@@ -618,7 +608,7 @@ async def test_multiple_chains_parallel_same_prompt_new_chain_siblings_and_uniqu
 
 
 @pytest.mark.asyncio
-async def test_multiple_chains_tools_and_effective_chat_template_kwargs_gate_chain_reuse():
+async def test_multiple_chains_tools_gate_reuse_and_request_chat_template_kwargs_are_ignored():
     search_tool = [{"type": "function", "function": {"name": "search", "parameters": {"type": "object"}}}]
     lookup_tool = [{"type": "function", "function": {"name": "lookup", "parameters": {"type": "object"}}}]
 
@@ -639,7 +629,7 @@ async def test_multiple_chains_tools_and_effective_chat_template_kwargs_gate_cha
     assert [_decode_response_ids(t.response_ids) for t in tool_trajectories] == ["SEARCH", "LOOKUP"]
 
     kwargs_session = _session("kwargs-gate", apply_chat_template_kwargs={"enable_thinking": False})
-    kwargs_backend = SequencedBackend(["BASE", "CONT", "SPLIT"])
+    kwargs_backend = SequencedBackend(["BASE", "CONT"])
     await _run(kwargs_session, kwargs_backend, [{"role": "user", "content": "template default"}])
     await _run(
         kwargs_session,
@@ -647,28 +637,15 @@ async def test_multiple_chains_tools_and_effective_chat_template_kwargs_gate_cha
         [
             {"role": "user", "content": "template default"},
             {"role": "assistant", "content": "BASE"},
-            {"role": "user", "content": "explicit same default"},
-        ],
-        chat_template_kwargs={"enable_thinking": False},
-    )
-    await _run(
-        kwargs_session,
-        kwargs_backend,
-        [
-            {"role": "user", "content": "template default"},
-            {"role": "assistant", "content": "BASE"},
-            {"role": "user", "content": "explicit same default"},
-            {"role": "assistant", "content": "CONT"},
-            {"role": "user", "content": "change effective kwargs"},
+            {"role": "user", "content": "request kwargs are ignored"},
         ],
         chat_template_kwargs={"enable_thinking": True},
     )
     kwargs_trajectories = await kwargs_session.finalize()
     decoded_kwargs = [_decode_response_ids(t.response_ids) for t in kwargs_trajectories]
-    assert len(kwargs_trajectories) == 2
+    assert len(kwargs_trajectories) == 1
     assert decoded_kwargs[0].startswith("BASE")
     assert decoded_kwargs[0].endswith("CONT")
-    assert decoded_kwargs[1] == "SPLIT"
     assert 0 in kwargs_trajectories[0].response_mask
 
 

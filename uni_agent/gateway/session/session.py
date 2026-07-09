@@ -60,7 +60,6 @@ class ChainState:
     message_history: list[dict[str, Any]]
     message_prefix_hashes: list[str]
     active_tool_schemas: list[dict[str, Any]] | None
-    effective_chat_template_kwargs: dict[str, Any]
     buffer: TrajectoryBuffer
     image_data: list[Any] | None
     video_data: list[Any] | None
@@ -121,8 +120,6 @@ class EncodedData:
         selected_updated_seq: Selected active chain updated sequence at prepare time.
         selected_created_seq: Selected active chain created sequence at prepare time.
         is_new_chain: Whether commit should append a new chain.
-        effective_chat_template_kwargs: Effective chat-template kwargs used for
-            chain compatibility and encoding.
         incoming_message_prefix_hashes: Stable prefix hashes for the normalized
             request history.
         logprobs_complete: Whether response logprobs are still complete for the
@@ -144,7 +141,6 @@ class EncodedData:
     selected_updated_seq: int | None = None
     selected_created_seq: int | None = None
     is_new_chain: bool = False
-    effective_chat_template_kwargs: dict[str, Any] = field(default_factory=dict)
     incoming_message_prefix_hashes: list[str] = field(default_factory=list)
     logprobs_complete: bool = True
 
@@ -324,13 +320,9 @@ class GatewaySession:
     ) -> EncodedData:
         messages = request_context["messages"]
         tools = request_context["tools"]
-        request_chat_template_kwargs = request_context["chat_template_kwargs"]
-        effective_chat_template_kwargs = self._codec.effective_chat_template_kwargs(request_chat_template_kwargs)
         incoming_message_prefix_hashes = self._compute_message_prefix_hashes(messages)
         selected_chain = self._select_chain(
-            messages=messages,
             tools=tools,
-            request_effective_chat_template_kwargs=effective_chat_template_kwargs,
             incoming_message_prefix_hashes=incoming_message_prefix_hashes,
         )
 
@@ -341,7 +333,6 @@ class GatewaySession:
                 tools=tools,
                 image_data=image_data,
                 video_data=video_data,
-                request_chat_template_kwargs=request_chat_template_kwargs,
             )
             buffer = TrajectoryBuffer(prompt_ids=prompt_ids)
             is_new_chain = True
@@ -370,7 +361,6 @@ class GatewaySession:
                     incremental_messages,
                     image_data=new_image_data,
                     video_data=new_video_data,
-                    request_chat_template_kwargs=request_chat_template_kwargs,
                 )
                 if (
                     self._response_length is not None
@@ -395,7 +385,6 @@ class GatewaySession:
                         selected_updated_seq=selected_updated_seq,
                         selected_created_seq=selected_created_seq,
                         is_new_chain=False,
-                        effective_chat_template_kwargs=effective_chat_template_kwargs,
                         incoming_message_prefix_hashes=list(incoming_message_prefix_hashes),
                         logprobs_complete=logprobs_complete,
                     )
@@ -434,7 +423,6 @@ class GatewaySession:
             selected_updated_seq=selected_updated_seq,
             selected_created_seq=selected_created_seq,
             is_new_chain=is_new_chain,
-            effective_chat_template_kwargs=effective_chat_template_kwargs,
             incoming_message_prefix_hashes=list(incoming_message_prefix_hashes),
             logprobs_complete=logprobs_complete,
         )
@@ -502,19 +490,15 @@ class GatewaySession:
     def _select_chain(
         self,
         *,
-        messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None,
-        request_effective_chat_template_kwargs: dict[str, Any],
         incoming_message_prefix_hashes: list[str],
     ) -> ChainState | None:
-        del messages  # Prefix hashes already encode the normalized message history.
         candidates = [
             chain
             for chain in self.active_chains
             if self._is_chain_request_compatible(
                 chain=chain,
                 tools=tools,
-                request_effective_chat_template_kwargs=request_effective_chat_template_kwargs,
             )
             and self._is_chain_prefix_hash_match(
                 chain=chain,
@@ -530,12 +514,8 @@ class GatewaySession:
         *,
         chain: ChainState,
         tools: list[dict[str, Any]] | None,
-        request_effective_chat_template_kwargs: dict[str, Any],
     ) -> bool:
-        return (
-            chain.active_tool_schemas == tools
-            and chain.effective_chat_template_kwargs == request_effective_chat_template_kwargs
-        )
+        return chain.active_tool_schemas == tools
 
     def _is_chain_prefix_hash_match(
         self,
@@ -634,7 +614,6 @@ class GatewaySession:
                     message_history=message_history,
                     message_prefix_hashes=message_prefix_hashes,
                     active_tool_schemas=encoded.tools,
-                    effective_chat_template_kwargs=dict(encoded.effective_chat_template_kwargs),
                     buffer=encoded.buffer,
                     image_data=self._copy_media_list(encoded.image_data),
                     video_data=self._copy_media_list(encoded.video_data),
@@ -656,7 +635,6 @@ class GatewaySession:
                     message_history=message_history,
                     message_prefix_hashes=message_prefix_hashes,
                     active_tool_schemas=encoded.tools,
-                    effective_chat_template_kwargs=dict(encoded.effective_chat_template_kwargs),
                     buffer=encoded.buffer,
                     image_data=self._copy_media_list(encoded.image_data),
                     video_data=self._copy_media_list(encoded.video_data),
@@ -673,7 +651,6 @@ class GatewaySession:
             message_history=message_history,
             message_prefix_hashes=message_prefix_hashes,
             active_tool_schemas=encoded.tools,
-            effective_chat_template_kwargs=dict(encoded.effective_chat_template_kwargs),
             buffer=encoded.buffer,
             image_data=self._copy_media_list(encoded.image_data),
             video_data=self._copy_media_list(encoded.video_data),

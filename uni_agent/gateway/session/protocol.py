@@ -49,12 +49,7 @@ class ChatCompletionTool(TypedDict, total=False):
 
 
 class ChatCompletionRequest(TypedDict, total=False):
-    """Incoming ``POST /v1/chat/completions`` request body shape.
-
-    ``chat_template_kwargs`` is an OpenAI-compatible server extension
-    used by the gateway to forward per-request chat template overrides
-    (e.g. ``enable_thinking``) into ``MessageCodec``.
-    """
+    """Incoming ``POST /v1/chat/completions`` request body shape."""
 
     model: str
     messages: list[ChatMessage]
@@ -63,7 +58,6 @@ class ChatCompletionRequest(TypedDict, total=False):
     stream: bool
     n: int
     response_format: Any
-    chat_template_kwargs: dict[str, Any]
     temperature: float
     top_p: float
     top_k: int

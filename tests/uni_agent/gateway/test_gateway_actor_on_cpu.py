@@ -228,27 +228,24 @@ def test_message_normalization_tool_call_arguments(raw_arguments, expected_argum
     assert result["tool_calls"][0]["function"]["arguments"] == expected_arguments
 
 
-def test_effective_chat_template_kwargs_merges_defaults_and_request_overrides():
+def test_normalize_request_ignores_chat_template_kwargs_extension():
     from uni_agent.gateway.session import MessageCodec
 
-    codec = MessageCodec(
-        FakeTokenizer(),
-        apply_chat_template_kwargs={"enable_thinking": False, "default_only": "kept"},
+    result = MessageCodec(FakeTokenizer()).normalize_request(
+        {
+            "messages": [{"role": "user", "content": "hi"}],
+            "chat_template_kwargs": "ignored",
+        }
     )
 
-    assert codec.effective_chat_template_kwargs({"enable_thinking": True, "request_only": "added"}) == {
-        "enable_thinking": True,
-        "default_only": "kept",
-        "request_only": "added",
-    }
-    assert codec.effective_chat_template_kwargs() == {"enable_thinking": False, "default_only": "kept"}
+    assert set(result) == {"messages", "tools"}
+    assert result["messages"] == [{"role": "user", "content": "hi"}]
+    assert result["tools"] is None
 
 
 @pytest.mark.asyncio
-async def test_request_chat_template_kwargs_forwarded(monkeypatch):
-    """Per-request ``chat_template_kwargs`` are forwarded to the chat-template
-    call alongside the codec-level defaults, and per-request values take
-    precedence over matching codec defaults."""
+async def test_config_chat_template_kwargs_forwarded_and_request_kwargs_ignored(monkeypatch):
+    """Codec-level chat-template kwargs are forwarded; request-level kwargs are ignored."""
     import uni_agent.gateway.session.codec as codec_mod
     from uni_agent.gateway.config import GatewayActorConfig
     from uni_agent.gateway.gateway import _GatewayActor
@@ -256,7 +253,7 @@ async def test_request_chat_template_kwargs_forwarded(monkeypatch):
     actor = _GatewayActor(
         GatewayActorConfig(
             tokenizer=FakeTokenizer(),
-            apply_chat_template_kwargs={"enable_thinking": False},
+            apply_chat_template_kwargs={"enable_thinking": False, "default_only": "kept"},
         ),
         InspectingBackend(),
     )
@@ -280,8 +277,9 @@ async def test_request_chat_template_kwargs_forwarded(monkeypatch):
             },
         )
 
-        assert captured_kwargs["enable_thinking"] is True
-        assert captured_kwargs["extra_flag"] == "x"
+        assert captured_kwargs["enable_thinking"] is False
+        assert captured_kwargs["default_only"] == "kept"
+        assert "extra_flag" not in captured_kwargs
     finally:
         await actor.shutdown()
 
