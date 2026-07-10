@@ -1,0 +1,11 @@
+- name: swe_bench
+  log_dir: /tmp/uni_agent_logs/swe_bench_claude_code
+  sandbox:
+    provider: seed
+    runtime_timeout: 7200
+  agent:
+    name: claude_code
+    workdir: /testbed
+    max_turns: 100
+    run_timeout: 3600
+    verbose: true
