@@ -10,8 +10,8 @@ from typing import Any
 
 from fastapi import HTTPException
 
-from uni_agent.gateway.session.codec import MalformedRequestError, MessageCodec
-from uni_agent.gateway.session.types import SessionHandle, Trajectory
+from uni_agent.gateway.session.codec import MessageCodec
+from uni_agent.gateway.session.types import InternalGenerationRequest, SessionHandle, Trajectory
 
 
 class SessionPhase(str, Enum):
@@ -86,7 +86,7 @@ class GenerationOutcome:
     """Business result returned by ``GatewaySession.run_generation``.
 
     The session emits this instead of an HTTP response dict. ``_GatewayActor``
-    converts it into the OpenAI chat-completion JSON envelope.
+    passes it to the provider adapter for wire response serialization.
 
     Attributes:
         assistant_msg: Decoded assistant message, or an empty assistant message
@@ -107,8 +107,8 @@ class GatewaySession:
 
     ``_GatewayActor`` owns instances of this class, calls ``run_generation`` for
     chat requests, and delegates lifecycle operations here. The session owns the
-    conversation state and trajectory materialization, while the actor owns HTTP
-    routing and OpenAI response serialization.
+    conversation state and trajectory materialization, while the actor owns
+    HTTP routing and provider response serialization.
     """
 
     def __init__(
@@ -139,19 +139,16 @@ class GatewaySession:
         # This is an implementation detail, not GatewaySession's public contract.
         self.generation_lock = asyncio.Lock()
 
-    async def run_generation(self, payload: dict[str, Any], backend) -> GenerationOutcome:
-        """Run one chat-completion request and return its business outcome.
+    async def run_generation(self, request: InternalGenerationRequest, backend) -> GenerationOutcome:
+        """Run one provider-normalized generation request and return its business outcome.
 
         The backend is passed in for this call only; the session does not own the
-        backend lifecycle. Protocol capability checks happen in the actor before
-        this method, while malformed payloads and backend errors are converted
-        into HTTP exceptions here.
+        backend lifecycle. The actor/provider adapter has already lowered the
+        wire payload to the internal canonical request; session never sees raw
+        wire payloads. Protocol capability checks happen in the actor before
+        this method, while backend errors are converted into HTTP exceptions
+        here.
         """
-        try:
-            request_context = self._codec.normalize_request(payload)
-        except MalformedRequestError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-
         async with self.generation_lock:
             async with self.request_lock:
                 if self.phase != SessionPhase.ACTIVE:
@@ -159,7 +156,7 @@ class GatewaySession:
                         status_code=409,
                         detail=f"Session {self.handle.session_id} is {self.phase.value.lower()}",
                     )
-                encoded = await self._prepare_generation_inputs(payload, request_context)
+                encoded = await self._prepare_generation_inputs(request)
                 if encoded.length_exhausted_trajectory is not None:
                     empty_msg = {"role": "assistant", "content": ""}
                     self.trajectories.append(encoded.length_exhausted_trajectory)
@@ -222,10 +219,10 @@ class GatewaySession:
                     completion_tokens=len(response_ids),
                 )
 
-    async def _prepare_generation_inputs(self, payload: dict[str, Any], request_context: dict[str, Any]) -> EncodedData:
-        messages = request_context["messages"]
-        tools = request_context["tools"]
-        request_chat_template_kwargs = request_context["chat_template_kwargs"]
+    async def _prepare_generation_inputs(self, request: InternalGenerationRequest) -> EncodedData:
+        messages = request["messages"]
+        tools = request["tools"]
+        request_chat_template_kwargs = request["chat_template_kwargs"]
         materialized_trajectory = None
         image_data = None
         video_data = None
@@ -277,7 +274,7 @@ class GatewaySession:
                         materialized_trajectory=None,
                         length_exhausted_trajectory=self._build_materialized_trajectory(
                             active=buffer,
-                            extra_fields={"finish_reason": "length"},
+                            extra_fields={"materialization_reason": "max_response_length"},
                         ),
                     )
                 buffer.response_ids.extend(incremental_ids)
@@ -297,7 +294,7 @@ class GatewaySession:
             buffer = TrajectoryBuffer(prompt_ids=prompt_ids)
 
         context_ids = buffer.prompt_ids + buffer.response_ids
-        sampling_params = self._codec.build_sampling_params(payload)
+        sampling_params = dict(request["sampling_params"])
         remaining_response_budget = (
             self._response_length - len(buffer.response_mask) if self._response_length is not None else None
         )
