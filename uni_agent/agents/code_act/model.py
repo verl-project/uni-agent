@@ -54,6 +54,7 @@ class OpenAICompatibleChatModel:
         """Lazily open (and reuse) one keep-alive session, bound to the running loop."""
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession(
+                connector=aiohttp.TCPConnector(force_close=True),
                 timeout=aiohttp.ClientTimeout(total=self.timeout),
                 headers={"Authorization": f"Bearer {self.api_key}"},
             )
