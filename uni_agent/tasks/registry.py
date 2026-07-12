@@ -21,6 +21,7 @@ TASK_REGISTRY: dict[str, type[Task]] = {}
 #: name -> module that defines (and registers) the task, for lazy loading.
 TASK_MODULES: dict[str, str] = {
     "swe_bench": "uni_agent.tasks.swe_bench.run",
+    "swe_rebench": "uni_agent.tasks.swe_rebench.run",
 }
 
 
