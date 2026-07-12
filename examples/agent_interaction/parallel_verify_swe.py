@@ -39,7 +39,7 @@ class TestEvalActor:
             instance_id = task_config["metadata"]["instance_id"]
             try:
                 task_config["run_gold_patch"] = True
-                task_config["log_dir"] = f"/tmp/eval_gold_patch"
+                task_config["log_dir"] = "/tmp/eval_gold_patch"
                 task_config["sandbox"]["provider"] = SANDBOX_PROVIDER
                 task_config["sandbox"]["runtime_timeout"] = RUNTIME_TIMEOUT
                 result = await get_task(task_config).run()

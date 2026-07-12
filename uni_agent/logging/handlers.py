@@ -4,9 +4,13 @@ progress bar."""
 
 from __future__ import annotations
 
+import atexit
 import logging
+import os
+import queue
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import TextIO
 
@@ -31,58 +35,188 @@ class _AlignedFormatter(logging.Formatter):
 _formatter = _AlignedFormatter(_LOG_FORMAT, datefmt=_DATE_FORMAT)
 
 
+_FLUSH_INTERVAL = 5.0  # seconds between writer flushes; higher = fewer HDFS round-trips, staler on-disk logs
+_QUEUE_MAX = 100_000  # slow sink backs up into dropped records rather than unbounded memory
+_STOP = object()
+
+
 class _RunFileDispatch(logging.Handler):
-    """Single handler on the root logger. Keeps an open file per run_id and writes
-    each record to the matching one; records with no registered run_id are dropped."""
+    """Single handler on the root logger. Resolves each record's run_id and formats it on
+    the *calling* thread (cheap, and required while the run_id ContextVar is still visible),
+    then hands all file I/O -- open, write, flush, close -- to a background writer thread.
+
+    This keeps slow sinks off the asyncio event loop: on an HDFS FUSE mount every write and
+    flush is a network round-trip, and doing that inline would stall every coroutine sharing
+    the loop (the old synchronous behaviour). Here the loop only enqueues; the writer thread
+    absorbs the latency and flushes on a fixed cadence (every ``_FLUSH_INTERVAL``s), so
+    on-disk content lags by at most that interval instead of appearing only on close."""
 
     def __init__(self) -> None:
         super().__init__(level=logging.DEBUG)
         self.setFormatter(_formatter)
-        self._files: dict[str, tuple[TextIO, int]] = {}
+        self._levels: dict[str, int] = {}
         self._lock = threading.Lock()
+        self._dropped = 0
+        self._dropped_reported = 0
+        self._start()
+        atexit.register(self._shutdown)
 
+    def _start(self) -> None:
+        self._queue: queue.Queue = queue.Queue(maxsize=_QUEUE_MAX)
+        self._files: dict[str, TextIO] = {}  # writer-thread-owned
+        self._dirty: set[TextIO] = set()
+        self._thread = threading.Thread(target=self._run, name="uni-agent-log-writer", daemon=True)
+        self._thread.start()
+
+    def _reinit_after_fork(self) -> None:
+        # child lost the writer thread; the parent owns the inherited files, so start clean
+        self._levels = {}
+        self._lock = threading.Lock()
+        self._dropped = 0
+        self._dropped_reported = 0
+        self._start()
+
+    # ----- caller thread: enqueue only, never blocks on I/O -----
     def register(self, run_id: str, path: Path, level: str) -> None:
         min_no = getattr(logging, level.upper(), logging.INFO)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        file_obj = open(path, "a", encoding="utf-8")
         with self._lock:
-            previous = self._files.get(run_id)
-            self._files[run_id] = (file_obj, min_no)
-        if previous is not None:  # replaced an active run_id; close the old file
-            try:
-                previous[0].close()
-            except OSError:
-                pass
+            self._levels[run_id] = min_no
+        self._submit(("open", run_id, str(path)))
 
     def unregister(self, run_id: str) -> None:
         with self._lock:
-            entry = self._files.pop(run_id, None)
-        if entry is not None:
-            try:
-                entry[0].close()
-            except OSError:
-                pass
+            self._levels.pop(run_id, None)
+        self._submit(("close", run_id, None))
 
     def emit(self, record: logging.LogRecord) -> None:
         run_id = resolve_run_id(record)
         if run_id is None:
             return
         with self._lock:
-            entry = self._files.get(run_id)
-        if entry is None:
-            return
-        file_obj, min_no = entry
-        if record.levelno < min_no:
+            min_no = self._levels.get(run_id)
+        if min_no is None or record.levelno < min_no:
             return
         try:
-            file_obj.write(self.format(record) + "\n")
-            if _FLUSH_EACH_LINE:
+            line = self.format(record) + "\n"
+        except Exception:  # a bad format arg must never break the calling coroutine
+            return
+        self._submit(("write", run_id, line))
+
+    def _submit(self, item: tuple) -> None:
+        """Hand an op to the writer without blocking; drop (and count) if the queue is full."""
+        try:
+            self._queue.put_nowait(item)
+        except queue.Full:
+            with self._lock:
+                self._dropped += 1
+
+    # ----- writer thread: owns every open/write/flush/close -----
+    def _run(self) -> None:
+        last_flush = time.monotonic()
+        while True:
+            timeout = max(0.0, _FLUSH_INTERVAL - (time.monotonic() - last_flush))
+            try:
+                item = self._queue.get(timeout=timeout)
+            except queue.Empty:
+                self._flush()
+                last_flush = time.monotonic()
+                continue
+            if item is _STOP:
+                self._drain()
+                self._close_all()
+                return
+            self._apply(item)
+            if time.monotonic() - last_flush >= _FLUSH_INTERVAL:
+                self._flush()
+                last_flush = time.monotonic()
+
+    def _apply(self, item: tuple) -> None:
+        op, run_id, arg = item
+        if op == "write":
+            file_obj = self._files.get(run_id)
+            if file_obj is not None:
+                try:
+                    file_obj.write(arg)
+                    if _FLUSH_EACH_LINE:
+                        file_obj.flush()
+                    else:
+                        self._dirty.add(file_obj)
+                except (ValueError, OSError):
+                    pass
+        elif op == "open":
+            try:
+                path = Path(arg)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                previous = self._files.pop(run_id, None)
+                if previous is not None:  # replaced an active run_id; close the old file
+                    self._dirty.discard(previous)
+                    try:
+                        previous.close()
+                    except OSError:
+                        pass
+                self._files[run_id] = open(path, "a", encoding="utf-8")
+            except OSError:
+                pass
+        elif op == "close":
+            file_obj = self._files.pop(run_id, None)
+            if file_obj is not None:
+                self._dirty.discard(file_obj)
+                try:
+                    file_obj.flush()
+                    file_obj.close()
+                except OSError:
+                    pass
+
+    def _flush(self) -> None:
+        for file_obj in list(self._dirty):
+            try:
                 file_obj.flush()
-        except (ValueError, OSError):
+            except OSError:
+                pass
+        self._dirty.clear()
+        with self._lock:
+            dropped = self._dropped
+        if dropped != self._dropped_reported:  # surface drops (not via logging -> no recursion)
+            print(
+                f"[uni-agent logging] dropped {dropped} log records (writer/sink can't keep up)",
+                file=sys.stderr,
+                flush=True,
+            )
+            self._dropped_reported = dropped
+
+    def _drain(self) -> None:
+        while True:
+            try:
+                item = self._queue.get_nowait()
+            except queue.Empty:
+                return
+            if item is not _STOP:
+                self._apply(item)
+
+    def _close_all(self) -> None:
+        self._flush()
+        for file_obj in list(self._files.values()):
+            try:
+                file_obj.close()
+            except OSError:
+                pass
+        self._files.clear()
+        self._dirty.clear()
+
+    def _shutdown(self) -> None:
+        """Best-effort drain+flush on normal process exit (daemon thread is killed abruptly otherwise)."""
+        try:
+            self._queue.put_nowait(_STOP)
+        except queue.Full:
             pass
+        self._thread.join(timeout=5.0)
 
 
 _dispatch = _RunFileDispatch()
+
+# A forked child (some Ray/multiprocessing start methods) loses the writer thread; restart it.
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_dispatch._reinit_after_fork)
 
 
 def add_file_handler(file_path: Path | str, run_id: str, level: str = "info") -> str:
