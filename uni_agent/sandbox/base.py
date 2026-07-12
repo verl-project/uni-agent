@@ -5,9 +5,11 @@ import asyncio
 import base64
 import dataclasses
 import logging
+import os
 import shlex
 import tempfile
 import uuid
+import weakref
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -103,6 +105,48 @@ class SandboxBackend(Protocol):
     async def expose_port(self, port: int) -> str: ...
 
 
+
+_DEFAULT_STARTUP_TIMEOUT = 600.0
+_DEFAULT_STARTUP_CONCURRENCY_PER_WORKER = 16
+# Per-worker (per-process) startup semaphores, created lazily per event loop so
+# each binds to the loop that uses it and is *shared* across concurrent start()s.
+_startup_semaphores: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+def _env_number(name: str, default: float) -> float:
+    """Read env var ``name`` as a number, falling back to ``default`` if unset/blank/invalid."""
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        logger.warning("invalid %s=%r; using default %s", name, raw, default)
+        return default
+
+
+@asynccontextmanager
+async def _startup_slot() -> AsyncIterator[None]:
+    """Hold one shared startup slot for the running loop (a no-op when ``<=0``).
+
+    The semaphore must be *shared* across all concurrent ``start()`` calls to cap
+    anything; a fresh ``asyncio.Semaphore`` per call always acquires immediately
+    and limits nothing. It is created lazily per loop (and rebuilt if the limit
+    changes) so it binds to the running loop rather than an import-time one.
+    """
+    limit = int(_env_number("SANDBOX_STARTUP_CONCURRENCY_PER_WORKER", _DEFAULT_STARTUP_CONCURRENCY_PER_WORKER))
+    if limit <= 0:
+        yield
+        return
+    loop = asyncio.get_running_loop()
+    entry = _startup_semaphores.get(loop)
+    if entry is None or entry[0] != limit:  # (re)build on first use or when the env-driven limit changes
+        entry = (limit, asyncio.Semaphore(limit))
+        _startup_semaphores[loop] = entry
+    async with entry[1]:
+        yield
+
+
 class Sandbox(abc.ABC):
     """One provider = one class: owns lifecycle and is the data-plane backend.
 
@@ -135,13 +179,27 @@ class Sandbox(abc.ABC):
         """Terminate the sandbox and release resources."""
         ...
 
+    async def _run_start(self) -> None:
+        """Run :meth:`start`, bounding it by the ``SANDBOX_STARTUP_TIMEOUT`` env cap (``<=0`` disables)."""
+        timeout = _env_number("SANDBOX_STARTUP_TIMEOUT", _DEFAULT_STARTUP_TIMEOUT)
+        try:
+            await asyncio.wait_for(self.start(), timeout=timeout if timeout > 0 else None)
+        except asyncio.TimeoutError as exc:
+            raise TimeoutError(f"sandbox start() exceeded SANDBOX_STARTUP_TIMEOUT={timeout:g}s") from exc
+
     async def __aenter__(self, retry: int = 3) -> Sandbox:
-        """Create the sandbox (retrying transient ``start()`` failures) and return it ready."""
+        """Create the sandbox (retrying transient ``start()`` failures) and return it ready.
+
+        Each attempt holds one per-worker startup slot (``SANDBOX_STARTUP_CONCURRENCY_PER_WORKER``)
+        and is bounded by ``SANDBOX_STARTUP_TIMEOUT``; the slot is released before the
+        retry backoff and the cleanup ``stop()``.
+        """
         retry = max(1, retry)
         last_exc: BaseException | None = None
         for attempt in range(1, retry + 1):
             try:
-                await self.start()
+                async with _startup_slot():
+                    await self._run_start()
                 return self
             except Exception as exc:
                 last_exc = exc
