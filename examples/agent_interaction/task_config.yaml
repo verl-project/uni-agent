@@ -4,7 +4,7 @@
     provider: modal
   agent:
     name: code_act
-    max_steps: 100
+    max_steps: 200
     tools:
       - name: stateful_shell
         command_timeout: 180
