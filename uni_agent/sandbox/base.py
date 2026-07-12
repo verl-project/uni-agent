@@ -105,7 +105,6 @@ class SandboxBackend(Protocol):
     async def expose_port(self, port: int) -> str: ...
 
 
-
 _DEFAULT_STARTUP_TIMEOUT = 600.0
 _DEFAULT_STARTUP_CONCURRENCY_PER_WORKER = 16
 # Per-worker (per-process) startup semaphores, created lazily per event loop so
