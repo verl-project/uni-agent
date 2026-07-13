@@ -151,10 +151,8 @@ Start with the script defaults, then tune these first:
 - `actor_rollout_ref.rollout.agent.num_workers`: number of agent rollout workers per rollout process.
 - `max_prompt_length`, `max_response_length`: context budget for the agent trajectory.
 - `staleness_threshold`, `trigger_parameter_sync_step`, `require_batches`, `partial_rollout`: fully async scheduling and weight synchronization behavior.
-- `actor_rollout_ref.rollout.custom.agent_framework.enable_parallel_session_generation` (default `False`): M2 opt-in for overlapping only backend generation. Gateway prepare and commit stay serial.
 
-Gateway sessions keep multiple active linear chains by default for subagent, compaction, and retry-style flows. In M1, the final finalized trajectory remains the scoring target and its score is broadcast to all trajectories from that session.
-With `enable_parallel_session_generation`, reward still uses the final finalized trajectory target plus final-broadcast semantics. Enable it only when sibling chains should share the same reward, such as best-of-N; do not use it for heterogeneous chains that need separate scoring.
+Gateway sessions keep multiple active linear chains by default for subagent, compaction, and retry-style flows. Backend generation calls within one session can overlap by default, while prepare, decode, and commit remain serialized under the session `request_lock`. Successful outcomes are accepted in completion order, so the final accepted trajectory used as the scoring target can be timing-dependent. Its score is broadcast to all trajectories from that session.
 
 For MoE or large models, also check tensor, pipeline, context, and expert parallelism settings such as `GEN_TP`, `TP`, `PP`, `CP`, and `EP` in `train_qwen3p5_moe.sh`.
 

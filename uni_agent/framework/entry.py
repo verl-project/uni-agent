@@ -32,12 +32,9 @@ def build_gateway_manager(*, config, llm_client) -> GatewayManager:
     """Spawn the gateway actor pool (driver-side, driver-owned) and return its manager."""
     # TODO(phase-b): switch this to actor_rollout_ref.rollout.agent_framework.*
     af_cfg = OmegaConf.select(config, "actor_rollout_ref.rollout.custom.agent_framework", default={}) or {}
-    enable_parallel_session_generation = af_cfg.get("enable_parallel_session_generation", False)
-    if type(enable_parallel_session_generation) is not bool:
-        raise ValueError(
-            "actor_rollout_ref.rollout.custom.agent_framework.enable_parallel_session_generation "
-            f"must be a bool, got {type(enable_parallel_session_generation).__name__}"
-        )
+    apply_chat_template_kwargs = OmegaConf.select(config, "data.apply_chat_template_kwargs", default={}) or {}
+    if OmegaConf.is_config(apply_chat_template_kwargs):
+        apply_chat_template_kwargs = OmegaConf.to_container(apply_chat_template_kwargs, resolve=True)
 
     # Match AgentLoopWorker pattern: self-load tokenizer/processor via HFModelConfig.
     model_config: HFModelConfig = omega_conf_to_dataclass(config.actor_rollout_ref.model)
@@ -46,9 +43,9 @@ def build_gateway_manager(*, config, llm_client) -> GatewayManager:
         tokenizer=model_config.tokenizer,
         processor=model_config.processor,
         tool_parser_name=config.actor_rollout_ref.rollout.get("multi_turn", {}).get("format"),
+        apply_chat_template_kwargs=dict(apply_chat_template_kwargs),
         prompt_length=config.actor_rollout_ref.rollout.prompt_length,
         response_length=config.actor_rollout_ref.rollout.response_length,
-        enable_parallel_session_generation=enable_parallel_session_generation,
     )
 
     return GatewayManager(

@@ -249,6 +249,31 @@ class OpenAICompatibleAgentFramework(AgentFramework):
             rollout_config=config.actor_rollout_ref.rollout,
         )
 
+    def _build_session_sampling_params(
+        self,
+        *,
+        partition_id: str,
+        sample_fields: dict[str, object],
+    ) -> dict[str, object]:
+        """Build trusted per-session sampling defaults using VERL rollout semantics."""
+        config = self._rollout_config
+        sampling_params: dict[str, object] = {
+            "temperature": config.temperature,
+            "top_p": config.top_p,
+            "top_k": config.top_k,
+            "repetition_penalty": 1.0,
+            "logprobs": config.calculate_log_probs,
+        }
+        if partition_id == "val":
+            sampling_params.update(
+                temperature=config.val_kwargs.temperature,
+                top_p=config.val_kwargs.top_p,
+                top_k=config.val_kwargs.top_k,
+            )
+        elif "__do_sample__" in sample_fields and not bool(sample_fields["__do_sample__"]):
+            sampling_params.update(temperature=0, top_p=1.0, top_k=-1)
+        return sampling_params
+
     async def generate_sequences(self, prompts: TensorDict) -> None:
         """Run rollout-manager generation and write outputs into TransferQueue."""
         if self._rollout_config is None:
@@ -359,6 +384,10 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         if uid is None:
             raise ValueError("OpenAICompatibleAgentFramework requires prompts['uid'] for TransferQueue output")
         uid = str(uid)
+        sampling_params = self._build_session_sampling_params(
+            partition_id=partition_id,
+            sample_fields=sample_fields,
+        )
 
         # Prompt layer: rollout.n sessions race independently for the same uid.
         # Successful sessions are written to TQ; failed sessions only affect this uid's stats.
@@ -367,6 +396,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
                 sample_fields=sample_fields,
                 sample_index=sample_index,
                 session_index=session_index,
+                sampling_params=sampling_params,
             )
             for session_index in range(num_sessions)
         ]
@@ -424,6 +454,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         sample_fields: dict[str, object],
         sample_index: int,
         session_index: int,
+        sampling_params: dict[str, object],
     ) -> tuple[list[Trajectory], dict[str, object]]:
         # Lazy-init semaphores on first use and rebind if the running loop
         # changed: asyncio.Semaphore binds to the loop at construction, but
@@ -455,6 +486,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
                 session_index=session_index,
                 runner_name=runner_name,
                 runner_config=runner_config,
+                sampling_params=sampling_params,
             )
 
         runner_semaphore = self._runner_semaphores.get(runner_name)
@@ -469,6 +501,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
                 session_index=session_index,
                 runner_name=runner_name,
                 runner_config=runner_config,
+                sampling_params=sampling_params,
             )
 
     async def _run_session(
@@ -479,12 +512,16 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         session_index: int,
         runner_name: str,
         runner_config: _RunnerConfig,
+        sampling_params: dict[str, object],
     ) -> tuple[list[Trajectory], dict[str, object]]:
         """Run one gateway session lifecycle and return finalized trajectories."""
         session_id = f"session-{sample_index}-{session_index}-{uuid4().hex}"
         raw_prompt = sample_fields["raw_prompt"]
         tools_kwargs = sample_fields.get("tools_kwargs")
-        session = await self.gateway_manager.create_session(session_id)
+        session = await self.gateway_manager.create_session(
+            session_id,
+            sampling_params=dict(sampling_params),
+        )
         try:
             if runner_config.dispatch_mode == "ray_task":
                 # Ray workers run only the runner. Gateway token truth,

@@ -85,7 +85,16 @@ async def _build_framework_with_agent_runners(
             "actor_rollout_ref": {
                 "rollout": {
                     "n": n,
-                    "val_kwargs": {"n": val_n},
+                    "temperature": 0.7,
+                    "top_p": 0.8,
+                    "top_k": 20,
+                    "calculate_log_probs": True,
+                    "val_kwargs": {
+                        "n": val_n,
+                        "temperature": 0,
+                        "top_p": 0.95,
+                        "top_k": -1,
+                    },
                     "custom": {"agent_framework": agent_framework_cfg},
                 }
             }
@@ -98,7 +107,18 @@ async def _build_framework_with_agent_runners(
     )
 
 
-def test_build_gateway_manager_wires_gateway_config_defaults(monkeypatch):
+@pytest.mark.parametrize(
+    ("data_config", "expected_chat_template_kwargs"),
+    [
+        ({}, {}),
+        ({"apply_chat_template_kwargs": {"thinking": True}}, {"thinking": True}),
+    ],
+)
+def test_build_gateway_manager_wires_gateway_config_defaults(
+    monkeypatch,
+    data_config,
+    expected_chat_template_kwargs,
+):
     from omegaconf import OmegaConf
 
     from uni_agent.framework import entry as entry_module
@@ -121,6 +141,7 @@ def test_build_gateway_manager_wires_gateway_config_defaults(monkeypatch):
     llm_client = object()
     config = OmegaConf.create(
         {
+            "data": data_config,
             "actor_rollout_ref": {
                 "model": {},
                 "rollout": {
@@ -129,7 +150,7 @@ def test_build_gateway_manager_wires_gateway_config_defaults(monkeypatch):
                     "multi_turn": {"format": "hermes"},
                     "custom": {"agent_framework": {"gateway_count": 2}},
                 },
-            }
+            },
         }
     )
 
@@ -141,87 +162,8 @@ def test_build_gateway_manager_wires_gateway_config_defaults(monkeypatch):
     assert captured["gateway_actor_config"].prompt_length == 128
     assert captured["gateway_actor_config"].response_length == 64
     assert captured["gateway_actor_config"].tool_parser_name == "hermes"
-    assert captured["gateway_actor_config"].enable_parallel_session_generation is False
-
-
-def test_build_gateway_manager_wires_enable_parallel_session_generation(monkeypatch):
-    from omegaconf import OmegaConf
-
-    from uni_agent.framework import entry as entry_module
-
-    class _ModelConfig:
-        tokenizer = object()
-        processor = None
-
-    captured = {}
-
-    class _FakeGatewayManager:
-        def __init__(self, *, llm_client, gateway_count, gateway_actor_config):
-            captured["llm_client"] = llm_client
-            captured["gateway_count"] = gateway_count
-            captured["gateway_actor_config"] = gateway_actor_config
-
-    monkeypatch.setattr(entry_module, "omega_conf_to_dataclass", lambda _config: _ModelConfig())
-    monkeypatch.setattr(entry_module, "GatewayManager", _FakeGatewayManager)
-
-    config = OmegaConf.create(
-        {
-            "actor_rollout_ref": {
-                "model": {},
-                "rollout": {
-                    "prompt_length": 128,
-                    "response_length": 64,
-                    "multi_turn": {"format": None},
-                    "custom": {
-                        "agent_framework": {
-                            "gateway_count": 2,
-                            "enable_parallel_session_generation": True,
-                        }
-                    },
-                },
-            }
-        }
-    )
-
-    manager = entry_module.build_gateway_manager(config=config, llm_client=object())
-
-    assert isinstance(manager, _FakeGatewayManager)
-    assert captured["gateway_actor_config"].enable_parallel_session_generation is True
-
-
-@pytest.mark.parametrize(
-    ("flag_name", "bad_value"),
-    [
-        ("enable_parallel_session_generation", "true"),
-        ("enable_parallel_session_generation", 1),
-    ],
-)
-def test_build_gateway_manager_rejects_non_bool_m2_flags(flag_name, bad_value):
-    from omegaconf import OmegaConf
-
-    from uni_agent.framework import entry as entry_module
-
-    config = OmegaConf.create(
-        {
-            "actor_rollout_ref": {
-                "model": {},
-                "rollout": {
-                    "prompt_length": 128,
-                    "response_length": 64,
-                    "multi_turn": {"format": None},
-                    "custom": {
-                        "agent_framework": {
-                            "gateway_count": 2,
-                            flag_name: bad_value,
-                        }
-                    },
-                },
-            }
-        }
-    )
-
-    with pytest.raises(ValueError, match=f"agent_framework.{flag_name} must be a bool"):
-        entry_module.build_gateway_manager(config=config, llm_client=object())
+    assert isinstance(captured["gateway_actor_config"].apply_chat_template_kwargs, dict)
+    assert captured["gateway_actor_config"].apply_chat_template_kwargs == expected_chat_template_kwargs
 
 
 class _FakeTransferQueue:
@@ -259,6 +201,7 @@ class _FakeGatewayManager:
     def __init__(self, finalized_by_session_prefix: dict[str, list[Trajectory]]):
         self._finalized_by_prefix = finalized_by_session_prefix
         self.created_sessions = []
+        self.created_session_kwargs = []
         self.finalized_sessions = []
         self.aborted_sessions = []
 
@@ -270,6 +213,7 @@ class _FakeGatewayManager:
 
     async def create_session(self, session_id: str, **kwargs):
         self.created_sessions.append(session_id)
+        self.created_session_kwargs.append(dict(kwargs))
         return SessionHandle(
             session_id=session_id,
             base_url=f"http://fake/{session_id}/v1",
@@ -284,20 +228,29 @@ class _FakeGatewayManager:
         self.aborted_sessions.append(session_id)
 
 
-def _build_prompts(count: int = 2, *, global_steps: int = 7, validate: bool = False):
+def _build_prompts(
+    count: int = 2,
+    *,
+    global_steps: int = 7,
+    validate: bool = False,
+    do_sample: bool | None = None,
+):
     non_tensor_dict = {"global_steps": global_steps}
     if validate:
         non_tensor_dict["validate"] = True
+    tensor_dict = {
+        "raw_prompt": [[{"role": "user", "content": f"sample {i}"}] for i in range(count)],
+        "uid": [f"uid-{i}" for i in range(count)],
+        "data_source": ["deepeyes"] * count,
+        "reward_model": [{"ground_truth": f"answer-{i}"} for i in range(count)],
+        "extra_info": [{"index": i} for i in range(count)],
+        "tools_kwargs": [{"tool": i} for i in range(count)],
+        "agent_name": ["deepeyes"] * count,
+    }
+    if do_sample is not None:
+        tensor_dict["__do_sample__"] = [do_sample] * count
     return tu.get_tensordict(
-        tensor_dict={
-            "raw_prompt": [[{"role": "user", "content": f"sample {i}"}] for i in range(count)],
-            "uid": [f"uid-{i}" for i in range(count)],
-            "data_source": ["deepeyes"] * count,
-            "reward_model": [{"ground_truth": f"answer-{i}"} for i in range(count)],
-            "extra_info": [{"index": i} for i in range(count)],
-            "tools_kwargs": [{"tool": i} for i in range(count)],
-            "agent_name": ["deepeyes"] * count,
-        },
+        tensor_dict=tensor_dict,
         non_tensor_dict=non_tensor_dict,
     )
 
@@ -386,6 +339,68 @@ async def test_agent_runners_registry_materializes_runners_and_selects_by_agent_
     assert [call["sample_index"] for call in calls] == [0, 1]
     assert [call["kwargs"]["tools_kwargs"] for call in calls] == [{"tool": 0}, {"tool": 1}]
     assert all("gateway_manager" not in call["kwargs"] for call in calls)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("validate", "do_sample", "expected_sampling_params"),
+    [
+        (
+            False,
+            None,
+            {
+                "temperature": 0.7,
+                "top_p": 0.8,
+                "top_k": 20,
+                "repetition_penalty": 1.0,
+                "logprobs": True,
+            },
+        ),
+        (
+            True,
+            None,
+            {
+                "temperature": 0,
+                "top_p": 0.95,
+                "top_k": -1,
+                "repetition_penalty": 1.0,
+                "logprobs": True,
+            },
+        ),
+        (
+            False,
+            False,
+            {
+                "temperature": 0,
+                "top_p": 1.0,
+                "top_k": -1,
+                "repetition_penalty": 1.0,
+                "logprobs": True,
+            },
+        ),
+    ],
+)
+async def test_framework_binds_sampling_defaults_to_gateway_sessions(
+    fake_tq,
+    validate,
+    do_sample,
+    expected_sampling_params,
+):
+    runtime = _FakeGatewayManager({"session-0-0": [_trajectory()]})
+    framework = await _build_framework_with_agent_runners(
+        agent_runners={"runner": _inline_runner_config(_async_noop_runner)},
+        gateway_manager=runtime,
+    )
+
+    await framework.generate_sequences(
+        _build_prompts(
+            count=1,
+            validate=validate,
+            do_sample=do_sample,
+        )
+    )
+
+    assert runtime.created_session_kwargs == [{"sampling_params": expected_sampling_params}]
 
 
 @pytest.mark.asyncio

@@ -150,7 +150,7 @@ class MessageCodec:
         self._processor = processor
         self._vision_info_extractor = vision_info_extractor or self._default_vision_info_extractor
         self._vision_info_extractor_kwargs = dict(vision_info_extractor_kwargs or {})
-        self._apply_chat_template_kwargs = apply_chat_template_kwargs or {}
+        self._apply_chat_template_kwargs = dict(apply_chat_template_kwargs or {})
         self._base_sampling_params = dict(base_sampling_params or {})
         self._allowed_request_sampling_param_keys = (
             _DEFAULT_ALLOWED_REQUEST_SAMPLING_PARAM_KEYS
@@ -363,9 +363,15 @@ class MessageCodec:
         normalized["tool_calls"] = normalized_tool_calls
         return normalized
 
-    def build_sampling_params(self, payload: dict[str, Any]) -> dict[str, Any]:
-        """Merge allowed per-request sampling params with codec defaults."""
+    def build_sampling_params(
+        self,
+        payload: dict[str, Any],
+        *,
+        session_sampling_params: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Merge codec, session, and allowed per-request sampling params."""
         sampling_params = dict(self._base_sampling_params)
+        sampling_params.update(session_sampling_params or {})
         for key in self._allowed_request_sampling_param_keys:
             if key in payload:
                 sampling_params[key] = payload[key]

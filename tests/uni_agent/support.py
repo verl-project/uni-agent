@@ -344,18 +344,13 @@ class SequencedBackend:
         )
 
 
-class RejectConcurrentSessionBackend:
+class RecordingConcurrentBackend:
     def __init__(self, responses, delay: float = 0.05):
         self._responses = list(responses)
         self._delay = delay
-        self._active_request_ids: set[str] = set()
         self.call_windows = []
 
     async def generate(self, request_id, *, prompt_ids, sampling_params, image_data=None, video_data=None):
-        if request_id in self._active_request_ids:
-            raise RuntimeError(f"concurrent request for session {request_id}")
-
-        self._active_request_ids.add(request_id)
         started_at = asyncio.get_running_loop().time()
         try:
             await asyncio.sleep(self._delay)
@@ -369,4 +364,3 @@ class RejectConcurrentSessionBackend:
         finally:
             finished_at = asyncio.get_running_loop().time()
             self.call_windows.append((request_id, started_at, finished_at))
-            self._active_request_ids.remove(request_id)

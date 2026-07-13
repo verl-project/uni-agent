@@ -29,8 +29,6 @@ class GatewayActorConfig:
         vision_info_extractor_kwargs: Static kwargs forwarded to the extractor.
         prompt_length: Optional prompt-token budget stored on gateway sessions.
         response_length: Optional response-token budget stored on gateway sessions.
-        enable_parallel_session_generation: Allow concurrent backend generation
-            calls within one gateway session while serializing prepare/commit.
     """
 
     tokenizer: Any
@@ -43,11 +41,3 @@ class GatewayActorConfig:
     vision_info_extractor_kwargs: dict[str, Any] | None = None
     prompt_length: int | None = None
     response_length: int | None = None
-    enable_parallel_session_generation: bool = False
-
-    def __post_init__(self) -> None:
-        if type(self.enable_parallel_session_generation) is not bool:
-            raise ValueError(
-                "enable_parallel_session_generation must be a bool, "
-                f"got {type(self.enable_parallel_session_generation).__name__}"
-            )

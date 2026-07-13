@@ -51,7 +51,6 @@ class _GatewayActor:
         )
         self._prompt_length = config.prompt_length
         self._response_length = config.response_length
-        self._enable_parallel_session_generation = config.enable_parallel_session_generation
         self._sessions: dict[str, GatewaySession] = {}
         self._app = FastAPI()
         self._server_port: int | None = None
@@ -183,7 +182,12 @@ class _GatewayActor:
         self._server_port = None
         self._server_base_url = None
 
-    async def create_session(self, session_id: str, metadata: dict[str, Any] | None = None) -> SessionHandle:
+    async def create_session(
+        self,
+        session_id: str,
+        metadata: dict[str, Any] | None = None,
+        sampling_params: dict[str, Any] | None = None,
+    ) -> SessionHandle:
         """Create an actor-owned session and return its OpenAI-compatible handle."""
         self._require_started()
         if session_id in self._sessions:
@@ -199,7 +203,7 @@ class _GatewayActor:
             codec=self._codec,
             prompt_length=self._prompt_length,
             response_length=self._response_length,
-            enable_parallel_session_generation=self._enable_parallel_session_generation,
+            sampling_params=sampling_params,
         )
         return handle
 
