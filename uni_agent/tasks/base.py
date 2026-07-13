@@ -12,13 +12,18 @@ A *task* is the top-level unit a trainer / evaluator instantiates. The base
 from __future__ import annotations
 
 import dataclasses
+import os
+import uuid
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny, field_validator
 
 from ..agents import AgentConfig
+from ..logging import current_run_id, sample_logging
 from ..sandbox import SandboxConfig
 
 if TYPE_CHECKING:
@@ -72,9 +77,10 @@ class TaskConfig(BaseModel):
 
 @dataclasses.dataclass
 class TaskResult:
-    """Outcome of one task episode: the reward plus auxiliary info."""
+    """Outcome of one task episode."""
 
     reward: Any
+    accuracy: float | None = None
     info: dict[str, Any] | None = None
 
 
@@ -113,3 +119,24 @@ class Task(ABC):
         from ..agents import build_agent
 
         return build_agent(self.config.agent)
+
+    @asynccontextmanager
+    async def episode_logging(self) -> AsyncIterator[str]:
+        """Scope this episode's logs to a run_id, yielded for use in log lines.
+
+        Reuse the caller's ambient run_id when one is active -- the agent framework
+        binds run_id = session_id, so the task's agent/tool/sandbox logs join that
+        session's file -- otherwise mint a fresh run_id and open
+        ``<log_dir>/<run_id>.log`` (standalone eval). The dispatch handler doesn't
+        ref-count, so we never open a second file for an already-active run_id (which
+        would clobber the shared one). Use as ``async with self.episode_logging() as run_id:``.
+        """
+        ambient_run_id = current_run_id()
+        if ambient_run_id is not None:
+            run_id, log_path = ambient_run_id, None
+        else:
+            run_id = str(uuid.uuid4())
+            log_dir = os.path.expanduser(self.config.log_dir or f"/tmp/uni_agent_logs/{self.name}")
+            log_path = Path(log_dir) / f"{run_id}.log"
+        async with sample_logging(run_id, log_path):
+            yield

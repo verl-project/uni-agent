@@ -11,12 +11,13 @@ Explicit use (RL agent loop): ``get_logger(name, run_id)`` + ``add_file_handler`
 
 from __future__ import annotations
 
-from .context import get_logger
+from .context import current_run_id, get_logger
 from .handlers import add_file_handler, cleanup_handlers, install_console_sink
 from .session import sample_logging
 
 __all__ = [
     "sample_logging",
+    "current_run_id",
     "get_logger",
     "add_file_handler",
     "cleanup_handlers",

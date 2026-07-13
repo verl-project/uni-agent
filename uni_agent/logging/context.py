@@ -40,6 +40,16 @@ def resolve_run_id(record: logging.LogRecord) -> str | None:
     return run_id if run_id is not None else _current_run_id.get()
 
 
+def current_run_id() -> str | None:
+    """The run_id bound by an enclosing :func:`~uni_agent.logging.sample_logging`, or ``None``.
+
+    Lets a nested caller reuse the ambient per-sample log stream instead of opening its
+    own file -- e.g. a task run under the agent framework reuses the framework's
+    session-level run_id so both write to one file (the dispatch handler doesn't
+    ref-count, so a second open/close would clobber the shared file)."""
+    return _current_run_id.get()
+
+
 def get_logger(name: str, run_id: str) -> logging.LoggerAdapter:
     """A logger whose records are tagged with ``run_id``, for explicit callers that
     don't use ``sample_logging`` (e.g. the RL agent loop). Pairs with

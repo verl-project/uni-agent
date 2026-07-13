@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
+import os
 import random
 from dataclasses import dataclass, replace
 from functools import partial
+from pathlib import Path
 from typing import Protocol
 from uuid import uuid4
 
@@ -15,6 +18,7 @@ from tensordict import TensorDict
 from tensordict.tensorclass import NonTensorData, NonTensorStack
 
 from uni_agent.gateway.session import SessionHandle, Trajectory
+from uni_agent.logging import sample_logging
 from verl.tools.tool_registry import initialize_tools_from_config
 from verl.utils import tensordict_utils as tu
 from verl.utils.import_utils import load_class_from_fqn
@@ -206,6 +210,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         reward_loop_worker_handles=None,
         processor=None,
         rollout_config=None,
+        log_dir: str | None = None,
     ):
         self.gateway_manager = gateway_manager
         self.runner_registry = runner_registry
@@ -221,6 +226,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         self._rollout_config = rollout_config
         self._runner_semaphores: dict[str, asyncio.Semaphore] = {}
         self._semaphore_loop: asyncio.AbstractEventLoop | None = None
+        self._log_dir = log_dir
 
     @classmethod
     def from_config(
@@ -241,12 +247,15 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         for runner_name, runner_cfg in agent_runners_cfg.items():
             runner_registry[str(runner_name)] = _RunnerConfig.from_config(runner_name, runner_cfg)
 
+        log_dir = af_cfg.get("log_dir") or os.environ.get("UNI_AGENT_LOG_DIR") or "/tmp/uni_agent_logs"
+
         return cls(
             gateway_manager=gateway_manager,
             runner_registry=runner_registry,
             reward_loop_worker_handles=reward_loop_worker_handles,
             processor=processor,
             rollout_config=config.actor_rollout_ref.rollout,
+            log_dir=log_dir,
         )
 
     async def generate_sequences(self, prompts: TensorDict) -> None:
@@ -367,6 +376,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
                 sample_fields=sample_fields,
                 sample_index=sample_index,
                 session_index=session_index,
+                global_steps=global_steps,
             )
             for session_index in range(num_sessions)
         ]
@@ -424,6 +434,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         sample_fields: dict[str, object],
         sample_index: int,
         session_index: int,
+        global_steps: int,
     ) -> tuple[list[Trajectory], dict[str, object]]:
         # Lazy-init semaphores on first use and rebind if the running loop
         # changed: asyncio.Semaphore binds to the loop at construction, but
@@ -453,6 +464,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
                 sample_fields=sample_fields,
                 sample_index=sample_index,
                 session_index=session_index,
+                global_steps=global_steps,
                 runner_name=runner_name,
                 runner_config=runner_config,
             )
@@ -467,6 +479,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
                 sample_fields=sample_fields,
                 sample_index=sample_index,
                 session_index=session_index,
+                global_steps=global_steps,
                 runner_name=runner_name,
                 runner_config=runner_config,
             )
@@ -477,56 +490,114 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         sample_fields: dict[str, object],
         sample_index: int,
         session_index: int,
+        global_steps: int,
         runner_name: str,
         runner_config: _RunnerConfig,
     ) -> tuple[list[Trajectory], dict[str, object]]:
-        """Run one gateway session lifecycle and return finalized trajectories."""
+        """Run one gateway session lifecycle and return finalized trajectories.
+
+        The whole session -- runner call, finalization, scoring -- runs under one
+        per-sample log stream keyed by a fresh ``run_id``, so the runner's
+        agent/tool/sandbox logs and the post-finalize trajectory summary land in one
+        file, grouped by training step: ``<log_dir>/step_<global_steps>/<run_id>.log``.
+        The runner's task reuses this ambient run_id instead of opening its own (see
+        ``current_run_id`` in the task ``run``); with no ``log_dir`` the framework binds
+        nothing and the task self-logs.
+        """
         session_id = f"session-{sample_index}-{session_index}-{uuid4().hex}"
-        raw_prompt = sample_fields["raw_prompt"]
-        tools_kwargs = sample_fields.get("tools_kwargs")
-        session = await self.gateway_manager.create_session(session_id)
-        try:
-            if runner_config.dispatch_mode == "ray_task":
-                # Ray workers run only the runner. Gateway token truth,
-                # finalization, reward scoring, and TQ writes stay in parent.
-                object_ref = _run_agent_runner_ray_task.remote(
-                    runner_fqn=runner_config.runner_fqn,
-                    runner_kwargs=runner_config.runner_kwargs,
-                    raw_prompt=raw_prompt,
-                    session=session,
-                    sample_index=sample_index,
-                    tools_kwargs=tools_kwargs,
-                )
-                await object_ref
+        if self._log_dir:
+            run_id = uuid4().hex
+            log_path = Path(self._log_dir) / f"step_{int(global_steps)}" / f"{run_id}.log"
+            log_ctx = sample_logging(run_id, log_path)
+        else:
+            log_ctx = contextlib.nullcontext()
+        async with log_ctx:
+            raw_prompt = sample_fields["raw_prompt"]
+            tools_kwargs = sample_fields.get("tools_kwargs")
+            session = await self.gateway_manager.create_session(session_id)
+            try:
+                if runner_config.dispatch_mode == "ray_task":
+                    # Ray workers run only the runner. Gateway token truth,
+                    # finalization, reward scoring, and TQ writes stay in parent.
+                    object_ref = _run_agent_runner_ray_task.remote(
+                        runner_fqn=runner_config.runner_fqn,
+                        runner_kwargs=runner_config.runner_kwargs,
+                        raw_prompt=raw_prompt,
+                        session=session,
+                        sample_index=sample_index,
+                        tools_kwargs=tools_kwargs,
+                    )
+                    await object_ref
+                else:
+                    runner = self._inline_runners[runner_name]
+                    await runner(
+                        raw_prompt=raw_prompt,
+                        session=session,
+                        sample_index=sample_index,
+                        **({"tools_kwargs": tools_kwargs} if tools_kwargs is not None else {}),
+                    )
+                session_trajectories = await self.gateway_manager.finalize_session(session_id)
+            except Exception:
+                await self.gateway_manager.abort_session(session_id)
+                raise
+
+            if not session_trajectories:
+                return session_trajectories, sample_fields
+
+            # Prefer the reward the runner posted to the session (report_reward=True);
+            # otherwise defer to the RewardLoopWorker (if any), else rm_scores stays 0.
+            annotations = self._score_from_reward_info(session_trajectories)
+            if annotations is None and self.reward_loop_worker_handles:
+                annotations = await self._score_trajectories(session_trajectories, sample_fields)
+
+            if annotations is None:
+                result_trajectories = session_trajectories
             else:
-                runner = self._inline_runners[runner_name]
-                await runner(
-                    raw_prompt=raw_prompt,
-                    session=session,
-                    sample_index=sample_index,
-                    **({"tools_kwargs": tools_kwargs} if tools_kwargs is not None else {}),
-                )
-            session_trajectories = await self.gateway_manager.finalize_session(session_id)
-        except Exception:
-            await self.gateway_manager.abort_session(session_id)
-            raise
+                result_trajectories = [
+                    replace(
+                        traj,
+                        reward_score=score,
+                        extra_fields={**traj.extra_fields, "reward_extra_info": extra},
+                    )
+                    for traj, (score, extra) in zip(session_trajectories, annotations, strict=True)
+                ]
 
-        # Score the session's trajectories immediately after finalization,
-        # consistent with VERL's per-sample reward path.
-        if not self.reward_loop_worker_handles or not session_trajectories:
-            return session_trajectories, sample_fields
+            self._log_trajectory_summary(session_id, result_trajectories)
+            return result_trajectories, sample_fields
 
-        annotations = await self._score_trajectories(session_trajectories, sample_fields)
-        scored_trajectories = []
-        for traj, (score, extra) in zip(session_trajectories, annotations, strict=True):
-            scored_trajectories.append(
-                replace(
-                    traj,
-                    reward_score=score,
-                    extra_fields={**traj.extra_fields, "reward_extra_info": extra},
-                )
+    def _log_trajectory_summary(self, session_id: str, trajectories: list[Trajectory]) -> None:
+        """Log a per-session trajectory summary -- the info the task layer can't emit,
+        since trajectories exist only after the session finalizes. Written as INFO under
+        the session's run_id, so it lands in that sample's log next to the runner's
+        agent/tool/sandbox lines."""
+        lines = [f"session {session_id}: {len(trajectories)} trajectory(ies)"]
+        for i, traj in enumerate(trajectories):
+            model_tokens = sum(traj.response_mask) if traj.response_mask else 0
+            reason = (traj.extra_fields or {}).get("materialization_reason")
+            lines.append(
+                f"  [{i}] turns={traj.num_turns} prompt_tokens={len(traj.prompt_ids)} "
+                f"response_tokens={len(traj.response_ids)} model_tokens={model_tokens} "
+                f"logprobs={'yes' if traj.response_logprobs else 'no'} "
+                f"reward_score={traj.reward_score} reward_info={traj.reward_info or {}}"
+                + (f" materialization_reason={reason}" if reason else "")
             )
-        return scored_trajectories, sample_fields
+        logger.info("\n".join(lines))
+
+    def _score_from_reward_info(
+        self, session_trajectories: list[Trajectory]
+    ) -> list[tuple[float, dict[str, object]]] | None:
+        """Score from the reward the runner posted to the session, if any.
+
+        Dead simple: reward_score = the posted ``reward``; whatever else was posted
+        (e.g. ``acc``) rides along verbatim as reward_extra_info. What to post is the
+        task's call (see task_runner._post_reward_info); the framework only splits
+        ``reward`` off from the rest.
+        """
+        reward_info = dict(session_trajectories[-1].reward_info or {})
+        reward = reward_info.pop("reward", None)
+        if reward is None:
+            return None
+        return [(float(reward), reward_info)] * len(session_trajectories)
 
     async def _score_trajectories(
         self,

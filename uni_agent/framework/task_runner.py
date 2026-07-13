@@ -1,35 +1,9 @@
 # ruff: noqa: E501
-"""Agent runner that bridges the framework's gateway sessions to uni_agent tasks.
-
-The framework layer runs *agent runners* against per-session OpenAI-compatible
-gateway endpoints (see :mod:`uni_agent.framework.framework`); it has no notion of
-a uni_agent :class:`~uni_agent.tasks.Task`. This runner closes that gap -- it is
-the "framework meets task" glue:
-
-1. resolve the task config carried on the sample's ``tools_kwargs["task"]``
-   (the same serialized form the dataset stores under
-   ``extra_info.tools_kwargs.task``),
-2. deep-merge any run-wide ``task_overrides`` (agent / sandbox / sampling ...),
-3. point the agent's policy endpoint (``agent.model.base_url``) at the gateway
-   session so every ``/v1/chat/completions`` call is captured as a trajectory,
-4. run the task and return its :class:`~uni_agent.tasks.TaskResult`.
-
-Wire it into a framework recipe via ``runner_fqn`` so training rollouts run
-uni_agent tasks::
-
-    actor_rollout_ref.rollout.custom.agent_framework.agent_runners:
-      swe_bench:
-        runner_fqn: uni_agent.framework.task_runner.run_task
-        dispatch_mode: inline_async
-
-It is also driven directly by the standalone evaluator
-``examples/agent_interaction/parallel_infer_verl.py``, which creates a session
-per sample and calls this runner to reproduce ``parallel_infer_api.py`` semantics
-over a verl-launched inference engine.
-"""
+"""Agent runner that bridges the framework's gateway sessions to uni_agent tasks."""
 
 from __future__ import annotations
 
+import functools
 import logging
 from typing import TYPE_CHECKING, Any
 
@@ -85,6 +59,38 @@ def resolve_task_config(
     return deep_merge(task, {"agent": {"model": model_cfg}})
 
 
+@functools.lru_cache(maxsize=8)
+def load_task_config_file(path: str) -> dict[str, dict[str, Any]]:
+    """Load a per-task-name config file into a ``{name: task_config}`` index.
+
+    Backs the training recipe's ``runner_kwargs.task_config_path`` -- the same
+    file-path idea as the legacy ``agent_loop_config_path``, so the run-wide task
+    bases live in one YAML (the inference ``task_config.yaml`` shape) instead of
+    dozens of Hydra overrides. The file is a list of task configs each keyed by
+    ``name``; :func:`route_task_config` picks the one whose name matches a row's task,
+    so a mixed train(swe_rebench)/test(swe_bench) run routes each row to its own base.
+    Cached per path (loaded once in the rollout worker).
+    """
+    import yaml
+
+    raw = yaml.safe_load(open(path))
+    entries = raw if isinstance(raw, list) else [raw]
+    index: dict[str, dict[str, Any]] = {}
+    for entry in entries:
+        if not isinstance(entry, dict) or not entry.get("name"):
+            raise ValueError(f"task_config_path {path!r}: each entry must be a mapping with a 'name' (got {entry!r})")
+        index[str(entry["name"])] = entry
+    return index
+
+
+def route_task_config(path: str, task_name: str | None) -> dict[str, Any]:
+    """Return the task config whose ``name`` matches ``task_name`` (route by task name)."""
+    index = load_task_config_file(path)
+    if task_name is None or task_name not in index:
+        raise ValueError(f"task_config_path {path!r} has no config for task name {task_name!r} (have {sorted(index)})")
+    return index[task_name]
+
+
 async def run_task(
     *,
     session: SessionHandle,
@@ -92,6 +98,7 @@ async def run_task(
     raw_prompt: Any = None,
     sample_index: int | None = None,
     task_overrides: dict[str, Any] | None = None,
+    task_config_path: str | None = None,
     api_key: str = "EMPTY",
     model_name: str | None = None,
     report_reward: bool = False,
@@ -103,11 +110,20 @@ async def run_task(
     / ``sample_index`` / ``tools_kwargs``). ``raw_prompt`` is accepted for protocol
     parity but unused: a uni_agent task carries its own prompt on the task config.
 
-    When ``report_reward`` is set, the task's reward + info are POSTed back to the
-    session's reward-info endpoint so a training reward manager can pick them up;
-    the standalone evaluator reads the returned :class:`TaskResult` directly and
-    leaves this off.
+    The run-wide task base may be supplied inline (``task_overrides``) and/or from a
+    per-task-name YAML file (``task_config_path``): the row's task name selects the
+    matching entry (:func:`route_task_config`), then inline ``task_overrides`` win on
+    top. When ``report_reward`` is set, the task's reward + info are POSTed back to the
+    session's reward-info endpoint so a training reward manager can pick them up; the
+    standalone evaluator reads the returned :class:`TaskResult` directly and leaves
+    this off.
     """
+    if task_config_path:
+        row_task = tools_kwargs.get("task") if tools_kwargs else None
+        task_name = row_task.get("name") if isinstance(row_task, dict) else None
+        routed = route_task_config(str(task_config_path), task_name)
+        task_overrides = deep_merge(routed, task_overrides or {})
+
     task = resolve_task_config(
         tools_kwargs,
         session_base_url=session.base_url,
@@ -125,14 +141,12 @@ async def run_task(
 
 
 async def _post_reward_info(reward_info_url: str, result: TaskResult) -> None:
-    """Best-effort POST of the task reward + info to the gateway session.
-
-    Failures are logged rather than raised: reward-info is auxiliary metadata for
-    the training reward path and must not fail an otherwise-successful episode.
-    """
+    """Best-effort POST of the task reward + accuracy to the gateway session."""
     import aiohttp
 
-    reward_info: dict[str, Any] = {"reward": result.reward, **(result.info or {})}
+    reward_info: dict[str, Any] = {"reward": result.reward}
+    if result.accuracy is not None:
+        reward_info["acc"] = result.accuracy
     try:
         timeout = aiohttp.ClientTimeout(total=None)
         async with aiohttp.ClientSession(timeout=timeout) as session:

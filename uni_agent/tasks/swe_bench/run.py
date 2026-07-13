@@ -4,13 +4,9 @@ from __future__ import annotations
 
 import json
 import logging
-import os
-import uuid
-from pathlib import Path
 
 from pydantic import Field
 
-from ...logging import sample_logging
 from ..base import Task, TaskConfig, TaskResult
 from ..registry import register_task
 
@@ -33,15 +29,13 @@ class SWEBenchTask(Task):
     async def run(self) -> TaskResult:
         cfg: SWEBenchTaskConfig = self.config  # type: ignore[assignment]
         sample = cfg.metadata  # the dataset sample is carried on the task config
-        run_id = str(uuid.uuid4())
-        log_dir = os.path.expanduser(cfg.log_dir or f"/tmp/uni_agent_logs/{self.name}")
 
-        # Route this episode's logs (agent, tools, sandbox) to <log_dir>/<run_id>.log.
-        async with sample_logging(run_id, Path(log_dir) / f"{run_id}.log"):
+        # Route this episode's logs (agent, tools, sandbox) to the run's log stream.
+        async with self.episode_logging():
             instance_id = sample.get("instance_id", "?") if isinstance(sample, dict) else "?"
             task_config_dump = cfg.model_dump(mode="json", exclude={"metadata", "prompt"})
             logger.info(
-                f"starting swe_bench task {run_id} (instance_id={instance_id}, run_gold_patch={cfg.run_gold_patch})\n"
+                f"starting swe_bench task (instance_id={instance_id}, run_gold_patch={cfg.run_gold_patch})\n"
                 f"task config: {json.dumps(task_config_dump, indent=2)}"
             )
             async with self.build_sandbox() as sandbox:
@@ -61,8 +55,9 @@ class SWEBenchTask(Task):
 
                 result = await compute_reward(sample, sandbox)
 
-                logger.info(f"task {run_id} done: resolved={result['resolved']}")
+                logger.info(f"task done: resolved={result['resolved']}")
                 return TaskResult(
-                    reward=result["resolved"],
+                    reward=float(result["resolved"]),
+                    accuracy=float(result["resolved"]),
                     info=result,
                 )
