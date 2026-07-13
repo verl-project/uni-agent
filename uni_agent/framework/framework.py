@@ -249,6 +249,9 @@ class OpenAICompatibleAgentFramework(AgentFramework):
 
         log_dir = af_cfg.get("log_dir") or os.environ.get("UNI_AGENT_LOG_DIR") or "/tmp/uni_agent_logs"
 
+        if not bool(af_cfg.get("use_reward_loop_worker", True)):
+            reward_loop_worker_handles = None
+
         return cls(
             gateway_manager=gateway_manager,
             runner_registry=runner_registry,
@@ -551,6 +554,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
                 annotations = await self._score_trajectories(session_trajectories, sample_fields)
 
             if annotations is None:
+                logger.warning("session %s: no reward available; rm_scores=0 for this sample", session_id)
                 result_trajectories = session_trajectories
             else:
                 result_trajectories = [
