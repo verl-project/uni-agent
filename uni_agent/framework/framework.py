@@ -518,6 +518,14 @@ class OpenAICompatibleAgentFramework(AgentFramework):
             raw_prompt = sample_fields["raw_prompt"]
             tools_kwargs = sample_fields.get("tools_kwargs")
             session = await self.gateway_manager.create_session(session_id)
+            logger.info(
+                "session %s start: runner=%s sample_index=%s session_index=%s global_steps=%s",
+                session_id,
+                runner_name,
+                sample_index,
+                session_index,
+                global_steps,
+            )
             try:
                 if runner_config.dispatch_mode == "ray_task":
                     # Ray workers run only the runner. Gateway token truth,
@@ -541,6 +549,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
                     )
                 session_trajectories = await self.gateway_manager.finalize_session(session_id)
             except Exception:
+                logger.exception("session %s failed (runner=%s); aborting session", session_id, runner_name)
                 await self.gateway_manager.abort_session(session_id)
                 raise
 
@@ -550,13 +559,16 @@ class OpenAICompatibleAgentFramework(AgentFramework):
             # Prefer the reward the runner posted to the session (report_reward=True);
             # otherwise defer to the RewardLoopWorker (if any), else rm_scores stays 0.
             annotations = self._score_from_reward_info(session_trajectories)
+            reward_source = "reward_info" if annotations is not None else None
             if annotations is None and self.reward_loop_worker_handles:
                 annotations = await self._score_trajectories(session_trajectories, sample_fields)
+                reward_source = "reward_loop_worker"
 
             if annotations is None:
                 logger.warning("session %s: no reward available; rm_scores=0 for this sample", session_id)
                 result_trajectories = session_trajectories
             else:
+                logger.info("session %s: scored via %s", session_id, reward_source)
                 result_trajectories = [
                     replace(
                         traj,

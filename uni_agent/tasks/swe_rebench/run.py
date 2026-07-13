@@ -70,9 +70,15 @@ class SWEREBenchTask(Task):
                     # The endpoint the agent calls lives on cfg.agent.model (the agent validates it).
                     await agent.run(sandbox=sandbox, messages=messages)
 
-                from .reward import compute_reward
+                try:
+                    from .reward import compute_reward
 
-                result = await compute_reward(sample, sandbox)
+                    result = await compute_reward(sample, sandbox)
+                except Exception:
+                    # Scoring runs inside episode_logging; without surfacing it here the
+                    # traceback escapes to the worker log and the eval silently "vanishes".
+                    logger.exception(f"scoring failed for instance_id={instance_id}")
+                    raise
 
                 logger.info(f"task done: resolved={result['resolved']}")
                 return TaskResult(
