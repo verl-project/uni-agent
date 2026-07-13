@@ -157,11 +157,6 @@ class MessageCodec:
             if allowed_request_sampling_param_keys is None
             else frozenset(allowed_request_sampling_param_keys)
         )
-        # Derive the cached default-kwargs system prompt from the processor when one is
-        # present: encode_incremental() slices processor-produced ids by this length on the
-        # default path, and a tokenizer-derived prefix would mis-slice the continuation delta
-        # whenever the processor adds BOS / multimodal-aware prefix tokens the bare tokenizer
-        # never emits.
         self._system_prompt = initialize_system_prompt(
             self._processor if self._processor is not None else tokenizer,
             **self._apply_chat_template_kwargs,
