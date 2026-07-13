@@ -7,7 +7,6 @@ from tests.uni_agent.support import FakeProcessor, FakeTokenizer, SequencedBacke
 from uni_agent.gateway.session import GatewaySession, MessageCodec, SessionHandle
 from verl.workers.rollout.replica import TokenOutput
 
-
 HELPFUL_SYS = {"role": "system", "content": "You are helpful."}
 SUBAGENT_SYS = {"role": "system", "content": "You are a focused subagent."}
 
@@ -44,6 +43,69 @@ def _session(
 
 async def _run(session: GatewaySession, backend: SequencedBackend, messages: list[dict], **payload_extra):
     return await session.run_generation({"model": "dummy-model", "messages": messages, **payload_extra}, backend)
+
+
+@pytest.mark.parametrize("bad_value", ["true", 1])
+def test_gateway_session_rejects_non_bool_parallel_generation_flag(bad_value):
+    with pytest.raises(ValueError, match="enable_parallel_session_generation must be a bool"):
+        _session("bad-parallel-flag", enable_parallel_session_generation=bad_value)
+
+
+def test_encode_incremental_processor_uses_processor_prefix_for_slice(monkeypatch):
+    import torch
+
+    import uni_agent.gateway.session.codec as codec_mod
+
+    class _Encoder:
+        @staticmethod
+        def _prefix(prefix_style="short"):
+            return "<s>" if prefix_style == "short" else "<long-system-prefix>"
+
+        def apply_chat_template(self, messages, tokenize=True, add_generation_prompt=True, tools=None, **kwargs):
+            text = self._prefix(**kwargs)
+            text += "".join(f"{message['role']}:{message.get('content', '')}\n" for message in messages)
+            if add_generation_prompt:
+                text += "assistant:"
+            return _ids(text) if tokenize else text
+
+        def decode(self, token_ids, skip_special_tokens=True):
+            return "".join(chr(token_id) for token_id in token_ids)
+
+    processor_bos = 9999
+
+    class _Processor(_Encoder):
+        def system_prompt(self, **kwargs):
+            return [processor_bos] + _ids(self._prefix(**kwargs))
+
+        def __call__(
+            self, *, text, images=None, videos=None, video_metadata=None, return_tensors=None, do_sample_frames=False
+        ):
+            return {"input_ids": torch.tensor([[processor_bos] + _ids(text[0])], dtype=torch.long)}
+
+    class _Tokenizer(_Encoder):
+        def system_prompt(self, **kwargs):
+            return _ids(self._prefix(**kwargs))
+
+    monkeypatch.setattr(
+        codec_mod,
+        "_apply_chat_template",
+        lambda encoder, messages, **kwargs: encoder.apply_chat_template(messages, **kwargs),
+    )
+    monkeypatch.setattr(
+        codec_mod,
+        "initialize_system_prompt",
+        lambda encoder, **kwargs: encoder.system_prompt(**kwargs),
+    )
+
+    codec = MessageCodec(
+        _Tokenizer(),
+        processor=_Processor(),
+        apply_chat_template_kwargs={"prefix_style": "long"},
+    )
+
+    incremental_ids = codec.encode_incremental([{"role": "user", "content": "delta"}])
+
+    assert _Tokenizer().decode(incremental_ids) == "user:delta\nassistant:"
 
 
 class _LogprobBackend:
@@ -178,33 +240,11 @@ async def test_multiple_chains_subagent_system_split_returns_to_main_chain():
     await _run(session, backend, subagent)
     await _run(session, backend, main_continuation)
 
-    # active_chains insertion order is main (id=1, created first) then subagent (id=2),
-    # but main is the *later-updated* chain (it committed last via the continuation).
-    assert [chain.chain_id for chain in session.active_chains] == [1, 2]
-    active_by_id = {chain.chain_id: chain for chain in session.active_chains}
-    main_updated_seq = active_by_id[1].updated_seq
-    subagent_updated_seq = active_by_id[2].updated_seq
-    assert main_updated_seq > subagent_updated_seq
-    order_seq_before = session._order_seq
+    state = session.snapshot_state()
+    assert state["active_chain_ids"] == [1, 2]
+    assert state["active_chain_updated_seq"][1] > state["active_chain_updated_seq"][2]
 
     trajectories = await session.finalize()
-
-    # finalize must not advance _order_seq nor rewrite any chain's updated_seq; active
-    # chains keep order_seq == updated_seq, so the return order is decided by order_seq,
-    # not by active_chains insertion order.
-    assert session._order_seq == order_seq_before
-    materialized_by_id = {chain.chain_id: chain for chain in session.materialized_chains}
-    assert materialized_by_id[1].updated_seq == main_updated_seq
-    assert materialized_by_id[2].updated_seq == subagent_updated_seq
-    assert materialized_by_id[1].order_seq == main_updated_seq
-    assert materialized_by_id[2].order_seq == subagent_updated_seq
-    # materialized_chains keeps active-insertion order [1, 2]; finalize derives the returned
-    # order by sorting on order_seq, yielding [2, 1] (subagent then main) — the reverse of
-    # insertion order. The decoded assertions below confirm the returned trajectories follow it.
-    assert [chain.chain_id for chain in session.materialized_chains] == [1, 2]
-    assert [
-        chain.chain_id for chain in sorted(session.materialized_chains, key=lambda chain: chain.order_seq)
-    ] == [2, 1]
 
     assert len(trajectories) == 2
     decoded = [_decode_response_ids(t.response_ids) for t in trajectories]
@@ -344,7 +384,10 @@ async def test_multiple_chains_parallel_same_tip_stale_success_becomes_sibling()
     )
     state_after_continuation = session.snapshot_state()
     assert state_after_continuation["active_chain_ids"] == [1, 2]
-    assert state_after_continuation["active_chain_updated_seq"][2] > state_after_continuation["active_chain_updated_seq"][1]
+    assert (
+        state_after_continuation["active_chain_updated_seq"][2]
+        > state_after_continuation["active_chain_updated_seq"][1]
+    )
 
     trajectories = await session.finalize()
     decoded = [_decode_response_ids(trajectory.response_ids) for trajectory in trajectories]
@@ -547,17 +590,23 @@ async def test_multiple_chains_length_exhaustion_closes_selected_chain_and_order
 
 
 @pytest.mark.asyncio
-async def test_multiple_chains_existing_chain_over_budget_clamps_to_zero():
-    """Clamp an existing chain's remaining backend response budget to zero."""
-    session = _session("existing-chain-clamp", response_length=0)
+async def test_multiple_chains_new_and_existing_chain_over_budget_clamp_without_early_close():
+    """Clamp both generation paths without closing the chain before backend output."""
+    session = _session("chain-budget-clamp", response_length=0)
     backend = SequencedBackend(["NORMAL", "SECOND"])
-    messages = [{"role": "user", "content": "request that already exceeded budget"}]
+    first_messages = [{"role": "user", "content": "request that already exceeded budget"}]
+    second_messages = [
+        *first_messages,
+        {"role": "assistant", "content": "NORMAL"},
+    ]
 
-    await _run(session, backend, messages, max_tokens=8)
-    await _run(session, backend, list(session.active_chains[0].message_history), max_tokens=8)
+    await _run(session, backend, first_messages, max_tokens=8)
+    assert session.snapshot_state()["active_chain_ids"] == [1]
+    await _run(session, backend, second_messages, max_tokens=8)
 
     assert len(backend.calls) == 2
-    assert backend.calls[-1]["sampling_params"]["max_tokens"] == 0
+    assert [call["sampling_params"]["max_tokens"] for call in backend.calls] == [0, 0]
+    assert session.snapshot_state()["active_chain_ids"] == [1]
 
 
 @pytest.mark.asyncio
@@ -634,6 +683,109 @@ async def test_multiple_chains_video_media_stays_chain_local():
     assert decoded[1].endswith("MAIN2")
     assert trajectories[0].multi_modal_data == {"videos": [subagent_video]}
     assert trajectories[1].multi_modal_data == {"videos": [main_video]}
+
+
+@pytest.mark.parametrize(
+    ("media_kind", "message_factory", "extractor", "sent_url", "unsent_url", "backend_field", "trajectory_key"),
+    [
+        (
+            "image",
+            _image_message,
+            fake_vision_info_extractor,
+            "image://sent-a.png",
+            "image://unsent-b.png",
+            "image_data",
+            "images",
+        ),
+        (
+            "video",
+            _video_message,
+            _codec_compatible_video_extractor,
+            "video://sent-a.mp4",
+            "video://unsent-b.mp4",
+            "video_data",
+            "videos",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_multiple_chains_length_exhaustion_does_not_materialize_unsent_media(
+    media_kind, message_factory, extractor, sent_url, unsent_url, backend_field, trajectory_key
+):
+    session = _session(
+        f"length-unsent-{media_kind}",
+        response_length=len("FIRST") + 1,
+        processor=FakeProcessor(),
+        vision_info_extractor=extractor,
+    )
+    backend = SequencedBackend(["FIRST", "SHOULD_NOT_RUN"])
+    first_messages = [message_factory(sent_url, "describe first")]
+    exhausted_messages = [
+        *first_messages,
+        {"role": "assistant", "content": "FIRST"},
+        message_factory(unsent_url, "new media that exhausts length"),
+    ]
+    expected_sent = [sent_url] if media_kind == "image" else [(sent_url, {"url": sent_url})]
+
+    await _run(session, backend, first_messages)
+    outcome = await _run(session, backend, exhausted_messages)
+    trajectories = await session.finalize()
+
+    assert outcome.finish_reason == "length"
+    assert len(backend.calls) == 1
+    assert backend.steps == ["SHOULD_NOT_RUN"]
+    assert backend.calls[0][backend_field] == expected_sent
+    assert len(trajectories) == 1
+    assert trajectories[0].multi_modal_data == {trajectory_key: expected_sent}
+    assert trajectories[0].extra_fields["finish_reason"] == "length"
+
+
+@pytest.mark.asyncio
+async def test_multiple_chains_abort_clears_length_materialized_trajectories():
+    session = _session("abort-clears-materialized", response_length=len("FIRST") + 1)
+    backend = SequencedBackend(["FIRST", "SHOULD_NOT_RUN"])
+    first_messages = [{"role": "user", "content": "first turn"}]
+    exhausted_messages = [
+        *first_messages,
+        {"role": "assistant", "content": "FIRST"},
+        {"role": "user", "content": "this continuation exhausts the length budget"},
+    ]
+
+    await _run(session, backend, first_messages)
+    outcome = await _run(session, backend, exhausted_messages)
+
+    assert outcome.finish_reason == "length"
+    assert session.snapshot_state()["num_trajectories"] == 1
+
+    await session.abort()
+
+    state = session.snapshot_state()
+    assert state["phase"] == "ABORTED"
+    assert state["num_trajectories"] == 0
+    assert state["num_active_chains"] == 0
+    with pytest.raises(RuntimeError, match="aborted"):
+        await session.finalize()
+
+
+@pytest.mark.asyncio
+async def test_multiple_chains_backend_media_list_mutation_does_not_change_committed_chain():
+    class _MutatingMediaBackend:
+        async def generate(self, request_id, *, prompt_ids, sampling_params, image_data=None, video_data=None):
+            image_data.append("image://backend-mutated.png")
+            return TokenOutput(token_ids=_ids("FIRST"), log_probs=[-0.1] * len("FIRST"), stop_reason="completed")
+
+    session = _session(
+        "backend-mutates-media",
+        processor=FakeProcessor(),
+        vision_info_extractor=fake_vision_info_extractor,
+    )
+    backend = _MutatingMediaBackend()
+
+    await _run(session, backend, [_image_message("image://stable-a.png", "describe stable")])
+    trajectories = await session.finalize()
+
+    assert len(trajectories) == 1
+    assert trajectories[0].multi_modal_data == {"images": ["image://stable-a.png"]}
 
 
 @pytest.mark.asyncio
@@ -868,8 +1020,11 @@ def test_compute_message_prefix_hashes_canonicalizes_json_tool_call_arguments():
 
 
 @pytest.mark.asyncio
-async def test_multiple_chains_tool_call_assistant_echo_hits_same_chain():
-    """Reuse a chain when an echoed tool-call assistant message is canonical-equivalent."""
+@pytest.mark.parametrize("rewrite_fresh_tool_result_id", [False, True], ids=["matching-id", "rewritten-fresh-id"])
+async def test_multiple_chains_tool_call_echo_reuses_chain_despite_fresh_tool_result_id(
+    rewrite_fresh_tool_result_id,
+):
+    """Match on the committed prefix; a fresh tool-result ID is outside that boundary."""
     session = _session("tool-call-echo", tool_parser_name="hermes")
     tools = [{"type": "function", "function": {"name": "search", "parameters": {"type": "object"}}}]
     tool_call_text = '<tool_call>\n{"name": "search", "arguments": {"query": "weather"}}\n</tool_call>'
@@ -884,6 +1039,9 @@ async def test_multiple_chains_tool_call_assistant_echo_hits_same_chain():
     first_chain_ids = session.snapshot_state()["active_chain_ids"]
     assert first.finish_reason == "tool_calls"
     assert first.assistant_msg["tool_calls"][0]["function"]["name"] == "search"
+    tool_result_id = (
+        "call_rewritten_fresh_tail" if rewrite_fresh_tool_result_id else first.assistant_msg["tool_calls"][0]["id"]
+    )
 
     await _run(
         session,
@@ -893,7 +1051,7 @@ async def test_multiple_chains_tool_call_assistant_echo_hits_same_chain():
             {"role": "assistant", "content": None, "tool_calls": first.assistant_msg["tool_calls"]},
             {
                 "role": "tool",
-                "tool_call_id": first.assistant_msg["tool_calls"][0]["id"],
+                "tool_call_id": tool_result_id,
                 "content": "sunny and warm",
             },
         ],

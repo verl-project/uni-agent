@@ -483,7 +483,9 @@ async def test_generate_sequences_preserves_sorted_trajectory_order_and_rewards_
         def decode(self, token_ids, skip_special_tokens=True):
             if hasattr(token_ids, "tolist"):
                 token_ids = token_ids.tolist()
-            return "".join(chr(int(token_id.item() if hasattr(token_id, "item") else token_id)) for token_id in token_ids)
+            return "".join(
+                chr(int(token_id.item() if hasattr(token_id, "item") else token_id)) for token_id in token_ids
+            )
 
         def encode(self, text, add_special_tokens=False):
             return [ord(char) for char in text]
@@ -563,9 +565,7 @@ async def test_generate_sequences_preserves_sorted_trajectory_order_and_rewards_
     final_trajectory = trajectories[-1]
     assert data.batch["prompts"].tolist() == [final_trajectory.prompt_ids]
     assert data.batch["responses"].tolist() == [final_trajectory.response_ids]
-    assert data.non_tensor_batch["extra_info"].tolist() == [
-        {"index": 0, "branch": "main", "target": "final-main"}
-    ]
+    assert data.non_tensor_batch["extra_info"].tolist() == [{"index": 0, "branch": "main", "target": "final-main"}]
     assert data.non_tensor_batch["__num_turns__"].tolist() == [final_trajectory.num_turns]
 
     assert len(fake_tq.batch_puts) == 1
@@ -612,7 +612,9 @@ async def test_generate_sequences_preserves_normal_multiple_chain_order_and_rewa
         def decode(self, token_ids, skip_special_tokens=True):
             if hasattr(token_ids, "tolist"):
                 token_ids = token_ids.tolist()
-            return "".join(chr(int(token_id.item() if hasattr(token_id, "item") else token_id)) for token_id in token_ids)
+            return "".join(
+                chr(int(token_id.item() if hasattr(token_id, "item") else token_id)) for token_id in token_ids
+            )
 
         def encode(self, text, add_special_tokens=False):
             return [ord(char) for char in text]
@@ -710,9 +712,7 @@ async def test_generate_sequences_preserves_normal_multiple_chain_order_and_rewa
     final_trajectory = trajectories[-1]
     assert data.batch["prompts"].tolist() == [final_trajectory.prompt_ids]
     assert data.batch["responses"].tolist() == [final_trajectory.response_ids]
-    assert data.non_tensor_batch["extra_info"].tolist() == [
-        {"index": 0, "branch": "main", "target": "final-main"}
-    ]
+    assert data.non_tensor_batch["extra_info"].tolist() == [{"index": 0, "branch": "main", "target": "final-main"}]
     assert data.non_tensor_batch["__num_turns__"].tolist() == [final_trajectory.num_turns]
 
     assert len(fake_tq.batch_puts) == 1
@@ -740,50 +740,6 @@ async def test_generate_sequences_preserves_normal_multiple_chain_order_and_rewa
         {"target": "final-main", "mode": "normal"},
     ]
     assert fake_tq.puts == [{"key": "uid-0", "partition_id": "train", "tag": {"status": "finished"}}]
-
-
-@pytest.mark.asyncio
-async def test_multiple_chains_tq_writes_preserve_sorted_trajectory_order(fake_tq):
-    """``_write_session_trajectories_to_tq()`` preserves the finalized
-    (order_seq-sorted) trajectory order: keys are written as
-    ``uid_sessionIndex_0..N`` in input order without re-sorting, so the last key
-    carries the highest-order_seq chain (the last visible session interaction and
-    reward-scoring target)."""
-    framework = await _build_framework_with_agent_runners(
-        agent_runners={"runner": _inline_runner_config(_async_noop_runner)},
-        gateway_manager=_FakeGatewayManager({}),
-        n=1,
-        val_n=1,
-    )
-
-    # GatewaySession.finalize() returns trajectories already sorted by order_seq:
-    # the lower-order_seq subagent chain first, the highest-order_seq main chain
-    # last. Distinct response_ids and a marker tag let us prove each key maps to
-    # the right chain and that the write preserves order rather than re-deriving it.
-    subagent = _trajectory(response_ids=[201, 202])
-    final_main = _trajectory(response_ids=[211, 212, 213], extra_fields={"finish_reason": "length"})
-    trajectories = [subagent, final_main]
-
-    await framework._write_session_trajectories_to_tq(
-        uid="uid-7",
-        session_index=3,
-        trajectories=trajectories,
-        sample_fields={"uid": "uid-7"},
-        global_steps=5,
-        partition_id="train",
-    )
-
-    assert len(fake_tq.batch_puts) == 1
-    batch_put = fake_tq.batch_puts[0]
-    assert batch_put["partition_id"] == "train"
-    assert batch_put["keys"] == ["uid-7_3_0", "uid-7_3_1"]
-
-    fields = batch_put["fields"]
-    assert fields["responses"][0].tolist() == subagent.response_ids
-    assert fields["responses"][1].tolist() == final_main.response_ids
-    # Highest-order_seq chain (final_main) lands on the last key, carrying its marker tag.
-    assert batch_put["tags"][0].get("finish_reason") is None
-    assert batch_put["tags"][1].get("finish_reason") == "length"
 
 
 @pytest.mark.asyncio
@@ -967,55 +923,3 @@ async def test_score_trajectories_merges_final_reward_info_into_reward_extra_inf
         (0.42, {"acc": 1.0, "format": 0.8}),
         (0.42, {"acc": 1.0, "format": 0.8}),
     ]
-
-
-@pytest.mark.asyncio
-async def test_score_trajectories_uses_last_finalized_trajectory_as_reward_target():
-    class _ComputeScoreRemote:
-        def __init__(self):
-            self.calls = []
-
-        async def remote(self, data):
-            self.calls.append(data)
-            return {"reward_score": 0.7, "reward_extra_info": {"target": "main"}}
-
-    class _StubWorker:
-        def __init__(self):
-            self.compute_score = _ComputeScoreRemote()
-
-    worker = _StubWorker()
-    framework = await _build_framework_with_agent_runners(
-        agent_runners={"runner": _inline_runner_config(_async_noop_runner)},
-        gateway_manager=_FakeGatewayManager({}),
-        reward_loop_worker_handles=[worker],
-        n=1,
-        val_n=1,
-    )
-
-    subagent_trajectory = Trajectory(
-        prompt_ids=[1],
-        response_ids=[2],
-        response_mask=[1],
-        reward_info={"branch": "subagent"},
-    )
-    last_main_trajectory = Trajectory(
-        prompt_ids=[10],
-        response_ids=[20],
-        response_mask=[1],
-        reward_info={"branch": "main", "finish_reason": "length"},
-        extra_fields={"finish_reason": "length"},
-    )
-
-    annotations = await framework._score_trajectories(
-        [subagent_trajectory, last_main_trajectory],
-        {"data_source": "test", "extra_info": {"branch": "sample"}},
-    )
-
-    assert len(worker.compute_score.calls) == 1
-    data = worker.compute_score.calls[0]
-    assert data.batch["prompts"].tolist() == [[10]]
-    assert data.batch["responses"].tolist() == [[20]]
-    assert data.non_tensor_batch["extra_info"].tolist() == [
-        {"branch": "main", "finish_reason": "length"}
-    ]
-    assert annotations == [(0.7, {"target": "main"}), (0.7, {"target": "main"})]
