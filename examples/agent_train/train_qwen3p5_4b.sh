@@ -1,115 +1,108 @@
 #!/usr/bin/env bash
 set -xeuo pipefail
 
-RAY_DATA_HOME=/mnt/hdfs/yyding
-NNODES=8
-GEN_TP=4
-ROLLOUT_RS=null
-TEST_FREQ=-1
+# Qwen3.5-4B agentic RL on SWE tasks via the uni_agent framework, running on
+# verl's V1 unified trainer in `colocate_async` mode: the actor and an async
+# rollout share the same GPUs (rollout replicas sleep during the train step),
+# and rollout output flows through TransferQueue.
+#
+# The framework plugs in through `agent_loop_manager_class`: verl.trainer.main_ppo's
+# TaskRunnerV1 honors that key, forces transfer_queue.enable, and calls our adapter's
+# `generate_sequences` (fire-and-forget) which posts each session's reward into TQ as
+# rm_scores. Because reward.reward_model.enable is False, the trainer's
+# reward_loop_worker_handles are non-None, so `_compute_reward_colocate` is skipped and
+# our posted rm_scores are used verbatim (no DAPO ground_truth needed).
+#
+# Launch from the repo root so Ray packages both `verl/` and `uni_agent/`.
 
-project_name=${PROJECT_NAME:-'Uni-Agent-Qwen3-Coder-30B-megatron'}
-exp_name=${EXP_NAME:-"$(date +%Y%m%d%H)_exp"}
+RAY_DATA_HOME=/mnt/hdfs/yyding
+NGPUS_PER_NODE=${NGPUS_PER_NODE:-8}
+# colocate_async colocates actor + rollout, so every node runs both. This is the
+# TOTAL node count (replaces the old fully-async NNODES_ROLLOUT + NNODES_TRAIN split).
+NNODES=${NNODES:-4}
+
+project_name='Uni-Agent-Qwen3p5-4B'
+exp_name=$(date +%Y%m%d%H)_exp
 
 RAY_DATA_HOME=${RAY_DATA_HOME:-"${HOME}/verl"}
-MODEL_PATH=${MODEL_PATH:-"${RAY_DATA_HOME}/models/Qwen3-Coder-30B-A3B-Instruct"}
+MODEL_PATH=${MODEL_PATH:-"${RAY_DATA_HOME}/models/Qwen3.5-4B"}
 CKPTS_DIR=${CKPTS_DIR:-"${RAY_DATA_HOME}/ckpts/${project_name}/${exp_name}"}
 AGENT_LOG_DIR=${AGENT_LOG_DIR:-"${RAY_DATA_HOME}/logs/${project_name}/${exp_name}"}
-TRAIN_FILE=${TRAIN_FILE:-"${RAY_DATA_HOME}/data/swe_agent/swe_rebench_filtered_seed_1150.parquet"}
-TEST_FILE=${TEST_FILE:-"${RAY_DATA_HOME}/data/swe_agent/swe_bench_verified_seed.parquet"}
-RUNTIME_ENV=${RUNTIME_ENV:-"${RAY_DATA_HOME}/data/swe_agent/runtime_env.yaml"}
-# Must be launched from the repository root so Ray packages both `verl/` and `uni_agent/`.
-# --- Agent-framework rollout (replaces the swe_agent agent-loop) --------------
-# Run-wide task base (agent + sandbox + sampling), loaded from this YAML by
-# uni_agent.framework.task_runner.run_task and deep-merged onto each row's task.
-# Same file-path idea as the old agent_loop_config_path; new (task-config) schema.
-TASK_CONFIG=${TASK_CONFIG:-"examples/agent_train/task_config.yaml"}
-TOOL_PARSER=${TOOL_PARSER:-"qwen3_coder"}    # gateway tool-call parser; MUST match the model chat template
-GATEWAY_COUNT=${GATEWAY_COUNT:-8}            # gateway actors fronting the engine
-CONCURRENCY=${CONCURRENCY:-256}              # max in-flight rollout sessions (runner cap)
-SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-"$(basename "${MODEL_PATH}")"}
+TRAIN_FILE=${TRAIN_FILE:-"${RAY_DATA_HOME}/data/uni_agent/swe_rebench_filtered_1150.parquet"}
+TEST_FILE=${TEST_FILE:-"${RAY_DATA_HOME}/data/uni_agent/swe_bench_verified.parquet"}
+RUNTIME_ENV=${RUNTIME_ENV:-"${RAY_DATA_HOME}/data/uni_agent/runtime_env.yaml"}
 
-rollout_mode=${ROLLOUT_MODE:-"async"}
-rollout_name=${ROLLOUT_NAME:-"vllm"} # sglang or vllm
+# --- Agent-framework rollout (replaces agent_loop_config_path) ----------------
+# Run-wide task base (agent + sandbox + sampling), loaded from this YAML by
+# uni_agent.framework.task_runner.run_task and deep-merged onto each data row's task.
+TASK_CONFIG=${TASK_CONFIG:-"examples/agent_train/task_config.yaml"}
+TOOL_PARSER=${TOOL_PARSER:-"qwen3_coder"}
+GATEWAY_COUNT=${GATEWAY_COUNT:-8}
+CONCURRENCY=${CONCURRENCY:-1024}
+
+rollout_mode="async"
+rollout_name="vllm" # sglang or vllm
 
 # Algorithm parameters
-adv_estimator=${ADV_ESTIMATOR:-grpo}
+adv_estimator=grpo
 
-use_kl_in_reward=${USE_KL_IN_REWARD:-False}
-kl_coef=${KL_COEF:-0.0}
-use_kl_loss=${USE_KL_LOSS:-False}
-kl_loss_coef=${KL_LOSS_COEF:-0.0}
+use_kl_in_reward=False
+kl_coef=0.0
+use_kl_loss=False
+kl_loss_coef=0.0
 
-clip_ratio_low=${CLIP_RATIO_LOW:-4e-4}
-clip_ratio_high=${CLIP_RATIO_HIGH:-4e-4}
+clip_ratio_low=0.2
+clip_ratio_high=0.28
 
 # Response length parameters
-max_prompt_length=${MAX_PROMPT_LENGTH:-$((1024 * 8))}
-max_response_length=${MAX_RESPONSE_LENGTH:-$((1024 * 128))}
-enable_overlong_buffer=${ENABLE_OVERLONG_BUFFER:-False}
-overlong_buffer_len=${OVERLONG_BUFFER_LEN:-$((1024 * 4))}  # unused
-overlong_penalty_factor=${OVERLONG_PENALTY_FACTOR:-1.0}
+max_prompt_length=$((1024 * 8))
+max_response_length=$((1024 * 128))
+enable_overlong_buffer=False
+overlong_buffer_len=$((1024 * 4))  # unused
+overlong_penalty_factor=1.0
 
-loss_agg_mode=${LOSS_AGG_MODE:-"token-mean"}
-loss_mode=${LOSS_MODE:-gspo}
+loss_agg_mode="token-mean"
+loss_mode=vanilla
 
 # Algorithm
-temperature=${TEMPERATURE:-1.0}
-top_p=${TOP_P:-1.0}
-top_k=${TOP_K:--1}
-val_temperature=${VAL_TEMPERATURE:-1.0}
-val_top_p=${VAL_TOP_P:-0.95}
-val_top_k=${VAL_TOP_K:--1}
+temperature=1.0
+top_p=1.0
+top_k=-1
+val_temperature=1.0
+val_top_p=0.95
+val_top_k=-1
 
 # Performance Related Parameter
-use_dynamic_bsz=${USE_DYNAMIC_BSZ:-True}
-offload=${OFFLOAD:-True}
-gen_tp=${GEN_TP:-4}
-train_tp=${TP:-4}
-train_pp=${PP:-2}
-train_cp=${CP:-2}
-train_ep=${EP:-8}
-train_etp=${ETP:-1}
+use_dynamic_bsz=True
+offload=False
+gen_tp=2
+train_tp=4
+train_pp=1
+train_cp=2
+train_ep=1
+train_etp=1
 actor_ppo_max_token_len=$(((max_prompt_length + max_response_length) / train_cp))
 infer_ppo_max_token_len=$(((max_prompt_length + max_response_length) / train_cp))
 
-optimizer_offload_fraction=${OFFLOAD_FRACTION:-1.0}
+optimizer_offload_fraction=1.0
 
 # install mbridge
 # pip3 install git+https://github.com/ISEEKYAN/mbridge
-USE_MBRIDGE=${USE_MBRIDGE:-True}
-USE_DIST_CKPT=${USE_DIST_CKPT:-False}
+USE_MBRIDGE=True
+USE_DIST_CKPT=False
 
-# V1 colocate_async topology. colocate_async colocates actor + rollout on the same
-# GPUs (rollout replicas sleep during the train step), so NNODES is the TOTAL node
-# count (replaces the old fully-async NNODES_ROLLOUT + NNODES_TRAIN split).
-NNODES=${NNODES:-8}
-NGPUS_PER_NODE=${NGPUS_PER_NODE:-8}
-
-# parameter_sync_step defaults to 1 for colocate_async, so train_batch_size
-# (prompts/step) only needs to be > 0 (the old async mode used train_batch_size=0).
-# num_warmup_batches pre-fills the rollout pipeline before the first train step.
-train_prompt_bsz=${TRAIN_PROMPT_BSZ:-32}
-n_resp_per_prompt=${N_RESP_PER_PROMPT:-8}
-train_prompt_mini_bsz=${PPO_MINI_BATCH_SIZE:-16}
-num_warmup_batches=${NUM_WARMUP_BATCHES:-1}
-lr_decay_steps=${LR_DECAY_STEPS:-2000}
-test_freq=${TEST_FREQ:-10}
-
-# ============================================================================
-# Decoupled PPO (bypass_mode=False) + Rollout Correction (Rollout IS)
-# ============================================================================
-bypass_mode=${BYPASS_MODE:-False}                                # False => decoupled PPO (recompute old_log_prob as proximal anchor)
-rollout_is=${ROLLOUT_IS:-token}                                  # token | sequence | null  (IS aggregation level)
-rollout_is_threshold=${ROLLOUT_IS_THRESHOLD:-2.0}                # single float => TIS upper clamp; "lo_hi" string => IcePop
-rollout_is_batch_normalize=${ROLLOUT_IS_BATCH_NORMALIZE:-False}  # normalize IS weights to mean=1.0 within a batch
-rollout_rs=${ROLLOUT_RS:-seq_mean_k1}                            # seq_mean_k1 | seq_mean_k3 | token_k1 | null
-rollout_rs_threshold=${ROLLOUT_RS_THRESHOLD:-"0.999_1.001"}      # k1: "lo_hi" ratio band; k3: single upper bound
-
-# ============================================================================
-# 30B MoE Router Replay (R3)
-# ============================================================================
-router_replay_mode=${ROUTER_REPLAY_MODE:-R3}                          # disabled | R2 | R3
-enable_rollout_routing_replay=${ENABLE_ROLLOUT_ROUTING_REPLAY:-True}  # required for R3 (rollout-side replay)
+# V1 colocate_async batching. parameter_sync_step defaults to 1 for colocate_async,
+# so train_batch_size (prompts/step) only needs to be > 0 (unlike the old async mode
+# which used train_batch_size=0 + gen_batch_size=1). num_warmup_batches pre-fills the
+# rollout pipeline before the first train step for actor/rollout overlap.
+train_prompt_bsz=${train_prompt_bsz:-32}
+n_resp_per_prompt=8
+train_prompt_mini_bsz=16
+num_warmup_batches=${num_warmup_batches:-1}
+lr_decay_steps=${lr_decay_steps:-2000}
+test_freq=10
+save_freq=10
+total_epochs=20
 
 ray job submit --no-wait --runtime-env $RUNTIME_ENV \
     -- python3 -m verl.trainer.main_ppo \
@@ -139,7 +132,7 @@ ray job submit --no-wait --runtime-env $RUNTIME_ENV \
     actor_rollout_ref.actor.clip_ratio_high=${clip_ratio_high} \
     actor_rollout_ref.actor.clip_ratio_c=10.0 \
     +actor_rollout_ref.model.override_config.model_config.max_position_embeddings=$((max_prompt_length + max_response_length)) \
-    actor_rollout_ref.model.use_fused_kernels=True \
+    actor_rollout_ref.model.use_fused_kernels=False \
     actor_rollout_ref.actor.use_dynamic_bsz=${use_dynamic_bsz} \
     actor_rollout_ref.actor.ppo_mini_batch_size=${train_prompt_mini_bsz} \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=${actor_ppo_max_token_len} \
@@ -153,7 +146,7 @@ ray job submit --no-wait --runtime-env $RUNTIME_ENV \
     +actor_rollout_ref.actor.optim.override_optimizer_config.optimizer_cpu_offload=True \
     actor_rollout_ref.actor.megatron.use_mbridge=$USE_MBRIDGE \
     actor_rollout_ref.actor.megatron.use_dist_checkpointing=$USE_DIST_CKPT \
-    actor_rollout_ref.actor.megatron.param_offload=False \
+    actor_rollout_ref.actor.megatron.param_offload=${offload} \
     actor_rollout_ref.actor.megatron.grad_offload=${offload} \
     actor_rollout_ref.actor.megatron.optimizer_offload=${offload} \
     actor_rollout_ref.actor.megatron.tensor_model_parallel_size=${train_tp} \
@@ -161,36 +154,23 @@ ray job submit --no-wait --runtime-env $RUNTIME_ENV \
     actor_rollout_ref.actor.megatron.context_parallel_size=${train_cp} \
     actor_rollout_ref.actor.megatron.expert_model_parallel_size=${train_ep} \
     actor_rollout_ref.actor.megatron.expert_tensor_parallel_size=${train_etp} \
-    +actor_rollout_ref.actor.megatron.override_transformer_config.apply_rope_fusion=True \
+    +actor_rollout_ref.actor.megatron.override_transformer_config.apply_rope_fusion=False \
     +actor_rollout_ref.actor.megatron.override_transformer_config.masked_softmax_fusion=True \
     +actor_rollout_ref.actor.megatron.override_transformer_config.bias_activation_fusion=True \
     +actor_rollout_ref.actor.megatron.override_transformer_config.bias_dropout_fusion=True \
     +actor_rollout_ref.actor.megatron.override_transformer_config.gradient_accumulation_fusion=True \
     +actor_rollout_ref.actor.megatron.override_transformer_config.deallocate_pipeline_outputs=True \
     +actor_rollout_ref.actor.megatron.override_transformer_config.persist_layer_norm=True \
-    +actor_rollout_ref.actor.megatron.override_transformer_config.moe_grouped_gemm=True \
-    +actor_rollout_ref.actor.megatron.override_transformer_config.moe_permute_fusion=True \
-    +actor_rollout_ref.actor.megatron.override_transformer_config.moe_token_dispatcher_type="alltoall" \
-    +actor_rollout_ref.actor.megatron.override_transformer_config.moe_router_dtype=fp32 \
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform \
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity=full \
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_num_layers=1 \
-    algorithm.rollout_correction.bypass_mode=${bypass_mode} \
-    algorithm.rollout_correction.rollout_is=${rollout_is} \
-    algorithm.rollout_correction.rollout_is_threshold=${rollout_is_threshold} \
-    algorithm.rollout_correction.rollout_is_batch_normalize=${rollout_is_batch_normalize} \
-    algorithm.rollout_correction.rollout_rs=${rollout_rs} \
-    algorithm.rollout_correction.rollout_rs_threshold="${rollout_rs_threshold}" \
-    actor_rollout_ref.actor.router_replay.mode=${router_replay_mode} \
-    actor_rollout_ref.rollout.enable_rollout_routing_replay=${enable_rollout_routing_replay} \
     actor_rollout_ref.actor.entropy_coeff=0 \
     actor_rollout_ref.actor.loss_agg_mode=${loss_agg_mode} \
-    +actor_rollout_ref.actor.checkpoint.save_contents=['model','hf_model'] \
+    +actor_rollout_ref.actor.checkpoint.save_contents=['hf_model'] \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu=${infer_ppo_max_token_len} \
     actor_rollout_ref.rollout.multi_turn.enable=True \
     actor_rollout_ref.rollout.multi_turn.max_parallel_calls=1 \
     ++actor_rollout_ref.rollout.multi_turn.format=${TOOL_PARSER} \
-    actor_rollout_ref.rollout.agent.num_workers=8 \
     ++actor_rollout_ref.rollout.agent.agent_loop_manager_class=uni_agent.framework.entry.AgentFrameworkRolloutAdapter \
     ++actor_rollout_ref.rollout.custom.agent_framework.gateway_count=${GATEWAY_COUNT} \
     ++actor_rollout_ref.rollout.custom.agent_framework.log_dir=${AGENT_LOG_DIR} \
@@ -198,7 +178,7 @@ ray job submit --no-wait --runtime-env $RUNTIME_ENV \
     ++actor_rollout_ref.rollout.custom.agent_framework.agent_runners.task.dispatch_mode=inline_async \
     ++actor_rollout_ref.rollout.custom.agent_framework.agent_runners.task.max_concurrent_sessions=${CONCURRENCY} \
     ++actor_rollout_ref.rollout.custom.agent_framework.agent_runners.task.runner_kwargs.task_config_path=${TASK_CONFIG} \
-    ++actor_rollout_ref.rollout.custom.agent_framework.agent_runners.task.runner_kwargs.model_name=${SERVED_MODEL_NAME} \
+    ++actor_rollout_ref.rollout.custom.agent_framework.agent_runners.task.runner_kwargs.model_name=${MODEL_PATH} \
     ++actor_rollout_ref.rollout.custom.agent_framework.agent_runners.task.runner_kwargs.report_reward=True \
     ++actor_rollout_ref.rollout.custom.agent_framework.use_reward_loop_worker=False \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.7 \
@@ -224,7 +204,7 @@ ray job submit --no-wait --runtime-env $RUNTIME_ENV \
     actor_rollout_ref.rollout.free_cache_engine=True \
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=${infer_ppo_max_token_len} \
     actor_rollout_ref.ref.megatron.use_dist_checkpointing=${USE_DIST_CKPT} \
-    actor_rollout_ref.ref.megatron.param_offload=False \
+    actor_rollout_ref.ref.megatron.param_offload=${offload} \
     actor_rollout_ref.ref.megatron.tensor_model_parallel_size=${train_tp} \
     actor_rollout_ref.ref.megatron.pipeline_model_parallel_size=${train_pp} \
     actor_rollout_ref.ref.megatron.context_parallel_size=${train_cp} \
@@ -240,11 +220,11 @@ ray job submit --no-wait --runtime-env $RUNTIME_ENV \
     trainer.project_name="${project_name}" \
     trainer.experiment_name="${exp_name}" \
     trainer.val_before_train=False \
-    trainer.save_freq=10 \
-    trainer.total_epochs=10 \
+    trainer.save_freq=${save_freq} \
+    trainer.total_epochs=${total_epochs} \
     trainer.resume_mode=auto \
     trainer.log_val_generations=10 \
     trainer.default_local_dir="${CKPTS_DIR}" \
-    trainer.nnodes="${NNODES}" \
-    trainer.n_gpus_per_node="${NGPUS_PER_NODE}" \
-    trainer.test_freq="${test_freq}"
+    trainer.nnodes=${NNODES} \
+    trainer.n_gpus_per_node=${NGPUS_PER_NODE} \
+    trainer.test_freq=${test_freq}
