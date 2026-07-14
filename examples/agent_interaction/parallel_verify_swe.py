@@ -20,7 +20,7 @@ from tqdm import tqdm
 
 from uni_agent.tasks import get_task
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s", force=True)
 logger = logging.getLogger(__name__)
 
 GLOBAL_CONCURRENCY = int(os.getenv("GLOBAL_CONCURRENCY", 512))

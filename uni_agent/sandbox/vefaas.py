@@ -23,9 +23,14 @@ _RUNTIME_PORT = 8000
 
 
 def _to_vefaas_image(image: str) -> str:
-    if image.startswith("swebench/"):
+    if image == "python:3.12":
+        return "enterprise-public-2-cn-beijing.cr.volces.com/vefaas-public/python:3.12"
+    elif image.startswith("swebench/"):
         return image.replace("swebench/", "enterprise-public-cn-beijing.cr.volces.com/swe-bench-verified/") + ":v2"
-    return image
+    elif image.startswith("swerebench/"):
+        return image.replace("swerebench/", "enterprise-public-cn-beijing.cr.volces.com/swe-rebench/") + ":latest"
+    else:
+        raise ValueError(f"Unsupported image: {image}")
 
 
 class _VefaasRuntime:
@@ -242,6 +247,7 @@ class VefaasSandbox(Sandbox):
         )
         await runtime.wait_until_alive(timeout=self.startup_timeout)
         self._runtime = runtime
+        await self.exec_shell("DEBIAN_FRONTEND=noninteractive apt-get install -y -qq tmux", timeout=300.0)
 
     async def stop(self) -> None:
         # Idempotent via the None checks below: a second call finds nothing to do.
