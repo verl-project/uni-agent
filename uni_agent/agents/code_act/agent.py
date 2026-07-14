@@ -103,7 +103,7 @@ class CodeActAgent(Agent):
             trajectory_info["exit_reason"] = "unknown_error"
             trajectory_info["error"] = f"{type(exc).__name__}: {exc}"
         finally:
-            await model.aclose()  # release the keep-alive HTTP session
+            await model.aclose()  # release the reused HTTP session
 
         logger.info(
             f"Episode done: exit_reason={trajectory_info['exit_reason']} steps={trajectory_info['steps']} "

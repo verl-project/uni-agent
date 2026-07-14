@@ -1,4 +1,4 @@
-"""Agent layer: the solver that runs *outside* the task image over a sandbox.
+"""Agent layer: pluggable solvers over a sandbox (white-box on the host, black-box inside the sandbox).
 
 See :mod:`uni_agent.agents.base` for the abstraction. An agent's launch params
 live in an :class:`AgentConfig` subclass; a task picks one by setting

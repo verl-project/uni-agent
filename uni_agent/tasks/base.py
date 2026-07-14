@@ -121,15 +121,13 @@ class Task(ABC):
         return build_agent(self.config.agent)
 
     @asynccontextmanager
-    async def episode_logging(self) -> AsyncIterator[str]:
-        """Scope this episode's logs to a run_id, yielded for use in log lines.
+    async def episode_logging(self) -> AsyncIterator[None]:
+        """Scope this episode's logs to a run_id via :func:`sample_logging`.
 
-        Reuse the caller's ambient run_id when one is active -- the agent framework
-        binds run_id = session_id, so the task's agent/tool/sandbox logs join that
-        session's file -- otherwise mint a fresh run_id and open
-        ``<log_dir>/<run_id>.log`` (standalone eval). The dispatch handler doesn't
-        ref-count, so we never open a second file for an already-active run_id (which
-        would clobber the shared one). Use as ``async with self.episode_logging() as run_id:``.
+        Reuses the caller's ambient run_id when set (the framework binds
+        run_id = session_id, so agent/tool/sandbox logs join that session's file);
+        otherwise mints one and opens ``<log_dir>/<run_id>.log`` (standalone eval).
+        Yields nothing -- use as ``async with self.episode_logging():``.
         """
         ambient_run_id = current_run_id()
         if ambient_run_id is not None:

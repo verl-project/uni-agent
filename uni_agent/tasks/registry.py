@@ -1,6 +1,6 @@
 """Task registry: register a task family by name and build it by name.
 
-Mirrors the agent / sandbox / reward registries. Concrete tasks live in
+Mirrors the agent / sandbox registries. Concrete tasks live in
 ``tasks/<name>/run.py`` and register themselves with :func:`register_task`;
 :func:`get_task` builds one from either a :class:`TaskConfig` (dispatched on
 ``config.name``, like ``build_agent``) or a flat ``{"name", ...fields}`` mapping

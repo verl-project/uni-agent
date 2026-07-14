@@ -41,15 +41,11 @@ _STOP = object()
 
 
 class _RunFileDispatch(logging.Handler):
-    """Single handler on the root logger. Resolves each record's run_id and formats it on
-    the *calling* thread (cheap, and required while the run_id ContextVar is still visible),
-    then hands all file I/O -- open, write, flush, close -- to a background writer thread.
-
-    This keeps slow sinks off the asyncio event loop: on an HDFS FUSE mount every write and
-    flush is a network round-trip, and doing that inline would stall every coroutine sharing
-    the loop (the old synchronous behaviour). Here the loop only enqueues; the writer thread
-    absorbs the latency and flushes on a fixed cadence (every ``_FLUSH_INTERVAL``s), so
-    on-disk content lags by at most that interval instead of appearing only on close."""
+    """Single root-logger handler: resolve each record's run_id and format it on the
+    *calling* thread (cheap, and required while the run_id ContextVar is visible), then
+    enqueue all file I/O to a background writer thread. This keeps slow sinks (e.g. an HDFS
+    FUSE mount, where every write is a network round-trip) off the asyncio event loop; the
+    writer flushes on a fixed cadence (``_FLUSH_INTERVAL``s)."""
 
     def __init__(self) -> None:
         super().__init__(level=logging.DEBUG)

@@ -1,0 +1,49 @@
+- name: swe_bench
+  sandbox:
+    provider: seed
+    runtime_timeout: 7200
+    sandbox_kwargs:
+      memory_gb: 8
+  agent:
+    name: code_act
+    max_steps: 200
+    tools:
+      - name: stateful_shell
+        command_timeout: 120
+        env_vars:
+          PAGER: "cat"
+          GIT_PAGER: "cat"
+          MANPAGER: "cat"
+          TQDM_DISABLE: "1"
+          PIP_PROGRESS_BAR: "off"
+      - name: str_replace_editor
+      - name: submit
+    model:
+      temperature: 1.0
+      top_p: 1.0
+      max_total_tokens: 131072
+
+- name: swe_rebench
+  sandbox:
+    provider: seed
+    runtime_timeout: 7200
+    sandbox_kwargs:
+      memory_gb: 8
+  agent:
+    name: code_act
+    max_steps: 200
+    tools:
+      - name: stateful_shell
+        command_timeout: 120
+        env_vars:
+          PAGER: "cat"
+          GIT_PAGER: "cat"
+          MANPAGER: "cat"
+          TQDM_DISABLE: "1"
+          PIP_PROGRESS_BAR: "off"
+      - name: str_replace_editor
+      - name: submit
+    model:
+      temperature: 1.0
+      top_p: 1.0
+      max_total_tokens: 131072

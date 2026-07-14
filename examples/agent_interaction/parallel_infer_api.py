@@ -13,29 +13,14 @@ Bring up an OpenAI-compatible policy server, then run this against it:
         --tensor-parallel-size 4
 
     BASE_URL=http://localhost:8000/v1 MODEL=Qwen3-Coder-30B-A3B-Instruct \
-        python examples/agent_interaction/parallel_infer_api.py --limit 8
+        python examples/agent_interaction/parallel_infer_api.py \
+        --task-config examples/agent_interaction/task_config.yaml --limit 8
 
-``--task-config`` (a YAML task config) is required and forms the base, deep-merged
-onto each sample's task dict (overriding agent / sandbox / ... while the per-sample
-image + metadata survive); all agent/model knobs (sampling, ``max_total_tokens``,
-``max_steps``, ...) come from it. A one-item ``- name: ...`` list wrapper is accepted:
-
-    - name: swe_bench
-      agent:
-        name: code_act
-        max_steps: 100
-        tools:
-          - name: stateful_shell
-            command_timeout: 120
-          - name: str_replace_editor
-        model:
-          temperature: 0.8
-          top_p: 0.9
-          top_k: -1
-          max_total_tokens: 65536
-
-The endpoint (--base-url / --model / --api-key or env BASE_URL / MODEL / API_KEY) is
-layered onto agent.model last.
+``--task-config`` (a YAML task config; see ``examples/agent_interaction/task_config.yaml``)
+is required and forms the base, deep-merged onto each sample's task dict; all agent/model
+knobs (sampling, ``max_total_tokens``, ``max_steps``, ...) come from it. The endpoint
+(--base-url / --model / --api-key or env BASE_URL / MODEL / API_KEY) is layered onto
+agent.model last.
 """
 
 import argparse

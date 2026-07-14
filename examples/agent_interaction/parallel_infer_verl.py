@@ -1,10 +1,9 @@
 # ruff: noqa: E501
 """Parallel agent inference over a verl-launched engine, through the training path.
 
-Same job as ``parallel_infer_api.py`` (run each dataset row's task and report a
-score) but instead of talking to an OpenAI endpoint you started yourself, this
-brings the engine up with verl and drives rollouts through the *exact* training
-rollout stack -- the agent **framework** adapter + TransferQueue (TQ):
+Same job as ``parallel_infer_api.py`` (run each row's task, report a score), but verl
+brings the engine up and rollouts flow through the *exact* training stack -- the agent
+framework adapter + TransferQueue (TQ):
 
     verl LLMServerManager (vLLM / SGLang)
     ->  AgentFrameworkRolloutAdapter.generate_sequences   (fire-and-forget -> TQ)
@@ -12,16 +11,10 @@ rollout stack -- the agent **framework** adapter + TransferQueue (TQ):
           ->  uni_agent.framework.task_runner.run_task  ->  uni_agent task
     ->  per-trajectory records written to TransferQueue
 
-The per-sample score is the trainer's own signal: read each session's final
-trajectory back from TQ and take ``rm_scores.sum(dim=-1)`` (mirrors
-``main_ppo_sync``'s validation read). ``rm_scores`` is populated by the framework
-from each session's ``reward_info``: ``run_task`` (``report_reward=True``) posts the
-task's own reward to the session reward-info endpoint, and the framework reads it
-back and writes it as ``reward_score``. No external reward model is needed.
-
-Because rollouts flow through the framework, fan-out is ``rollout.n`` (``--n``
-sessions per prompt), not a driver loop, and there is no resolved / wrong-answer
-/ timeout bucketing -- just the mean ``rm_scores``.
+The per-sample score is the trainer's own ``rm_scores`` read back from TQ: ``run_task``
+(``report_reward=True``) posts the task reward to its session, and the framework writes
+it as ``reward_score`` -- no external reward model. Fan-out is ``rollout.n`` (``--n``),
+with no resolved/wrong-answer/timeout bucketing (just mean ``rm_scores``).
 
 Example (single node, 4-way tensor parallel)::
 
@@ -31,10 +24,8 @@ Example (single node, 4-way tensor parallel)::
         --tool-parser qwen3_coder --tensor-parallel-size 4 \
         --task-config examples/agent_interaction/task_config.yaml --limit 8
 
-As with ``parallel_infer_api.py``, ``--task-config`` (a YAML task config) is required
-and forms the base, deep-merged onto each sample's task dict; all agent/model knobs
-(sampling, ``max_total_tokens``, ``max_steps``, ...) come from it. The policy endpoint
-is the gateway session, bound by the runner -- not a flag.
+``--task-config`` is required (same YAML shape as ``parallel_infer_api.py``); the policy
+endpoint is the gateway session, bound by the runner, not a flag.
 """
 
 import argparse
@@ -159,10 +150,9 @@ def init_config(args: argparse.Namespace, *, task_overrides: dict, served_model_
     # --tool-call-parser, e.g. qwen3_coder for Qwen3-Coder, hermes for Qwen3).
     OmegaConf.update(config, "actor_rollout_ref.rollout.multi_turn.format", args.tool_parser, force_add=True)
 
-    # Framework wiring: gateway pool size + the single task runner that turns each
-    # gateway session into a uni_agent task. runner_kwargs are forwarded to
-    # run_task; report_reward makes it post the task reward to the session so the
-    # reward worker (and thus rm_scores) can pick it up.
+    # Framework wiring: gateway pool + the task runner that turns each gateway session
+    # into a uni_agent task. runner_kwargs are forwarded to run_task; report_reward makes
+    # it post the task reward to the session, which the framework reads back as rm_scores.
     agent_framework_cfg = {
         "gateway_count": args.gateway_count,
         "agent_runners": {

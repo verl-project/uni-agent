@@ -25,10 +25,10 @@ _SSE_HEADERS = {
 }
 
 _OPENAI_ERROR_TYPE_BY_STATUS = {
-    # Only status codes the gateway actually emits today (gateway.py /
-    # session.py: 400 malformed/JSON, 409 concurrent session generation,
-    # 500 internal). 401/403/404/422/429 are intentionally omitted: this
-    # gateway has no auth / rate-limit / routing paths that surface them.
+    # Status codes the gateway emits (gateway.py / session.py): 400 malformed/JSON,
+    # 404 unknown session, 409 inactive session (finalized/aborted), 500 internal.
+    # Only 400/409 get a specific type here; 404/500 use openai_error_body's 4xx/5xx
+    # default. 401/403/422/429 never arise (no auth / rate-limit paths).
     400: "invalid_request_error",
     409: "conflict_error",
 }

@@ -37,13 +37,10 @@ _SSE_HEADERS = {
 }
 
 
-# Only status codes the gateway actually emits today (gateway.py / session.py:
-# 400 malformed/JSON, 409 concurrent session generation, 500 internal). Other
-# Anthropic types (authentication_error / permission_error / not_found_error /
-# request_too_large / rate_limit_error / overloaded_error) are intentionally
-# omitted: this gateway is not an Anthropic proxy and has no auth / rate-limit
-# / capacity paths that would surface those codes. Anything not listed falls
-# back to "api_error" via .get() default.
+# Status codes the gateway emits (gateway.py / session.py): 400 malformed/JSON,
+# 404 unknown session, 409 inactive session (finalized/aborted), 500 internal.
+# 404 has no dedicated Anthropic type and falls back to "api_error" via .get().
+# This gateway isn't an Anthropic proxy, so auth / rate-limit / capacity types are absent.
 ANTHROPIC_ERROR_TYPE_BY_STATUS = {
     400: "invalid_request_error",
     409: "invalid_request_error",
@@ -80,12 +77,10 @@ def _tool_call_input(arguments: Any) -> dict[str, Any]:
 
 def _outcome_to_blocks(assistant_msg: dict[str, Any]) -> list[dict[str, Any]]:
     blocks: list[dict[str, Any]] = []
-    # Outbound thinking/reasoning is intentionally not synthesized here:
-    # `assistant_msg` from session/decode currently has no `reasoning_content`
-    # field, and adding outbound wrapping before there is a producer would be
-    # defensive code at a trusted boundary (AGENTS §4 rule 3). When session
-    # decode grows reasoning_content, mirror OpenAI streaming and emit Anthropic
-    # thinking blocks at that point.
+    # Outbound thinking/reasoning is intentionally not synthesized here: ``assistant_msg``
+    # from session/decode has no ``reasoning_content`` field yet, so wrapping it before a
+    # producer exists would be dead defensive code. When session decode grows
+    # reasoning_content, mirror OpenAI streaming and emit Anthropic thinking blocks then.
     content = assistant_msg.get("content")
     if isinstance(content, str) and content:
         blocks.append({"type": "text", "text": content})

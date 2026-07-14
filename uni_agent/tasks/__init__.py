@@ -1,4 +1,4 @@
-"""Task layer: compose gateway + sandbox + agent into one family.
+"""Task layer: compose sandbox + agent into one runnable family (gateway wired at run time).
 
 See :mod:`uni_agent.tasks.base` for the abstraction. The base config holds only
 the shared fields; concrete tasks under ``tasks/<name>/run.py`` subclass

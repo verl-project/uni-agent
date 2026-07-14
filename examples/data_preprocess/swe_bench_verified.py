@@ -3,8 +3,8 @@
 
 Provider-agnostic on purpose: the row only carries the canonical *open-source*
 image ref (the published ``swebench/sweb.eval.x86_64.<id>``); mapping that to a
-service-provider image is a provider concern (``provider.py``), decided at run
-time, not baked into the dataset.
+service-provider image is the sandbox provider's job (e.g. ``_to_vefaas_image``),
+decided at run time, not baked into the dataset.
 
 Example::
 

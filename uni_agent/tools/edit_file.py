@@ -112,7 +112,7 @@ class EditFileTool(Tool):
 
     # ----- dispatch -----
     async def run(self, args: dict[str, Any], *, timeout: float | None = None) -> ToolResult:
-        # Edits are fast and local; `timeout` is accepted for interface parity, unused.
+        # Edits are cheap (a read + write over the data plane); `timeout` is accepted for interface parity, unused.
         return ToolResult(text=await self._apply(args))
 
     async def _apply(self, args: dict[str, Any]) -> str:

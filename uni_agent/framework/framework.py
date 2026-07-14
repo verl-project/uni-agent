@@ -158,8 +158,7 @@ def _trajectory_to_reward_dataproto(trajectory, sample_fields):
     Field shape matches AgentLoopWorker._compute_score
     (verl/experimental/agent_loop/agent_loop.py:753-772). Only fields actually
     consumed by NaiveRewardManager.run_single / RewardLoopWorker dispatch are
-    populated; tool_extra_fields / num_turns are passed via non_tensor_batch
-    for parity.
+    populated; ``__num_turns__`` rides in non_tensor_batch for parity.
     """
     import numpy as np
 
@@ -195,11 +194,11 @@ class OpenAICompatibleAgentFramework(AgentFramework):
     Each sample in the batch is run as an independent session: the agent
     communicates with the Gateway via standard ``/v1/chat/completions``
     requests, and the Gateway collects token-level trajectories.  After
-    finalization, ``_score_trajectories`` dispatches the session's final
-    trajectory to a RewardLoopWorker and broadcasts the score back to all
-    trajectories in the session (matching
-    ``AgentLoopWorkerTQ._agent_loop_postprocess``); the framework then writes
-    them to the TransferQueue schema consumed by sync training.
+    finalization, scoring prefers the reward the runner posted to the session
+    (``_score_from_reward_info``); otherwise, if a RewardLoopWorker is configured,
+    ``_score_trajectories`` scores the final trajectory and broadcasts the score to all
+    trajectories in the session (matching ``AgentLoopWorkerTQ._agent_loop_postprocess``).
+    The framework then writes them to the TransferQueue schema consumed by sync training.
     """
 
     def __init__(
@@ -503,9 +502,9 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         per-sample log stream keyed by a fresh ``run_id``, so the runner's
         agent/tool/sandbox logs and the post-finalize trajectory summary land in one
         file, grouped by training step: ``<log_dir>/step_<global_steps>/<run_id>.log``.
-        The runner's task reuses this ambient run_id instead of opening its own (see
-        ``current_run_id`` in the task ``run``); with no ``log_dir`` the framework binds
-        nothing and the task self-logs.
+        The runner's task reuses this ambient run_id via ``episode_logging`` instead of
+        opening its own; with no ``log_dir`` the framework binds nothing and the task
+        self-logs.
         """
         session_id = f"session-{sample_index}-{session_index}-{uuid4().hex}"
         if self._log_dir:
@@ -604,10 +603,8 @@ class OpenAICompatibleAgentFramework(AgentFramework):
     ) -> list[tuple[float, dict[str, object]]] | None:
         """Score from the reward the runner posted to the session, if any.
 
-        Dead simple: reward_score = the posted ``reward``; whatever else was posted
-        (e.g. ``acc``) rides along verbatim as reward_extra_info. What to post is the
-        task's call (see task_runner._post_reward_info); the framework only splits
-        ``reward`` off from the rest.
+        reward_score = the posted ``reward``; anything else posted (e.g. ``acc``) rides
+        along as reward_extra_info. See ``task_runner._post_reward_info`` for what's posted.
         """
         reward_info = dict(session_trajectories[-1].reward_info or {})
         reward = reward_info.pop("reward", None)

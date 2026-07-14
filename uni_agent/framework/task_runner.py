@@ -20,7 +20,7 @@ def deep_merge(base: dict, overrides: dict) -> dict:
 
     Nested dicts merge key-wise (``overrides`` wins); lists and scalars replace
     wholesale. ``base`` is never mutated. (Same semantics as the agent-loop's
-    and ``parallel_infer.py``'s.)
+    and ``parallel_infer_api.py``'s.)
     """
     if not isinstance(base, dict) or not isinstance(overrides, dict):
         return overrides
@@ -63,13 +63,10 @@ def resolve_task_config(
 def load_task_config_file(path: str) -> dict[str, dict[str, Any]]:
     """Load a per-task-name config file into a ``{name: task_config}`` index.
 
-    Backs the training recipe's ``runner_kwargs.task_config_path`` -- the same
-    file-path idea as the legacy ``agent_loop_config_path``, so the run-wide task
-    bases live in one YAML (the inference ``task_config.yaml`` shape) instead of
-    dozens of Hydra overrides. The file is a list of task configs each keyed by
-    ``name``; :func:`route_task_config` picks the one whose name matches a row's task,
-    so a mixed train(swe_rebench)/test(swe_bench) run routes each row to its own base.
-    Cached per path (loaded once in the rollout worker).
+    Backs the training recipe's ``runner_kwargs.task_config_path`` -- the run-wide task
+    bases live in one YAML (a list of configs keyed by ``name``, the inference
+    ``task_config.yaml`` shape) instead of dozens of Hydra overrides;
+    :func:`route_task_config` picks the entry matching a row's task. Cached per path.
     """
     import yaml
 

@@ -1,6 +1,6 @@
 """Agent registry: register an agent by name and build it by name.
 
-Mirrors the sandbox / reward / tools / tasks registries. Each agent is an
+Mirrors the sandbox / tools / tasks registries. Each agent is an
 :class:`~uni_agent.agents.base.Agent` subclass living under ``agents/<name>/``
 that registers itself with :func:`register_agent`. :func:`build_agent` resolves
 an agent by ``config.name``, importing its module on first use

@@ -3,8 +3,8 @@
 Talks to ``{base_url}/chat/completions`` directly over ``aiohttp`` (no OpenAI SDK):
 normalizes the running conversation to the API shape, sends the tool schemas, and
 returns the assistant text plus any structured tool calls for the CodeAct loop to
-execute. One keep-alive :class:`aiohttp.ClientSession` is reused across calls, so
-callers should :meth:`aclose` the model (or use it as an async context manager).
+execute. One :class:`aiohttp.ClientSession` is reused across calls (connections are not
+kept alive), so callers should :meth:`aclose` the model (or use it as an async context manager).
 """
 
 from __future__ import annotations
@@ -51,7 +51,7 @@ class OpenAICompatibleChatModel:
 
     # ----- session lifecycle -----
     def _session_for_call(self) -> aiohttp.ClientSession:
-        """Lazily open (and reuse) one keep-alive session, bound to the running loop."""
+        """Lazily open (and reuse) one session, bound to the running loop (connections not kept alive)."""
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession(
                 connector=aiohttp.TCPConnector(force_close=True),

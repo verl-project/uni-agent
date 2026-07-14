@@ -3,9 +3,8 @@
 The agent runs *outside* the task image. A :class:`Tool` pairs a schema (what the
 model sees) with an async :meth:`run` that drives the container through the
 :class:`~uni_agent.sandbox.SandboxBackend` data plane. A tool is built with its
-sandbox and owns whatever state it needs -- stateless tools (the editor) just
-read/write; stateful ones (``shell``) hold a live channel opened lazily and closed
-in :meth:`close`. Every :meth:`run` returns a normalized :class:`ToolResult`
+sandbox and owns whatever state it needs -- the editor keeps undo history and the
+shell holds a live channel opened lazily and closed in :meth:`close`. Every :meth:`run` returns a normalized :class:`ToolResult`
 (``text`` + ``status``); :class:`Toolbox` binds a set of tools to one sandbox.
 """
 
@@ -284,8 +283,8 @@ class Toolbox:
         before the error propagates; :meth:`close` runs again on normal exit.
 
         ``async with`` uses the defaults; call ``__aenter__(retry=..., timeout=...)``
-        directly to override. ``timeout`` caps each per-tool start attempt and must exceed
-        a tool's own first-use setup budget (the shell's 300s tmux install).
+        directly to override. ``timeout`` caps each per-tool start attempt; raise it if a
+        tool's first-use setup is slow (e.g. the shell installing tmux).
         """
         retry = max(1, retry)
         try:
