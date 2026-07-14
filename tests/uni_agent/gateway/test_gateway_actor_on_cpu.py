@@ -240,13 +240,14 @@ def test_message_normalization_tool_call_arguments(raw_arguments, expected_argum
     assert result["tool_calls"][0]["function"]["arguments"] == expected_arguments
 
 
-def test_normalize_request_ignores_chat_template_kwargs_extension():
+@pytest.mark.parametrize("payload_extra", [{}, {"chat_template_kwargs": None}])
+def test_normalize_request_accepts_absent_or_null_chat_template_kwargs(payload_extra):
     from uni_agent.gateway.session import MessageCodec
 
     result = MessageCodec(FakeTokenizer()).normalize_request(
         {
             "messages": [{"role": "user", "content": "hi"}],
-            "chat_template_kwargs": "ignored",
+            **payload_extra,
         }
     )
 
@@ -255,9 +256,22 @@ def test_normalize_request_ignores_chat_template_kwargs_extension():
     assert result["tools"] is None
 
 
+@pytest.mark.parametrize("chat_template_kwargs", [{}, {"enable_thinking": True}, "unsupported"])
+def test_normalize_request_rejects_non_null_chat_template_kwargs(chat_template_kwargs):
+    from uni_agent.gateway.session import MalformedRequestError, MessageCodec
+
+    with pytest.raises(MalformedRequestError, match="request-level chat_template_kwargs is not supported"):
+        MessageCodec(FakeTokenizer()).normalize_request(
+            {
+                "messages": [{"role": "user", "content": "hi"}],
+                "chat_template_kwargs": chat_template_kwargs,
+            }
+        )
+
+
 @pytest.mark.asyncio
-async def test_config_chat_template_kwargs_forwarded_and_request_kwargs_ignored(monkeypatch):
-    """Codec-level chat-template kwargs are forwarded; request-level kwargs are ignored."""
+async def test_config_chat_template_kwargs_forwarded(monkeypatch):
+    """Codec-level chat-template kwargs are copied and forwarded."""
     import uni_agent.gateway.session.codec as codec_mod
     from uni_agent.gateway.config import GatewayActorConfig
     from uni_agent.gateway.gateway import _GatewayActor
@@ -287,13 +301,11 @@ async def test_config_chat_template_kwargs_forwarded_and_request_kwargs_ignored(
             "s1",
             {
                 "messages": [{"role": "user", "content": "hi"}],
-                "chat_template_kwargs": {"enable_thinking": True, "extra_flag": "x"},
             },
         )
 
         assert captured_kwargs["enable_thinking"] is False
         assert captured_kwargs["default_only"] == "kept"
-        assert "extra_flag" not in captured_kwargs
     finally:
         await actor.shutdown()
 
@@ -1148,13 +1160,27 @@ async def test_gateway_actor_parallel_same_session_requests_by_default():
             },
             "tools must be a list",
         ),
+        (
+            {
+                "model": "dummy-model",
+                "messages": [{"role": "user", "content": "hello"}],
+                "chat_template_kwargs": {},
+            },
+            "request-level chat_template_kwargs is not supported",
+        ),
+        (
+            {
+                "model": "dummy-model",
+                "messages": [{"role": "user", "content": "hello"}],
+                "max_tokens": 0,
+            },
+            "max_tokens must be a positive integer",
+        ),
     ],
 )
 @pytest.mark.asyncio
 async def test_gateway_actor_rejects_malformed_requests_with_bad_request(ray_runtime, payload, detail_fragment):
-    """Malformed request payloads (empty messages, bad types, invalid
-    tool_calls/tools structure) are rejected with HTTP 400 and an
-    OpenAI-style error envelope."""
+    """Malformed request payloads are rejected with HTTP 400 and an OpenAI-style error envelope."""
     from uni_agent.gateway.config import GatewayActorConfig
     from uni_agent.gateway.gateway import GatewayActor
 

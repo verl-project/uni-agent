@@ -23,6 +23,7 @@ def _session(
     session_id: str,
     *,
     response_length: int | None = None,
+    sampling_params: dict | None = None,
     processor=None,
     vision_info_extractor=None,
     tool_parser_name: str | None = None,
@@ -36,6 +37,7 @@ def _session(
             tool_parser_name=tool_parser_name,
         ),
         response_length=response_length,
+        sampling_params=sampling_params,
     )
 
 
@@ -596,6 +598,53 @@ async def test_multiple_chains_sets_remaining_budget_when_request_omits_max_toke
     await _run(session, backend, [{"role": "user", "content": "use session budget"}])
 
     assert backend.calls[0]["sampling_params"]["max_tokens"] == 10
+
+
+@pytest.mark.parametrize("max_tokens", [0, -1, None, "1", 1.5, True])
+@pytest.mark.asyncio
+async def test_multiple_chains_rejects_invalid_request_max_tokens_before_backend_call(max_tokens):
+    session = _session("invalid-request-max-tokens")
+    backend = SequencedBackend(["SHOULD_NOT_RUN"])
+
+    with pytest.raises(HTTPException, match="max_tokens must be a positive integer") as exc_info:
+        await _run(
+            session,
+            backend,
+            [{"role": "user", "content": "invalid request max_tokens"}],
+            max_tokens=max_tokens,
+        )
+
+    assert exc_info.value.status_code == 400
+    assert backend.calls == []
+
+
+@pytest.mark.asyncio
+async def test_multiple_chains_rejects_invalid_session_max_tokens_before_backend_call():
+    session = _session("invalid-session-max-tokens", sampling_params={"max_tokens": 0})
+    backend = SequencedBackend(["SHOULD_NOT_RUN"])
+
+    with pytest.raises(HTTPException, match="max_tokens must be a positive integer") as exc_info:
+        await _run(session, backend, [{"role": "user", "content": "invalid session max_tokens"}])
+
+    assert exc_info.value.status_code == 400
+    assert backend.calls == []
+
+
+@pytest.mark.asyncio
+async def test_request_chat_template_kwargs_rejected_before_backend_call():
+    session = _session("unsupported-request-chat-template-kwargs")
+    backend = SequencedBackend(["SHOULD_NOT_RUN"])
+
+    with pytest.raises(HTTPException, match="request-level chat_template_kwargs is not supported") as exc_info:
+        await _run(
+            session,
+            backend,
+            [{"role": "user", "content": "unsupported template override"}],
+            chat_template_kwargs={},
+        )
+
+    assert exc_info.value.status_code == 400
+    assert backend.calls == []
 
 
 @pytest.mark.asyncio

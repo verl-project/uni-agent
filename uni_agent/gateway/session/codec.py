@@ -329,6 +329,11 @@ class MessageCodec:
 
     def normalize_request(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Normalize chat messages and tool schemas."""
+        if payload.get("chat_template_kwargs") is not None:
+            raise MalformedRequestError(
+                "request-level chat_template_kwargs is not supported; configure data.apply_chat_template_kwargs instead"
+            )
+
         messages = payload.get("messages")
         if not isinstance(messages, list) or not messages:
             raise MalformedRequestError("messages must be non-empty")
@@ -375,4 +380,8 @@ class MessageCodec:
         for key in self._allowed_request_sampling_param_keys:
             if key in payload:
                 sampling_params[key] = payload[key]
+        if "max_tokens" in sampling_params:
+            max_tokens = sampling_params["max_tokens"]
+            if not isinstance(max_tokens, int) or isinstance(max_tokens, bool) or max_tokens <= 0:
+                raise MalformedRequestError("max_tokens must be a positive integer")
         return sampling_params

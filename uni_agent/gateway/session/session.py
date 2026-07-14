@@ -214,7 +214,10 @@ class GatewaySession:
                     )
                 # Prepare can touch codec and multimodal extractor state, so only
                 # backend generation runs outside the session lock.
-                encoded = await self._prepare_generation_inputs(payload, request_context)
+                try:
+                    encoded = await self._prepare_generation_inputs(payload, request_context)
+                except MalformedRequestError as exc:
+                    raise HTTPException(status_code=400, detail=str(exc)) from exc
                 if encoded.length_exhausted_trajectory is not None:
                     empty_msg = {"role": "assistant", "content": ""}
                     self._close_length_exhausted_chain(encoded)
@@ -286,6 +289,10 @@ class GatewaySession:
     ) -> EncodedData:
         messages = request_context["messages"]
         tools = request_context["tools"]
+        sampling_params = self._codec.build_sampling_params(
+            payload,
+            session_sampling_params=self._sampling_params,
+        )
         incoming_message_prefix_hashes = self._compute_message_prefix_hashes(messages)
         selected_chain = self._select_chain(
             tools=tools,
@@ -357,10 +364,6 @@ class GatewaySession:
                     video_data.extend(new_video_data)
 
         context_ids = buffer.prompt_ids + buffer.response_ids
-        sampling_params = self._codec.build_sampling_params(
-            payload,
-            session_sampling_params=self._sampling_params,
-        )
         remaining_response_budget = (
             max(0, self._response_length - len(buffer.response_mask)) if self._response_length is not None else None
         )
