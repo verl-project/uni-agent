@@ -36,8 +36,8 @@ def build_sandbox_config() -> SandboxConfig:
 def build_tool_specs() -> list[dict]:
     return [
         {
-            "name": "stateful_shell",  # registry key; model sees it as `shell`
-            "command_timeout": 120,  # per-command timeout (seconds)
+            "name": "stateful_shell",
+            "command_timeout": 120,
             "env_vars": {
                 "PAGER": "cat",
                 "GIT_PAGER": "cat",

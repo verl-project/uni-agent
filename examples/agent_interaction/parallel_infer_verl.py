@@ -14,11 +14,10 @@ rollout stack -- the agent **framework** adapter + TransferQueue (TQ):
 
 The per-sample score is the trainer's own signal: read each session's final
 trajectory back from TQ and take ``rm_scores.sum(dim=-1)`` (mirrors
-``main_ppo_sync``'s validation read). ``rm_scores`` is only populated when a
-reward worker scored the trajectory, so we attach a tiny worker
-(:class:`_TaskRewardWorker`) that surfaces the task's own reward -- which
-``run_task`` posts to the session reward-info endpoint (``report_reward=True``)
--- as ``reward_score``. No external reward model is needed.
+``main_ppo_sync``'s validation read). ``rm_scores`` is populated by the framework
+from each session's ``reward_info``: ``run_task`` (``report_reward=True``) posts the
+task's own reward to the session reward-info endpoint, and the framework reads it
+back and writes it as ``reward_score``. No external reward model is needed.
 
 Because rollouts flow through the framework, fan-out is ``rollout.n`` (``--n``
 sessions per prompt), not a driver loop, and there is no resolved / wrong-answer
@@ -208,25 +207,6 @@ def _build_prompts(samples: list, uids: list):
         },
         non_tensor_dict={"global_steps": 0},
     )
-
-
-@ray.remote
-class _TaskRewardWorker:
-    """Reward worker that surfaces each task's own reward as ``reward_score``.
-
-    ``run_task`` (report_reward=True) posts the task reward to the session
-    reward-info endpoint; the framework merges that ``reward_info`` into the
-    sample's ``extra_info`` before dispatch, so this reads ``reward`` back and
-    returns it in the RewardLoopWorker contract shape
-    (``{"reward_score", "reward_extra_info"}``) -- no external reward model needed.
-    Without it the framework skips scoring and every ``rm_scores`` stays 0.
-    """
-
-    def compute_score(self, data) -> dict:
-        extra_info = data.non_tensor_batch.get("extra_info")
-        info = extra_info[0] if extra_info is not None and len(extra_info) else {}
-        reward = float((info or {}).get("reward", 0.0))
-        return {"reward_score": reward, "reward_extra_info": {}}
 
 
 def _read_rm_scores(uids: list, *, partition_id: str = PARTITION_ID) -> dict:
@@ -460,13 +440,12 @@ def main() -> None:
     tq.init(config.transfer_queue)
     llm_server_manager = LLMServerManager.create(config=config)
 
-    # 2. Framework rollout adapter over the engine, with a reward worker that
-    #    surfaces each task's own reward (posted via report_reward) as rm_scores.
-    reward_worker = _TaskRewardWorker.remote()
+    # 2. Framework rollout adapter over the engine. run_task posts each task's own
+    #    reward to its gateway session (report_reward=True); the framework reads it
+    #    back from reward_info and writes it as rm_scores -- no reward worker needed.
     adapter = AgentFrameworkRolloutAdapter.create(
         config=config,
         llm_client=llm_server_manager.get_client(),
-        reward_loop_worker_handles=[reward_worker],
     )
 
     # 3. Submit the batch and wait for every trajectory to land in TQ.
