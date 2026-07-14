@@ -1100,19 +1100,10 @@ async def test_multiple_chains_tool_call_id_rewrite_starts_new_chain():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("steps", "expected_logprobs"),
-    [
-        ([("FIRST", "full"), ("SECOND", "full")], "aligned"),
-        ([("FIRST", "full"), ("SECOND", None)], None),
-        ([("FIRST", None), ("SECOND", "full")], None),
-        ([("FIRST", "short"), ("SECOND", "full")], None),
-    ],
-)
-async def test_multiple_chains_response_logprobs_stay_aligned_or_none(steps, expected_logprobs):
-    """Return aligned response logprobs only when every generated segment is covered."""
-    session = _session(f"logprobs-{expected_logprobs}")
-    backend = _LogprobBackend(steps)
+async def test_multiple_chains_requested_response_logprobs_stay_aligned():
+    """Collect requested logprobs and zero-fill continuation context tokens."""
+    session = _session("logprobs-aligned", sampling_params={"logprobs": True})
+    backend = _LogprobBackend([("FIRST", "full"), ("SECOND", "full")])
 
     await _run(session, backend, [{"role": "user", "content": "first turn"}])
     await _run(
@@ -1126,9 +1117,75 @@ async def test_multiple_chains_response_logprobs_stay_aligned_or_none(steps, exp
     )
     [trajectory] = await session.finalize()
 
-    if expected_logprobs == "aligned":
-        assert trajectory.response_logprobs is not None
-        assert len(trajectory.response_logprobs) == len(trajectory.response_ids)
-        assert 0.0 in trajectory.response_logprobs
-    else:
-        assert trajectory.response_logprobs is None
+    assert trajectory.response_logprobs is not None
+    assert len(trajectory.response_logprobs) == len(trajectory.response_ids)
+    assert 0.0 in trajectory.response_logprobs
+
+
+@pytest.mark.asyncio
+async def test_multiple_chains_unrequested_response_logprobs_are_ignored():
+    """Ignore backend logprobs unless the effective sampling params request them."""
+    session = _session("logprobs-not-requested")
+
+    await _run(session, _LogprobBackend([("FIRST", "full")]), [{"role": "user", "content": "first turn"}])
+    [trajectory] = await session.finalize()
+
+    assert trajectory.response_logprobs is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("backend_logprobs", "error_match"),
+    [
+        (None, "backend omitted logprobs when requested"),
+        ("short", "backend logprobs must align with token_ids: got 1 logprobs for 5 tokens"),
+    ],
+)
+async def test_multiple_chains_requested_response_logprobs_reject_invalid_backend_output(
+    backend_logprobs,
+    error_match,
+):
+    """Reject missing or misaligned requested logprobs without creating a chain."""
+    session = _session("logprobs-invalid", sampling_params={"logprobs": True})
+
+    with pytest.raises(RuntimeError, match=error_match):
+        await _run(
+            session,
+            _LogprobBackend([("FIRST", backend_logprobs)]),
+            [{"role": "user", "content": "first turn"}],
+        )
+
+    state = session.snapshot_state()
+    assert state["active_chain_ids"] == []
+    assert state["num_active_chains"] == 0
+    assert state["num_trajectories"] == 0
+
+
+@pytest.mark.asyncio
+async def test_multiple_chains_invalid_continuation_logprobs_release_chain_for_retry():
+    """Keep the selected chain unchanged and reusable after logprob validation fails."""
+    session = _session("logprobs-retry", sampling_params={"logprobs": True})
+    first_messages = [{"role": "user", "content": "first turn"}]
+    continuation = [
+        *first_messages,
+        {"role": "assistant", "content": "FIRST"},
+        {"role": "user", "content": "follow up"},
+    ]
+
+    await _run(session, _LogprobBackend([("FIRST", "full")]), first_messages)
+    state_before_failure = session.snapshot_state()
+
+    with pytest.raises(RuntimeError, match="backend omitted logprobs when requested"):
+        await _run(session, _LogprobBackend([("SECOND", None)]), continuation)
+
+    state_after_failure = session.snapshot_state()
+    assert state_after_failure["active_chain_ids"] == state_before_failure["active_chain_ids"]
+    assert state_after_failure["active_chain_tip_hashes"] == state_before_failure["active_chain_tip_hashes"]
+
+    await _run(session, _LogprobBackend([("RETRY", "full")]), continuation)
+    [trajectory] = await session.finalize()
+
+    assert _decode_response_ids(trajectory.response_ids).endswith("RETRY")
+    assert "SECOND" not in _decode_response_ids(trajectory.response_ids)
+    assert trajectory.response_logprobs is not None
+    assert len(trajectory.response_logprobs) == len(trajectory.response_ids)
