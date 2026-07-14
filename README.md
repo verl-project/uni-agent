@@ -1,44 +1,47 @@
-# Uni-Agent: Build, Run, and Train Agents at Scale
+# Uni-Agent: Build and Train Agents at Scale
 
 [![Docs](https://img.shields.io/badge/docs-Read%20the%20Docs-8A2BE2)](https://uni-agent.readthedocs.io/en/latest/index.html)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue)](./LICENSE)
 
-Uni-Agent is a unified framework for general agents at scale.
+Uni-Agent is a unified framework for long-horizon, tool-using agents. Bring existing agent harnesses into reinforcement learning, build transparent agents with composable tools and sandboxes, and generate training-grade trajectories at scale.
 
-- **All-in-one stack:** one framework for building, running, and training agents.
-- **Unified agent interface:** unified abstractions for diverse and complex real-world agent scenarios.
-
-The long-term vision is to build the backend infrastructure across both inference and training, enabling agents to perceive, act, and explore complex real-world tasks.
+The same task, agent, sandbox, and reward definition can be reused across parallel evaluation and RL training with [verl](https://github.com/verl-project/verl).
 
 ## Highlights ✨
 
-**Unified yet decoupled agent stack:** Uni-Agent organizes agents around `model`, `tool`, and `env`, so each layer can be swapped independently while still composing into one unified interaction framework.
+### Bring existing agents into RL
 
-**Large-scale parallel interaction:** Uni-Agent supports high-throughput, stable parallel inference, execution, and verification for 1000+ concurrent agent tasks.
+Connect agent harnesses such as Claude Code and Mini-SWE-Agent, or any harness that can redirect its OpenAI, or Anthropic-compatible model endpoint—to the Uni-Agent Gateway. Uni-Agent captures token-level trajectories and task rewards without requiring you to rewrite the agent loop.
 
-**One stack from inference to training:** Uni-Agent reuses the same interaction stack from large-scale agent execution to RL training, with support for advanced paradigms such as fully-async and partial rollout.
+### Build transparent and extensible agents
+
+Build white-box agents by composing reusable `Agent`, `Tool`, `Task`, and `Sandbox` abstractions. Start with built-in coding agents and tools, register your own tools and environments, and extend the same framework to code, search, GUI, and other interactive scenarios.
+
+### Generate training-grade trajectories at scale
+
+Run 1000+ long-horizon, stateful agent sessions with distributed workers, pooled gateway sessions, isolated sandboxes, and asynchronous scheduling. Uni-Agent keeps each session's trajectory and reward correctly associated while reusing the same execution stack across evaluation and RL training.
 
 ## Quickstart 🚀
 
-Start with the docs below:
+Choose the path that matches your goal:
 
-- `Launch`: [Launch an agent environment](https://uni-agent.readthedocs.io/en/latest/start/agent_env.html) to run simple demo scripts.
-- `Build`: [Build a simple search agent](https://uni-agent.readthedocs.io/en/latest/start/arxiv_search_agent.html) with minimal customization for arXiv paper search and recommendation.
-- `Search`: [Train a search agent](https://uni-agent.readthedocs.io/en/latest/start/search_agent.html) on ASearcher with a LocalWiki retrieval service.
-- `Scale`: [Run parallel agent interaction](https://uni-agent.readthedocs.io/en/latest/start/agent_interaction.html) for large-scale interaction, inference, and verification workloads.
-- `Train`: [Train an agent with reinforcement learning](https://uni-agent.readthedocs.io/en/latest/start/agent_train.html) using state-of-the-art training techniques.
+- **Explore the execution stack:** run the [sandbox and tools demo](./examples/agent_env/README.md).
+- **Evaluate with an existing model endpoint:** use [`parallel_infer_api.py`](./examples/agent_interaction/parallel_infer_api.py).
+- **Evaluate through the training rollout stack:** use [`parallel_infer_verl.py`](./examples/agent_interaction/parallel_infer_verl.py).
+- **Train an agent with RL:** start from the recipes in [`examples/agent_train`](./examples/agent_train).
 
 ## Architecture 🧩
 
-<img src="./assets/uni-agent.png" width="80%" alt="Uni-Agent architecture overview">
+<img src="./assets/uni-agent.png" width="100%" alt="Uni-Agent architecture overview">
 
-Uni-Agent is built around a unified interaction loop with three parts: `model`, `tool`, and `env`.
+Uni-Agent separates rollout orchestration from agent and environment execution, with the **Uni-Agent Gateway** acting as the boundary between agent runtimes and the RL system:
 
-- `model` is the reasoning backend that decides what to do next,
-- `tool` is how the `model` perceives and acts on the `env`
-- `env` is the runtime environment where actions are executed and state is preserved.
+1. **Framework Workers** receive prompts and start parallel sessions through the Gateway.
+2. A **Task Runner** launches the selected agent—such as Claude Code, Mini-SWE-Agent, or CodeAct—against a configurable sandbox backend.
+3. The agent sends model requests through its session-scoped Gateway endpoint. The Gateway records the interaction as a token-level trajectory while the task computes its reward.
+4. When the session ends, the trajectory and reward are written to the trajectory pool for evaluation or RL training.
 
-This interaction stack is used for large-scale agent execution and can be connected to [verl](https://github.com/verl-project/verl) for scalable RL training.
+For black-box agents, integration can be as small as redirecting the model endpoint to the Gateway. For white-box agents, Uni-Agent provides composable agents, tools, tasks, and sandboxes that can be customized independently.
 
 ## Installation 📦
 
