@@ -250,3 +250,53 @@ async def test_gateway_manager_default_chains_config_to_http_finalizes_subagent_
         ]
     finally:
         await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_gateway_manager_allows_concurrent_http_requests_within_one_session(ray_runtime):
+    """Two HTTP requests must reach backend generation concurrently and both materialize."""
+    from uni_agent.gateway.config import GatewayActorConfig
+    from uni_agent.gateway.manager import GatewayManager
+    from verl.workers.rollout.replica import TokenOutput
+
+    class _BarrierBackend:
+        def __init__(self):
+            self.started = 0
+            self.both_started = asyncio.Event()
+
+        async def generate(self, request_id, *, prompt_ids, sampling_params, image_data=None, video_data=None):
+            response_index = self.started
+            self.started += 1
+            if self.started == 2:
+                self.both_started.set()
+            await asyncio.wait_for(self.both_started.wait(), timeout=2)
+            text = ["FIRST", "SECOND"][response_index]
+            return TokenOutput(
+                token_ids=[ord(char) for char in text],
+                log_probs=[-0.1] * len(text),
+                stop_reason="completed",
+            )
+
+    manager = GatewayManager(
+        llm_client=_BarrierBackend(),
+        gateway_count=1,
+        gateway_actor_config=GatewayActorConfig(tokenizer=FakeTokenizer(), response_length=128),
+    )
+
+    try:
+        session = await manager.create_session("session-manager-concurrent-http")
+        payload = {"model": "m", "messages": [{"role": "user", "content": "same prompt"}]}
+        async with httpx.AsyncClient(timeout=5.0, trust_env=False) as client:
+            first, second = await asyncio.gather(
+                client.post(f"{session.base_url}/chat/completions", json=payload),
+                client.post(f"{session.base_url}/chat/completions", json=payload),
+            )
+
+        assert first.status_code == second.status_code == 200
+        trajectories = await manager.finalize_session("session-manager-concurrent-http")
+        assert sorted(FakeTokenizer().decode(trajectory.response_ids) for trajectory in trajectories) == [
+            "FIRST",
+            "SECOND",
+        ]
+    finally:
+        await manager.shutdown()

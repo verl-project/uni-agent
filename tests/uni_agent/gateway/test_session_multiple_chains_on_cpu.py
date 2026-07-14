@@ -39,6 +39,12 @@ def _session(
     )
 
 
+@pytest.mark.parametrize("response_length", [0, -1])
+def test_gateway_session_rejects_non_positive_response_length(response_length):
+    with pytest.raises(ValueError, match="response_length must be positive"):
+        _session("invalid-response-length", response_length=response_length)
+
+
 async def _run(session: GatewaySession, backend: SequencedBackend, messages: list[dict], **payload_extra):
     return await session.run_generation({"model": "dummy-model", "messages": messages, **payload_extra}, backend)
 
@@ -561,23 +567,35 @@ async def test_multiple_chains_length_exhaustion_closes_selected_chain_and_order
 
 
 @pytest.mark.asyncio
-async def test_multiple_chains_new_and_existing_chain_over_budget_clamp_without_early_close():
-    """Clamp both generation paths without closing the chain before backend output."""
-    session = _session("chain-budget-clamp", response_length=0)
-    backend = SequencedBackend(["NORMAL", "SECOND"])
-    first_messages = [{"role": "user", "content": "request that already exceeded budget"}]
-    second_messages = [
+async def test_multiple_chains_exactly_exhausted_chain_closes_without_backend_call():
+    """Close an exhausted chain even when the repeated request has no incremental tail."""
+    session = _session("chain-budget-exhausted", response_length=len("NORMAL"))
+    backend = SequencedBackend(["NORMAL", "SHOULD_NOT_RUN"])
+    first_messages = [{"role": "user", "content": "fill the response budget"}]
+    repeated_history = [
         *first_messages,
         {"role": "assistant", "content": "NORMAL"},
     ]
 
-    await _run(session, backend, first_messages, max_tokens=8)
-    assert session.snapshot_state()["active_chain_ids"] == [1]
-    await _run(session, backend, second_messages, max_tokens=8)
+    await _run(session, backend, first_messages)
+    outcome = await _run(session, backend, repeated_history)
+    trajectories = await session.finalize()
 
-    assert len(backend.calls) == 2
-    assert [call["sampling_params"]["max_tokens"] for call in backend.calls] == [0, 0]
-    assert session.snapshot_state()["active_chain_ids"] == [1]
+    assert outcome.finish_reason == "length"
+    assert len(backend.calls) == 1
+    assert backend.steps == ["SHOULD_NOT_RUN"]
+    assert len(trajectories) == 1
+    assert trajectories[0].extra_fields["finish_reason"] == "length"
+
+
+@pytest.mark.asyncio
+async def test_multiple_chains_sets_remaining_budget_when_request_omits_max_tokens():
+    session = _session("default-max-tokens-budget", response_length=10)
+    backend = SequencedBackend(["A"])
+
+    await _run(session, backend, [{"role": "user", "content": "use session budget"}])
+
+    assert backend.calls[0]["sampling_params"]["max_tokens"] == 10
 
 
 @pytest.mark.asyncio

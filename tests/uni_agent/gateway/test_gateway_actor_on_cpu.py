@@ -31,6 +31,14 @@ def ray_runtime():
     ray.shutdown()
 
 
+@pytest.mark.parametrize("response_length", [0, -1])
+def test_gateway_actor_config_rejects_non_positive_response_length(response_length):
+    from uni_agent.gateway.config import GatewayActorConfig
+
+    with pytest.raises(ValueError, match="response_length must be positive"):
+        GatewayActorConfig(tokenizer=FakeTokenizer(), response_length=response_length)
+
+
 @pytest.mark.asyncio
 async def test_gateway_actor_max_tokens_clamped_to_remaining_response_budget():
     """Continuation requests clamp ``max_tokens`` to the selected chain budget."""
@@ -51,6 +59,7 @@ async def test_gateway_actor_max_tokens_clamped_to_remaining_response_budget():
         await actor.create_session("s1")
         first_messages = [{"role": "user", "content": "hi"}]
         await actor._handle_chat_completions("s1", {"messages": first_messages})
+        assert backend.calls[-1]["sampling_params"]["max_tokens"] == 100
 
         await actor._handle_chat_completions(
             "s1",
@@ -66,7 +75,7 @@ async def test_gateway_actor_max_tokens_clamped_to_remaining_response_budget():
 
 
 @pytest.mark.asyncio
-async def test_gateway_actor_over_budget_clamps_remaining_response_budget_to_zero():
+async def test_gateway_actor_over_budget_closes_without_backend_call():
     from uni_agent.gateway.config import GatewayActorConfig
     from uni_agent.gateway.gateway import _GatewayActor
 
@@ -85,7 +94,7 @@ async def test_gateway_actor_over_budget_clamps_remaining_response_budget_to_zer
         first_messages = [{"role": "user", "content": "hi"}]
         await actor._handle_chat_completions("s1", {"messages": first_messages})
 
-        await actor._handle_chat_completions(
+        response = await actor._handle_chat_completions(
             "s1",
             {
                 "messages": [*first_messages, {"role": "assistant", "content": "A" * 60}],
@@ -93,7 +102,10 @@ async def test_gateway_actor_over_budget_clamps_remaining_response_budget_to_zer
             },
         )
 
-        assert backend.calls[-1]["sampling_params"]["max_tokens"] == 0
+        body = json.loads(response.body)
+        assert body["choices"][0]["finish_reason"] == "length"
+        assert len(backend.calls) == 1
+        assert backend.steps == ["B"]
     finally:
         await actor.shutdown()
 
@@ -991,6 +1003,7 @@ async def test_gateway_actor_session_sampling_defaults_are_isolated_and_request_
             "top_k": -1,
             "presence_penalty": 0.3,
             "logprobs": False,
+            "max_tokens": 64,
         },
     ]
 

@@ -158,6 +158,9 @@ class GatewaySession:
         sampling_params: dict[str, Any] | None = None,
     ):
         """Create an active session bound to a handle and model codec."""
+        if response_length is not None and response_length <= 0:
+            raise ValueError(f"response_length must be positive when set, got {response_length}")
+
         self.handle = handle
         self._codec = codec
         # Stored for parity with the actor config; only the response budget is
@@ -306,6 +309,9 @@ class GatewaySession:
             logprobs_complete = selected_chain.logprobs_complete
             chain_id = selected_chain.chain_id
             incremental_messages = messages[len(selected_chain.message_history) :]
+            new_image_data = None
+            new_video_data = None
+            incremental_ids = []
             if incremental_messages:
                 new_image_data, new_video_data = await self._codec.extract_multi_modal_data(incremental_messages)
                 incremental_ids = self._codec.encode_incremental(
@@ -313,27 +319,30 @@ class GatewaySession:
                     image_data=new_image_data,
                     video_data=new_video_data,
                 )
-                if (
-                    self._response_length is not None
-                    and len(buffer.response_mask) + len(incremental_ids) >= self._response_length
-                ):
-                    context_ids = buffer.prompt_ids + buffer.response_ids
-                    return EncodedData(
-                        buffer=buffer,
-                        context_ids=context_ids,
-                        sampling_params={},
-                        messages=list(messages),
-                        tools=tools,
-                        image_data=image_data,
-                        video_data=video_data,
-                        length_exhausted_trajectory=self._build_materialized_trajectory(
-                            chain=selected_chain,
-                            extra_fields={"finish_reason": "length"},
-                        ),
-                        chain_id=selected_chain.chain_id,
-                        incoming_message_prefix_hashes=list(incoming_message_prefix_hashes),
-                        logprobs_complete=logprobs_complete,
-                    )
+
+            if (
+                self._response_length is not None
+                and len(buffer.response_mask) + len(incremental_ids) >= self._response_length
+            ):
+                context_ids = buffer.prompt_ids + buffer.response_ids
+                return EncodedData(
+                    buffer=buffer,
+                    context_ids=context_ids,
+                    sampling_params={},
+                    messages=list(messages),
+                    tools=tools,
+                    image_data=image_data,
+                    video_data=video_data,
+                    length_exhausted_trajectory=self._build_materialized_trajectory(
+                        chain=selected_chain,
+                        extra_fields={"finish_reason": "length"},
+                    ),
+                    chain_id=selected_chain.chain_id,
+                    incoming_message_prefix_hashes=list(incoming_message_prefix_hashes),
+                    logprobs_complete=logprobs_complete,
+                )
+
+            if incremental_messages:
                 buffer.response_ids.extend(incremental_ids)
                 buffer.response_mask.extend([0] * len(incremental_ids))
                 if logprobs_complete:
@@ -355,8 +364,11 @@ class GatewaySession:
         remaining_response_budget = (
             max(0, self._response_length - len(buffer.response_mask)) if self._response_length is not None else None
         )
-        if remaining_response_budget is not None and "max_tokens" in sampling_params:
-            sampling_params["max_tokens"] = min(sampling_params["max_tokens"], remaining_response_budget)
+        if remaining_response_budget is not None:
+            sampling_params["max_tokens"] = min(
+                sampling_params.get("max_tokens", remaining_response_budget),
+                remaining_response_budget,
+            )
         return EncodedData(
             buffer=buffer,
             context_ids=context_ids,
