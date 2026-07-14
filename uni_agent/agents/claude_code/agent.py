@@ -20,7 +20,7 @@ from ..base import Agent, AgentConfig, AgentResult
 from ..registry import register_agent
 
 if TYPE_CHECKING:
-    from ...sandbox import Sandbox
+    from uni_agent.sandbox import Sandbox
 
 logger = logging.getLogger(__name__)
 

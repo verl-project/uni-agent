@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 from pydantic import BaseModel, ConfigDict, Field
 
 if TYPE_CHECKING:
-    from ..sandbox import Sandbox
+    from uni_agent.sandbox import Sandbox
 
 
 class ModelConfig(BaseModel):

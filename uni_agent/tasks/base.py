@@ -22,13 +22,13 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny, field_validator
 
-from ..agents import AgentConfig
-from ..logging import current_run_id, sample_logging
-from ..sandbox import SandboxConfig
+from uni_agent.agents import AgentConfig
+from uni_agent.logging import current_run_id, sample_logging
+from uni_agent.sandbox import SandboxConfig
 
 if TYPE_CHECKING:
-    from ..agents import Agent
-    from ..sandbox import Sandbox
+    from uni_agent.agents import Agent
+    from uni_agent.sandbox import Sandbox
 
 
 class TaskConfig(BaseModel):
@@ -66,7 +66,7 @@ class TaskConfig(BaseModel):
         reject subclass fields; dispatch on ``name`` via the agent registry instead.
         """
         if isinstance(v, Mapping):
-            from ..agents import get_agent_cls
+            from uni_agent.agents import get_agent_cls
 
             name = v.get("name")
             if not name:
@@ -110,13 +110,13 @@ class Task(ABC):
 
     def build_sandbox(self) -> Sandbox:
         """Instantiate the execution sandbox from :attr:`TaskConfig.sandbox`."""
-        from ..sandbox import build_sandbox
+        from uni_agent.sandbox import build_sandbox
 
         return build_sandbox(self.config.sandbox)
 
     def build_agent(self) -> Agent:
         """Instantiate the solving agent from :attr:`TaskConfig.agent`."""
-        from ..agents import build_agent
+        from uni_agent.agents import build_agent
 
         return build_agent(self.config.agent)
 

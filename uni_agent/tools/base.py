@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal
 from pydantic import BaseModel
 
 if TYPE_CHECKING:
-    from ..sandbox import SandboxBackend
+    from uni_agent.sandbox import SandboxBackend
 
 logger = logging.getLogger(__name__)
 

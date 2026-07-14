@@ -25,7 +25,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..sandbox import SandboxBackend
+from uni_agent.sandbox import SandboxBackend
 from .base import Tool, ToolError, ToolResult, register_tool
 
 

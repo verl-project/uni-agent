@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field, ValidationError
 from .base import Tool, ToolError, ToolResult, register_tool
 
 if TYPE_CHECKING:
-    from ..sandbox import SandboxBackend
+    from uni_agent.sandbox import SandboxBackend
 
 SNIPPET_LINES = 4
 MAX_RESPONSE_LEN = 16000
