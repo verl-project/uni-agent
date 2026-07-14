@@ -39,12 +39,17 @@ class TrajectoryBuffer:
             output and ``0`` for continuation context tokens.
         response_logprobs: Log probabilities aligned with ``response_ids`` when
             present; continuation context tokens use ``0.0``.
+        routed_experts: Latest per-token expert-routing tensor from the backend,
+            spanning ``prompt + response``. The backend re-prefills the full
+            context each turn, so this is replaced (not accumulated) and the final
+            value covers the whole sequence (mirrors verl's tool_agent_loop).
     """
 
     prompt_ids: list[int]
     response_ids: list[int] = field(default_factory=list)
     response_mask: list[int] = field(default_factory=list)
     response_logprobs: list[float] = field(default_factory=list)
+    routed_experts: Any | None = None
 
 
 @dataclass
@@ -191,6 +196,9 @@ class GatewaySession:
             encoded.buffer.response_mask.extend([1] * len(response_ids))
             if output.log_probs is not None:
                 encoded.buffer.response_logprobs.extend(list(output.log_probs))
+            routed_experts = getattr(output, "routed_experts", None)
+            if routed_experts is not None:
+                encoded.buffer.routed_experts = routed_experts
 
             assistant_msg, finish_reason = await self._codec.decode_response(
                 response_ids,
@@ -376,6 +384,7 @@ class GatewaySession:
             response_ids=list(buffer.response_ids),
             response_mask=list(buffer.response_mask),
             response_logprobs=list(buffer.response_logprobs),
+            routed_experts=buffer.routed_experts,
         )
 
     def _materialize_active_trajectory(self) -> None:
@@ -400,6 +409,7 @@ class GatewaySession:
             response_logprobs=list(active.response_logprobs) if active.response_logprobs else None,
             reward_info={},
             num_turns=self._count_chat_turns(self.message_history),
+            routed_experts=active.routed_experts,
             multi_modal_data=self._build_multi_modal_trajectory_data(self.image_data, self.video_data),
             extra_fields=dict(extra_fields) if extra_fields else {},
         )

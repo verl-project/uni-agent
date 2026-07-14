@@ -133,13 +133,42 @@ _TQ_NESTED_SEQUENCE_FIELDS = {
     "attention_mask",
     "position_ids",
     "rollout_log_probs",
+    "routed_experts",
     "rm_scores",
     "teacher_logprobs",
     "teacher_ids",
 }
 
 
+def _align_routed_experts(source: object, seq_len: int) -> torch.Tensor | None:
+    """Return R3 routing as an int64 ``[seq_len, layers, topk]`` tensor aligned to input_ids.
+
+    The gateway stores the last turn's routing, which already spans ``prompt + response``
+    (the backend re-prefills the full context each turn). Zero-pad / truncate defensively so
+    the field always matches ``input_ids`` even on early-return trajectories with trailing
+    context tokens; a wrong length would crash Megatron's packed-sequence replay.
+    """
+    experts = torch.as_tensor(source)
+    if experts.dim() != 3:
+        return None
+    experts = experts.to(dtype=torch.int64, device="cpu")
+    out = torch.zeros((seq_len, experts.shape[1], experts.shape[2]), dtype=torch.int64)
+    covered = min(experts.shape[0], seq_len)
+    if covered > 0:
+        out[:covered] = experts[:covered]
+    return out
+
+
 def _list_of_tq_fields_to_tensordict(fields: list[dict[str, object]]) -> TensorDict:
+    # Optional per-sample fields (e.g. routed_experts) can be missing on degenerate
+    # trajectories; drop any column not present on every sample so the stacker never
+    # KeyErrors on a partially-present key (list_of_dict_to_tensordict keys off row 0).
+    if fields:
+        shared_keys = set(fields[0]).intersection(*(set(f) for f in fields[1:]))
+        for f in fields:
+            for key in list(f):
+                if key not in shared_keys:
+                    f.pop(key, None)
     td = tu.list_of_dict_to_tensordict(fields)
     for key in _TQ_NESTED_SEQUENCE_FIELDS:
         if key not in fields[0]:
@@ -147,7 +176,12 @@ def _list_of_tq_fields_to_tensordict(fields: list[dict[str, object]]) -> TensorD
         values = [field[key] for field in fields]
         if not all(isinstance(value, torch.Tensor) for value in values):
             continue
-        ragged_idx = 2 if key == "position_ids" and values[0].dim() == 2 else None
+        if key == "routed_experts":
+            ragged_idx = 1  # [seq, layers, topk]: ragged on the sequence dim
+        elif key == "position_ids" and values[0].dim() == 2:
+            ragged_idx = 2
+        else:
+            ragged_idx = None
         td[key] = tu.nested_tensor_from_tensor_list(values, ragged_idx=ragged_idx)
     return td
 
@@ -593,6 +627,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
                 f"  [{i}] turns={traj.num_turns} prompt_tokens={len(traj.prompt_ids)} "
                 f"response_tokens={len(traj.response_ids)} model_tokens={model_tokens} "
                 f"logprobs={'yes' if traj.response_logprobs else 'no'} "
+                f"experts={'yes' if traj.routed_experts is not None else 'no'} "
                 f"reward_score={traj.reward_score} reward_info={traj.reward_info or {}}"
                 + (f" materialization_reason={reason}" if reason else "")
             )
@@ -736,12 +771,9 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         else:
             field["rollout_log_probs"] = torch.zeros_like(responses, dtype=torch.float32)
         if trajectory.routed_experts is not None:
-            field["routed_experts"] = (
-                torch.from_numpy(trajectory.routed_experts.copy())
-                if hasattr(trajectory.routed_experts, "copy")
-                and not isinstance(trajectory.routed_experts, torch.Tensor)
-                else trajectory.routed_experts
-            )
+            aligned_experts = _align_routed_experts(trajectory.routed_experts, input_ids.size(0))
+            if aligned_experts is not None:
+                field["routed_experts"] = aligned_experts
         rm_scores = torch.zeros_like(responses, dtype=torch.float32)
         if trajectory.reward_score is not None and responses.numel() > 0:
             rm_scores[-1] = float(trajectory.reward_score)
