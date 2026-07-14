@@ -761,8 +761,13 @@ class OpenAICompatibleAgentFramework(AgentFramework):
 
         prompt_len = prompts.size(0)
         response_len = responses.size(0)
+
+        min_global_steps = trajectory.extra_fields.get("min_global_steps", global_steps)
+        max_global_steps = trajectory.extra_fields.get("max_global_steps", global_steps)
         tag = {
             "global_steps": global_steps,
+            "min_global_steps": global_steps if min_global_steps is None else min_global_steps,
+            "max_global_steps": global_steps if max_global_steps is None else max_global_steps,
             "status": "success",
             "prompt_len": prompt_len,
             "response_len": response_len,
