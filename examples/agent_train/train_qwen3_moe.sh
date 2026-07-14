@@ -89,7 +89,7 @@ NGPUS_PER_NODE=${NGPUS_PER_NODE:-8}
 # parameter_sync_step defaults to 1 for colocate_async, so train_batch_size
 # (prompts/step) only needs to be > 0 (the old async mode used train_batch_size=0).
 # num_warmup_batches pre-fills the rollout pipeline before the first train step.
-train_prompt_bsz=${TRAIN_PROMPT_BSZ:-32}
+train_prompt_bsz=${TRAIN_PROMPT_BSZ:-64}
 n_resp_per_prompt=${N_RESP_PER_PROMPT:-8}
 train_prompt_mini_bsz=${PPO_MINI_BATCH_SIZE:-16}
 num_warmup_batches=${NUM_WARMUP_BATCHES:-1}
