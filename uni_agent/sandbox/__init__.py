@@ -10,25 +10,15 @@ from __future__ import annotations
 from .base import ExecResult, Sandbox, SandboxBackend, SandboxConfig
 
 # Host-local provider is stdlib-only: import (and register) it eagerly. Heavier
-# providers (e.g. ``modal``) stay lazy.
+# providers (e.g. ``modal``) stay lazy via the registry's module map.
 from .local import LocalSandbox
-from .registry import (
-    SANDBOX_MODULES,
-    SANDBOX_REGISTRY,
-    build_sandbox,
-    get_sandbox_cls,
-    register_sandbox,
-)
+from .registry import build_sandbox
 
 __all__ = [
     "ExecResult",
-    "SandboxBackend",
     "Sandbox",
+    "SandboxBackend",
     "SandboxConfig",
     "LocalSandbox",
     "build_sandbox",
-    "register_sandbox",
-    "get_sandbox_cls",
-    "SANDBOX_REGISTRY",
-    "SANDBOX_MODULES",
 ]

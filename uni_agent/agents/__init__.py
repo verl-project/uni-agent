@@ -19,13 +19,7 @@ package never forces an agent's optional deps to be installed.
 from __future__ import annotations
 
 from .base import Agent, AgentConfig, AgentResult, ModelConfig
-from .registry import (
-    AGENT_MODULES,
-    AGENT_REGISTRY,
-    build_agent,
-    get_agent_cls,
-    register_agent,
-)
+from .registry import build_agent, get_agent_cls
 
 __all__ = [
     "Agent",
@@ -34,7 +28,4 @@ __all__ = [
     "AgentResult",
     "build_agent",
     "get_agent_cls",
-    "register_agent",
-    "AGENT_REGISTRY",
-    "AGENT_MODULES",
 ]

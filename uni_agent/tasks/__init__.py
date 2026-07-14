@@ -7,26 +7,22 @@ the shared fields; concrete tasks under ``tasks/<name>/run.py`` subclass
 themselves, and are built with :func:`get_task` -- from either a config instance
 (dispatched on its ``name``) or a flat ``{"name", ...fields}`` mapping::
 
-    from uni_agent.gateway import set_gateway_manager
     from uni_agent.tasks import get_task
     from uni_agent.tasks.swe_bench.run import SWEBenchTaskConfig
 
-    set_gateway_manager(gateway)   # runner installs the process-global gateway once
     task = get_task(SWEBenchTaskConfig(metadata=sample))        # a config instance
     task = get_task({"name": "swe_bench", "metadata": sample})  # or a flat mapping
-    result = await task.run()      # reads the global gateway; no args
+    result = await task.run()      # runs one episode (prompt + endpoint live on the config)
 """
 
 from __future__ import annotations
 
 from .base import Task, TaskConfig, TaskResult
-from .registry import TASK_REGISTRY, get_task, register_task
+from .registry import get_task
 
 __all__ = [
     "Task",
     "TaskConfig",
     "TaskResult",
-    "register_task",
     "get_task",
-    "TASK_REGISTRY",
 ]

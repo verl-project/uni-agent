@@ -21,21 +21,16 @@ episode when the policy calls one -- see ``_FINISH_TOOLS``).
 from __future__ import annotations
 
 from .base import (
-    TOOL_REGISTRY,
     Tool,
     ToolCallFormatError,
     ToolError,
     ToolResult,
     ToolStatus,
     Toolbox,
-    build_function_schema,
-    get_tool,
-    register_tool,
 )
-from .edit_file import EditFileTool
-from .finish import FinishTool
-from .shell import CommandResult, ShellChannel, ShellTool, ShellToolConfig
-from .submit import SubmitTool
+
+# Built-in tools self-register on import; keep these imports for that side effect.
+from . import edit_file, finish, shell, submit  # noqa: F401
 
 __all__ = [
     "Tool",
@@ -44,15 +39,4 @@ __all__ = [
     "ToolResult",
     "ToolStatus",
     "Toolbox",
-    "TOOL_REGISTRY",
-    "register_tool",
-    "get_tool",
-    "build_function_schema",
-    "ShellTool",
-    "ShellToolConfig",
-    "EditFileTool",
-    "FinishTool",
-    "SubmitTool",
-    "ShellChannel",
-    "CommandResult",
 ]
