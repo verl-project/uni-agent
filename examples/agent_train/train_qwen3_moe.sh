@@ -4,6 +4,7 @@ set -xeuo pipefail
 RAY_DATA_HOME=/mnt/hdfs/yyding
 NNODES=8
 GEN_TP=4
+CP=4
 ROLLOUT_RS=null
 TEST_FREQ=-1
 
@@ -14,9 +15,9 @@ RAY_DATA_HOME=${RAY_DATA_HOME:-"${HOME}/verl"}
 MODEL_PATH=${MODEL_PATH:-"${RAY_DATA_HOME}/models/Qwen3-Coder-30B-A3B-Instruct"}
 CKPTS_DIR=${CKPTS_DIR:-"${RAY_DATA_HOME}/ckpts/${project_name}/${exp_name}"}
 AGENT_LOG_DIR=${AGENT_LOG_DIR:-"${RAY_DATA_HOME}/logs/${project_name}/${exp_name}"}
-TRAIN_FILE=${TRAIN_FILE:-"${RAY_DATA_HOME}/data/swe_agent/swe_rebench_filtered_seed_1150.parquet"}
-TEST_FILE=${TEST_FILE:-"${RAY_DATA_HOME}/data/swe_agent/swe_bench_verified_seed.parquet"}
-RUNTIME_ENV=${RUNTIME_ENV:-"${RAY_DATA_HOME}/data/swe_agent/runtime_env.yaml"}
+TRAIN_FILE=${TRAIN_FILE:-"${RAY_DATA_HOME}/data/uni_agent/swe_rebench_filtered_1150.parquet"}
+TEST_FILE=${TEST_FILE:-"${RAY_DATA_HOME}/data/uni_agent/swe_bench_verified.parquet"}
+RUNTIME_ENV=${RUNTIME_ENV:-"${RAY_DATA_HOME}/data/uni_agent/runtime_env.yaml"}
 # Must be launched from the repository root so Ray packages both `verl/` and `uni_agent/`.
 # --- Agent-framework rollout (replaces the swe_agent agent-loop) --------------
 # Run-wide task base (agent + sandbox + sampling), loaded from this YAML by
@@ -25,7 +26,7 @@ RUNTIME_ENV=${RUNTIME_ENV:-"${RAY_DATA_HOME}/data/swe_agent/runtime_env.yaml"}
 TASK_CONFIG=${TASK_CONFIG:-"examples/agent_train/task_config.yaml"}
 TOOL_PARSER=${TOOL_PARSER:-"qwen3_coder"}    # gateway tool-call parser; MUST match the model chat template
 GATEWAY_COUNT=${GATEWAY_COUNT:-8}            # gateway actors fronting the engine
-CONCURRENCY=${CONCURRENCY:-256}              # max in-flight rollout sessions (runner cap)
+CONCURRENCY=${CONCURRENCY:-512}              # max in-flight rollout sessions (runner cap)
 SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-"$(basename "${MODEL_PATH}")"}
 
 rollout_mode=${ROLLOUT_MODE:-"async"}
@@ -153,7 +154,7 @@ ray job submit --no-wait --runtime-env $RUNTIME_ENV \
     +actor_rollout_ref.actor.optim.override_optimizer_config.optimizer_cpu_offload=True \
     actor_rollout_ref.actor.megatron.use_mbridge=$USE_MBRIDGE \
     actor_rollout_ref.actor.megatron.use_dist_checkpointing=$USE_DIST_CKPT \
-    actor_rollout_ref.actor.megatron.param_offload=False \
+    actor_rollout_ref.actor.megatron.param_offload=${offload} \
     actor_rollout_ref.actor.megatron.grad_offload=${offload} \
     actor_rollout_ref.actor.megatron.optimizer_offload=${offload} \
     actor_rollout_ref.actor.megatron.tensor_model_parallel_size=${train_tp} \
@@ -224,7 +225,7 @@ ray job submit --no-wait --runtime-env $RUNTIME_ENV \
     actor_rollout_ref.rollout.free_cache_engine=True \
     actor_rollout_ref.ref.log_prob_max_token_len_per_gpu=${infer_ppo_max_token_len} \
     actor_rollout_ref.ref.megatron.use_dist_checkpointing=${USE_DIST_CKPT} \
-    actor_rollout_ref.ref.megatron.param_offload=False \
+    actor_rollout_ref.ref.megatron.param_offload=${offload} \
     actor_rollout_ref.ref.megatron.tensor_model_parallel_size=${train_tp} \
     actor_rollout_ref.ref.megatron.pipeline_model_parallel_size=${train_pp} \
     actor_rollout_ref.ref.megatron.context_parallel_size=${train_cp} \
