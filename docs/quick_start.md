@@ -1,8 +1,7 @@
 # Uni-Agent Quick Start
 
 > Minimal end-to-end pipeline: host deployment + dummy data + dummy reward,
-> using Qwen2.5-0.5B as an example. For actual tool calling, upgrade to
-> Qwen3-4B or another larger model.
+> using Qwen3-0.6B.
 
 ---
 
@@ -30,7 +29,7 @@ pip install swe-rex loguru pydantic pydantic_settings aiohttp
 ### 3.1 Download the model
 
 ```bash
-hf download Qwen/Qwen2.5-0.5B-Instruct --local-dir $HOME/models/Qwen2.5-0.5B-Instruct
+hf download Qwen/Qwen3-0.6B-Instruct --local-dir $HOME/models/Qwen3-0.6B-Instruct
 ```
 
 
@@ -141,7 +140,7 @@ set -xeuo pipefail
 project_name='Uni-Agent-Dummy'
 exp_name='GRPO-Dummy-Debug'
 
-MODEL_PATH=${MODEL_PATH:-"$HOME/models/Qwen2.5-0.5B-Instruct"}
+MODEL_PATH=${MODEL_PATH:-"$HOME/models/Qwen3-0.6B-Instruct"}
 TRAIN_FILE=${TRAIN_FILE:-"$HOME/data/swe_agent/dummy_agent_train.parquet"}
 AGENT_CONFIG_PATH=${AGENT_CONFIG_PATH:-"${HOME}/uni-agent/agent_config_host.yaml"}
 
@@ -234,5 +233,3 @@ grep "reward_score" ~/logs/agent/*/run.log
 | `response_mask must contain at least one valid token` | Check run.log for the actual crash; increase `max_response_length` |
 | `string indices must be integers, not 'str'` | `prompt` must be `list[dict]`, not a plain string (see step 6) |
 | `No function call found in the response` | Set `tool_parser: hermes` in agent config |
-> 0.5B verifies the pipeline but is too small for valid tool calls.
-> For actual agent behavior, switch to Qwen3-4B after the pipeline runs.
