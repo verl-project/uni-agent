@@ -33,37 +33,6 @@ pip install swe-rex loguru pydantic pydantic_settings aiohttp
 hf download Qwen/Qwen2.5-0.5B-Instruct --local-dir $HOME/models/Qwen2.5-0.5B-Instruct
 ```
 
-### 3.2 Replace `chat_template`
-
-The default `chat_template` produces JSON tool calls, but uni-agent's
-parser expects XML format (`<function=...><parameter=...>`).
-This causes `No function call found` on every step.
-
-Replace only the `chat_template` field in `tokenizer_config.json`
-(the tokenizer and special tokens are identical to Qwen3-Coder):
-
-```bash
-cd $HOME/models/Qwen2.5-0.5B-Instruct
-cp tokenizer_config.json tokenizer_config.json.bak
-
-python3 -c "
-import json, urllib.request
-
-url = 'https://modelscope.cn/api/v1/models/Qwen/Qwen3-Coder-30B-A3B-Instruct/repo?Revision=master&FilePath=tokenizer_config.json'
-coder_data = json.loads(urllib.request.urlopen(url).read())
-coder_template = coder_data['chat_template']
-
-with open('tokenizer_config.json', 'r') as f:
-    config = json.load(f)
-
-config['chat_template'] = coder_template
-
-with open('tokenizer_config.json', 'w') as f:
-    json.dump(config, f, indent=2, ensure_ascii=False)
-
-print('Done. Backed up to tokenizer_config.json.bak')
-"
-```
 
 ## 4. Create Dummy Reward
 
@@ -99,6 +68,7 @@ Create `~/uni-agent/agent_config_host.yaml`:
 ```yaml
 - name: swe_agent
   _target_: uni_agent.agent_loop.UniAgentLoop
+  tool_parser: hermes   # "qwen3_coder" for XML, "hermes" for JSON tool calls
   concurrency: 16
   log_dir: ~/logs/agent
   interaction:
@@ -263,7 +233,6 @@ grep "reward_score" ~/logs/agent/*/run.log
 |---|---|
 | `response_mask must contain at least one valid token` | Check run.log for the actual crash; increase `max_response_length` |
 | `string indices must be integers, not 'str'` | `prompt` must be `list[dict]`, not a plain string (see step 6) |
-| `No function call found in the response` | Replace `chat_template` (step 3.2) |
+| `No function call found in the response` | Set `tool_parser: hermes` in agent config |
 > 0.5B verifies the pipeline but is too small for valid tool calls.
-> For actual agent behavior, switch to Qwen3-4B (apply the same
-> `chat_template` replacement) after the pipeline runs.
+> For actual agent behavior, switch to Qwen3-4B after the pipeline runs.
