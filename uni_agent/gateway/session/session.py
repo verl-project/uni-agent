@@ -57,12 +57,11 @@ class ChainState:
 
     chain_id: int
     message_history: list[dict[str, Any]]
-    message_prefix_hashes: list[str]
+    message_tip_hash: str
     active_tool_schemas: list[dict[str, Any]] | None
     buffer: TrajectoryBuffer
     image_data: list[Any] | None
     video_data: list[Any] | None
-    created_seq: int
     updated_seq: int
 
 
@@ -70,10 +69,7 @@ class ChainState:
 class MaterializedChain:
     """A closed chain plus the ordering metadata needed at finalize."""
 
-    chain_id: int
     trajectory: Trajectory
-    created_seq: int
-    updated_seq: int
     order_seq: int
 
 
@@ -199,7 +195,6 @@ class GatewaySession:
         request_context: dict[str, Any],
         backend,
     ) -> GenerationOutcome:
-        encoded: EncodedData | None = None
         reserved_chain_id: int | None = None
         try:
             async with self.request_lock:
@@ -233,8 +228,8 @@ class GatewaySession:
                     request_id=self.handle.session_id,
                     prompt_ids=encoded.context_ids,
                     sampling_params=encoded.sampling_params,
-                    image_data=self._copy_media_list(encoded.image_data),
-                    video_data=self._copy_media_list(encoded.video_data),
+                    image_data=encoded.image_data,
+                    video_data=encoded.video_data,
                 )
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e)) from e
@@ -351,23 +346,22 @@ class GatewaySession:
                     incoming_message_prefix_hashes=list(incoming_message_prefix_hashes),
                 )
 
-            if incremental_messages:
-                buffer.response_ids.extend(incremental_ids)
-                buffer.response_mask.extend([0] * len(incremental_ids))
-                if sampling_params.get("logprobs", False):
-                    buffer.response_logprobs.extend([0.0] * len(incremental_ids))
-                if new_image_data:
-                    if image_data is None:
-                        image_data = []
-                    image_data.extend(new_image_data)
-                if new_video_data:
-                    if video_data is None:
-                        video_data = []
-                    video_data.extend(new_video_data)
+            buffer.response_ids.extend(incremental_ids)
+            buffer.response_mask.extend([0] * len(incremental_ids))
+            if sampling_params.get("logprobs", False):
+                buffer.response_logprobs.extend([0.0] * len(incremental_ids))
+            if new_image_data:
+                if image_data is None:
+                    image_data = []
+                image_data.extend(new_image_data)
+            if new_video_data:
+                if video_data is None:
+                    video_data = []
+                video_data.extend(new_video_data)
 
         context_ids = buffer.prompt_ids + buffer.response_ids
         remaining_response_budget = (
-            max(0, self._response_length - len(buffer.response_mask)) if self._response_length is not None else None
+            self._response_length - len(buffer.response_mask) if self._response_length is not None else None
         )
         if remaining_response_budget is not None:
             sampling_params["max_tokens"] = min(
@@ -438,11 +432,7 @@ class GatewaySession:
             "has_active_trajectory": bool(self.active_chains),
             "num_active_chains": len(self.active_chains),
             "active_chain_ids": [chain.chain_id for chain in self.active_chains],
-            "active_chain_tip_hashes": {
-                chain.chain_id: (chain.message_prefix_hashes[-1] if chain.message_prefix_hashes else _EMPTY_PREFIX_HASH)
-                for chain in self.active_chains
-            },
-            "active_chain_updated_seq": {chain.chain_id: chain.updated_seq for chain in self.active_chains},
+            "active_chain_tip_hashes": {chain.chain_id: chain.message_tip_hash for chain in self.active_chains},
         }
 
     def _select_chain(
@@ -487,9 +477,7 @@ class GatewaySession:
             return False
         if history_len == 0:
             return True
-        if len(chain.message_prefix_hashes) != history_len:
-            return False
-        return chain.message_prefix_hashes[-1] == incoming_message_prefix_hashes[history_len - 1]
+        return chain.message_tip_hash == incoming_message_prefix_hashes[history_len - 1]
 
     def _compute_message_prefix_hashes(self, messages: list[dict[str, Any]]) -> list[str]:
         return self._extend_message_prefix_hashes([], messages)
@@ -552,12 +540,11 @@ class GatewaySession:
                 ChainState(
                     chain_id=chain_id,
                     message_history=message_history,
-                    message_prefix_hashes=message_prefix_hashes,
+                    message_tip_hash=message_prefix_hashes[-1],
                     active_tool_schemas=encoded.tools,
                     buffer=encoded.buffer,
                     image_data=self._copy_media_list(encoded.image_data),
                     video_data=self._copy_media_list(encoded.video_data),
-                    created_seq=order_seq,
                     updated_seq=order_seq,
                 )
             )
@@ -568,12 +555,11 @@ class GatewaySession:
         self.active_chains[chain_index] = ChainState(
             chain_id=previous_chain.chain_id,
             message_history=message_history,
-            message_prefix_hashes=message_prefix_hashes,
+            message_tip_hash=message_prefix_hashes[-1],
             active_tool_schemas=encoded.tools,
             buffer=encoded.buffer,
             image_data=self._copy_media_list(encoded.image_data),
             video_data=self._copy_media_list(encoded.video_data),
-            created_seq=previous_chain.created_seq,
             updated_seq=order_seq,
         )
 
@@ -584,10 +570,7 @@ class GatewaySession:
         order_seq = self._next_order_seq()
         self.materialized_chains.append(
             MaterializedChain(
-                chain_id=chain.chain_id,
                 trajectory=encoded.length_exhausted_trajectory,
-                created_seq=chain.created_seq,
-                updated_seq=chain.updated_seq,
                 order_seq=order_seq,
             )
         )
@@ -616,10 +599,7 @@ class GatewaySession:
         for chain in self.active_chains:
             self.materialized_chains.append(
                 MaterializedChain(
-                    chain_id=chain.chain_id,
                     trajectory=self._build_materialized_trajectory(chain=chain),
-                    created_seq=chain.created_seq,
-                    updated_seq=chain.updated_seq,
                     order_seq=chain.updated_seq,
                 )
             )
@@ -642,8 +622,8 @@ class GatewaySession:
             reward_info={},
             num_turns=self._count_chat_turns(chain.message_history),
             multi_modal_data=self._build_multi_modal_trajectory_data(
-                self._copy_media_list(chain.image_data),
-                self._copy_media_list(chain.video_data),
+                chain.image_data,
+                chain.video_data,
             ),
             extra_fields=dict(extra_fields) if extra_fields else {},
         )

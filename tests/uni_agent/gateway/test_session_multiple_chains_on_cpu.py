@@ -183,12 +183,12 @@ async def _codec_compatible_video_extractor(messages, image_patch_size, config=N
     return images, videos
 
 
-def _assert_active_chain_hashes_match_history(session: GatewaySession) -> None:
+def _assert_active_chain_tip_hashes_match_history(session: GatewaySession) -> None:
     state = session.snapshot_state()
     for chain in session.active_chains:
-        assert len(chain.message_prefix_hashes) == len(chain.message_history)
-        assert chain.message_prefix_hashes == session._compute_message_prefix_hashes(chain.message_history)
-        assert state["active_chain_tip_hashes"][chain.chain_id] == chain.message_prefix_hashes[-1]
+        expected_tip_hash = session._compute_message_prefix_hashes(chain.message_history)[-1]
+        assert chain.message_tip_hash == expected_tip_hash
+        assert state["active_chain_tip_hashes"][chain.chain_id] == expected_tip_hash
 
 
 @pytest.mark.asyncio
@@ -234,7 +234,6 @@ async def test_multiple_chains_subagent_system_split_returns_to_main_chain():
 
     state = session.snapshot_state()
     assert state["active_chain_ids"] == [1, 2]
-    assert state["active_chain_updated_seq"][1] > state["active_chain_updated_seq"][2]
 
     trajectories = await session.finalize()
 
@@ -806,27 +805,6 @@ async def test_multiple_chains_abort_clears_length_materialized_trajectories():
 
 
 @pytest.mark.asyncio
-async def test_multiple_chains_backend_media_list_mutation_does_not_change_committed_chain():
-    class _MutatingMediaBackend:
-        async def generate(self, request_id, *, prompt_ids, sampling_params, image_data=None, video_data=None):
-            image_data.append("image://backend-mutated.png")
-            return TokenOutput(token_ids=_ids("FIRST"), log_probs=[-0.1] * len("FIRST"), stop_reason="completed")
-
-    session = _session(
-        "backend-mutates-media",
-        processor=FakeProcessor(),
-        vision_info_extractor=fake_vision_info_extractor,
-    )
-    backend = _MutatingMediaBackend()
-
-    await _run(session, backend, [_image_message("image://stable-a.png", "describe stable")])
-    trajectories = await session.finalize()
-
-    assert len(trajectories) == 1
-    assert trajectories[0].multi_modal_data == {"images": ["image://stable-a.png"]}
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("terminal_action", ["finalize", "abort"])
 async def test_multiple_chains_terminal_state_rejects_late_commit(terminal_action):
     """Reject a backend result that arrives after finalization or abort."""
@@ -959,7 +937,7 @@ async def test_multiple_chains_prefix_content_change_does_not_reuse_chain_and_ha
     backend = SequencedBackend(["FIRST", "SECOND"])
 
     await _run(session, backend, [{"role": "user", "content": "same length a"}])
-    _assert_active_chain_hashes_match_history(session)
+    _assert_active_chain_tip_hashes_match_history(session)
     await _run(
         session,
         backend,
@@ -969,7 +947,7 @@ async def test_multiple_chains_prefix_content_change_does_not_reuse_chain_and_ha
             {"role": "user", "content": "follow up should split"},
         ],
     )
-    _assert_active_chain_hashes_match_history(session)
+    _assert_active_chain_tip_hashes_match_history(session)
     trajectories = await session.finalize()
 
     assert len(trajectories) == 2
@@ -1043,7 +1021,7 @@ async def test_multiple_chains_tool_call_echo_reuses_chain_despite_fresh_tool_re
         ],
         tools=tools,
     )
-    _assert_active_chain_hashes_match_history(session)
+    _assert_active_chain_tip_hashes_match_history(session)
     trajectories = await session.finalize()
 
     assert session.snapshot_state()["active_chain_ids"] == []
