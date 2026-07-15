@@ -51,7 +51,7 @@ class TaskConfig(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
     log_dir: str = Field(
         default="",
-        description="Directory for this episode's per-sample log (<log_dir>/<run_id>.log); "
+        description="Directory for this episode's per-sample log (<log_dir>/<run_id>/run.log); "
         "empty falls back to /tmp/uni_agent_logs/<task_name>.",
     )
 
@@ -126,7 +126,7 @@ class Task(ABC):
 
         Reuses the caller's ambient run_id when set (the framework binds
         run_id = session_id, so agent/tool/sandbox logs join that session's file);
-        otherwise mints one and opens ``<log_dir>/<run_id>.log`` (standalone eval).
+        otherwise mints one and opens ``<log_dir>/<run_id>/run.log`` (standalone eval).
         Yields nothing -- use as ``async with self.episode_logging():``.
         """
         ambient_run_id = current_run_id()
@@ -135,6 +135,6 @@ class Task(ABC):
         else:
             run_id = str(uuid.uuid4())
             log_dir = os.path.expanduser(self.config.log_dir or f"/tmp/uni_agent_logs/{self.name}")
-            log_path = Path(log_dir) / f"{run_id}.log"
+            log_path = Path(log_dir) / run_id / "run.log"
         async with sample_logging(run_id, log_path):
             yield

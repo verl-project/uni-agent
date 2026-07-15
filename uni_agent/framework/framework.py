@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import os
 import random
@@ -138,6 +139,20 @@ _TQ_NESTED_SEQUENCE_FIELDS = {
     "teacher_logprobs",
     "teacher_ids",
 }
+
+
+def _json_default(obj: object) -> object:
+    """Best-effort JSON coercion for reward/extra fields (numpy scalars, tensors, sets)."""
+    if isinstance(obj, set | frozenset):
+        return list(obj)
+    for attr in ("item", "tolist"):  # numpy scalar / 0-d tensor, then ndarray / tensor
+        fn = getattr(obj, attr, None)
+        if callable(fn):
+            try:
+                return fn()
+            except Exception:
+                pass
+    return str(obj)
 
 
 def _align_routed_experts(source: object, seq_len: int) -> torch.Tensor | None:
@@ -530,22 +545,14 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         runner_name: str,
         runner_config: _RunnerConfig,
     ) -> tuple[list[Trajectory], dict[str, object]]:
-        """Run one gateway session lifecycle and return finalized trajectories.
-
-        The whole session -- runner call, finalization, scoring -- runs under one
-        per-sample log stream keyed by a fresh ``run_id``, so the runner's
-        agent/tool/sandbox logs and the post-finalize trajectory summary land in one
-        file, grouped by training step: ``<log_dir>/step_<global_steps>/<run_id>.log``.
-        The runner's task reuses this ambient run_id via ``episode_logging`` instead of
-        opening its own; with no ``log_dir`` the framework binds nothing and the task
-        self-logs.
-        """
+        """Run one gateway session lifecycle and return finalized trajectories."""
         session_id = f"session-{sample_index}-{session_index}-{uuid4().hex}"
         if self._log_dir:
             run_id = uuid4().hex
-            log_path = Path(self._log_dir) / f"step_{int(global_steps)}" / f"{run_id}.log"
-            log_ctx = sample_logging(run_id, log_path)
+            run_dir = Path(self._log_dir) / f"step_{int(global_steps)}" / run_id
+            log_ctx = sample_logging(run_id, run_dir / "run.log")
         else:
+            run_dir = None
             log_ctx = contextlib.nullcontext()
         async with log_ctx:
             raw_prompt = sample_fields["raw_prompt"]
@@ -612,6 +619,8 @@ class OpenAICompatibleAgentFramework(AgentFramework):
                 ]
 
             self._log_trajectory_summary(session_id, result_trajectories)
+            if run_dir is not None:
+                await asyncio.to_thread(self._dump_trajectories_json, run_dir, session_id, result_trajectories)
             return result_trajectories, sample_fields
 
     def _log_trajectory_summary(self, session_id: str, trajectories: list[Trajectory]) -> None:
@@ -632,6 +641,44 @@ class OpenAICompatibleAgentFramework(AgentFramework):
                 + (f" materialization_reason={reason}" if reason else "")
             )
         logger.info("\n".join(lines))
+
+    def _dump_trajectories_json(self, run_dir: Path, session_id: str, trajectories: list[Trajectory]) -> None:
+        """Persist finalized trajectories next to ``run.log`` as ``trajectory.json``.
+
+        Runs off the event loop (caller wraps this in ``asyncio.to_thread``) and is
+        best-effort: a serialization/IO error is logged but never aborts the rollout.
+        Token ids are kept verbatim (the exact training data); bulky fields
+        (routed_experts, multi-modal blobs) are summarized, not dumped.
+        """
+        path = run_dir / "trajectory.json"
+        try:
+            payload = {
+                "session_id": session_id,
+                "num_trajectories": len(trajectories),
+                "trajectories": [self._trajectory_to_json_dict(traj) for traj in trajectories],
+            }
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default), encoding="utf-8")
+        except Exception:
+            logger.exception("session %s: failed to write %s", session_id, path)
+
+    def _trajectory_to_json_dict(self, traj: Trajectory) -> dict[str, object]:
+        extra = traj.extra_fields or {}
+        return {
+            "num_turns": traj.num_turns,
+            "reward_score": traj.reward_score,
+            "reward_info": traj.reward_info or {},
+            "reward_extra_info": extra.get("reward_extra_info"),
+            "materialization_reason": extra.get("materialization_reason"),
+            "prompt_len": len(traj.prompt_ids),
+            "response_len": len(traj.response_ids),
+            "model_token_count": sum(traj.response_mask) if traj.response_mask else 0,
+            "has_routed_experts": traj.routed_experts is not None,
+            "prompt_ids": traj.prompt_ids,
+            "response_ids": traj.response_ids,
+            "response_mask": traj.response_mask,
+            "response_logprobs": traj.response_logprobs,
+        }
 
     def _score_from_reward_info(
         self, session_trajectories: list[Trajectory]
