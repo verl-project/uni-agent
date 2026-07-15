@@ -17,6 +17,7 @@ REWARD_SPEC_MODULES: dict[str, str] = {
     "r2e_gym": "uni_agent.reward.r2e_gym",
     "terminal_bench": "uni_agent.reward.terminal_bench",
     "terminal_bench_v2": "uni_agent.reward.terminal_bench",
+    "dummy": "uni_agent.reward.dummy",
 }
 
 
