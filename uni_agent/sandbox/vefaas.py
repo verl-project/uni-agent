@@ -142,6 +142,18 @@ class _VefaasRuntime:
         http_timeout = max(self._timeout, cmd_timeout + 30) if cmd_timeout else self._timeout
         return await self._post("execute", command, CommandResponse, timeout=http_timeout)
 
+    async def write_file(self, path: str, content: str) -> None:
+        from swerex.runtime.abstract import WriteFileRequest, WriteFileResponse
+
+        # Content rides in the HTTP body; the server does mkdir -p + write_text.
+        await self._post("write_file", WriteFileRequest(path=path, content=content), WriteFileResponse)
+
+    async def read_file(self, path: str) -> str:
+        from swerex.runtime.abstract import ReadFileRequest, ReadFileResponse
+
+        resp = await self._post("read_file", ReadFileRequest(path=path), ReadFileResponse)
+        return resp.content
+
     async def close(self) -> None:
         try:
             from swerex.runtime.abstract import CloseResponse
@@ -309,3 +321,13 @@ class VefaasSandbox(Sandbox):
             stdout=_to_str(resp.stdout),
             stderr=_to_str(resp.stderr),
         )
+
+    async def write_file(self, path: str, content: bytes | str) -> None:
+        """Write via swerex's native file endpoint (content in the HTTP body)."""
+        text = content.decode("utf-8") if isinstance(content, bytes) else content
+        await self._require_runtime().write_file(path, text)
+
+    async def read_file(self, path: str) -> bytes:
+        """Read via swerex's native file endpoint, mirroring :meth:`write_file`."""
+        content = await self._require_runtime().read_file(path)
+        return content.encode("utf-8")
