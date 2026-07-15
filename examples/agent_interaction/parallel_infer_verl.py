@@ -168,6 +168,8 @@ def init_config(args: argparse.Namespace, *, task_overrides: dict, served_model_
             }
         },
     }
+    if task_overrides.get("log_dir"):
+        agent_framework_cfg["log_dir"] = task_overrides["log_dir"]
     OmegaConf.update(config, "actor_rollout_ref.rollout.custom.agent_framework", agent_framework_cfg, force_add=True)
 
     # TransferQueue carries the rollout trajectories (and their rm_scores).
