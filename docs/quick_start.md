@@ -29,7 +29,7 @@ pip install swe-rex loguru pydantic pydantic_settings aiohttp
 ### 3.1 Download the model
 
 ```bash
-hf download Qwen/Qwen3-0.6B-Instruct --local-dir $HOME/models/Qwen3-0.6B-Instruct
+modelscope download Qwen/Qwen3-0.6B --local-dir $HOME/models/Qwen3-0.6B
 ```
 
 
@@ -140,7 +140,7 @@ set -xeuo pipefail
 project_name='Uni-Agent-Dummy'
 exp_name='GRPO-Dummy-Debug'
 
-MODEL_PATH=${MODEL_PATH:-"$HOME/models/Qwen3-0.6B-Instruct"}
+MODEL_PATH=${MODEL_PATH:-"$HOME/models/Qwen3-0.6B"}
 TRAIN_FILE=${TRAIN_FILE:-"$HOME/data/swe_agent/dummy_agent_train.parquet"}
 AGENT_CONFIG_PATH=${AGENT_CONFIG_PATH:-"${HOME}/uni-agent/agent_config_host.yaml"}
 
