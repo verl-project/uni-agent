@@ -1,6 +1,6 @@
 """``finish``: end the interaction and hand back a final answer.
 
-A control tool with no sandbox side effect: the CodeAct loop stops the episode when
+A control tool with no sandbox side effect: the ReAct loop stops the episode when
 the policy calls it (see ``_FINISH_TOOLS``). For tasks where the reply is the
 deliverable (QA); code tasks use ``submit`` (the solution lives in the sandbox).
 """

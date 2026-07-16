@@ -137,7 +137,7 @@ def main() -> None:
         default=os.getenv("DATA_PATH", os.path.expanduser("~/data/swe_agent/swe_bench_verified.parquet")),
     )
     parser.add_argument("--limit", type=int, default=None, help="Only run the first N samples (smoke testing).")
-    parser.add_argument("--agent", default="code_act", help="Registered agent name to run.")
+    parser.add_argument("--agent", default="react", help="Registered agent name to run.")
     parser.add_argument(
         "--task-config",
         required=True,

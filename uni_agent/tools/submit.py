@@ -2,7 +2,7 @@
 
 A control tool with no arguments and no sandbox side effect: the solution lives in
 the sandbox (e.g. an applied patch) which the task scores after the loop ends. The
-CodeAct loop stops the episode when the policy calls it (see ``_FINISH_TOOLS``). For
+ReAct loop stops the episode when the policy calls it (see ``_FINISH_TOOLS``). For
 text-answer tasks use ``finish`` instead.
 """
 

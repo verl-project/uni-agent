@@ -37,7 +37,7 @@ Choose the path that matches your goal:
 Uni-Agent separates rollout orchestration from agent and environment execution, with the **Uni-Agent Gateway** acting as the boundary between agent runtimes and the RL system:
 
 1. **Framework Workers** receive prompts and start parallel sessions through the Gateway.
-2. A **Task Runner** launches the selected agent—such as Claude Code, Mini-SWE-Agent, or CodeAct—against a configurable sandbox backend.
+2. A **Task Runner** launches the selected agent—such as Claude Code, Mini-SWE-Agent, or ReAct—against a configurable sandbox backend.
 3. The agent sends model requests through its session-scoped Gateway endpoint. The Gateway records the interaction as a token-level trajectory while the task computes its reward.
 4. When the session ends, the trajectory and reward are written to the trajectory pool for evaluation or RL training.
 

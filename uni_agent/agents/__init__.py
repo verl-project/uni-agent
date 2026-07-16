@@ -5,9 +5,9 @@ live in an :class:`AgentConfig` subclass; a task picks one by setting
 ``TaskConfig.agent`` and the runner builds it with :func:`build_agent`::
 
     from uni_agent.agents import build_agent
-    from uni_agent.agents.code_act import CodeActConfig
+    from uni_agent.agents.react import ReActConfig
 
-    agent = build_agent(CodeActConfig())     # white-box: native framework loop
+    agent = build_agent(ReActConfig())     # white-box: native framework loop
     # ... task starts + provisions the sandbox (endpoint lives on the config), then:
     # result = await agent.run(sandbox=sandbox, messages=messages)
 

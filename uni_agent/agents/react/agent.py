@@ -1,4 +1,4 @@
-"""CodeAct: the white-box agent driven by our own framework loop."""
+"""ReAct: the white-box agent driven by our own framework loop (reason + tool-call act)."""
 
 from __future__ import annotations
 
@@ -22,10 +22,10 @@ logger = logging.getLogger(__name__)
 _FINISH_TOOLS = {"submit", "finish"}
 
 
-class CodeActConfig(AgentConfig):
+class ReActConfig(AgentConfig):
     """White-box launch params: host-side tools + step / timeout budgets."""
 
-    name: str = "code_act"
+    name: str = "react"
     tools: list[dict] = Field(
         default_factory=lambda: [
             {"name": "stateful_shell", "command_timeout": 120},
@@ -47,11 +47,11 @@ class CodeActConfig(AgentConfig):
     )
 
 
-@register_agent("code_act")
-class CodeActAgent(Agent):
+@register_agent("react")
+class ReActAgent(Agent):
     """White-box solver: framework loop + host-side tools over an OpenAI endpoint."""
 
-    config_model = CodeActConfig
+    config_model = ReActConfig
 
     async def run(
         self,
@@ -59,9 +59,9 @@ class CodeActAgent(Agent):
         sandbox: Sandbox,
         messages: list[dict[str, Any]],
     ) -> AgentResult:
-        cfg: CodeActConfig = self.config  # type: ignore[assignment]
+        cfg: ReActConfig = self.config  # type: ignore[assignment]
         if cfg.model.base_url is None:
-            raise ValueError("code_act: config.model.base_url is not set (the endpoint the policy calls)")
+            raise ValueError("react: config.model.base_url is not set (the endpoint the policy calls)")
 
         toolbox = Toolbox.from_specs(cfg.tools, sandbox=sandbox)
         model = OpenAICompatibleChatModel(
@@ -99,7 +99,7 @@ class CodeActAgent(Agent):
                     trajectory_info["exit_reason"] = "max_steps"
                     logger.warning(f"Reached max steps ({cfg.max_steps}) without finishing.")
         except Exception as exc:  # keep the partial transcript; the task buckets the failure
-            logger.exception("code_act loop failed at step %s", trajectory_info["steps"])
+            logger.exception("react loop failed at step %s", trajectory_info["steps"])
             trajectory_info["exit_reason"] = "unknown_error"
             trajectory_info["error"] = f"{type(exc).__name__}: {exc}"
         finally:
@@ -114,7 +114,7 @@ class CodeActAgent(Agent):
 
     async def step(
         self,
-        cfg: CodeActConfig,
+        cfg: ReActConfig,
         model: OpenAICompatibleChatModel,
         toolbox: Toolbox,
         transcript: list[dict[str, Any]],

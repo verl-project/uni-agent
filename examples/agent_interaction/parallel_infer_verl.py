@@ -335,7 +335,7 @@ def main() -> None:
         default=None,
         help="Model name sent on chat-completions requests (default: basename of --model-path).",
     )
-    parser.add_argument("--agent", default="code_act", help="Registered agent name to run.")
+    parser.add_argument("--agent", default="react", help="Registered agent name to run.")
     parser.add_argument(
         "--task-config",
         required=True,

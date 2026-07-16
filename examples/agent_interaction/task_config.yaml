@@ -3,7 +3,7 @@
   sandbox:
     provider: modal
   agent:
-    name: code_act
+    name: react
     max_steps: 200
     tools:
       - name: stateful_shell

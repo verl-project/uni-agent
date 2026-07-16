@@ -14,7 +14,7 @@ through the :class:`~uni_agent.sandbox.SandboxBackend` data plane and returns a
 
 Importing this package registers the built-ins in :data:`TOOL_REGISTRY`:
 ``stateful_shell`` (seen by the model as ``shell``), ``str_replace_editor``, and the
-control tools ``finish`` / ``submit`` (no side effect; the CodeAct loop ends the
+control tools ``finish`` / ``submit`` (no side effect; the ReAct loop ends the
 episode when the policy calls one -- see ``_FINISH_TOOLS``).
 """
 

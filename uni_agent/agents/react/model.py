@@ -2,7 +2,7 @@
 
 Talks to ``{base_url}/chat/completions`` directly over ``aiohttp`` (no OpenAI SDK):
 normalizes the running conversation to the API shape, sends the tool schemas, and
-returns the assistant text plus any structured tool calls for the CodeAct loop to
+returns the assistant text plus any structured tool calls for the ReAct loop to
 execute. One :class:`aiohttp.ClientSession` is reused across calls (connections are not
 kept alive), so callers should :meth:`aclose` the model (or use it as an async context manager).
 """

@@ -5,7 +5,7 @@
     sandbox_kwargs:
       memory_gb: 8
   agent:
-    name: code_act
+    name: react
     max_steps: 200
     tools:
       - name: stateful_shell
@@ -30,7 +30,7 @@
     sandbox_kwargs:
       memory_gb: 8
   agent:
-    name: code_act
+    name: react
     max_steps: 200
     tools:
       - name: stateful_shell
