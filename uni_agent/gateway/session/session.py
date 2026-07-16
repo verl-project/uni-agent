@@ -187,14 +187,6 @@ class GatewaySession:
         # Same-session requests overlap backend generation and commit in backend
         # completion order. The framework currently scores session_trajectories[-1]
         # and broadcasts that reward, so concurrent siblings share one reward target.
-        return await self._run_generation_prepared(payload, request_context, backend)
-
-    async def _run_generation_prepared(
-        self,
-        payload: dict[str, Any],
-        request_context: dict[str, Any],
-        backend,
-    ) -> GenerationOutcome:
         reserved_chain_id: int | None = None
         try:
             async with self.request_lock:
@@ -259,14 +251,11 @@ class GatewaySession:
                 # Decode runs under request_lock so this session's prepare/commit and
                 # decode stay serialized. It does not serialize decode across sessions,
                 # which share the actor codec.
-                try:
-                    assistant_msg, finish_reason = await self._codec.decode_response(
-                        response_ids,
-                        tools=encoded.tools,
-                        stop_reason=output.stop_reason,
-                    )
-                except Exception as e:
-                    raise HTTPException(status_code=500, detail=f"{e.__class__.__name__}: {e}") from e
+                assistant_msg, finish_reason = await self._codec.decode_response(
+                    response_ids,
+                    tools=encoded.tools,
+                    stop_reason=output.stop_reason,
+                )
                 self._commit_generation_to_chain(encoded, assistant_msg)
                 if reserved_chain_id is not None:
                     self.reserved_chain_ids.discard(reserved_chain_id)
@@ -282,6 +271,60 @@ class GatewaySession:
             if reserved_chain_id is not None:
                 await asyncio.shield(self._release_chain_reservation(reserved_chain_id))
 
+    async def set_reward_info(self, reward_info: dict[str, Any] | None = None) -> None:
+        """Store session-level reward metadata without closing the session."""
+        async with self.request_lock:
+            if self.phase != SessionPhase.ACTIVE:
+                raise RuntimeError(f"Session {self.handle.session_id} is {self.phase.value.lower()}")
+            if reward_info is not None:
+                self.reward_info = dict(reward_info)
+            self._touch()
+
+    async def finalize(self) -> list[Trajectory]:
+        """Close the session and return its materialized trajectories with rewards."""
+        async with self.request_lock:
+            if self.phase == SessionPhase.ABORTED:
+                raise RuntimeError(f"Session {self.handle.session_id} is aborted")
+            if self.phase == SessionPhase.FINALIZED:
+                raise RuntimeError(f"Session {self.handle.session_id} is finalized")
+            self._touch()
+            self._materialize_active_chains()
+            self.reserved_chain_ids.clear()
+            self.phase = SessionPhase.FINALIZED
+            self._touch()
+            ordered_trajectories = [
+                materialized.trajectory
+                for materialized in sorted(self.materialized_chains, key=lambda chain: chain.order_seq)
+            ]
+            return [replace(trajectory, reward_info=dict(self.reward_info)) for trajectory in ordered_trajectories]
+
+    async def abort(self) -> None:
+        """Abort the session and prevent further generation."""
+        async with self.request_lock:
+            if self.phase == SessionPhase.ABORTED:
+                return
+            if self.phase == SessionPhase.FINALIZED:
+                raise RuntimeError(f"Session {self.handle.session_id} is finalized")
+            self.phase = SessionPhase.ABORTED
+            self.active_chains = []
+            self.materialized_chains = []
+            self.reserved_chain_ids.clear()
+            self._touch()
+
+    def snapshot_state(self) -> dict[str, Any]:
+        """Return a JSON-serializable snapshot for actor state inspection."""
+        return {
+            "session_id": self.handle.session_id,
+            "phase": self.phase.value,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "num_trajectories": len(self.materialized_chains),
+            "has_active_trajectory": bool(self.active_chains),
+            "num_active_chains": len(self.active_chains),
+            "active_chain_ids": [chain.chain_id for chain in self.active_chains],
+            "active_chain_tip_hashes": {chain.chain_id: chain.message_tip_hash for chain in self.active_chains},
+        }
+
     async def _prepare_generation_inputs(
         self,
         payload: dict[str, Any],
@@ -293,7 +336,7 @@ class GatewaySession:
             payload,
             session_sampling_params=self._sampling_params,
         )
-        incoming_message_prefix_hashes = self._compute_message_prefix_hashes(messages)
+        incoming_message_prefix_hashes = self._extend_message_prefix_hashes([], messages)
         selected_chain = self._select_chain(
             tools=tools,
             incoming_message_prefix_hashes=incoming_message_prefix_hashes,
@@ -381,60 +424,6 @@ class GatewaySession:
             incoming_message_prefix_hashes=list(incoming_message_prefix_hashes),
         )
 
-    async def set_reward_info(self, reward_info: dict[str, Any] | None = None) -> None:
-        """Store session-level reward metadata without closing the session."""
-        async with self.request_lock:
-            if self.phase != SessionPhase.ACTIVE:
-                raise RuntimeError(f"Session {self.handle.session_id} is {self.phase.value.lower()}")
-            if reward_info is not None:
-                self.reward_info = dict(reward_info)
-            self._touch()
-
-    async def finalize(self) -> list[Trajectory]:
-        """Close the session and return its materialized trajectories with rewards."""
-        async with self.request_lock:
-            if self.phase == SessionPhase.ABORTED:
-                raise RuntimeError(f"Session {self.handle.session_id} is aborted")
-            if self.phase == SessionPhase.FINALIZED:
-                raise RuntimeError(f"Session {self.handle.session_id} is finalized")
-            self._touch()
-            self._materialize_active_chains()
-            self.reserved_chain_ids.clear()
-            self.phase = SessionPhase.FINALIZED
-            self._touch()
-            ordered_trajectories = [
-                materialized.trajectory
-                for materialized in sorted(self.materialized_chains, key=lambda chain: chain.order_seq)
-            ]
-            return [replace(trajectory, reward_info=dict(self.reward_info)) for trajectory in ordered_trajectories]
-
-    async def abort(self) -> None:
-        """Abort the session and prevent further generation."""
-        async with self.request_lock:
-            if self.phase == SessionPhase.ABORTED:
-                return
-            if self.phase == SessionPhase.FINALIZED:
-                raise RuntimeError(f"Session {self.handle.session_id} is finalized")
-            self.phase = SessionPhase.ABORTED
-            self.active_chains = []
-            self.materialized_chains = []
-            self.reserved_chain_ids.clear()
-            self._touch()
-
-    def snapshot_state(self) -> dict[str, Any]:
-        """Return a JSON-serializable snapshot for actor state inspection."""
-        return {
-            "session_id": self.handle.session_id,
-            "phase": self.phase.value,
-            "created_at": self.created_at,
-            "updated_at": self.updated_at,
-            "num_trajectories": len(self.materialized_chains),
-            "has_active_trajectory": bool(self.active_chains),
-            "num_active_chains": len(self.active_chains),
-            "active_chain_ids": [chain.chain_id for chain in self.active_chains],
-            "active_chain_tip_hashes": {chain.chain_id: chain.message_tip_hash for chain in self.active_chains},
-        }
-
     def _select_chain(
         self,
         *,
@@ -445,10 +434,7 @@ class GatewaySession:
             chain
             for chain in self.active_chains
             if chain.chain_id not in self.reserved_chain_ids
-            and self._is_chain_request_compatible(
-                chain=chain,
-                tools=tools,
-            )
+            and chain.active_tool_schemas == tools
             and self._is_chain_prefix_hash_match(
                 chain=chain,
                 incoming_message_prefix_hashes=incoming_message_prefix_hashes,
@@ -457,14 +443,6 @@ class GatewaySession:
         if not candidates:
             return None
         return max(candidates, key=lambda chain: (len(chain.message_history), chain.updated_seq, chain.chain_id))
-
-    def _is_chain_request_compatible(
-        self,
-        *,
-        chain: ChainState,
-        tools: list[dict[str, Any]] | None,
-    ) -> bool:
-        return chain.active_tool_schemas == tools
 
     def _is_chain_prefix_hash_match(
         self,
@@ -478,9 +456,6 @@ class GatewaySession:
         if history_len == 0:
             return True
         return chain.message_tip_hash == incoming_message_prefix_hashes[history_len - 1]
-
-    def _compute_message_prefix_hashes(self, messages: list[dict[str, Any]]) -> list[str]:
-        return self._extend_message_prefix_hashes([], messages)
 
     def _extend_message_prefix_hashes(
         self,
