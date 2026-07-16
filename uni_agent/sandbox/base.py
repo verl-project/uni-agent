@@ -106,8 +106,8 @@ class SandboxBackend(Protocol):
 
 
 _DEFAULT_STARTUP_TIMEOUT = 600.0
-_DEFAULT_STARTUP_CONCURRENCY_PER_WORKER = 16
-# Per-worker (per-process) startup semaphores, created lazily per event loop so
+_DEFAULT_STARTUP_CONCURRENCY = 64
+# Per-process startup semaphores, created lazily per event loop so
 # each binds to the loop that uses it and is *shared* across concurrent start()s.
 _startup_semaphores: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 
@@ -133,7 +133,7 @@ async def _startup_slot() -> AsyncIterator[None]:
     and limits nothing. It is created lazily per loop (and rebuilt if the limit
     changes) so it binds to the running loop rather than an import-time one.
     """
-    limit = int(_env_number("SANDBOX_STARTUP_CONCURRENCY_PER_WORKER", _DEFAULT_STARTUP_CONCURRENCY_PER_WORKER))
+    limit = int(_env_number("SANDBOX_STARTUP_CONCURRENCY", _DEFAULT_STARTUP_CONCURRENCY))
     if limit <= 0:
         yield
         return
@@ -189,7 +189,7 @@ class Sandbox(abc.ABC):
     async def __aenter__(self, retry: int = 3) -> Sandbox:
         """Create the sandbox (retrying transient ``start()`` failures) and return it ready.
 
-        Each attempt holds one per-worker startup slot (``SANDBOX_STARTUP_CONCURRENCY_PER_WORKER``)
+        Each attempt holds one startup slot (``SANDBOX_STARTUP_CONCURRENCY``)
         and is bounded by ``SANDBOX_STARTUP_TIMEOUT``; the slot is released before the
         retry backoff and the cleanup ``stop()``.
         """

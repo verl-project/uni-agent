@@ -376,8 +376,6 @@ def main() -> None:
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.9, help="Engine GPU memory fraction.")
     parser.add_argument(
         "--gateway-count",
-        "--num-workers",
-        dest="gateway_count",
         type=int,
         default=4,
         help="Number of gateway actors fronting the engine (each serves many concurrent sessions).",
