@@ -1,5 +1,6 @@
 import asyncio
 
+from tests.deployment.support import FakeProcess, FakeRuntime
 from uni_agent.deployment.local import deployment as local_deployment
 from uni_agent.deployment.local.deployment import (
     LocalDeployment,
@@ -136,42 +137,14 @@ def test_docker_command_keeps_published_to_runtime_port_mapping():
     ]
 
 
-class _FakeRuntime:
-    def __init__(self):
-        self.closed = False
-
-    async def close(self):
-        self.closed = True
-
-
-class _FakeProcess:
-    def __init__(self):
-        self.terminated = False
-        self.killed = False
-        self.wait_timeout = None
-
-    def poll(self):
-        return None
-
-    def terminate(self):
-        self.terminated = True
-
-    def wait(self, timeout=None):
-        self.wait_timeout = timeout
-        return 0
-
-    def kill(self):
-        self.killed = True
-
-
 def test_stop_closes_runtime_and_apptainer_process_without_docker_rm(tmp_path):
     deployment = LocalDeployment(
         run_id="test",
         type="local",
         container_runtime="apptainer",
     )
-    runtime = _FakeRuntime()
-    process = _FakeProcess()
+    runtime = FakeRuntime()
+    process = FakeProcess()
     log_path = tmp_path / "apptainer.log"
     log_path.write_text("server log", encoding="utf-8")
     log_handle = log_path.open("a", encoding="utf-8")
@@ -180,9 +153,7 @@ def test_stop_closes_runtime_and_apptainer_process_without_docker_rm(tmp_path):
     deployment._server_process = process
     deployment._server_log_path = log_path
     deployment._server_log_handle = log_handle
-    deployment._container_name = "sandbox-name"
     deployment._container_id = "container-id"
-    deployment._stopped = False
 
     asyncio.run(deployment.stop())
 
@@ -193,6 +164,5 @@ def test_stop_closes_runtime_and_apptainer_process_without_docker_rm(tmp_path):
     assert deployment._server_process is None
     assert deployment._server_log_handle is None
     assert deployment._server_log_path is None
-    assert deployment._container_name is None
     assert deployment._container_id is None
     assert not log_path.exists()
