@@ -318,13 +318,18 @@ class MessageCodec:
     def canonicalize_message_for_prefix_comparison(self, message: dict[str, Any]) -> dict[str, Any]:
         """Canonicalize one message before session prefix comparison."""
         normalized = dict(message)
+        normalized.pop("tool_call_id", None)
         tool_calls = normalized.get("tool_calls")
         if not isinstance(tool_calls, list):
             return normalized
 
-        normalized_tool_calls: list[dict[str, Any]] = []
+        normalized_tool_calls: list[Any] = []
         for tool_call in tool_calls:
+            if not isinstance(tool_call, dict):
+                normalized_tool_calls.append(tool_call)
+                continue
             normalized_tool_call = dict(tool_call)
+            normalized_tool_call.pop("id", None)
             function = normalized_tool_call.get("function")
             if isinstance(function, dict) and "arguments" in function:
                 normalized_function = dict(function)

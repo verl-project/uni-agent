@@ -522,7 +522,7 @@ async def test_multiple_chains_length_exhaustion_closes_selected_chain_and_order
     assert len(trajectories) == 2
     assert _decode_response_ids(trajectories[0].response_ids) == "SUB"
     assert _decode_response_ids(trajectories[1].response_ids) == "MAIN1"
-    assert trajectories[1].extra_fields["finish_reason"] == "length"
+    assert trajectories[1].extra_fields["materialization_reason"] == "max_response_length"
 
 
 @pytest.mark.asyncio
@@ -544,7 +544,67 @@ async def test_multiple_chains_exactly_exhausted_chain_closes_without_backend_ca
     assert len(backend.calls) == 1
     assert backend.steps == ["SHOULD_NOT_RUN"]
     assert len(trajectories) == 1
-    assert trajectories[0].extra_fields["finish_reason"] == "length"
+    assert trajectories[0].extra_fields["materialization_reason"] == "max_response_length"
+
+
+@pytest.mark.asyncio
+async def test_multiple_chains_length_exhaustion_orders_before_later_fresh_chain():
+    """Order a closed length trajectory before a later normal trajectory."""
+    session = _session("length-before-fresh", response_length=len("FULL"))
+    backend = SequencedBackend(["FULL", "NEW"])
+    first_messages = [{"role": "user", "content": "fill the response budget"}]
+    repeated_history = [
+        *first_messages,
+        {"role": "assistant", "content": "FULL"},
+    ]
+
+    await _run(session, backend, first_messages)
+    length_outcome = await _run(session, backend, repeated_history)
+    await _run(session, backend, [{"role": "user", "content": "start a fresh chain"}])
+    trajectories = await session.finalize()
+
+    assert length_outcome.finish_reason == "length"
+    assert len(backend.calls) == 2
+    assert backend.steps == []
+    assert [_decode_response_ids(trajectory.response_ids) for trajectory in trajectories] == ["FULL", "NEW"]
+    assert trajectories[0].extra_fields == {"materialization_reason": "max_response_length"}
+    assert trajectories[1].extra_fields == {}
+
+
+@pytest.mark.asyncio
+async def test_multiple_chains_exactly_exhausted_chain_skips_new_media_extraction():
+    """Do not parse unused incremental media after the response budget is full."""
+    extractor_calls = 0
+
+    async def forbidden_extractor(*args, **kwargs):
+        nonlocal extractor_calls
+        extractor_calls += 1
+        raise AssertionError("media extractor must not run for an exhausted chain")
+
+    session = _session(
+        "exhausted-skips-media",
+        response_length=len("FULL"),
+        processor=FakeProcessor(),
+        vision_info_extractor=forbidden_extractor,
+    )
+    backend = SequencedBackend(["FULL", "SHOULD_NOT_RUN"])
+    first_messages = [{"role": "user", "content": "fill the response budget"}]
+    continuation = [
+        *first_messages,
+        {"role": "assistant", "content": "FULL"},
+        _image_message("image://unused.png", "unused media"),
+    ]
+
+    await _run(session, backend, first_messages)
+    outcome = await _run(session, backend, continuation)
+    trajectories = await session.finalize()
+
+    assert outcome.finish_reason == "length"
+    assert extractor_calls == 0
+    assert len(backend.calls) == 1
+    assert backend.steps == ["SHOULD_NOT_RUN"]
+    assert trajectories[0].multi_modal_data is None
+    assert trajectories[0].extra_fields == {"materialization_reason": "max_response_length"}
 
 
 @pytest.mark.asyncio
@@ -687,7 +747,7 @@ async def test_multiple_chains_length_exhaustion_does_not_materialize_unsent_med
     assert backend.calls[0][backend_field] == expected_sent
     assert len(trajectories) == 1
     assert trajectories[0].multi_modal_data == {trajectory_key: expected_sent}
-    assert trajectories[0].extra_fields["finish_reason"] == "length"
+    assert trajectories[0].extra_fields["materialization_reason"] == "max_response_length"
 
 
 @pytest.mark.asyncio
@@ -784,7 +844,7 @@ async def test_multiple_chains_reserved_chain_is_not_closed_by_concurrent_length
     trajectories = await session.finalize()
     decoded = [_decode_response_ids(trajectory.response_ids) for trajectory in trajectories]
     assert len(trajectories) == 2
-    assert all("finish_reason" not in trajectory.extra_fields for trajectory in trajectories)
+    assert all("materialization_reason" not in trajectory.extra_fields for trajectory in trajectories)
     assert any(text.endswith("CONT") for text in decoded)
     assert "FRESH" in decoded
 
@@ -895,6 +955,40 @@ def test_message_prefix_hashes_canonicalize_json_tool_call_arguments():
     assert raw_a != raw_b
 
 
+def test_message_prefix_hashes_ignore_renamed_and_swapped_tool_call_ids():
+    """Ignore call IDs, including whole renames and exchanged result IDs."""
+    session = _session("hash-tool-call-ids")
+
+    def history(call_ids: tuple[str, str], result_ids: tuple[str, str]) -> list[dict]:
+        return [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": call_ids[0],
+                        "type": "function",
+                        "function": {"name": "weather", "arguments": {"city": "Paris"}},
+                    },
+                    {
+                        "id": call_ids[1],
+                        "type": "function",
+                        "function": {"name": "stocks", "arguments": {"ticker": "ACME"}},
+                    },
+                ],
+            },
+            {"role": "tool", "tool_call_id": result_ids[0], "content": "sunny"},
+            {"role": "tool", "tool_call_id": result_ids[1], "content": "up"},
+        ]
+
+    original = session._extend_message_prefix_hashes([], history(("call_a", "call_b"), ("call_a", "call_b")))
+    renamed = session._extend_message_prefix_hashes([], history(("call_x", "call_y"), ("call_x", "call_y")))
+    swapped_results = session._extend_message_prefix_hashes([], history(("call_x", "call_y"), ("call_y", "call_x")))
+
+    assert original == renamed
+    assert original == swapped_results
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("rewrite_fresh_tool_result_id", [False, True], ids=["matching-id", "rewritten-fresh-id"])
 async def test_multiple_chains_tool_call_echo_reuses_chain_despite_fresh_tool_result_id(
@@ -949,15 +1043,15 @@ async def test_multiple_chains_tool_call_echo_reuses_chain_despite_fresh_tool_re
 
 
 @pytest.mark.asyncio
-async def test_multiple_chains_tool_call_id_rewrite_starts_new_chain(monkeypatch):
-    """Start a sibling when the caller rewrites a committed tool-call ID."""
+async def test_multiple_chains_tool_call_id_rewrite_reuses_chain(monkeypatch):
+    """Reuse a chain when committed tool-call IDs are rewritten."""
     import uni_agent.gateway.session.codec as codec_mod
 
     monkeypatch.setattr(codec_mod, "_extract_tool_calls_with_sglang_or_vllm", _fake_tool_call_dispatch)
     session = _session("tool-call-id-rewrite", tool_parser_name="hermes")
     tools = [{"type": "function", "function": {"name": "search", "parameters": {"type": "object"}}}]
     tool_call_text = '<tool_call>\n{"name": "search", "arguments": {"query": "weather"}}\n</tool_call>'
-    backend = SequencedBackend([tool_call_text, "FINAL"])
+    backend = SequencedBackend([tool_call_text, "AFTER_TOOL", "FINAL"])
 
     first = await _run(
         session,
@@ -968,11 +1062,17 @@ async def test_multiple_chains_tool_call_id_rewrite_starts_new_chain(monkeypatch
     assert session.snapshot_state()["active_chain_ids"] == [1]
     committed_id = first.assistant_msg["tool_calls"][0]["id"]
 
-    # Echo the committed assistant tool call but regenerate its id (and the matching tool
-    # message tool_call_id). The committed prefix carries the original id, so the canonical
-    # prefix hash no longer matches chain 1; selection must split into a new sibling chain
-    # instead of reusing the old token buffer. Only the committed-prefix id is rewritten here,
-    # which is the case Hash 定义第 8 条 requires to split.
+    await _run(
+        session,
+        backend,
+        [
+            {"role": "user", "content": "what is the weather?"},
+            {"role": "assistant", "content": None, "tool_calls": first.assistant_msg["tool_calls"]},
+            {"role": "tool", "tool_call_id": committed_id, "content": "sunny and warm"},
+        ],
+        tools=tools,
+    )
+
     assert committed_id != "call_rewritten"
     rewritten_tool_calls = [{**first.assistant_msg["tool_calls"][0], "id": "call_rewritten"}]
     await _run(
@@ -982,17 +1082,19 @@ async def test_multiple_chains_tool_call_id_rewrite_starts_new_chain(monkeypatch
             {"role": "user", "content": "what is the weather?"},
             {"role": "assistant", "content": None, "tool_calls": rewritten_tool_calls},
             {"role": "tool", "tool_call_id": "call_rewritten", "content": "sunny and warm"},
+            {"role": "assistant", "content": "AFTER_TOOL"},
+            {"role": "user", "content": "summarize"},
         ],
         tools=tools,
     )
 
-    # Split, not continuation: two sibling chains, two trajectories.
-    assert session.snapshot_state()["active_chain_ids"] == [1, 2]
+    assert session.snapshot_state()["active_chain_ids"] == [1]
     trajectories = await session.finalize()
-    assert len(trajectories) == 2
-    decoded = [_decode_response_ids(trajectory.response_ids) for trajectory in trajectories]
-    assert decoded == [tool_call_text, "FINAL"]
-    assert trajectories[1].response_mask == [1] * len("FINAL")
+    assert len(trajectories) == 1
+    decoded = _decode_response_ids(trajectories[0].response_ids)
+    assert decoded.startswith(tool_call_text)
+    assert decoded.endswith("FINAL")
+    assert 0 in trajectories[0].response_mask
 
 
 @pytest.mark.asyncio

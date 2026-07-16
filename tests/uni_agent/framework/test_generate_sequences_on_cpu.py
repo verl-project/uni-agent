@@ -491,6 +491,37 @@ async def test_generate_sequences_writes_tq_schema_for_each_session(monkeypatch,
 
 
 @pytest.mark.asyncio
+async def test_generate_sequences_batches_length_trajectory_before_normal_trajectory(fake_tq):
+    """Keep length metadata in tags when mixed trajectories share one TQ batch."""
+    runtime = _FakeGatewayManager(
+        {
+            "session-0-0": [
+                _trajectory(
+                    response_ids=[20],
+                    extra_fields={"materialization_reason": "max_response_length"},
+                ),
+                _trajectory(response_ids=[21]),
+            ]
+        }
+    )
+    framework = await _build_framework_with_agent_runners(
+        agent_runners={"runner": _inline_runner_config(_async_noop_runner)},
+        gateway_manager=runtime,
+    )
+
+    await framework.generate_sequences(_build_prompts(count=1, global_steps=8))
+
+    assert len(fake_tq.batch_puts) == 1
+    batch = fake_tq.batch_puts[0]
+    assert batch["keys"] == ["uid-0_0_0", "uid-0_0_1"]
+    assert batch["tags"][0]["materialization_reason"] == "max_response_length"
+    assert "materialization_reason" not in batch["tags"][1]
+    assert "materialization_reason" not in batch["fields"].keys()
+    assert batch["fields"]["responses"][0].tolist() == [20]
+    assert batch["fields"]["responses"][1].tolist() == [21]
+
+
+@pytest.mark.asyncio
 async def test_generate_sequences_keeps_successful_sessions_when_one_session_fails(fake_tq):
     """A failed rollout session aborts only that session; other successful
     sessions for the same prompt are still finalized and written to TQ."""

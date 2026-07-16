@@ -355,7 +355,8 @@ class GatewaySession:
             new_image_data = None
             new_video_data = None
             incremental_ids = []
-            if incremental_messages:
+            already_exhausted = self._response_length is not None and len(buffer.response_mask) >= self._response_length
+            if incremental_messages and not already_exhausted:
                 new_image_data, new_video_data = await self._codec.extract_multi_modal_data(incremental_messages)
                 incremental_ids = self._codec.encode_incremental(
                     incremental_messages,
@@ -363,7 +364,7 @@ class GatewaySession:
                     video_data=new_video_data,
                 )
 
-            if (
+            if already_exhausted or (
                 self._response_length is not None
                 and len(buffer.response_mask) + len(incremental_ids) >= self._response_length
             ):
@@ -378,7 +379,7 @@ class GatewaySession:
                     video_data=video_data,
                     length_exhausted_trajectory=self._build_materialized_trajectory(
                         chain=selected_chain,
-                        extra_fields={"finish_reason": "length"},
+                        extra_fields={"materialization_reason": "max_response_length"},
                     ),
                     chain_id=selected_chain.chain_id,
                     incoming_message_prefix_hashes=list(incoming_message_prefix_hashes),
