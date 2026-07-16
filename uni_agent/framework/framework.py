@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import io
 import json
 import logging
 import os
@@ -671,8 +672,10 @@ class OpenAICompatibleAgentFramework(AgentFramework):
                 arrays[f"traj{i}_response_mask"] = np.asarray(traj.response_mask, dtype=np.int8)
                 if traj.response_logprobs is not None:
                     arrays[f"traj{i}_response_logprobs"] = np.asarray(traj.response_logprobs, dtype=np.float32)
-            with open(run_dir / "trajectory.npz", "wb") as fh:
-                np.savez_compressed(fh, **arrays)
+
+            buf = io.BytesIO()
+            np.savez_compressed(buf, **arrays)
+            (run_dir / "trajectory.npz").write_bytes(buf.getvalue())
         except Exception:
             logger.exception("session %s: failed to write trajectory dump under %s", session_id, run_dir)
 
