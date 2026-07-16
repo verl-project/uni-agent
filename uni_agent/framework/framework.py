@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Protocol
 from uuid import uuid4
 
+import numpy as np
 import ray
 import torch
 from omegaconf import OmegaConf
@@ -209,8 +210,6 @@ def _trajectory_to_reward_dataproto(trajectory, sample_fields):
     consumed by NaiveRewardManager.run_single / RewardLoopWorker dispatch are
     populated; ``__num_turns__`` rides in non_tensor_batch for parity.
     """
-    import numpy as np
-
     from verl.protocol import DataProto
 
     prompt_ids = torch.tensor(trajectory.prompt_ids, dtype=torch.long).unsqueeze(0)
@@ -620,7 +619,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
 
             self._log_trajectory_summary(session_id, result_trajectories)
             if run_dir is not None:
-                await asyncio.to_thread(self._dump_trajectories_json, run_dir, session_id, result_trajectories)
+                await asyncio.to_thread(self._dump_trajectories, run_dir, session_id, result_trajectories)
             return result_trajectories, sample_fields
 
     def _log_trajectory_summary(self, session_id: str, trajectories: list[Trajectory]) -> None:
@@ -642,27 +641,43 @@ class OpenAICompatibleAgentFramework(AgentFramework):
             )
         logger.info("\n".join(lines))
 
-    def _dump_trajectories_json(self, run_dir: Path, session_id: str, trajectories: list[Trajectory]) -> None:
-        """Persist finalized trajectories next to ``run.log`` as ``trajectory.json``.
+    def _dump_trajectories(self, run_dir: Path, session_id: str, trajectories: list[Trajectory]) -> None:
+        """Persist finalized trajectories next to ``run.log``.
+
+        Split by cost: a small human-readable summary (reward, turns, lengths) is written
+        to ``trajectory.json``; the bulky per-token arrays (ids / mask / logprobs) go to a
+        compressed ``trajectory.npz``. The arrays serialize at C speed and compress well
+        (token ids repeat, the mask is runs of 0/1), so this is far smaller and faster than
+        the old indented-JSON dump -- which matters most on a network / HDFS log_dir.
 
         Runs off the event loop (caller wraps this in ``asyncio.to_thread``) and is
-        best-effort: a serialization/IO error is logged but never aborts the rollout.
-        Token ids are kept verbatim (the exact training data); bulky fields
-        (routed_experts, multi-modal blobs) are summarized, not dumped.
+        best-effort: an IO / serialization error is logged but never aborts the rollout.
         """
-        path = run_dir / "trajectory.json"
         try:
-            payload = {
+            run_dir.mkdir(parents=True, exist_ok=True)
+            meta = {
                 "session_id": session_id,
                 "num_trajectories": len(trajectories),
-                "trajectories": [self._trajectory_to_json_dict(traj) for traj in trajectories],
+                "trajectories": [self._trajectory_meta(traj) for traj in trajectories],
             }
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(payload, ensure_ascii=False, indent=2, default=_json_default), encoding="utf-8")
+            (run_dir / "trajectory.json").write_text(
+                json.dumps(meta, ensure_ascii=False, separators=(",", ":"), default=_json_default),
+                encoding="utf-8",
+            )
+            arrays: dict[str, np.ndarray] = {}
+            for i, traj in enumerate(trajectories):
+                arrays[f"traj{i}_prompt_ids"] = np.asarray(traj.prompt_ids, dtype=np.int32)
+                arrays[f"traj{i}_response_ids"] = np.asarray(traj.response_ids, dtype=np.int32)
+                arrays[f"traj{i}_response_mask"] = np.asarray(traj.response_mask, dtype=np.int8)
+                if traj.response_logprobs is not None:
+                    arrays[f"traj{i}_response_logprobs"] = np.asarray(traj.response_logprobs, dtype=np.float32)
+            with open(run_dir / "trajectory.npz", "wb") as fh:
+                np.savez_compressed(fh, **arrays)
         except Exception:
-            logger.exception("session %s: failed to write %s", session_id, path)
+            logger.exception("session %s: failed to write trajectory dump under %s", session_id, run_dir)
 
-    def _trajectory_to_json_dict(self, traj: Trajectory) -> dict[str, object]:
+    def _trajectory_meta(self, traj: Trajectory) -> dict[str, object]:
+        """Small, human-readable per-trajectory summary; the token arrays live in the npz."""
         extra = traj.extra_fields or {}
         return {
             "num_turns": traj.num_turns,
@@ -674,10 +689,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
             "response_len": len(traj.response_ids),
             "model_token_count": sum(traj.response_mask) if traj.response_mask else 0,
             "has_routed_experts": traj.routed_experts is not None,
-            "prompt_ids": traj.prompt_ids,
-            "response_ids": traj.response_ids,
-            "response_mask": traj.response_mask,
-            "response_logprobs": traj.response_logprobs,
+            "has_logprobs": traj.response_logprobs is not None,
         }
 
     def _score_from_reward_info(
