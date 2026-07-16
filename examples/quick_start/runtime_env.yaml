@@ -1,0 +1,7 @@
+working_dir: ./
+excludes: ["/.git/", "verl/.git/"]
+env_vars:
+  PYTHONPATH: "verl"
+  TORCH_NCCL_AVOID_RECORD_STREAMS: "1"
+  CUDA_DEVICE_MAX_CONNECTIONS: "1"
+  VLLM_DISABLE_COMPILE_CACHE: "1"

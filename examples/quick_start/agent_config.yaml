@@ -1,0 +1,17 @@
+- name: swe_agent
+  _target_: uni_agent.agent_loop.UniAgentLoop
+  tool_parser: hermes   # "hermes" for JSON tool calls, "qwen3_coder" for XML
+  concurrency: 16
+  log_dir: ~/logs/agent
+  interaction:
+    action_timeout: 30
+    max_turns: 10
+  env:
+    deployment:
+      type: host
+    tool_install_dir: ~/.local/bin   # user-writable when running without root
+  tools:
+    - name: execute_bash
+    - name: submit
+  reward:
+    name: dummy

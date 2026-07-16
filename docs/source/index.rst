@@ -28,6 +28,7 @@ The documentation is organized into three sections:
    :caption: Quickstart
 
    start/installation.md
+   start/quick_start.md
    start/agent_env.md
    start/arxiv_search_agent.md
    start/agent_interaction.md
