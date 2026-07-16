@@ -1,4 +1,5 @@
 import argparse
+import json
 import logging
 import os
 from pathlib import Path
@@ -111,10 +112,29 @@ def run_inference(args: argparse.Namespace):
 
     # 6. Process results
     rm_scores = output.batch["rm_scores"].sum(dim=-1).tolist()
-    mean_score = np.mean(rm_scores)
+    mean_score = float(np.mean(rm_scores)) if len(rm_scores) > 0 else 0.0
 
     logger.info(f"Generation completed. Mean RM Score: {mean_score:.4f}")
     print(f"\n=> Mean RM Score: {mean_score:.4f}\n")
+
+    # 7. Optionally persist a machine-readable result file (used by eval_checkpoints.py).
+    if args.result_path:
+        result_path = os.path.expanduser(args.result_path)
+        os.makedirs(os.path.dirname(result_path) or ".", exist_ok=True)
+        result = {
+            "model_path": os.path.expanduser(args.model_path),
+            "data_path": data_path,
+            "agent_config_path": os.path.expanduser(args.agent_config_path),
+            "n": config.actor_rollout_ref.rollout.n,
+            "num_samples": len(rm_scores),
+            "mean_rm_score": mean_score,
+            "rm_scores": rm_scores,
+        }
+        with open(result_path, "w") as f:
+            json.dump(result, f, indent=2)
+        logger.info(f"Wrote result file to: {result_path}")
+
+    return mean_score
 
 
 def main():
@@ -139,6 +159,12 @@ def main():
         type=str,
         default="examples/agent_interaction/agent_config.yaml",
         help="Path to the agent loop configuration YAML.",
+    )
+    parser.add_argument(
+        "--result-path",
+        type=str,
+        default=None,
+        help="Optional path to write a JSON result file (mean reward and per-rollout scores).",
     )
 
     # Inference parameters

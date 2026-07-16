@@ -24,7 +24,7 @@ class GatewayActorConfig:
         apply_chat_template_kwargs: Default kwargs passed to chat-template rendering.
         base_sampling_params: Sampling params applied before per-request overrides.
         allowed_request_sampling_param_keys: Request sampling keys accepted by the
-            codec when merging payload sampling params.
+            provider adapters when merging payload sampling params.
         vision_info_extractor: Optional async extractor for image/video inputs.
         vision_info_extractor_kwargs: Static kwargs forwarded to the extractor.
         prompt_length: Optional prompt-token budget stored on gateway sessions.
@@ -36,7 +36,7 @@ class GatewayActorConfig:
     tool_parser_name: str | None = None
     apply_chat_template_kwargs: dict[str, Any] | None = None
     base_sampling_params: dict[str, Any] | None = None
-    allowed_request_sampling_param_keys: frozenset[str] | None = None
+    allowed_request_sampling_param_keys: set[str] | frozenset[str] | None = None
     vision_info_extractor: Callable | None = None
     vision_info_extractor_kwargs: dict[str, Any] | None = None
     prompt_length: int | None = None

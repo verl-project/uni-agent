@@ -407,7 +407,12 @@ async def test_generate_sequences_writes_tq_schema_for_each_session(monkeypatch,
     session and trainer-compatible trajectory fields."""
     runtime = _FakeGatewayManager(
         {
-            "session-0-0": [_trajectory(response_logprobs=[-0.1, -0.2], extra_fields={"finish_reason": "length"})],
+            "session-0-0": [
+                _trajectory(
+                    response_logprobs=[-0.1, -0.2],
+                    extra_fields={"materialization_reason": "max_response_length"},
+                )
+            ],
             "session-0-1": [_trajectory(response_logprobs=[-0.3, -0.4])],
         }
     )
@@ -438,7 +443,15 @@ async def test_generate_sequences_writes_tq_schema_for_each_session(monkeypatch,
     tag = first["tags"][0]
     assert {
         key: tag[key]
-        for key in ("global_steps", "status", "prompt_len", "response_len", "seq_len", "uid", "finish_reason")
+        for key in (
+            "global_steps",
+            "status",
+            "prompt_len",
+            "response_len",
+            "seq_len",
+            "uid",
+            "materialization_reason",
+        )
     } == {
         "global_steps": 7,
         "status": "success",
@@ -446,10 +459,11 @@ async def test_generate_sequences_writes_tq_schema_for_each_session(monkeypatch,
         "response_len": 2,
         "seq_len": 4,
         "uid": "uid-0",
-        "finish_reason": "length",
+        "materialization_reason": "max_response_length",
     }
     assert "length_truncated" not in tag
     assert "traj_exit_reason" not in tag
+    assert "materialization_reason" not in fields
     assert fields["input_ids"].is_nested
     assert fields["response_mask"].is_nested
     assert fields["position_ids"].is_nested

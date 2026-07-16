@@ -700,7 +700,9 @@ class OpenAICompatibleAgentFramework(AgentFramework):
             rm_scores[-1] = float(trajectory.reward_score)
         field["rm_scores"] = rm_scores
 
-        field.update(trajectory.extra_fields)
+        extra_fields = dict(trajectory.extra_fields)
+        extra_fields.pop("materialization_reason", None)
+        field.update(extra_fields)
         field.pop("multi_modal_data", None)
         for key in ("uid", "raw_prompt", "data_source", "reward_model", "extra_info", "tools_kwargs", "agent_name"):
             if key in sample_fields:
@@ -719,7 +721,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
             "seq_len": prompt_len + response_len,
             "uid": uid,
         }
-        finish_reason = trajectory.extra_fields.get("finish_reason")
-        if finish_reason is not None:
-            tag["finish_reason"] = finish_reason
+        materialization_reason = trajectory.extra_fields.get("materialization_reason")
+        if materialization_reason is not None:
+            tag["materialization_reason"] = materialization_reason
         return field, tag

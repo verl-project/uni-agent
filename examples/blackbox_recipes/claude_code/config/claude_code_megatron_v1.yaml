@@ -1,0 +1,171 @@
+# Megatron + V1 unified trainer config for the blackbox claude-code recipe.
+#
+# Entry point: python3 -m verl.trainer.main_ppo
+# Default trainer mode is separate_async. On a single 8-GPU node this recipe
+# uses 4 GPUs for trainer and 4 GPUs for standalone rollout.
+#
+# Mirrors mini_swe_agent/config/swe_agent_blackbox_megatron_v1.yaml; only the
+# agent runner (runner_fqn + runner_kwargs) and experiment name differ.
+
+hydra:
+  searchpath:
+    - pkg://verl.trainer.config
+
+defaults:
+  - ppo_megatron_trainer
+  - _self_
+
+actor_rollout_ref:
+  hybrid_engine: true
+  nccl_timeout: 9600
+
+  model:
+    path: ???
+
+  rollout:
+    name: vllm
+    mode: async
+    nnodes: 1
+    n_gpus_per_node: 4
+    prompt_length: 4096
+    response_length: 131072
+    max_model_len: 135168
+    temperature: 1.0
+    top_p: 1.0
+    top_k: -1
+    n: 8
+    tensor_model_parallel_size: 4
+    gpu_memory_utilization: 0.7
+    calculate_log_probs: true
+    enable_sleep_mode: true
+    free_cache_engine: true
+    enable_chunked_prefill: true
+    max_num_batched_tokens: 135168
+    checkpoint_engine:
+      backend: nccl
+      update_weights_bucket_megabytes: 2048
+
+    multi_turn:
+      enable: true
+      max_parallel_calls: 1
+      format: qwen3_coder
+
+    agent:
+      num_workers: 8
+      agent_loop_manager_class: uni_agent.framework.entry.AgentFrameworkRolloutAdapter
+
+    custom:
+      agent_framework:
+        gateway_count: 1
+        agent_runners:
+          claude_code:
+            runner_fqn: examples.blackbox_recipes.claude_code.claude_code_runner.claude_code_runner
+            dispatch_mode: ray_task
+            max_concurrent_sessions: 32
+            runner_kwargs:
+              tool_image: swr.cn-east-3.myhuaweicloud.com/openyuanrong/claude-code-tool:latest
+              run_timeout: 3600
+              conda_env: testbed
+
+  actor:
+    use_dynamic_bsz: true
+    use_rollout_log_probs: true
+    ppo_mini_batch_size: 16
+    ppo_micro_batch_size_per_gpu: 1
+    use_kl_loss: false
+    kl_loss_coef: 0.0
+    clip_ratio_low: 0.2
+    clip_ratio_high: 0.28
+    clip_ratio_c: 10.0
+    loss_agg_mode: token-mean
+    entropy_coeff: 0
+    optim:
+      lr: 1e-6
+      weight_decay: 0.1
+      lr_decay_style: constant
+    megatron:
+      param_offload: true
+      grad_offload: true
+      optimizer_offload: true
+      tensor_model_parallel_size: 4
+      pipeline_model_parallel_size: 1
+      context_parallel_size: 1
+      use_mbridge: true
+      use_remove_padding: false
+
+  ref:
+    log_prob_micro_batch_size_per_gpu: 1
+    megatron:
+      param_offload: false
+      tensor_model_parallel_size: 4
+      pipeline_model_parallel_size: 1
+      context_parallel_size: 1
+
+data:
+  train_files: ???
+  val_files: ???
+  prompt_key: prompt
+  truncation: left
+  max_prompt_length: 4096
+  max_response_length: 131072
+  train_batch_size: 1
+  val_batch_size: 1
+  gen_batch_size: 1
+  return_raw_chat: true
+  trust_remote_code: true
+  dataloader_num_workers: 0
+  custom_cls:
+    path: pkg://examples.blackbox_recipes.claude_code.dataset
+    name: SWEBenchDataset
+
+algorithm:
+  gamma: 1.0
+  lam: 1.0
+  adv_estimator: grpo
+  use_kl_in_reward: false
+  kl_ctrl:
+    type: fixed
+    kl_coef: 0.0
+  rollout_correction:
+    bypass_mode: true
+
+reward:
+  custom_reward_function:
+    path: pkg://examples.blackbox_recipes.claude_code.reward
+    name: compute_score
+
+trainer:
+  nnodes: 1
+  n_gpus_per_node: 4
+  total_epochs: 10
+  total_training_steps: null
+  project_name: claude_code
+  experiment_name: claude_code
+  logger:
+    - console
+  device: cuda
+  val_before_train: true
+  val_only: false
+  save_freq: 10
+  test_freq: 10
+  default_local_dir: checkpoints/claude_code
+  resume_mode: auto
+  use_v1: true
+  v1:
+    trainer_mode: separate_async
+    colocate_async:
+      num_warmup_batches: 1
+    separate_async:
+      num_warmup_batches: 4
+      parameter_sync_step: 4
+
+transfer_queue:
+  enable: true
+
+ray_kwargs:
+  ray_init:
+    runtime_env:
+      env_vars:
+        TRANSFER_QUEUE_ENABLE: ""
+        NCCL_P2P_DISABLE: "1"
+        NCCL_SHM_DISABLE: "1"

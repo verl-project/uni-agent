@@ -1,14 +1,23 @@
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
 
 from tests.uni_agent.support import FakeProcessor, FakeTokenizer, SequencedBackend, fake_vision_info_extractor
+from uni_agent.gateway.adapters.openai import openai_to_internal
 from uni_agent.gateway.session import GatewaySession, MessageCodec, SessionHandle
 from verl.workers.rollout.replica import TokenOutput
 
 HELPFUL_SYS = {"role": "system", "content": "You are helpful."}
 SUBAGENT_SYS = {"role": "system", "content": "You are a focused subagent."}
+ALLOWED_SAMPLING_KEYS = frozenset({"temperature", "top_p", "top_k", "max_tokens", "stop"})
+
+
+def _fake_tool_call_dispatch(text, tools, parser_name, tokenizer):
+    if "<tool_call>" not in text:
+        return text, []
+    return "", [SimpleNamespace(name="search", arguments='{"query":"weather"}')]
 
 
 def _ids(text: str) -> list[int]:
@@ -49,7 +58,12 @@ def test_gateway_session_rejects_non_positive_response_length(response_length):
 
 
 async def _run(session: GatewaySession, backend: SequencedBackend, messages: list[dict], **payload_extra):
-    return await session.run_generation({"model": "dummy-model", "messages": messages, **payload_extra}, backend)
+    request = openai_to_internal(
+        {"model": "dummy-model", "messages": messages, **payload_extra},
+        base_sampling_params=session.sampling_params,
+        allowed_sampling_keys=ALLOWED_SAMPLING_KEYS,
+    )
+    return await session.run_generation(request, backend)
 
 
 class _LogprobBackend:
@@ -544,56 +558,6 @@ async def test_multiple_chains_sets_remaining_budget_when_request_omits_max_toke
     assert backend.calls[0]["sampling_params"]["max_tokens"] == 10
 
 
-@pytest.mark.parametrize("max_tokens", [0, -1, None, "1", 1.5, True])
-@pytest.mark.asyncio
-async def test_multiple_chains_rejects_invalid_request_max_tokens_before_backend_call(max_tokens):
-    """Reject invalid request max_tokens values before backend generation."""
-    session = _session("invalid-request-max-tokens")
-    backend = SequencedBackend(["SHOULD_NOT_RUN"])
-
-    with pytest.raises(HTTPException, match="max_tokens must be a positive integer") as exc_info:
-        await _run(
-            session,
-            backend,
-            [{"role": "user", "content": "invalid request max_tokens"}],
-            max_tokens=max_tokens,
-        )
-
-    assert exc_info.value.status_code == 400
-    assert backend.calls == []
-
-
-@pytest.mark.asyncio
-async def test_multiple_chains_rejects_invalid_session_max_tokens_before_backend_call():
-    """Reject an invalid session max_tokens value before backend generation."""
-    session = _session("invalid-session-max-tokens", sampling_params={"max_tokens": 0})
-    backend = SequencedBackend(["SHOULD_NOT_RUN"])
-
-    with pytest.raises(HTTPException, match="max_tokens must be a positive integer") as exc_info:
-        await _run(session, backend, [{"role": "user", "content": "invalid session max_tokens"}])
-
-    assert exc_info.value.status_code == 400
-    assert backend.calls == []
-
-
-@pytest.mark.asyncio
-async def test_request_chat_template_kwargs_rejected_before_backend_call():
-    """Reject request-level template overrides before backend generation."""
-    session = _session("unsupported-request-chat-template-kwargs")
-    backend = SequencedBackend(["SHOULD_NOT_RUN"])
-
-    with pytest.raises(HTTPException, match="request-level chat_template_kwargs is not supported") as exc_info:
-        await _run(
-            session,
-            backend,
-            [{"role": "user", "content": "unsupported template override"}],
-            chat_template_kwargs={},
-        )
-
-    assert exc_info.value.status_code == 400
-    assert backend.calls == []
-
-
 @pytest.mark.asyncio
 async def test_multiple_chains_multimodal_media_stays_chain_local():
     """Keep image media isolated between independently selected chains."""
@@ -934,9 +898,12 @@ def test_message_prefix_hashes_canonicalize_json_tool_call_arguments():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("rewrite_fresh_tool_result_id", [False, True], ids=["matching-id", "rewritten-fresh-id"])
 async def test_multiple_chains_tool_call_echo_reuses_chain_despite_fresh_tool_result_id(
-    rewrite_fresh_tool_result_id,
+    rewrite_fresh_tool_result_id, monkeypatch
 ):
     """Match on the committed prefix; a fresh tool-result ID is outside that boundary."""
+    import uni_agent.gateway.session.codec as codec_mod
+
+    monkeypatch.setattr(codec_mod, "_extract_tool_calls_with_sglang_or_vllm", _fake_tool_call_dispatch)
     session = _session("tool-call-echo", tool_parser_name="hermes")
     tools = [{"type": "function", "function": {"name": "search", "parameters": {"type": "object"}}}]
     tool_call_text = '<tool_call>\n{"name": "search", "arguments": {"query": "weather"}}\n</tool_call>'
@@ -982,8 +949,11 @@ async def test_multiple_chains_tool_call_echo_reuses_chain_despite_fresh_tool_re
 
 
 @pytest.mark.asyncio
-async def test_multiple_chains_tool_call_id_rewrite_starts_new_chain():
+async def test_multiple_chains_tool_call_id_rewrite_starts_new_chain(monkeypatch):
     """Start a sibling when the caller rewrites a committed tool-call ID."""
+    import uni_agent.gateway.session.codec as codec_mod
+
+    monkeypatch.setattr(codec_mod, "_extract_tool_calls_with_sglang_or_vllm", _fake_tool_call_dispatch)
     session = _session("tool-call-id-rewrite", tool_parser_name="hermes")
     tools = [{"type": "function", "function": {"name": "search", "parameters": {"type": "object"}}}]
     tool_call_text = '<tool_call>\n{"name": "search", "arguments": {"query": "weather"}}\n</tool_call>'

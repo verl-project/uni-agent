@@ -1,13 +1,27 @@
-"""Shared gateway-owned dataclasses passed across session boundaries."""
+"""Shared gateway-owned types passed across session boundaries."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypedDict
 
 if TYPE_CHECKING:
     import numpy as np
     import torch
+
+
+class InternalGenerationRequest(TypedDict):
+    """Lowered request consumed by GatewaySession.run_generation.
+
+    Provider adapters lower OpenAI / Anthropic wire requests into this
+    template-facing canonical before the session sees them. It is not a
+    provider-neutral block model.
+    """
+
+    messages: list[dict[str, Any]]
+    tools: list[dict[str, Any]] | None
+    chat_template_kwargs: dict[str, Any]
+    sampling_params: dict[str, Any]
 
 
 @dataclass
@@ -16,11 +30,11 @@ class SessionHandle:
 
     Attributes:
         session_id: Stable session identifier assigned by the caller.
-        base_url: Per-session OpenAI-compatible ``/v1`` API root, or ``None``
+        base_url: Per-session provider-compatible ``/v1`` API root, or ``None``
             when the handle only needs to identify the session.
         reward_info_url: Per-session endpoint used by runners to attach reward
-            metadata; this is a sibling of the OpenAI-compatible ``/v1`` root
-            rather than part of that API.
+            metadata; this is a sibling of the provider ``/v1`` root rather
+            than part of that API.
     """
 
     session_id: str
@@ -46,8 +60,8 @@ class Trajectory:
         num_turns: Chat-turn count materialized with the trajectory.
         routed_experts: Optional expert-routing data captured by the backend.
         multi_modal_data: Optional image/video data associated with the prompt.
-        extra_fields: Gateway-owned extension fields, such as length finish
-            metadata consumed by training adapters.
+        extra_fields: Gateway-owned extension fields, such as trajectory
+            materialization metadata consumed by training adapters.
     """
 
     prompt_ids: list[int]

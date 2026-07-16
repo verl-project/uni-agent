@@ -12,8 +12,8 @@ from typing import Any
 
 from fastapi import HTTPException
 
-from uni_agent.gateway.session.codec import MalformedRequestError, MessageCodec
-from uni_agent.gateway.session.types import SessionHandle, Trajectory
+from uni_agent.gateway.session.codec import MessageCodec
+from uni_agent.gateway.session.types import InternalGenerationRequest, SessionHandle, Trajectory
 
 _EMPTY_PREFIX_HASH = hashlib.sha256(b"uni-agent-prefix-v1\0empty").hexdigest()
 
@@ -115,7 +115,7 @@ class GenerationOutcome:
     """Business result returned by ``GatewaySession.run_generation``.
 
     The session emits this instead of an HTTP response dict. ``_GatewayActor``
-    converts it into the OpenAI chat-completion JSON envelope.
+    passes it to the provider adapter for wire response serialization.
 
     Attributes:
         assistant_msg: Decoded assistant message, or an empty assistant message
@@ -136,8 +136,8 @@ class GatewaySession:
 
     ``_GatewayActor`` owns instances of this class, calls ``run_generation`` for
     chat requests, and delegates lifecycle operations here. The session owns the
-    conversation state and trajectory materialization, while the actor owns HTTP
-    routing and OpenAI response serialization.
+    conversation state and trajectory materialization, while the actor owns
+    HTTP routing and provider response serialization.
     """
 
     def __init__(
@@ -155,8 +155,8 @@ class GatewaySession:
 
         self.handle = handle
         self._codec = codec
-        # Stored for parity with the actor config; only the response budget is
-        # enforced during generation today (see _prepare_generation_inputs).
+        # Provider adapters merge these trusted defaults before calling the
+        # session; the response budget is enforced here during preparation.
         self._prompt_length = prompt_length
         self._response_length = response_length
         self._sampling_params = dict(sampling_params or {})
@@ -171,19 +171,21 @@ class GatewaySession:
         self.updated_at = self.created_at
         self.request_lock = asyncio.Lock()
 
-    async def run_generation(self, payload: dict[str, Any], backend) -> GenerationOutcome:
-        """Run one chat-completion request and return its business outcome.
+    @property
+    def sampling_params(self) -> dict[str, Any]:
+        """Return a copy of the trusted per-session sampling defaults."""
+        return dict(self._sampling_params)
+
+    async def run_generation(self, request: InternalGenerationRequest, backend) -> GenerationOutcome:
+        """Run one provider-normalized generation request and return its business outcome.
 
         The backend is passed in for this call only; the session does not own the
-        backend lifecycle. Protocol capability checks happen in the actor before
-        this method, while malformed payloads and backend errors are converted
-        into HTTP exceptions here.
+        backend lifecycle. The actor/provider adapter has already lowered the
+        wire payload to the internal canonical request; session never sees raw
+        wire payloads. Protocol capability checks happen in the actor before
+        this method, while backend errors are converted into HTTP exceptions
+        here.
         """
-        try:
-            request_context = self._codec.normalize_request(payload)
-        except MalformedRequestError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-
         # Same-session requests overlap backend generation and commit in backend
         # completion order. The framework currently scores session_trajectories[-1]
         # and broadcasts that reward, so concurrent siblings share one reward target.
@@ -197,10 +199,7 @@ class GatewaySession:
                     )
                 # Prepare can touch codec and multimodal extractor state, so only
                 # backend generation runs outside the session lock.
-                try:
-                    encoded = await self._prepare_generation_inputs(payload, request_context)
-                except MalformedRequestError as exc:
-                    raise HTTPException(status_code=400, detail=str(exc)) from exc
+                encoded = await self._prepare_generation_inputs(request)
                 if encoded.length_exhausted_trajectory is not None:
                     empty_msg = {"role": "assistant", "content": ""}
                     self._close_length_exhausted_chain(encoded)
@@ -327,15 +326,11 @@ class GatewaySession:
 
     async def _prepare_generation_inputs(
         self,
-        payload: dict[str, Any],
-        request_context: dict[str, Any],
+        request: InternalGenerationRequest,
     ) -> EncodedData:
-        messages = request_context["messages"]
-        tools = request_context["tools"]
-        sampling_params = self._codec.build_sampling_params(
-            payload,
-            session_sampling_params=self._sampling_params,
-        )
+        messages = request["messages"]
+        tools = request["tools"]
+        sampling_params = dict(request["sampling_params"])
         incoming_message_prefix_hashes = self._extend_message_prefix_hashes([], messages)
         selected_chain = self._select_chain(
             tools=tools,
