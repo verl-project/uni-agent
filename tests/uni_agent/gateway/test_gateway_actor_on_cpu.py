@@ -1186,14 +1186,6 @@ async def test_gateway_actor_rejects_malformed_requests_with_bad_request(ray_run
             {
                 "model": "dummy-model",
                 "messages": [{"role": "user", "content": "hello"}],
-                "chat_template_kwargs": {},
-            },
-            "request-level chat_template_kwargs is not supported",
-        ),
-        (
-            {
-                "model": "dummy-model",
-                "messages": [{"role": "user", "content": "hello"}],
                 "max_tokens": 0,
             },
             "max_tokens must be a positive integer",

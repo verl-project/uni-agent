@@ -98,6 +98,7 @@ def test_openai_to_internal_normalizes_messages_sampling_and_tools():
         "max_tokens": 32,
         "temperature": 0.7,
         "stop": ["</s>"],
+        "chat_template_kwargs": {"enable_thinking": True},
         "ignored_field": 1,
     }
     req = openai_to_internal(
@@ -105,12 +106,11 @@ def test_openai_to_internal_normalizes_messages_sampling_and_tools():
         base_sampling_params={"top_p": 0.9},
         allowed_sampling_keys=ALLOWED_SAMPLING_KEYS,
     )
-    assert set(req) == {"messages", "tools", "chat_template_kwargs", "sampling_params"}
+    assert set(req) == {"messages", "tools", "sampling_params"}
     assert req["messages"][0] == {"role": "user", "content": "hi"}
     assert req["messages"][1]["tool_calls"][0]["function"]["arguments"] == {"x": 1}
     assert req["messages"][1]["tool_calls"][1]["function"]["arguments"] == "not json"
     assert req["tools"][0]["function"]["name"] == "f"
-    assert req["chat_template_kwargs"] == {}
     assert req["sampling_params"]["max_tokens"] == 32
     assert req["sampling_params"]["temperature"] == 0.7
     assert req["sampling_params"]["top_p"] == 0.9

@@ -548,6 +548,5 @@ def anthropic_to_internal(
     return {
         "messages": messages,
         "tools": tools,
-        "chat_template_kwargs": {},
         "sampling_params": sampling_params,
     }

@@ -195,15 +195,10 @@ def openai_to_internal(
     else:
         raise MalformedRequestError("tool_choice must be a string or object")
 
-    # Required payload fields and template kwargs.
+    # Required payload fields.
     messages = payload.get("messages")
     if not isinstance(messages, list) or not messages:
         raise MalformedRequestError("messages must be non-empty")
-
-    if payload.get("chat_template_kwargs") is not None:
-        raise MalformedRequestError(
-            "request-level chat_template_kwargs is not supported; configure data.apply_chat_template_kwargs instead"
-        )
 
     # Tool injection policy.
     tools = payload.get("tools")
@@ -221,6 +216,5 @@ def openai_to_internal(
     return {
         "messages": [_normalize_message(message) for message in messages],
         "tools": tools,
-        "chat_template_kwargs": {},
         "sampling_params": sampling_params,
     }
