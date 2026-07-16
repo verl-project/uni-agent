@@ -8,7 +8,7 @@ decided at run time, not baked into the dataset.
 
 Example::
 
-    python examples/data_preprocess/swe_bench_verified.py --local-save-dir ~/data/swe_agent
+    python -m uni_agent.tasks.swe_bench.preprocess --local-save-dir ~/data/swe_agent
 """
 
 import argparse

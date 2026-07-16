@@ -87,7 +87,7 @@ class TaskResult:
 class Task(ABC):
     """A task family: turns a :class:`TaskConfig` into the runnable lower layers.
 
-    Concrete tasks live in ``tasks/<name>/run.py``: set :attr:`name`, subclass
+    Concrete tasks live in ``tasks/<name>/task.py``: set :attr:`name`, subclass
     :class:`TaskConfig`, and implement :meth:`run` (which also does reward scoring).
     The base provides the config -> runtime glue (:meth:`build_sandbox`,
     :meth:`build_agent`) so runners stay generic.

@@ -1,1 +1,1 @@
-"""SWE-rebench task (native framework loop). See :mod:`.run`."""
+"""SWE-rebench task (native framework loop). See :mod:`.task`."""

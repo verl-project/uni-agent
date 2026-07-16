@@ -1,7 +1,7 @@
 """Task registry: register a task family by name and build it by name.
 
 Mirrors the agent / sandbox registries. Concrete tasks live in
-``tasks/<name>/run.py`` and register themselves with :func:`register_task`;
+``tasks/<name>/task.py`` and register themselves with :func:`register_task`;
 :func:`get_task` builds one from either a :class:`TaskConfig` (dispatched on
 ``config.name``, like ``build_agent``) or a flat ``{"name", ...fields}`` mapping
 (the form training carries in ``extra_info.tools_kwargs.task``), importing the
@@ -20,8 +20,8 @@ TASK_REGISTRY: dict[str, type[Task]] = {}
 
 #: name -> module that defines (and registers) the task, for lazy loading.
 TASK_MODULES: dict[str, str] = {
-    "swe_bench": "uni_agent.tasks.swe_bench.run",
-    "swe_rebench": "uni_agent.tasks.swe_rebench.run",
+    "swe_bench": "uni_agent.tasks.swe_bench.task",
+    "swe_rebench": "uni_agent.tasks.swe_rebench.task",
 }
 
 

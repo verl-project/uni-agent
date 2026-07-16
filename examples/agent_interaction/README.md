@@ -17,7 +17,7 @@ For the full setup guide, see the documentation:
 Minimal Modal example:
 
 ```bash
-DEPLOYMENT=modal python examples/data_preprocess/swe_bench_verified.py \
+DEPLOYMENT=modal python -m uni_agent.tasks.swe_bench.preprocess \
     --local-save-dir ~/data/swe_agent
 
 python examples/agent_interaction/parallel_infer.py \

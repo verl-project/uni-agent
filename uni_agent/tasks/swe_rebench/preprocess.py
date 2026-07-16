@@ -3,7 +3,7 @@
 
 Example::
 
-    python examples/data_preprocess/swe_rebench.py --local-save-dir ~/data/swe_agent
+    python -m uni_agent.tasks.swe_rebench.preprocess --local-save-dir ~/data/swe_agent
 """
 
 import argparse

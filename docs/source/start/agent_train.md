@@ -57,9 +57,9 @@ For a Modal-based SWE training setup:
 
 ```bash
 # Training Data
-DEPLOYMENT=modal python examples/data_preprocess/swe_rebench.py --local-save-dir "${RAY_DATA_HOME}/data/swe_agent"
+DEPLOYMENT=modal python -m uni_agent.tasks.swe_rebench.preprocess --local-save-dir "${RAY_DATA_HOME}/data/swe_agent"
 # Evaluation Data
-DEPLOYMENT=modal python examples/data_preprocess/swe_bench_verified.py --local-save-dir "${RAY_DATA_HOME}/data/swe_agent"
+DEPLOYMENT=modal python -m uni_agent.tasks.swe_bench.preprocess --local-save-dir "${RAY_DATA_HOME}/data/swe_agent"
 ```
 
 This writes:

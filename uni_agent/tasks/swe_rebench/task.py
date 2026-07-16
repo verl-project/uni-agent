@@ -1,6 +1,6 @@
 """SWE-rebench task (native framework loop).
 
-Same shape as :mod:`uni_agent.tasks.swe_bench.run`, with two swe-rebench specifics:
+Same shape as :mod:`uni_agent.tasks.swe_bench.task`, with two swe-rebench specifics:
 scoring reads the eval config carried on the row (see :mod:`.reward`), and the
 future git history is cleaned in-sandbox before the agent runs (this used to be a
 data-preprocess ``post_setup_cmd``; owning it here keeps the dataset row declarative).

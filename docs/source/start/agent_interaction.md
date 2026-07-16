@@ -38,10 +38,10 @@ The inference and verification scripts for this page live under `examples/agent_
 
 Start with the dataset. A parallel interaction sample needs the prompt, the sandbox setup, and the reward metadata required for verification.
 
-Use `examples/data_preprocess/swe_bench_verified.py` to fetch [SWE-Bench Verified](https://huggingface.co/datasets/princeton-nlp/SWE-bench_Verified) and build a Parquet file in the format Uni-Agent expects. Set `DEPLOYMENT` to match the sandbox backend you plan to use, because the preprocessing step writes backend-specific image names. The commands below use Modal as the example backend.
+Use `uni_agent/tasks/swe_bench/preprocess.py` to fetch [SWE-Bench Verified](https://huggingface.co/datasets/princeton-nlp/SWE-bench_Verified) and build a Parquet file in the format Uni-Agent expects. Set `DEPLOYMENT` to match the sandbox backend you plan to use, because the preprocessing step writes backend-specific image names. The commands below use Modal as the example backend.
 
 ```bash
-DEPLOYMENT=modal python examples/data_preprocess/swe_bench_verified.py --local-save-dir ~/data/swe_agent
+DEPLOYMENT=modal python -m uni_agent.tasks.swe_bench.preprocess --local-save-dir ~/data/swe_agent
 ```
 
 The script writes `~/data/swe_agent/swe_bench_verified_<deployment>.parquet`, for example `~/data/swe_agent/swe_bench_verified_modal.parquet`.
