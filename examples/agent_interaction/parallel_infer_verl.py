@@ -142,7 +142,7 @@ def init_config(args: argparse.Namespace, *, task_entries: list[dict], served_mo
         "agent_runners": {
             "task": {
                 "runner_fqn": "uni_agent.framework.task_runner.run_task",
-                "dispatch_mode": "inline_async",
+                "dispatch_mode": "ray_task",
                 "max_concurrent_sessions": max(0, args.concurrency),
                 "runner_kwargs": {
                     "task_config_path": args.task_config,
