@@ -117,7 +117,7 @@ def _short_failure_reason(error: BaseException) -> str:
     message = str(error)
     if not message:
         message = error.__class__.__name__
-    return message[:512]
+    return f"{error.__class__.__name__}:{message}"[:512]
 
 
 _TQ_NESTED_SEQUENCE_FIELDS = {
@@ -392,16 +392,22 @@ class OpenAICompatibleAgentFramework(AgentFramework):
                 failure_reasons.append(f"empty trajectories for uid={uid} session_index={session_index}")
                 continue
 
-            success_sessions += 1
-            await self._write_session_trajectories_to_tq(
-                uid=uid,
-                session_index=session_index,
-                trajectories=trajectories,
-                sample_fields=session_sample_fields,
-                global_steps=global_steps,
-                partition_id=partition_id,
-            )
-            success_outputs += len(trajectories)
+            try:
+                await self._write_session_trajectories_to_tq(
+                    uid=uid,
+                    session_index=session_index,
+                    trajectories=trajectories,
+                    sample_fields=session_sample_fields,
+                    global_steps=global_steps,
+                    partition_id=partition_id,
+                )
+            except Exception as e:
+                logger.exception(f"TQ write failed for uid={uid} session={session_index}: {e}")
+                failed_sessions += 1
+                failure_reasons.append(f"TQ write error: {e}")
+            else:
+                success_sessions += 1
+                success_outputs += len(trajectories)
 
         if success_sessions > 0:
             await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "finished"})
