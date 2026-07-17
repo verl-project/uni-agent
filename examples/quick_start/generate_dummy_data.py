@@ -5,6 +5,7 @@ Produces 8 identical trivial "fix the bug" samples. There is no real task,
 no real reward signal, and no training benefit -- this only exercises the
 data -> agent loop -> trajectory -> reward -> training path end to end.
 """
+
 import argparse
 import os
 
