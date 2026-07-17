@@ -17,11 +17,61 @@ from swebench.harness.log_parsers import MAP_REPO_TO_PARSER
 from swebench.harness.test_spec.python import get_test_directives
 from swebench.harness.utils import get_modified_files
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from uni_agent.async_logging import get_logger
-from uni_agent.interaction import AgentEnv
 from uni_agent.reward.base import AbstractRewardSpec
+
+if TYPE_CHECKING:
+    from uni_agent.interaction import AgentEnv
 from uni_agent.reward.registry import register_reward_spec
 from uni_agent.utils import auto_await
+
+
+def make_eval_script(metadata: dict, workdir: str, env_name: str = "testbed") -> str:
+    """Build a self-contained bash eval script for a SWE-bench instance.
+
+    Returns the full script string (with shebang). Caller writes it to a file
+    and executes it; output is parsed by :func:`parse_eval_output`.
+    """
+    repo, version = metadata["repo"], metadata["version"]
+    specs = MAP_REPO_VERSION_TO_SPECS[repo][version]
+    cmds = _make_eval_script_list(
+        instance=metadata, specs=specs, env_name=env_name,
+        repo_directory=workdir, base_commit=metadata.get("base_commit", ""),
+        test_patch=metadata["test_patch"],
+    )
+    return "\n".join(["#!/bin/bash", "set -uxo pipefail"] + cmds) + "\n"
+
+
+def parse_eval_output(metadata: dict, eval_output: str) -> tuple[bool, dict]:
+    """Parse raw eval output and return (solved, report).
+
+    Pure function — no env/sandbox dependency. Reusable by any caller that
+    ran the script from :func:`make_eval_script`.
+    """
+    repo = metadata["repo"]
+    report = {"resolved": False, "found_eval_status": False, "test_status": None}
+
+    if START_TEST_OUTPUT not in eval_output or END_TEST_OUTPUT not in eval_output:
+        return False, report
+
+    test_content = eval_output.split(START_TEST_OUTPUT)[1].split(END_TEST_OUTPUT)[0]
+    status_map = MAP_REPO_TO_PARSER[repo](test_content, None)
+    report["found_eval_status"] = True
+
+    eval_ref = {
+        "instance_id": metadata["instance_id"],
+        "FAIL_TO_PASS": json.loads(metadata.get("FAIL_TO_PASS", "[]")),
+        "PASS_TO_PASS": json.loads(metadata.get("PASS_TO_PASS", "[]")),
+    }
+    eval_type = EvalType.FAIL_ONLY if repo in FAIL_ONLY_REPOS else EvalType.PASS_AND_FAIL
+    eval_tests_report = get_eval_tests_report(status_map, eval_ref, eval_type=eval_type)
+    report["test_status"] = eval_tests_report
+    report["resolved"] = get_resolution_status(eval_tests_report) == ResolvedStatus.FULL.value
+    return report["resolved"], report
 
 
 # fix: https://github.com/SWE-bench/SWE-bench/issues/518
@@ -96,52 +146,23 @@ class SWEBenchRewardSpec(AbstractRewardSpec):
             "resolved": False,
         }
 
-        # 1. eval script
-        instance = self.metadata
-        repo = instance["repo"]
-        version = instance.get("version")
-        specs = MAP_REPO_VERSION_TO_SPECS[repo][version]
-        env_name = "testbed"
-        repo_directory = f"/{env_name}"
-        base_commit = instance["base_commit"]
-        test_patch = instance["test_patch"]
-        eval_script_list = _make_eval_script_list(
-            instance=instance,
-            specs=specs,
-            env_name=env_name,
-            repo_directory=repo_directory,
-            base_commit=base_commit,
-            test_patch=test_patch,
-        )
-        eval_script = "\n".join(["#!/bin/bash", "set -uxo pipefail"] + eval_script_list) + "\n"
-
         try:
-            # write eval script to container
+            eval_script = make_eval_script(self.metadata, workdir="/testbed")
             eval_script_container = Path(f"/tmp/eval_script_{uuid.uuid4()}.sh")
             await self.env.write_file(eval_script_container, eval_script)
 
             execution_t0 = time.perf_counter()
-
-            cmd_str = f"bash {eval_script_container}"
-            output = await self.env.communicate(cmd_str, timeout=self.eval_timeout, check="ignore")
-
-            # cmd_str = f"bash {eval_script_container} 2>&1"
-            # from swerex.runtime.abstract import Command
-            # r = await self.env.deployment.runtime.execute(
-            #     Command(command=["bash", "-c", cmd_str], timeout=self.eval_timeout)
-            # )
-            # output = r.stdout
+            output = await self.env.communicate(
+                f"bash {eval_script_container}", timeout=self.eval_timeout, check="ignore")
             execution_time = time.perf_counter() - execution_t0
             result["eval_completed"] = True
             result["eval_execution_time"] = execution_time
 
-            # Remove ANSI escape codes and \r
             output = re.sub(r"\x1b\[[0-9;]*m|\r", "", output)
-
-            eval_report = self._get_eval_report(output)
+            solved, eval_report = parse_eval_output(self.metadata, output)
             result["eval_report"] = eval_report
             self.logger.info(f"Eval report: {eval_report}")
-            result["resolved"] = eval_report["resolved"]
+            result["resolved"] = solved
         except Exception as e:
             self.logger.error(f"Failed to evaluate: {e}")
         return result["resolved"], result
@@ -185,41 +206,7 @@ class SWEBenchRewardSpec(AbstractRewardSpec):
                 continue
         raise RuntimeError("Failed to apply patch with any command") from last_error
 
-    def _get_logs_eval(self, eval_output: str):
-        instance = self.metadata
-        repo = instance["repo"]
-        log_parser = MAP_REPO_TO_PARSER[repo]
-        if START_TEST_OUTPUT in eval_output and END_TEST_OUTPUT in eval_output:
-            test_content = eval_output.split(START_TEST_OUTPUT)[1].split(END_TEST_OUTPUT)[0]
-            status_map = log_parser(test_content, None)
-            return status_map, True
-        else:
-            status_map = {}
-            return status_map, False
-
     def _get_eval_report(self, eval_output: str):
-        eval_report = {
-            "resolved": False,
-            "found_eval_status": False,
-            "test_status": None,
-        }
-
-        # step 1: get logs eval
-        status_map, found = self._get_logs_eval(eval_output)
-        eval_report["found_eval_status"] = found
-        if not found:
-            return eval_report
-
-        # step 2: get eval tests report
-        eval_ref = {
-            "instance_id": self.metadata["instance_id"],
-            "FAIL_TO_PASS": json.loads(self.metadata.get("FAIL_TO_PASS", "[]")),
-            "PASS_TO_PASS": json.loads(self.metadata.get("PASS_TO_PASS", "[]")),
-        }
-        repo = self.metadata["repo"]
-        eval_type = EvalType.FAIL_ONLY if repo in FAIL_ONLY_REPOS else EvalType.PASS_AND_FAIL
-        report = get_eval_tests_report(status_map, eval_ref, eval_type=eval_type)
-        eval_report["test_status"] = report
-        if get_resolution_status(report) == ResolvedStatus.FULL.value:
-            eval_report["resolved"] = True
-        return eval_report
+        """Delegates to module-level :func:`parse_eval_output`."""
+        _, report = parse_eval_output(self.metadata, eval_output)
+        return report
