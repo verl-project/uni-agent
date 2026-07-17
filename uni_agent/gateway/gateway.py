@@ -35,6 +35,7 @@ from uni_agent.gateway.session import (
     SessionHandle,
     Trajectory,
 )
+from verl.utils.net_utils import is_valid_ipv6_address
 from verl.workers.rollout.utils import run_uvicorn
 
 DEFAULT_ALLOWED_REQUEST_SAMPLING_KEYS = frozenset({"temperature", "top_p", "top_k", "max_tokens", "stop"})
@@ -61,9 +62,7 @@ class _GatewayActor:
 
     def __init__(self, config: GatewayActorConfig, backend):
         """Create an actor with model codec configuration and backend client."""
-        # Same pattern as vllm_async_server.py / async_sglang_server.py:
-        # use the node's routable IP for both bind and URL.
-        self._server_address = ray.util.get_node_ip_address()
+        self._server_address = ray.util.get_node_ip_address().strip("[]")
         self._backend = backend
         self._codec = MessageCodec(
             tokenizer=config.tokenizer,
@@ -216,7 +215,8 @@ class _GatewayActor:
         if self._server_task is not None:
             return
         self._server_port, self._server_task = await run_uvicorn(self._app, None, self._server_address)
-        self._server_base_url = f"http://{self._server_address}:{self._server_port}"
+        host = f"[{self._server_address}]" if is_valid_ipv6_address(self._server_address) else self._server_address
+        self._server_base_url = f"http://{host}:{self._server_port}"
 
     async def shutdown(self) -> None:
         """Stop the FastAPI server backing this gateway actor."""
