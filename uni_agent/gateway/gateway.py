@@ -35,12 +35,19 @@ from uni_agent.gateway.session import (
     SessionHandle,
     Trajectory,
 )
-from verl.utils.net_utils import is_valid_ipv6_address
 from verl.workers.rollout.utils import run_uvicorn
 
 DEFAULT_ALLOWED_REQUEST_SAMPLING_KEYS = frozenset({"temperature", "top_p", "top_k", "max_tokens", "stop"})
 
 logger = logging.getLogger("gateway")
+
+
+def _validate_sampling_params(sampling_params: dict[str, Any]) -> None:
+    max_tokens = sampling_params.get("max_tokens")
+    if "max_tokens" in sampling_params and (
+        not isinstance(max_tokens, int) or isinstance(max_tokens, bool) or max_tokens <= 0
+    ):
+        raise MalformedRequestError("max_tokens must be a positive integer")
 
 
 class _GatewayActor:
@@ -54,7 +61,9 @@ class _GatewayActor:
 
     def __init__(self, config: GatewayActorConfig, backend):
         """Create an actor with model codec configuration and backend client."""
-        self._server_address = ray.util.get_node_ip_address().strip("[]")
+        # Same pattern as vllm_async_server.py / async_sglang_server.py:
+        # use the node's routable IP for both bind and URL.
+        self._server_address = ray.util.get_node_ip_address()
         self._backend = backend
         self._codec = MessageCodec(
             tokenizer=config.tokenizer,
@@ -163,9 +172,10 @@ class _GatewayActor:
         try:
             internal = openai_to_internal(
                 payload,
-                base_sampling_params=self._base_sampling_params,
+                base_sampling_params={**self._base_sampling_params, **session.sampling_params},
                 allowed_sampling_keys=self._allowed_request_sampling_param_keys,
             )
+            _validate_sampling_params(internal["sampling_params"])
         except MalformedRequestError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -188,9 +198,10 @@ class _GatewayActor:
         try:
             internal = anthropic_to_internal(
                 payload,
-                base_sampling_params=self._base_sampling_params,
+                base_sampling_params={**self._base_sampling_params, **session.sampling_params},
                 allowed_sampling_keys=self._allowed_request_sampling_param_keys,
             )
+            _validate_sampling_params(internal["sampling_params"])
         except MalformedRequestError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -205,8 +216,7 @@ class _GatewayActor:
         if self._server_task is not None:
             return
         self._server_port, self._server_task = await run_uvicorn(self._app, None, self._server_address)
-        host = f"[{self._server_address}]" if is_valid_ipv6_address(self._server_address) else self._server_address
-        self._server_base_url = f"http://{host}:{self._server_port}"
+        self._server_base_url = f"http://{self._server_address}:{self._server_port}"
 
     async def shutdown(self) -> None:
         """Stop the FastAPI server backing this gateway actor."""
@@ -221,7 +231,12 @@ class _GatewayActor:
         self._server_port = None
         self._server_base_url = None
 
-    async def create_session(self, session_id: str, metadata: dict[str, Any] | None = None) -> SessionHandle:
+    async def create_session(
+        self,
+        session_id: str,
+        metadata: dict[str, Any] | None = None,
+        sampling_params: dict[str, Any] | None = None,
+    ) -> SessionHandle:
         """Create an actor-owned session and return its provider-compatible handle."""
         self._require_started()
         if session_id in self._sessions:
@@ -237,6 +252,7 @@ class _GatewayActor:
             codec=self._codec,
             prompt_length=self._prompt_length,
             response_length=self._response_length,
+            sampling_params=sampling_params,
         )
         return handle
 

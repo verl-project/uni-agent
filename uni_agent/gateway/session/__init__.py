@@ -3,14 +3,15 @@
 The gateway is a thin HTTP layer; this package holds the session-side logic it
 serves: trajectory buffering and message encoding/decoding.
 ``SessionHandle`` / ``Trajectory`` are consumed by framework runners, while
-``InternalGenerationRequest`` (in :mod:`.types`) is the adapter-to-session boundary.
+``InternalGenerationRequest`` is the adapter-to-session request boundary.
 """
 
 from .codec import MessageCodec
 from .session import GatewaySession, TrajectoryBuffer
-from .types import SessionHandle, Trajectory
+from .types import InternalGenerationRequest, SessionHandle, Trajectory
 
 __all__ = [
+    "InternalGenerationRequest",
     "GatewaySession",
     "MessageCodec",
     "SessionHandle",

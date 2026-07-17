@@ -41,3 +41,7 @@ class GatewayActorConfig:
     vision_info_extractor_kwargs: dict[str, Any] | None = None
     prompt_length: int | None = None
     response_length: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.response_length is not None and self.response_length <= 0:
+            raise ValueError(f"response_length must be positive when set, got {self.response_length}")

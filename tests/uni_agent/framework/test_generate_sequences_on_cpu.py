@@ -83,7 +83,16 @@ async def _build_framework_with_agent_runners(
             "actor_rollout_ref": {
                 "rollout": {
                     "n": n,
-                    "val_kwargs": {"n": val_n},
+                    "temperature": 0.7,
+                    "top_p": 0.8,
+                    "top_k": 20,
+                    "calculate_log_probs": True,
+                    "val_kwargs": {
+                        "n": val_n,
+                        "temperature": 0,
+                        "top_p": 0.95,
+                        "top_k": -1,
+                    },
                     "custom": {"agent_framework": agent_framework_cfg},
                 }
             }
@@ -94,6 +103,65 @@ async def _build_framework_with_agent_runners(
         gateway_manager=gateway_manager,
         reward_loop_worker_handles=reward_loop_worker_handles,
     )
+
+
+@pytest.mark.parametrize(
+    ("data_config", "expected_chat_template_kwargs"),
+    [
+        ({}, {}),
+        ({"apply_chat_template_kwargs": {"thinking": True}}, {"thinking": True}),
+    ],
+)
+def test_build_gateway_manager_wires_gateway_config_defaults(
+    monkeypatch,
+    data_config,
+    expected_chat_template_kwargs,
+):
+    from omegaconf import OmegaConf
+
+    from uni_agent.framework import entry as entry_module
+
+    class _ModelConfig:
+        tokenizer = object()
+        processor = None
+
+    captured = {}
+
+    class _FakeGatewayManager:
+        def __init__(self, *, llm_client, gateway_count, gateway_actor_config):
+            captured["llm_client"] = llm_client
+            captured["gateway_count"] = gateway_count
+            captured["gateway_actor_config"] = gateway_actor_config
+
+    monkeypatch.setattr(entry_module, "omega_conf_to_dataclass", lambda _config: _ModelConfig())
+    monkeypatch.setattr(entry_module, "GatewayManager", _FakeGatewayManager)
+
+    llm_client = object()
+    config = OmegaConf.create(
+        {
+            "data": data_config,
+            "actor_rollout_ref": {
+                "model": {},
+                "rollout": {
+                    "prompt_length": 128,
+                    "response_length": 64,
+                    "multi_turn": {"format": "hermes"},
+                    "custom": {"agent_framework": {"gateway_count": 2}},
+                },
+            },
+        }
+    )
+
+    manager = entry_module.build_gateway_manager(config=config, llm_client=llm_client)
+
+    assert isinstance(manager, _FakeGatewayManager)
+    assert captured["llm_client"] is llm_client
+    assert captured["gateway_count"] == 2
+    assert captured["gateway_actor_config"].prompt_length == 128
+    assert captured["gateway_actor_config"].response_length == 64
+    assert captured["gateway_actor_config"].tool_parser_name == "hermes"
+    assert isinstance(captured["gateway_actor_config"].apply_chat_template_kwargs, dict)
+    assert captured["gateway_actor_config"].apply_chat_template_kwargs == expected_chat_template_kwargs
 
 
 class _FakeTransferQueue:
@@ -131,6 +199,7 @@ class _FakeGatewayManager:
     def __init__(self, finalized_by_session_prefix: dict[str, list[Trajectory]]):
         self._finalized_by_prefix = finalized_by_session_prefix
         self.created_sessions = []
+        self.created_session_kwargs = []
         self.finalized_sessions = []
         self.aborted_sessions = []
 
@@ -142,6 +211,7 @@ class _FakeGatewayManager:
 
     async def create_session(self, session_id: str, **kwargs):
         self.created_sessions.append(session_id)
+        self.created_session_kwargs.append(dict(kwargs))
         return SessionHandle(
             session_id=session_id,
             base_url=f"http://fake/{session_id}/v1",
@@ -156,20 +226,29 @@ class _FakeGatewayManager:
         self.aborted_sessions.append(session_id)
 
 
-def _build_prompts(count: int = 2, *, global_steps: int = 7, validate: bool = False):
+def _build_prompts(
+    count: int = 2,
+    *,
+    global_steps: int = 7,
+    validate: bool = False,
+    do_sample: bool | None = None,
+):
     non_tensor_dict = {"global_steps": global_steps}
     if validate:
         non_tensor_dict["validate"] = True
+    tensor_dict = {
+        "raw_prompt": [[{"role": "user", "content": f"sample {i}"}] for i in range(count)],
+        "uid": [f"uid-{i}" for i in range(count)],
+        "data_source": ["deepeyes"] * count,
+        "reward_model": [{"ground_truth": f"answer-{i}"} for i in range(count)],
+        "extra_info": [{"index": i} for i in range(count)],
+        "tools_kwargs": [{"tool": i} for i in range(count)],
+        "agent_name": ["deepeyes"] * count,
+    }
+    if do_sample is not None:
+        tensor_dict["__do_sample__"] = [do_sample] * count
     return tu.get_tensordict(
-        tensor_dict={
-            "raw_prompt": [[{"role": "user", "content": f"sample {i}"}] for i in range(count)],
-            "uid": [f"uid-{i}" for i in range(count)],
-            "data_source": ["deepeyes"] * count,
-            "reward_model": [{"ground_truth": f"answer-{i}"} for i in range(count)],
-            "extra_info": [{"index": i} for i in range(count)],
-            "tools_kwargs": [{"tool": i} for i in range(count)],
-            "agent_name": ["deepeyes"] * count,
-        },
+        tensor_dict=tensor_dict,
         non_tensor_dict=non_tensor_dict,
     )
 
@@ -179,6 +258,7 @@ def _trajectory(
     prompt_ids: list[int] | None = None,
     response_ids: list[int] | None = None,
     response_logprobs: list[float] | None = None,
+    reward_info: dict[str, object] | None = None,
     num_turns: int = 2,
     extra_fields: dict[str, object] | None = None,
 ):
@@ -189,6 +269,7 @@ def _trajectory(
         response_ids=response_ids,
         response_mask=[1] * len(response_ids),
         response_logprobs=response_logprobs,
+        reward_info=dict(reward_info or {}),
         reward_score=None,
         num_turns=num_turns,
         multi_modal_data={"images": ["raw-image-should-not-be-written"]},
@@ -259,12 +340,79 @@ async def test_agent_runners_registry_materializes_runners_and_selects_by_agent_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("validate", "do_sample", "expected_sampling_params"),
+    [
+        (
+            False,
+            None,
+            {
+                "temperature": 0.7,
+                "top_p": 0.8,
+                "top_k": 20,
+                "repetition_penalty": 1.0,
+                "logprobs": True,
+            },
+        ),
+        (
+            True,
+            None,
+            {
+                "temperature": 0,
+                "top_p": 0.95,
+                "top_k": -1,
+                "repetition_penalty": 1.0,
+                "logprobs": True,
+            },
+        ),
+        (
+            False,
+            False,
+            {
+                "temperature": 0,
+                "top_p": 1.0,
+                "top_k": -1,
+                "repetition_penalty": 1.0,
+                "logprobs": True,
+            },
+        ),
+    ],
+)
+async def test_framework_binds_sampling_defaults_to_gateway_sessions(
+    fake_tq,
+    validate,
+    do_sample,
+    expected_sampling_params,
+):
+    runtime = _FakeGatewayManager({"session-0-0": [_trajectory()]})
+    framework = await _build_framework_with_agent_runners(
+        agent_runners={"runner": _inline_runner_config(_async_noop_runner)},
+        gateway_manager=runtime,
+    )
+
+    await framework.generate_sequences(
+        _build_prompts(
+            count=1,
+            validate=validate,
+            do_sample=do_sample,
+        )
+    )
+
+    assert runtime.created_session_kwargs == [{"sampling_params": expected_sampling_params}]
+
+
+@pytest.mark.asyncio
 async def test_generate_sequences_writes_tq_schema_for_each_session(monkeypatch, fake_tq):
     """Full ``generate_sequences`` path writes one TQ batch per successful
     session and trainer-compatible trajectory fields."""
     runtime = _FakeGatewayManager(
         {
-            "session-0-0": [_trajectory(response_logprobs=[-0.1, -0.2], extra_fields={"finish_reason": "length"})],
+            "session-0-0": [
+                _trajectory(
+                    response_logprobs=[-0.1, -0.2],
+                    extra_fields={"materialization_reason": "max_response_length"},
+                )
+            ],
             "session-0-1": [_trajectory(response_logprobs=[-0.3, -0.4])],
         }
     )
@@ -295,7 +443,15 @@ async def test_generate_sequences_writes_tq_schema_for_each_session(monkeypatch,
     tag = first["tags"][0]
     assert {
         key: tag[key]
-        for key in ("global_steps", "status", "prompt_len", "response_len", "seq_len", "uid", "finish_reason")
+        for key in (
+            "global_steps",
+            "status",
+            "prompt_len",
+            "response_len",
+            "seq_len",
+            "uid",
+            "materialization_reason",
+        )
     } == {
         "global_steps": 7,
         "status": "success",
@@ -303,10 +459,11 @@ async def test_generate_sequences_writes_tq_schema_for_each_session(monkeypatch,
         "response_len": 2,
         "seq_len": 4,
         "uid": "uid-0",
-        "finish_reason": "length",
+        "materialization_reason": "max_response_length",
     }
     assert "length_truncated" not in tag
     assert "traj_exit_reason" not in tag
+    assert "materialization_reason" not in fields
     assert fields["input_ids"].is_nested
     assert fields["response_mask"].is_nested
     assert fields["position_ids"].is_nested
@@ -331,6 +488,37 @@ async def test_generate_sequences_writes_tq_schema_for_each_session(monkeypatch,
     assert tu.get(fields, "global_steps") == [7]
     assert fields["num_turns"].tolist() == [2]
     assert "multi_modal_data" not in fields.keys()
+
+
+@pytest.mark.asyncio
+async def test_generate_sequences_batches_length_trajectory_before_normal_trajectory(fake_tq):
+    """Keep length metadata in tags when mixed trajectories share one TQ batch."""
+    runtime = _FakeGatewayManager(
+        {
+            "session-0-0": [
+                _trajectory(
+                    response_ids=[20],
+                    extra_fields={"materialization_reason": "max_response_length"},
+                ),
+                _trajectory(response_ids=[21]),
+            ]
+        }
+    )
+    framework = await _build_framework_with_agent_runners(
+        agent_runners={"runner": _inline_runner_config(_async_noop_runner)},
+        gateway_manager=runtime,
+    )
+
+    await framework.generate_sequences(_build_prompts(count=1, global_steps=8))
+
+    assert len(fake_tq.batch_puts) == 1
+    batch = fake_tq.batch_puts[0]
+    assert batch["keys"] == ["uid-0_0_0", "uid-0_0_1"]
+    assert batch["tags"][0]["materialization_reason"] == "max_response_length"
+    assert "materialization_reason" not in batch["tags"][1]
+    assert "materialization_reason" not in batch["fields"].keys()
+    assert batch["fields"]["responses"][0].tolist() == [20]
+    assert batch["fields"]["responses"][1].tolist() == [21]
 
 
 @pytest.mark.asyncio

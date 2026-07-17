@@ -152,6 +152,8 @@ Start with the script defaults, then tune these first:
 - `max_prompt_length`, `max_response_length`: context budget for the agent trajectory.
 - `staleness_threshold`, `trigger_parameter_sync_step`, `require_batches`, `partial_rollout`: fully async scheduling and weight synchronization behavior.
 
+Gateway sessions keep multiple active linear chains by default for subagent, compaction, and retry-style flows. Backend generation calls within one session can overlap by default, while prepare, decode, and commit remain serialized under the session `request_lock`. Successful outcomes are accepted in completion order, so the final accepted trajectory used as the scoring target can be timing-dependent. Its score is broadcast to all trajectories from that session.
+
 For MoE or large models, also check tensor, pipeline, context, and expert parallelism settings such as `GEN_TP`, `TP`, `PP`, `CP`, and `EP` in `train_qwen3p5_moe.sh`.
 
 ---

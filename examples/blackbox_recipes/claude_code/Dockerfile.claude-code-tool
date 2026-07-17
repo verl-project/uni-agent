@@ -1,0 +1,21 @@
+# Claude Code sidecar tool image.
+#
+# Mounted at /opt/claude-code inside the SWE-bench sandbox.
+
+FROM node:20-bookworm-slim AS builder
+
+ARG TOOL_VERSION="latest"
+ARG NPM_REGISTRY=""
+
+ENV DISABLE_AUTOUPDATER=1 \
+    IS_SANDBOX=1 \
+    npm_config_audit=false \
+    npm_config_fund=false \
+    npm_config_update_notifier=false
+
+RUN if [ -n "${NPM_REGISTRY}" ]; then npm config set registry "${NPM_REGISTRY}"; fi \
+    && npm install -g --prefix /opt/claude-code "@anthropic-ai/claude-code@${TOOL_VERSION}" \
+    && /opt/claude-code/bin/claude --version
+
+FROM scratch
+COPY --from=builder /opt/claude-code /

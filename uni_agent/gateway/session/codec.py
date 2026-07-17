@@ -140,9 +140,9 @@ class MessageCodec:
         self._processor = processor
         self._vision_info_extractor = vision_info_extractor or self._default_vision_info_extractor
         self._vision_info_extractor_kwargs = dict(vision_info_extractor_kwargs or {})
-        self._apply_chat_template_kwargs = apply_chat_template_kwargs or {}
+        self._apply_chat_template_kwargs = dict(apply_chat_template_kwargs or {})
         self._system_prompt = initialize_system_prompt(
-            tokenizer,
+            self._processor if self._processor is not None else tokenizer,
             **self._apply_chat_template_kwargs,
         )
         self._tool_parser_name = tool_parser_name
@@ -201,10 +201,8 @@ class MessageCodec:
         tools: list[dict[str, Any]] | None = None,
         image_data: list[Any] | None = None,
         video_data: list[Any] | None = None,
-        request_chat_template_kwargs: dict[str, Any] | None = None,
     ) -> list[int]:
         """Encode a full chat history into prompt token IDs."""
-        chat_template_kwargs = {**self._apply_chat_template_kwargs, **(request_chat_template_kwargs or {})}
         if self._processor is not None:
             raw_prompt = _apply_chat_template(
                 self._processor,
@@ -212,7 +210,7 @@ class MessageCodec:
                 tools=tools,
                 add_generation_prompt=True,
                 tokenize=False,
-                **chat_template_kwargs,
+                **self._apply_chat_template_kwargs,
             )
             videos = video_data
             video_metadata = None
@@ -235,7 +233,7 @@ class MessageCodec:
                 messages,
                 tools=tools,
                 add_generation_prompt=True,
-                **chat_template_kwargs,
+                **self._apply_chat_template_kwargs,
             )
         )
 
@@ -245,17 +243,15 @@ class MessageCodec:
         messages: list[dict[str, Any]],
         image_data: list[Any] | None = None,
         video_data: list[Any] | None = None,
-        request_chat_template_kwargs: dict[str, Any] | None = None,
     ) -> list[int]:
         """Encode continuation messages without the cached system prompt prefix."""
-        chat_template_kwargs = {**self._apply_chat_template_kwargs, **(request_chat_template_kwargs or {})}
         if self._processor is not None:
             raw_prompt = _apply_chat_template(
                 self._processor,
                 messages,
                 add_generation_prompt=True,
                 tokenize=False,
-                **chat_template_kwargs,
+                **self._apply_chat_template_kwargs,
             )
             videos = video_data
             video_metadata = None
@@ -277,7 +273,7 @@ class MessageCodec:
                     self._tokenizer,
                     messages,
                     add_generation_prompt=True,
-                    **chat_template_kwargs,
+                    **self._apply_chat_template_kwargs,
                 )
             )
         return ids[len(self._system_prompt) :]
@@ -320,10 +316,7 @@ class MessageCodec:
     def canonicalize_message_for_prefix_comparison(self, message: dict[str, Any]) -> dict[str, Any]:
         """Canonicalize one message before session prefix comparison."""
         normalized = dict(message)
-        # Tool-result correlation ids are wire noise; prefix comparison ignores
-        # them while preserving unexpected top-level fields on other roles.
-        if normalized.get("role") == "tool":
-            normalized.pop("tool_call_id", None)
+        normalized.pop("tool_call_id", None)
         tool_calls = normalized.get("tool_calls")
         if not isinstance(tool_calls, list):
             return normalized

@@ -25,10 +25,10 @@ _SSE_HEADERS = {
 }
 
 _OPENAI_ERROR_TYPE_BY_STATUS = {
-    # Status codes the gateway emits (gateway.py / session.py): 400 malformed/JSON,
-    # 404 unknown session, 409 inactive session (finalized/aborted), 500 internal.
-    # Only 400/409 get a specific type here; 404/500 use openai_error_body's 4xx/5xx
-    # default. 401/403/422/429 never arise (no auth / rate-limit paths).
+    # Only status codes the gateway actually emits today (gateway.py /
+    # session.py: 400 malformed/JSON, 409 concurrent session generation,
+    # 500 internal). 401/403/404/422/429 are intentionally omitted: this
+    # gateway has no auth / rate-limit / routing paths that surface them.
     400: "invalid_request_error",
     409: "conflict_error",
 }
@@ -195,14 +195,10 @@ def openai_to_internal(
     else:
         raise MalformedRequestError("tool_choice must be a string or object")
 
-    # Required payload fields and template kwargs.
+    # Required payload fields.
     messages = payload.get("messages")
     if not isinstance(messages, list) or not messages:
         raise MalformedRequestError("messages must be non-empty")
-
-    chat_template_kwargs = payload.get("chat_template_kwargs")
-    if chat_template_kwargs is not None and not isinstance(chat_template_kwargs, dict):
-        raise MalformedRequestError("chat_template_kwargs must be an object")
 
     # Tool injection policy.
     tools = payload.get("tools")
@@ -220,6 +216,5 @@ def openai_to_internal(
     return {
         "messages": [_normalize_message(message) for message in messages],
         "tools": tools,
-        "chat_template_kwargs": dict(chat_template_kwargs) if chat_template_kwargs else {},
         "sampling_params": sampling_params,
     }

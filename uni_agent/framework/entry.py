@@ -32,22 +32,19 @@ def build_gateway_manager(*, config, llm_client) -> GatewayManager:
     """Spawn the gateway actor pool (driver-side, driver-owned) and return its manager."""
     # TODO(phase-b): switch this to actor_rollout_ref.rollout.agent_framework.*
     af_cfg = OmegaConf.select(config, "actor_rollout_ref.rollout.custom.agent_framework", default={}) or {}
+    apply_chat_template_kwargs = OmegaConf.select(config, "data.apply_chat_template_kwargs", default={}) or {}
+    if OmegaConf.is_config(apply_chat_template_kwargs):
+        apply_chat_template_kwargs = OmegaConf.to_container(apply_chat_template_kwargs, resolve=True)
 
     # Match AgentLoopWorker pattern: self-load tokenizer/processor via HFModelConfig.
     model_config: HFModelConfig = omega_conf_to_dataclass(config.actor_rollout_ref.model)
-    rollout_cfg = config.actor_rollout_ref.rollout
-
-    base_sampling_params = {}
-    if rollout_cfg.get("calculate_log_probs", False):
-        base_sampling_params["logprobs"] = True
-
     gateway_actor_config = GatewayActorConfig(
         tokenizer=model_config.tokenizer,
         processor=model_config.processor,
-        tool_parser_name=rollout_cfg.get("multi_turn", {}).get("format"),
-        prompt_length=rollout_cfg.prompt_length,
-        response_length=rollout_cfg.response_length,
-        base_sampling_params=base_sampling_params or None,
+        tool_parser_name=config.actor_rollout_ref.rollout.get("multi_turn", {}).get("format"),
+        apply_chat_template_kwargs=dict(apply_chat_template_kwargs),
+        prompt_length=config.actor_rollout_ref.rollout.prompt_length,
+        response_length=config.actor_rollout_ref.rollout.response_length,
     )
 
     return GatewayManager(

@@ -20,7 +20,6 @@ class InternalGenerationRequest(TypedDict):
 
     messages: list[dict[str, Any]]
     tools: list[dict[str, Any]] | None
-    chat_template_kwargs: dict[str, Any]
     sampling_params: dict[str, Any]
 
 

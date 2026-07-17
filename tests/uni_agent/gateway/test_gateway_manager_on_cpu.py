@@ -1,15 +1,18 @@
 import asyncio
+import os
+
+os.environ["RAY_ENABLE_UV_RUN_RUNTIME_ENV"] = "0"
 
 import httpx
 import pytest
 import ray
 
-from tests.uni_agent.support import FakeTokenizer, RecordingLLMClient
+from tests.uni_agent.support import FakeTokenizer, RecordingLLMClient, SequencedBackend
 
 
 @pytest.fixture(scope="session")
 def ray_runtime():
-    ray.init(ignore_reinit_error=True)
+    ray.init(ignore_reinit_error=True, include_dashboard=False)
     yield
     ray.shutdown()
 
@@ -151,7 +154,7 @@ async def test_gateway_manager_finalizes_each_session_on_its_owning_gateway(ray_
     # mis-routed finalize would hit the other session's gateway.
     assert session_a.base_url != session_b.base_url
 
-    async with httpx.AsyncClient(timeout=5.0) as client:
+    async with httpx.AsyncClient(timeout=5.0, trust_env=False) as client:
         for session, label in ((session_a, "a"), (session_b, "b")):
             chat = await client.post(
                 f"{session.base_url}/chat/completions",
@@ -168,3 +171,132 @@ async def test_gateway_manager_finalizes_each_session_on_its_owning_gateway(ray_
     assert [t.reward_info["label"] for t in trajectories_b] == ["b"]
 
     await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_gateway_manager_default_chains_config_to_http_finalizes_subagent_before_updated_main(
+    ray_runtime,
+    monkeypatch,
+):
+    """Exercise default multi-chain behavior from config wiring through HTTP routes."""
+    from omegaconf import OmegaConf
+
+    from uni_agent.framework import entry as entry_module
+
+    class _ModelConfig:
+        tokenizer = FakeTokenizer()
+        processor = None
+
+    monkeypatch.setattr(entry_module, "omega_conf_to_dataclass", lambda _config: _ModelConfig())
+    config = OmegaConf.create(
+        {
+            "actor_rollout_ref": {
+                "model": {},
+                "rollout": {
+                    "prompt_length": 2048,
+                    "response_length": 2048,
+                    "multi_turn": {"format": None},
+                    "custom": {"agent_framework": {"gateway_count": 1}},
+                },
+            }
+        }
+    )
+    manager = entry_module.build_gateway_manager(
+        config=config,
+        llm_client=SequencedBackend(["Mango", "Blue", "Apple"]),
+    )
+
+    try:
+        session = await manager.create_session("session-manager-multiple-chains")
+        main_first = [
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "name a fruit"},
+        ]
+        subagent = [
+            {"role": "system", "content": "You are a focused subagent."},
+            {"role": "user", "content": "name a color"},
+        ]
+        main_continuation = [
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "name a fruit"},
+            {"role": "assistant", "content": "Mango"},
+            {"role": "user", "content": "name another fruit"},
+        ]
+
+        async with httpx.AsyncClient(timeout=5.0, trust_env=False) as client:
+            for messages in (main_first, subagent, main_continuation):
+                chat = await client.post(
+                    f"{session.base_url}/chat/completions",
+                    json={"model": "m", "messages": messages},
+                )
+                assert chat.status_code == 200
+
+            reward = await client.post(
+                session.reward_info_url,
+                json={"reward_info": {"label": "manager-multiple-chains"}},
+            )
+            assert reward.status_code == 200
+
+        trajectories = await manager.finalize_session("session-manager-multiple-chains")
+
+        assert len(trajectories) == 2
+        decoded = [FakeTokenizer().decode(trajectory.response_ids) for trajectory in trajectories]
+        assert decoded[0] == "Blue"
+        assert decoded[1].startswith("Mango")
+        assert decoded[1].endswith("Apple")
+        assert [trajectory.reward_info["label"] for trajectory in trajectories] == [
+            "manager-multiple-chains",
+            "manager-multiple-chains",
+        ]
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_gateway_manager_allows_concurrent_http_requests_within_one_session(ray_runtime):
+    """Two HTTP requests must reach backend generation concurrently and both materialize."""
+    from uni_agent.gateway.config import GatewayActorConfig
+    from uni_agent.gateway.manager import GatewayManager
+    from verl.workers.rollout.replica import TokenOutput
+
+    class _BarrierBackend:
+        def __init__(self):
+            self.started = 0
+            self.both_started = asyncio.Event()
+
+        async def generate(self, request_id, *, prompt_ids, sampling_params, image_data=None, video_data=None):
+            response_index = self.started
+            self.started += 1
+            if self.started == 2:
+                self.both_started.set()
+            await asyncio.wait_for(self.both_started.wait(), timeout=2)
+            text = ["FIRST", "SECOND"][response_index]
+            return TokenOutput(
+                token_ids=[ord(char) for char in text],
+                log_probs=[-0.1] * len(text),
+                stop_reason="completed",
+            )
+
+    manager = GatewayManager(
+        llm_client=_BarrierBackend(),
+        gateway_count=1,
+        gateway_actor_config=GatewayActorConfig(tokenizer=FakeTokenizer(), response_length=128),
+    )
+
+    try:
+        session = await manager.create_session("session-manager-concurrent-http")
+        payload = {"model": "m", "messages": [{"role": "user", "content": "same prompt"}]}
+        async with httpx.AsyncClient(timeout=5.0, trust_env=False) as client:
+            first, second = await asyncio.gather(
+                client.post(f"{session.base_url}/chat/completions", json=payload),
+                client.post(f"{session.base_url}/chat/completions", json=payload),
+            )
+
+        assert first.status_code == second.status_code == 200
+        trajectories = await manager.finalize_session("session-manager-concurrent-http")
+        assert sorted(FakeTokenizer().decode(trajectory.response_ids) for trajectory in trajectories) == [
+            "FIRST",
+            "SECOND",
+        ]
+    finally:
+        await manager.shutdown()
