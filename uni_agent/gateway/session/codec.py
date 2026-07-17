@@ -323,11 +323,8 @@ class MessageCodec:
         if not isinstance(tool_calls, list):
             return normalized
 
-        normalized_tool_calls: list[Any] = []
+        normalized_tool_calls: list[dict[str, Any]] = []
         for tool_call in tool_calls:
-            if not isinstance(tool_call, dict):
-                normalized_tool_calls.append(tool_call)
-                continue
             normalized_tool_call = dict(tool_call)
             normalized_tool_call.pop("id", None)
             function = normalized_tool_call.get("function")
