@@ -1,0 +1,14 @@
+document.addEventListener("DOMContentLoaded", function () {
+  const script = document.createElement("script");
+  script.type = "module";
+  script.id = "runllm-widget-script";
+  script.src = "https://widget.runllm.com";
+  script.setAttribute("version", "stable");
+  script.setAttribute("crossorigin", "true");
+  script.setAttribute("runllm-keyboard-shortcut", "Mod+j");
+  script.setAttribute("runllm-name", "Uni-Agent Chatbot");
+  script.setAttribute("runllm-position", "TOP_RIGHT");
+  script.setAttribute("runllm-assistant-id", "679");
+  script.async = true;
+  document.head.appendChild(script);
+});

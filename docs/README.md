@@ -1,21 +1,23 @@
 # Uni-Agent Documentation
 
-This directory contains the source files for the **Uni-Agent** documentation, built with [Sphinx](https://www.sphinx-doc.org/). The docs support both reStructuredText (`.rst`) and Markdown (`.md`).
+This directory contains the Markdown source files for the **Uni-Agent**
+documentation, built with
+[Material for MkDocs](https://squidfunk.github.io/mkdocs-material/).
 
 ## Install Dependencies
 
-Install the documentation dependencies before building:
+From the repository root, install the documentation dependencies:
 
 ```bash
-cd docs
-pip install -r requirements.txt
+pip install -r docs/requirements.txt
 ```
 
 ## Build the Docs
 
-Generate the static HTML site with:
+Generate the static HTML site from the `docs/` directory:
 
 ```bash
+cd docs
 make html
 ```
 
@@ -25,16 +27,14 @@ After the build completes, open the generated homepage:
 _build/html/index.html
 ```
 
-You can also serve the built site locally:
+## Preview Locally
 
-```bash
-python -m http.server -d _build/html/
-```
-
-Then open [http://localhost:8000](http://localhost:8000) in your browser.
+Run `make serve` and open
+[http://localhost:8000](http://localhost:8000). MkDocs automatically reloads
+the page when documentation files change.
 
 ## Add New Content
 
-- For Markdown content, add a `.md` file under `source/`.
-- For reStructuredText content, add a `.rst` file under `source/`.
-- Update the `toctree` in `source/index.rst` so the new page appears in the documentation site.
+- Add a Markdown (`.md`) file under `source/`.
+- Add the page to `nav` in the repository-level `mkdocs.yml`.
+- Shared images live in the repository-level `assets/` directory.

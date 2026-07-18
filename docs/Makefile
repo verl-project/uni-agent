@@ -1,20 +1,17 @@
-# Minimal makefile for Sphinx documentation
-#
+MKDOCS ?= python -m mkdocs
 
-# You can set these variables from the command line.
-SPHINXOPTS    =
-SPHINXBUILD   = LC_ALL=C.UTF-8 sphinx-build
-SPHINXPROJ    = uni-agent
-SOURCEDIR     = source
-BUILDDIR      = _build
+.PHONY: help html serve clean
 
-# Put it first so that "make" without argument is like "make help".
 help:
-	@$(SPHINXBUILD) -M help "$(SOURCEDIR)" "$(BUILDDIR)" $(SPHINXOPTS) $(O)
+	@echo "make html   Build the documentation"
+	@echo "make serve  Start the local preview server"
+	@echo "make clean  Remove generated documentation"
 
-.PHONY: help Makefile
+html:
+	cd .. && $(MKDOCS) build --strict
 
-# Catch-all target: route all unknown targets to Sphinx using the new
-# "make mode" option.  $(O) is meant as a shortcut for $(SPHINXOPTS).
-%: Makefile
-	@$(SPHINXBUILD) -M $@ "$(SOURCEDIR)" "$(BUILDDIR)" $(SPHINXOPTS) $(O)
+serve:
+	cd .. && $(MKDOCS) serve
+
+clean:
+	rm -rf _build/html

@@ -4,7 +4,7 @@
 
 *First post in an ongoing series on **Project Milo**, the personal chat agent. See the [Vision](./vision.md) for the bigger picture.*
 
-<img src="../lark-summarize-group-chat.jpeg" alt="Lark chat" style="width: 100%; max-width: 900px; height: auto; display: block; margin: 0 auto;" />
+<img src="../assets/lark-summarize-group-chat.jpeg" alt="Lark chat" style="width: 100%; max-width: 900px; height: auto; display: block; margin: 0 auto;" />
 
 <!-- *Real example: the user asks for a digest of unresolved issues in a Lark group chat. The agent pulls recent messages through `lark-cli`, identifies the open threads, cross-references the people involved, embeds linked GitHub issues, and writes back as native Lark Markdown.* -->
 

@@ -1,0 +1,91 @@
+site_name: Uni-Agent
+site_description: Build, run, and train long-horizon agents at scale.
+site_url: https://uni-agent.readthedocs.io/en/latest/
+repo_name: verl-project/uni-agent
+repo_url: https://github.com/verl-project/uni-agent
+edit_uri: edit/main/docs/source/
+copyright: Copyright &copy; 2026 Uni-Agent Contributors
+
+docs_dir: docs/source
+site_dir: docs/_build/html
+use_directory_urls: false
+
+theme:
+  name: material
+  language: en
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: deep purple
+      accent: purple
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: deep purple
+      accent: purple
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - navigation.tracking
+    - content.code.copy
+    - content.tabs.link
+    - search.highlight
+    - search.suggest
+    - toc.follow
+  icon:
+    repo: fontawesome/brands/github
+
+nav:
+  - Home: index.md
+  - Quickstart:
+      - Installation: start/installation.md
+      - Launch an Agent Environment: start/agent_env.md
+      - Build an Arxiv Search Agent: start/arxiv_search_agent.md
+      - Parallel Agent Interaction: start/agent_interaction.md
+      - Agent Reinforcement Learning: start/agent_train.md
+  - Guides:
+      - Evaluate on Terminal-Bench v2: start/terminal_bench_eval.md
+      - Train a Search Agent: start/search_agent.md
+  - Blog:
+      - Vision: blog/vision.md
+      - Personal Agent with Lark: blog/lark_agent.md
+
+plugins:
+  - search
+
+hooks:
+  - docs/mkdocs_hooks.py
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+
+extra_javascript:
+  - assets/js/runllm-widget.js
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/verl-project/uni-agent
+
+watch:
+  - assets
