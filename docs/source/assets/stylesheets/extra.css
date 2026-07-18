@@ -1,0 +1,20 @@
+/* Give the article more room while keeping Material's three-column layout. */
+.md-grid {
+    max-width: 70rem;
+}
+
+/* Make top-level navigation groups stand out from their child pages. */
+.md-nav--primary > .md-nav__list > .md-nav__item > .md-nav__link {
+    color: var(--md-primary-fg-color);
+    font-size: 0.78rem;
+    font-weight: 700;
+    letter-spacing: 0.01em;
+    margin-top: 0.6rem;
+}
+
+/* The site name is already present in the desktop header. */
+@media screen and (min-width: 76.25em) {
+    .md-sidebar--primary .md-nav--primary > .md-nav__title {
+        display: none;
+    }
+}

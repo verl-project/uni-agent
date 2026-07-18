@@ -29,9 +29,8 @@ theme:
         icon: material/weather-sunny
         name: Switch to light mode
   features:
-    - navigation.tabs
-    - navigation.tabs.sticky
     - navigation.sections
+    - navigation.expand
     - navigation.top
     - navigation.footer
     - navigation.tracking
@@ -44,7 +43,7 @@ theme:
     repo: fontawesome/brands/github
 
 nav:
-  - Home: index.md
+  - Uni-Agent: index.md
   - Quickstart:
       - Installation: start/installation.md
       - Launch an Agent Environment: start/agent_env.md
@@ -71,6 +70,7 @@ markdown_extensions:
   - tables
   - toc:
       permalink: true
+      toc_depth: 3
   - pymdownx.details
   - pymdownx.highlight:
       anchor_linenums: true
@@ -81,6 +81,9 @@ markdown_extensions:
 
 extra_javascript:
   - assets/js/runllm-widget.js
+
+extra_css:
+  - assets/stylesheets/extra.css
 
 extra:
   social:
