@@ -1,25 +1,40 @@
-# Uni-Agent: Build and Train Agents at Scale
+<h1>Uni-Agent: Train Long-horizon Agents at Scale</h1>
 
-[![Docs](https://img.shields.io/badge/docs-Read%20the%20Docs-8A2BE2)](https://uni-agent.readthedocs.io/en/latest/index.html)
-[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](./LICENSE)
+<p align="center">
+  <a href="https://uni-agent.readthedocs.io/en/latest/index.html"><img src="https://img.shields.io/badge/Documentation-6D28D9?style=flat-square" alt="Documentation"></a>
+  <a href="https://github.com/verl-project/uni-agent/stargazers"><img src="https://img.shields.io/github/stars/verl-project/uni-agent?style=flat-square&logo=github&label=Stars" alt="GitHub Stars"></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-2563EB?style=flat-square" alt="Apache 2.0 License"></a>
+</p>
 
-Uni-Agent is a unified framework for long-horizon, tool-using agents. Bring existing agent harnesses into reinforcement learning, build transparent agents with composable tools and sandboxes, and generate training-grade trajectories at scale.
+Uni-Agent is a framework for training long-horizon agents:
 
-The same task, agent, sandbox, and reward definition can be reused across parallel evaluation and RL training with [verl](https://github.com/verl-project/verl).
+- Bring any existing agent harness into reinforcement learning.
+- Unify diverse agent tasks through one extensible interface.
+- Run agents concurrently at scale and collect traceable trajectories as training-ready data (for both SFT and RL).
+
+<p align="center">
+  <img src="./assets/uni-agent.png" width="95%" alt="Uni-Agent architecture overview">
+  <br>
+  <sub>A unified path from agent interaction to reinforcement learning.</sub>
+</p>
 
 ## Highlights ✨
 
-### Bring existing agents into RL
+### Plug in any agent harness
 
-Connect agent harnesses such as Claude Code and Mini-SWE-Agent, or any harness that can redirect its OpenAI, or Anthropic-compatible model endpoint—to the Uni-Agent Gateway. Uni-Agent captures token-level trajectories and task rewards without requiring you to rewrite the agent loop.
+Redirect any OpenAI- or Anthropic-compatible model endpoint to the **Uni-Agent Gateway**. Keep the harness and its native agent loop unchanged while connecting it to RL training.
 
-### Build transparent and extensible agents
+### Decouple agents, tasks, and infrastructure
 
-Build white-box agents by composing reusable `Agent`, `Tool`, `Task`, and `Sandbox` abstractions. Start with built-in coding agents and tools, register your own tools and environments, and extend the same framework to code, search, GUI, and other interactive scenarios.
+Customize agents, tools, tasks, sandboxes, and rewards independently through composable interfaces.
 
-### Generate training-grade trajectories at scale
+### Run thousands of sessions concurrently
 
-Run 1000+ long-horizon, stateful agent sessions with distributed workers, pooled gateway sessions, isolated sandboxes, and asynchronous scheduling. Uni-Agent keeps each session's trajectory and reward correctly associated while reusing the same execution stack across evaluation and RL training.
+Schedule 1,000+ stateful agent sessions across isolated sandboxes while preserving per-session trajectories, logs, and rewards.
+
+### Reproducible training, verifiable results
+
+We publish runnable [recipes](./examples/) with configurations, benchmark results, and learning curves so reported improvements can be reproduced and verified.
 
 ## Quickstart 🚀
 
@@ -31,8 +46,6 @@ Choose the path that matches your goal:
 - **Train an agent with RL:** start from the recipes in [`examples/agent_train`](./examples/agent_train).
 
 ## Architecture 🧩
-
-<img src="./assets/uni-agent.png" width="100%" alt="Uni-Agent architecture overview">
 
 Uni-Agent separates rollout orchestration from agent and environment execution, with the **Uni-Agent Gateway** acting as the boundary between agent runtimes and the RL system:
 
