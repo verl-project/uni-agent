@@ -14,8 +14,6 @@ Uni-Agent is a framework for training long-horizon agents:
 
 <p>
   <img src="./assets/uni-agent.png" width="80%" alt="Uni-Agent architecture overview">
-  <br>
-  <sub>A unified path from agent interaction to reinforcement learning.</sub>
 </p>
 
 ## Highlights ✨
