@@ -20,19 +20,19 @@ Uni-Agent is a framework for training long-horizon agents:
 
 ### Plug in any agent harness
 
-Redirect any OpenAI- or Anthropic-compatible model endpoint to the **Uni-Agent Gateway**. Keep the harness and its native agent loop unchanged while connecting it to RL training.
+Connect harnesses such as Claude Code and Mini-SWE-Agent, or any harness that can point its OpenAI- or Anthropic-compatible model endpoint at the **Uni-Agent Gateway**: request string in, training tokens out.
 
 ### Decouple agents, tasks, and infrastructure
 
-Customize agents, tools, tasks, sandboxes, and rewards independently through composable interfaces.
+Build white-box agents from reusable `Agent`, `Tool`, `Task`, and `Sandbox` abstractions. Customize agent logic, tools, task environments, sandbox backends, and rewards independently while reusing the same evaluation and training runtime.
 
 ### Run thousands of sessions concurrently
 
-Schedule 1,000+ stateful agent sessions across isolated sandboxes while preserving per-session trajectories, logs, and rewards.
+Run 1,000+ long-horizon, stateful sessions with distributed workers, pooled Gateway sessions, isolated sandboxes, and asynchronous scheduling. Every trajectory, log, and reward remains associated with the correct session for reliable evaluation, RL training, and data synthesis.
 
 ### Reproducible training, verifiable results
 
-We publish runnable [recipes](./examples/) with configurations, benchmark results, and learning curves so reported improvements can be reproduced and verified.
+We publish runnable [recipes](./examples/) with complete configurations, benchmark settings, result tables, and learning curves. Each recipe provides a tested starting point and makes reported improvements easier to reproduce and verify.
 
 ## Quickstart 🚀
 
