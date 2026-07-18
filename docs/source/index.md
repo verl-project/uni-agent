@@ -4,7 +4,7 @@ Uni-Agent is a framework for building, running, and training long-horizon agent
 workflows. It provides persistent sandboxes, tool-based interaction loops, and
 `verl` integration for scalable reinforcement learning.
 
-[Get started](start/installation.md){ .md-button .md-button--primary }
+[Get started](quickstart/installation.md){ .md-button .md-button--primary }
 [View on GitHub](https://github.com/verl-project/uni-agent){ .md-button }
 
 <div class="grid cards" markdown>

@@ -3,6 +3,34 @@
     max-width: 70rem;
 }
 
+/* Improve long-form readability without making the page feel oversized. */
+.md-typeset {
+    line-height: 1.7;
+}
+
+.md-typeset h1 {
+    color: var(--md-default-fg-color);
+    font-weight: 700;
+    letter-spacing: -0.025em;
+}
+
+.md-typeset h2 {
+    border-bottom: 1px solid var(--md-default-fg-color--lightest);
+    font-weight: 700;
+    letter-spacing: -0.015em;
+    padding-bottom: 0.3em;
+}
+
+.md-typeset h3,
+.md-typeset strong {
+    font-weight: 650;
+}
+
+.md-typeset code,
+.md-typeset pre > code {
+    border-radius: 0.3rem;
+}
+
 /* Make top-level navigation groups stand out from their child pages. */
 .md-nav--primary > .md-nav__list > .md-nav__item > .md-nav__link {
     color: var(--md-primary-fg-color);

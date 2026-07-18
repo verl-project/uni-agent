@@ -13,6 +13,9 @@ use_directory_urls: false
 theme:
   name: material
   language: en
+  font:
+    text: Inter
+    code: JetBrains Mono
   palette:
     - media: "(prefers-color-scheme: light)"
       scheme: default
@@ -45,18 +48,10 @@ theme:
 nav:
   - Uni-Agent: index.md
   - Quickstart:
-      - Installation: start/installation.md
-      - Launch an Agent Environment: start/agent_env.md
-      - Build an Arxiv Search Agent: start/arxiv_search_agent.md
-      - Parallel Agent Interaction: start/agent_interaction.md
-      - Agent Reinforcement Learning: start/agent_train.md
-  - Guides:
-      - Evaluate on Terminal-Bench v2: start/terminal_bench_eval.md
-      - Train a Search Agent: start/search_agent.md
-  - Blog:
-      - Vision: blog/vision.md
-      - Personal Agent with Lark: blog/lark_agent.md
-
+      - Installation: quickstart/installation.md
+      - Launch a Sandbox: quickstart/launch-sandbox.md
+      - Run Agent Inference: quickstart/agent-inference.md
+      - Train an Agent with RL: quickstart/rl-training.md
 plugins:
   - search
 
