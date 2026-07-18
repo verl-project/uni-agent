@@ -118,32 +118,7 @@ More training dynamics, including reward, validation score, and average-turn cur
 
 ## Roadmap 🗺️
 
-The roadmap below highlights the next major directions for Uni-Agent.
-
-**Environment Support**
-
-- [x] Local deployment support.
-- [x] Modal deployment support.
-- [ ] More cloud deployment backends (e.g., Yuanrong Sandbox Management System).
-
-**Tool and Task Support**
-
-- [ ] GUI tool support.
-- [x] Integration of Skills.
-- [ ] More built-in tools and task patterns.
-
-**Model Support**
-
-- [ ] DeepSeek model support.
-- [ ] Multimodal model support.
-
-**Agent Integration**
-
-- [x] Black-box integration of additional third-party agents (Ref: [RFC #5790](https://github.com/verl-project/verl/issues/5790)).
-
-**Performance Optimization**
-
-- [ ] Optimize Agentic RL rollout performance (Ref: [Issue #6383](https://github.com/verl-project/verl/issues/6383)).
+See the [Uni-Agent 26Q3 Roadmap](https://github.com/verl-project/uni-agent/issues/79) for current priorities and planned work.
 
 ## Acknowledgement 🙏
 
