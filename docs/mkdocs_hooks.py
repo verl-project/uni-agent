@@ -4,7 +4,6 @@ from pathlib import Path
 
 from mkdocs.structure.files import File, Files
 
-
 REPOSITORY_ROOT = Path(__file__).resolve().parent.parent
 ASSETS_DIR = REPOSITORY_ROOT / "assets"
 
