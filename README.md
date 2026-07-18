@@ -1,6 +1,6 @@
 <h1>Uni-Agent: Train Long-horizon Agents at Scale</h1>
 
-<p align="center">
+<p>
   <a href="https://uni-agent.readthedocs.io/en/latest/index.html"><img src="https://img.shields.io/badge/Documentation-6D28D9?style=flat-square" alt="Documentation"></a>
   <a href="https://github.com/verl-project/uni-agent/stargazers"><img src="https://img.shields.io/github/stars/verl-project/uni-agent?style=flat-square&logo=github&label=Stars" alt="GitHub Stars"></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-2563EB?style=flat-square" alt="Apache 2.0 License"></a>
@@ -10,7 +10,7 @@ Uni-Agent is a framework for training long-horizon agents:
 
 - Bring any existing agent harness into reinforcement learning.
 - Unify diverse agent tasks through one extensible interface.
-- Run agents concurrently at scale and collect traceable trajectories as training-ready data (for both SFT and RL).
+- Run agents concurrently at scale and collect traceable trajectories as training-ready data (SFT and RL).
 
 <p align="center">
   <img src="./assets/uni-agent.png" width="95%" alt="Uni-Agent architecture overview">
