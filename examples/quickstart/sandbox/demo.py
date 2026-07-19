@@ -22,7 +22,7 @@ def banner(title: str) -> None:
 
 def _indent(text, prefix: str = "    | ") -> str:
     # `text` may be a ToolResult; str() yields its text channel.
-    return "\n".join(prefix + line for line in str(text).splitlines())
+    return "Output:\n" + "\n".join(prefix + line for line in str(text).splitlines())
 
 
 def build_sandbox_config() -> SandboxConfig:

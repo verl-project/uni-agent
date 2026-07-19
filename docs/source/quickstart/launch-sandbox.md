@@ -198,32 +198,24 @@ Both `Sandbox` and `Toolbox` use async context managers, so tools are closed and
 
 ## Run the Complete Demo
 
-=== "Modal"
-
-    Install and authenticate Modal, then run the demo:
-
-    ```bash
-    pip install pydantic modal
-    modal token set
-    DEBUG_MODE=1 python examples/quickstart/sandbox/demo.py
-    ```
-
-    Override the default `python:3.12` image with `IMAGE`:
-
-    ```bash
-    DEBUG_MODE=1 IMAGE=python:3.11 python examples/quickstart/sandbox/demo.py
-    ```
+After configuring a supported backend above, run the complete connectivity and persistence check:
 
 === "Local"
 
-    Run without remote credentials:
-
     ```bash
-    pip install pydantic
     DEBUG_MODE=1 SANDBOX_PROVIDER=local python examples/quickstart/sandbox/demo.py
     ```
 
-    !!! warning "The local provider is not isolated"
-        Commands run directly on your host, and the demo installs NumPy into the active Python environment.
+=== "veFaaS"
+
+    ```bash
+    DEBUG_MODE=1 SANDBOX_PROVIDER=vefaas python examples/quickstart/sandbox/demo.py
+    ```
+
+=== "Modal"
+
+    ```bash
+    DEBUG_MODE=1 SANDBOX_PROVIDER=modal python examples/quickstart/sandbox/demo.py
+    ```
 
 Next, [run agent inference](agent-inference.md) against a sandbox-backed task.
