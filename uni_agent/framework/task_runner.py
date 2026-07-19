@@ -37,21 +37,15 @@ def resolve_task_config(
     tools_kwargs: dict[str, Any] | None,
     *,
     session_base_url: str | None,
-    task_overrides: dict[str, Any] | None = None,
+    task_defaults: dict[str, Any] | None = None,
     api_key: str = "EMPTY",
     model_name: str | None = None,
 ) -> dict[str, Any]:
-    """Build the concrete task-config dict for one sample.
-
-    Layers, in order: the sample's own task (``tools_kwargs["task"]``), the
-    run-wide ``task_overrides`` (agent / sandbox / sampling ...), and finally the
-    endpoint -- ``agent.model.{base_url,api_key,model_name}`` -- which is runtime
-    state bound to the live gateway session rather than dataset content.
-    """
+    """Build the concrete task-config dict for one sample."""
     if not tools_kwargs or "task" not in tools_kwargs:
         raise ValueError("run_task requires tools_kwargs['task'] (the serialized task config)")
 
-    task = deep_merge(tools_kwargs["task"], task_overrides or {})
+    task = deep_merge(task_defaults or {}, tools_kwargs["task"])
 
     model_cfg: dict[str, Any] = {"base_url": session_base_url, "api_key": api_key}
     if model_name is not None:
@@ -94,7 +88,7 @@ async def run_task(
     tools_kwargs: dict[str, Any] | None = None,
     raw_prompt: Any = None,
     sample_index: int | None = None,
-    task_overrides: dict[str, Any] | None = None,
+    task_defaults: dict[str, Any] | None = None,
     task_config_path: str | None = None,
     api_key: str = "EMPTY",
     model_name: str | None = None,
@@ -107,24 +101,24 @@ async def run_task(
     / ``sample_index`` / ``tools_kwargs``). ``raw_prompt`` is accepted for protocol
     parity but unused: a uni_agent task carries its own prompt on the task config.
 
-    The run-wide task base may be supplied inline (``task_overrides``) and/or from a
+    The run-wide task base may be supplied inline (``task_defaults``) and/or from a
     per-task-name YAML file (``task_config_path``): the row's task name selects the
-    matching entry (:func:`route_task_config`), then inline ``task_overrides`` win on
-    top. When ``report_reward`` is set, the task's reward + info are POSTed back to the
-    session's reward-info endpoint so a training reward manager can pick them up; the
-    standalone evaluator reads the returned :class:`TaskResult` directly and leaves
-    this off.
+    matching entry (:func:`route_task_config`), inline defaults are merged onto that
+    entry, and the row's sample config wins on top. When ``report_reward`` is set, the
+    task's reward + info are POSTed back to the session's reward-info endpoint so a
+    training reward manager can pick them up; the standalone evaluator reads the
+    returned :class:`TaskResult` directly and leaves this off.
     """
     if task_config_path:
         row_task = tools_kwargs.get("task") if tools_kwargs else None
         task_name = row_task.get("name") if isinstance(row_task, dict) else None
         routed = route_task_config(str(task_config_path), task_name)
-        task_overrides = deep_merge(routed, task_overrides or {})
+        task_defaults = deep_merge(routed, task_defaults or {})
 
     task = resolve_task_config(
         tools_kwargs,
         session_base_url=session.base_url,
-        task_overrides=task_overrides,
+        task_defaults=task_defaults,
         api_key=api_key,
         model_name=model_name,
     )

@@ -17,10 +17,9 @@ Bring up an OpenAI-compatible policy server, then run this against it:
         --task-config examples/inference/task_config.yaml --limit 8
 
 ``--task-config`` (a YAML task config; see ``examples/inference/task_config.yaml``)
-is required and forms the base, deep-merged onto each sample's task dict; all agent/model
-knobs (sampling, ``max_total_tokens``, ``max_steps``, ...) come from it. The endpoint
-(--base-url / --model / --api-key or env BASE_URL / MODEL / API_KEY) is layered onto
-agent.model last.
+is required and provides run-level defaults; each sample's task dict is merged on top.
+The endpoint (--base-url / --model / --api-key or env BASE_URL / MODEL / API_KEY) is
+layered onto agent.model last.
 """
 
 import argparse
@@ -35,6 +34,7 @@ import yaml
 from datasets import load_dataset
 from tqdm import tqdm
 
+from uni_agent.framework.task_runner import resolve_task_config
 from uni_agent.tasks import get_task
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
@@ -48,14 +48,21 @@ NUM_WORKERS = int(os.getenv("NUM_WORKERS", 8))
 class InferenceActor:
     _semaphore = asyncio.Semaphore(max(1, GLOBAL_CONCURRENCY // NUM_WORKERS))
 
-    async def run_single(self, sample: dict, task_overrides: dict) -> dict:
+    async def run_single(self, sample: dict, task_defaults: dict) -> dict:
         async with self._semaphore:
             base_task = sample["extra_info"]["tools_kwargs"]["task"]
             instance_id = base_task["metadata"]["instance_id"]
             try:
-                # Deep-merge this run's task config onto the sample's task (overrides win;
-                # the sample's image + metadata survive), then run it.
-                task = _deep_merge(base_task, task_overrides)
+                # Run-level YAML provides defaults, the sample wins on top, and the
+                # live endpoint is injected last.
+                model_cfg = task_defaults.get("agent", {}).get("model", {})
+                task = resolve_task_config(
+                    {"task": base_task},
+                    session_base_url=model_cfg.get("base_url"),
+                    task_defaults=task_defaults,
+                    api_key=model_cfg.get("api_key", "EMPTY"),
+                    model_name=model_cfg.get("model_name"),
+                )
                 result = await get_task(task).run()
                 info = result.info or {}
                 resolved = bool(info.get("resolved", result.reward))
@@ -84,23 +91,6 @@ def _rule(text: str = "", width: int = 50, ch: str = "-") -> str:
     return f"{ch * (pad // 2)} {text} {ch * (pad - pad // 2)}"
 
 
-def _deep_merge(base: dict, overrides: dict) -> dict:
-    """Recursively merge ``overrides`` on top of ``base``, returning a new dict.
-
-    Nested dicts merge key-wise (``overrides`` wins); lists and scalars replace
-    wholesale. ``base`` is never mutated. (Same semantics as the agent-loop's.)
-    """
-    if not isinstance(base, dict) or not isinstance(overrides, dict):
-        return overrides
-    result = dict(base)
-    for k, v in overrides.items():
-        if isinstance(v, dict) and isinstance(result.get(k), dict):
-            result[k] = _deep_merge(result[k], v)
-        else:
-            result[k] = v
-    return result
-
-
 def _load_task_yaml(path: str) -> dict:
     """Load a YAML task-config file into a dict."""
     raw = yaml.safe_load(Path(path).expanduser().read_text())
@@ -113,8 +103,8 @@ def _load_task_yaml(path: str) -> dict:
     return raw
 
 
-def build_task_overrides(args: argparse.Namespace) -> dict:
-    """Load the (required) task config: the sole source of the agent/model config."""
+def build_task_defaults(args: argparse.Namespace) -> dict:
+    """Load required run-level Task Config defaults and attach the live endpoint."""
     overrides = _load_task_yaml(args.task_config)
 
     # endpoint = runtime state, layered onto the agent's model.
@@ -152,8 +142,8 @@ def main() -> None:
     parser.add_argument("--n", type=int, default=1, help="Rollouts per instance (pass rate averages over all).")
     args = parser.parse_args()
 
-    task_overrides = build_task_overrides(args)
-    agent_cfg = task_overrides.get("agent", {})
+    task_defaults = build_task_defaults(args)
+    agent_cfg = task_defaults.get("agent", {})
     model_cfg = agent_cfg.get("model", {})
     if not model_cfg.get("base_url"):
         logger.error("no policy endpoint: set BASE_URL (or --base-url), or agent.model.base_url in --task-config")
@@ -171,8 +161,8 @@ def main() -> None:
 
     logger.info(f"loaded {len(samples)} rollouts ({n}x) from {args.data_path}")
     logger.info(
-        f"task={task_overrides.get('name') or '<dataset>'} agent={agent_cfg.get('name', args.agent)} "
-        f"provider={task_overrides.get('sandbox', {}).get('provider')} "
+        f"task={task_defaults.get('name') or '<dataset>'} agent={agent_cfg.get('name', args.agent)} "
+        f"provider={task_defaults.get('sandbox', {}).get('provider')} "
         f"endpoint={model_cfg.get('base_url')} model={model_cfg.get('model_name') or '<default>'}"
     )
     logger.info(
@@ -185,7 +175,7 @@ def main() -> None:
 
     num_workers = min(NUM_WORKERS, len(samples))
     workers = [ray.remote(InferenceActor).remote() for _ in range(num_workers)]
-    futures = [workers[i % num_workers].run_single.remote(s, task_overrides) for i, s in enumerate(samples)]
+    futures = [workers[i % num_workers].run_single.remote(s, task_defaults) for i, s in enumerate(samples)]
 
     fut_to_idx = {f: i for i, f in enumerate(futures)}
 

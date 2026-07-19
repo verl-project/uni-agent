@@ -136,15 +136,16 @@ Keep datasets provider-agnostic when possible. For example, SWE-Bench rows store
 
 ## Runtime Configuration
 
-Task configuration is composed in three layers, where later layers win:
+Task configuration has two user-defined layers:
 
-1. The sample's serialized `tools_kwargs.task`.
-2. Run-level YAML or inline overrides.
-3. Runtime `agent.model` endpoint information.
+1. Run-level Task Config provides shared defaults.
+2. The sample's serialized `tools_kwargs.task` is merged on top and wins on conflicts.
 
-Nested dictionaries are deep-merged. Lists and scalar values are replaced.
+Nested dictionaries are deep-merged. Lists and scalar values from the Sample Config replace Task Config defaults.
 
-This allows one dataset to run with different Agents, Sandbox backends, sampling settings, and model endpoints without rewriting the data.
+The runtime injects `agent.model.base_url`, API key, and served model name after the two layers. Endpoint information is not sample-overridable because it belongs to the live policy service.
+
+This allows one dataset batch to customize prompts, metadata, Sandbox images, Agents, or budgets sample by sample while retaining shared defaults.
 
 ## Register a Task
 

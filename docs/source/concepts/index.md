@@ -18,7 +18,7 @@ A normal episode runs from the top down:
 Task
 ├── Sandbox
 ├── Agent
-│   └── Tool and Toolbox
+│   └── Tool and Toolbox (Optional)
 └── Reward / Verification
 ```
 
@@ -26,18 +26,20 @@ When inference or training uses the verl-managed rollout path, the Uni-Agent Gat
 
 ## Ownership
 
+- **Gateway** owns session-scoped model routing and token-level trajectory capture for the training pipeline.
 - **Task** owns the episode lifecycle, task metadata, prompt, and reward computation.
-- **Sandbox** owns the execution environment, process lifecycle, filesystem, and command data plane.
-- **Agent** owns the solving strategy. A white-box agent owns its loop; a black-box agent delegates the loop to an external harness.
-- **Tool** owns one model-visible action and any host-side state required by that action.
-- **Toolbox** owns a set of tool instances bound to one sandbox.
-- **Gateway** owns session-scoped model routing and token-level trajectory capture.
+- **Agent** owns the solving strategy. A white-box agent owns its loop; a black-box agent delegates the loop to an external agent harness, such as Claude Code.
+- **Tool** owns one model-visible action and any host-side state required by that action. **Toolbox** owns a set of tool instances bound to one sandbox.
+- **Sandbox** owns the execution environment, filesystem, and command data plane.
 
-Clear ownership is important: Tasks start and stop sandboxes, Tools never manage sandbox lifecycle, and runtime model endpoints are injected by the runner instead of being stored in datasets.
+## Task Configuration
 
-## Configuration Model
+Uni-Agent uses two Task Config layers for both standalone inference and training:
 
-The same configuration shape is used by standalone inference and training:
+1. **Task Config:** run-level defaults shared by the workload.
+2. **Sample Config:** sample-wise values stored under `extra_info.tools_kwargs.task`, merged on top of the Task Config.
+
+The run-level Task Config defines common behavior such as the Agent, Tools, Sandbox provider, and sampling settings:
 
 ```yaml
 - name: swe_bench
@@ -55,7 +57,24 @@ The same configuration shape is used by standalone inference and training:
       max_total_tokens: 65536
 ```
 
-Dataset rows carry the sample-specific Task configuration under `extra_info.tools_kwargs.task`. Run-level YAML overrides are merged on top, and the live model endpoint is injected last.
+Each sample can then provide or override fields such as its prompt, metadata, sandbox image, budgets, or other nested Task settings:
+
+```yaml
+name: swe_bench
+sandbox:
+  image: swebench/sweb.eval.x86_64.example
+agent:
+  max_steps: 300
+prompt:
+  - role: user
+    content: Fix the issue in /testbed.
+metadata:
+  instance_id: example
+```
+
+Nested dictionaries are merged recursively, while lists and scalar values from the Sample Config replace Task Config defaults. This allows one batch to contain heterogeneous tasks or sandbox environments while still sharing a common Agent and rollout configuration.
+
+The live model endpoint, API key, and served model name are injected after both layers. They are runtime state rather than a third user-configurable layer, so Sample Config cannot replace the active policy endpoint.
 
 ## Customize Bottom-Up
 
