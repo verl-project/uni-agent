@@ -157,6 +157,29 @@ def test_provider_implements_private_exec_and_shares_public_exec(name):
     assert cls.exec is Sandbox.exec
 
 
+def test_local_file_operations_use_host_filesystem(tmp_path):
+    from uni_agent.sandbox.local import LocalSandbox
+
+    sandbox = LocalSandbox()
+    sandbox_file = tmp_path / "sandbox" / "data.bin"
+    upload_source = tmp_path / "upload.bin"
+    uploaded_file = tmp_path / "sandbox" / "uploaded.bin"
+    downloaded_file = tmp_path / "download" / "result.bin"
+    upload_source.write_bytes(b"\x00upload\xff")
+
+    async def run() -> None:
+        await sandbox.write_file(str(sandbox_file), b"\x00sandbox\xff")
+        assert await sandbox.read_file(str(sandbox_file)) == b"\x00sandbox\xff"
+
+        await sandbox.upload_file(upload_source, str(uploaded_file))
+        assert await sandbox.read_file(str(uploaded_file)) == b"\x00upload\xff"
+
+        await sandbox.download_file(str(uploaded_file), downloaded_file)
+
+    asyncio.run(run())
+    assert downloaded_file.read_bytes() == b"\x00upload\xff"
+
+
 def test_registry_includes_seed_provider():
     assert SANDBOX_MODULES["seed"] == "uni_agent.sandbox.seed"
     assert get_sandbox_cls("seed").__name__ == "SeedSandbox"

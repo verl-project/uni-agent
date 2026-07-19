@@ -81,6 +81,13 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
     modal token set
     ```
 
+    Alternatively, provide the Modal credentials through environment variables:
+
+    ```bash
+    export MODAL_TOKEN_ID="<token-id>"
+    export MODAL_TOKEN_SECRET="<token-secret>"
+    ```
+
     Configure the image, lifecycle timeout, and optional Modal app name:
 
     ```python
