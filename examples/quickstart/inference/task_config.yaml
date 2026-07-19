@@ -1,0 +1,21 @@
+- name: swe_bench
+  log_dir: /tmp/uni_agent_logs/swe_bench
+  sandbox:
+    provider: modal
+  agent:
+    name: react
+    max_steps: 200
+    tools:
+      - name: stateful_shell
+        command_timeout: 180
+        env_vars:
+          PIP_PROGRESS_BAR: "off"
+          PAGER: "cat"
+          TQDM_DISABLE: "1"
+          GIT_PAGER: "cat"
+      - name: str_replace_editor
+      - name: submit
+    model:
+      temperature: 0.8
+      top_p: 0.9
+      max_total_tokens: 65536

@@ -85,7 +85,7 @@ Agent-specific fields configure the interaction loop. ReAct declares its tools a
 
 ## External API
 
-Use this mode when you already have an OpenAI-compatible endpoint. The endpoint may be a local vLLM/SGLang server or a hosted model API. The inference driver does not load model weights or require GPUs.
+Use this mode when model serving is managed outside Uni-Agent. The endpoint can come from an external API service or a self-hosted inference engine such as vLLM or SGLang.
 
 ### Start a Model Server
 
@@ -129,7 +129,7 @@ Useful controls:
 
 ## verl Rollout Engine
 
-Use this mode when you have a local model checkpoint and want inference to match the RL rollout path. `parallel_infer_verl.py` asks `verl` to launch and manage the rollout engine, then sends agent sessions through the Uni-Agent training stack.
+`parallel_infer_verl.py` asks `verl` to launch and manage the rollout engine, then sends agent sessions through the Uni-Agent training stack.
 
 The execution path is:
 
@@ -148,8 +148,8 @@ Run a small single-node example:
 ```bash
 python examples/inference/parallel_infer_verl.py \
     --data-path ~/data/swe_agent/swe_bench_verified.parquet \
-    --model-path ~/models/Qwen3-Coder-30B-A3B-Instruct \
-    --task-config examples/inference/task_config.yaml \
+    --model-path Qwen/Qwen3-Coder-30B-A3B-Instruct \
+    --task-config examples/quickstart/inference/task_config.yaml \
     --engine vllm \
     --tool-parser qwen3_coder \
     --tensor-parallel-size 4 \
@@ -176,12 +176,12 @@ The verl-managed entry point can be submitted as a Ray job:
 
 ```bash
 ray job submit --no-wait \
-    --runtime-env examples/inference/runtime_env.yaml \
+    --runtime-env examples/quickstart/inference/runtime_env.yaml \
     --working-dir . \
     -- python3 examples/inference/parallel_infer_verl.py \
     --data-path ~/data/swe_agent/swe_bench_verified.parquet \
     --model-path /path/to/model \
-    --task-config examples/inference/task_config.yaml \
+    --task-config examples/quickstart/inference/task_config.yaml \
     --tool-parser qwen3_coder \
     --tensor-parallel-size 4 \
     --nnodes 2 \
@@ -191,9 +191,15 @@ ray job submit --no-wait \
 
 Use the Ray Runtime Environment to distribute the repository, expose the bundled `verl` source, install optional dependencies, and inject sandbox credentials.
 
-## Choose a Mode
+## Run the Demo
 
-- Start with **external API mode** when validating a task, agent, or hosted model endpoint.
-- Use **verl-managed rollout mode** when benchmarking a local checkpoint, collecting training-format trajectories, or validating the exact rollout path before RL training.
+Replace the Modal credential placeholders in `examples/quickstart/inference/runtime_env.yaml`, then launch a small verl-managed inference job:
 
-Next, [train an agent with RL](rl-training.md) using the same task and rollout configuration.
+```bash
+MODEL_PATH=/path/to/model \
+bash examples/quickstart/inference/run_infer.sh
+```
+
+Override `DATA_PATH`, `TASK_CONFIG`, `LIMIT`, `NNODES`, `N_GPUS_PER_NODE`, or `CONCURRENCY` as needed.
+
+Next, you can [train an agent with RL](rl-training.md) using the same task and rollout configuration.

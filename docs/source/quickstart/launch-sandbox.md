@@ -5,11 +5,11 @@ Uni-Agent provides an isolated and persistent execution environment for agents. 
 This guide focuses on the ReAct Agent Tool workflow. It uses [`examples/quickstart/sandbox/demo.py`](https://github.com/verl-project/uni-agent/blob/main/examples/quickstart/sandbox/demo.py) to install a package, create and edit a Python script, execute it, and verify that state persists across tool calls.
 
 ```bash
-DEBUG_MODE=1 python examples/quickstart/sandbox/demo.py
+DEBUG_MODE=1 SANDBOX_PROVIDER=xxx python examples/quickstart/sandbox/demo.py
 ```
 
 !!! note "About `demo.py` and `DEBUG_MODE`"
-    You can also use this `demo.py` to run an end-to-end sandbox check.
+    You can use this `demo.py` to run an end-to-end sandbox check.
 
     Set `DEBUG_MODE=1` to display the per-session `INFO` walkthrough in the console.
 

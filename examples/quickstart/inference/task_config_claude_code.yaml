@@ -1,0 +1,16 @@
+- name: swe_bench
+  log_dir: /tmp/uni_agent_logs/swe_bench_claude_code
+  sandbox:
+    provider: modal
+    runtime_timeout: 7200
+    sandbox_kwargs:
+      memory_gb: 8
+  agent:
+    name: claude_code
+    max_turns: 200
+    run_timeout: 4800
+    verbose: true
+    model:
+      temperature: 1.0
+      top_p: 0.95
+      max_total_tokens: 131072
