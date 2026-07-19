@@ -1,20 +1,17 @@
 # Installation
 
-Uni-Agent is designed to add as few dependencies as possible to your runtime environment.
-
-You can start from the suitable environment that fits your workflow, then install only the necessary dependencies introduced by Uni-Agent.
-
-## Prerequisites
+Start with the environment that matches your workflow, then add the task and sandbox dependencies you need.
 
 - **Non-training workflows:** a standard Python 3.10+ environment.
-- **RL training:** a compatible `verl` Docker image with the training dependencies already configured (e.g., Megatron).
+- **RL training:** a compatible `verl` Docker image with the training dependencies.
 
 ## Install Uni-Agent
 
-Clone the repository with its submodules:
+Clone the repository and enter its directory:
 
 ```bash
 git clone https://github.com/verl-project/uni-agent.git
+cd uni-agent
 ```
 
 For RL training, install the bundled `verl` source into your training environment:
@@ -24,7 +21,7 @@ git submodule update --init --recursive
 pip install --no-deps -e ./verl
 ```
 
-## Install Optional Dependencies
+## Optional Dependencies
 
 The additional dependencies introduced by Uni-Agent mainly fall into two categories: task dependencies and sandbox dependencies. Most are lightweight and can be installed on demand.
 
@@ -48,9 +45,7 @@ Install the client package for the sandbox backend you plan to use:
 
 === "Local"
 
-    ```bash
-    pip install swe-rex
-    ```
+    No additional sandbox SDK is required.
 
 === "Modal"
 
@@ -61,7 +56,7 @@ Install the client package for the sandbox backend you plan to use:
 === "veFaaS"
 
     ```bash
-    pip install volcengine-python-sdk
+    pip install volcengine-python-sdk swe-rex
     ```
 
 ## Ray Runtime Environments
@@ -74,7 +69,7 @@ excludes: ["/.git/"]
 pip:
   packages:
     - "volcengine-python-sdk"
-    - "swe-rex
+    - "swe-rex"
     - "swebench"
 env_vars:
   PYTHONPATH: "verl"

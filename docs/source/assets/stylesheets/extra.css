@@ -1,6 +1,113 @@
+@import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@600;700&display=swap");
+
+/* Add a subtle purple atmosphere without reducing content contrast. */
+body[data-md-color-scheme="default"] {
+    --md-code-bg-color: #f3f4f6;
+    --md-code-fg-color: #24292f;
+    background-color: #f6f1ff;
+}
+
+body[data-md-color-scheme="slate"] {
+    background-color: #1d1825;
+}
+
+body[data-md-color-scheme="default"] .md-main {
+    background: linear-gradient(135deg, #ffffff 0%, #f8f4ff 50%, #eee6ff 100%) fixed !important;
+}
+
+body[data-md-color-scheme="slate"] .md-main {
+    background: linear-gradient(135deg, #1b1a20 0%, #191720 50%, #251a31 100%) fixed !important;
+}
+
+body[data-md-color-scheme] .md-container,
+body[data-md-color-scheme] .md-main__inner,
+body[data-md-color-scheme] .md-content,
+body[data-md-color-scheme] .md-content__inner {
+    background: transparent !important;
+}
+
 /* Give the article more room while keeping Material's three-column layout. */
 .md-grid {
     max-width: 70rem;
+}
+
+/* Keep the site chrome text-only; the U mark is reserved for the favicon. */
+.md-header__button.md-logo,
+.md-nav__title .md-logo {
+    display: none;
+}
+
+.md-header__title {
+    font-family: "Space Grotesk", "Inter", sans-serif;
+    font-size: 0.9rem;
+    font-weight: 700;
+    letter-spacing: -0.025em;
+    margin-left: 0.2rem;
+}
+
+/* Mintlify-inspired feature cards for the documentation landing page. */
+.md-typeset .ua-feature-grid > ul {
+    gap: 0.8rem;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.md-typeset .ua-feature-grid > ul > li {
+    background: rgba(255, 255, 255, 0.64);
+    border: 1px solid rgba(94, 53, 177, 0.13);
+    border-radius: 0.75rem;
+    box-shadow: 0 1px 2px rgba(40, 24, 72, 0.04);
+    min-height: 6.6rem;
+    padding: 1.05rem 1.1rem;
+    transition:
+        border-color 160ms ease,
+        box-shadow 160ms ease,
+        transform 160ms ease;
+}
+
+[data-md-color-scheme="slate"] .md-typeset .ua-feature-grid > ul > li {
+    background: rgba(255, 255, 255, 0.035);
+    border-color: rgba(179, 136, 255, 0.16);
+    box-shadow: none;
+}
+
+.md-typeset .ua-feature-grid > ul > li::before {
+    background: linear-gradient(90deg, #7e57c2, #b39ddb);
+    border-radius: 999px;
+    content: "";
+    display: block;
+    height: 0.2rem;
+    margin-bottom: 0.7rem;
+    width: 2rem;
+}
+
+.md-typeset .ua-feature-grid > ul > li:hover {
+    border-color: rgba(94, 53, 177, 0.32);
+    box-shadow: 0 0.55rem 1.35rem rgba(55, 32, 96, 0.09);
+    transform: translateY(-2px);
+}
+
+.md-typeset .ua-feature-grid > ul > li > p {
+    margin: 0;
+}
+
+.md-typeset .ua-feature-grid > ul > li > p:first-of-type {
+    color: var(--md-default-fg-color);
+    font-family: "Space Grotesk", "Inter", sans-serif;
+    font-size: 0.8rem;
+    letter-spacing: -0.015em;
+    margin-bottom: 0.35rem;
+}
+
+.md-typeset .ua-feature-grid > ul > li > p:last-of-type {
+    color: var(--md-default-fg-color--light);
+    font-size: 0.7rem;
+    line-height: 1.45;
+}
+
+@media screen and (max-width: 40em) {
+    .md-typeset .ua-feature-grid > ul {
+        grid-template-columns: 1fr;
+    }
 }
 
 /* Improve long-form readability without making the page feel oversized. */
@@ -23,12 +130,45 @@
 
 .md-typeset h3,
 .md-typeset strong {
-    font-weight: 650;
+    font-weight: 700;
 }
 
-.md-typeset code,
-.md-typeset pre > code {
+/* Present fenced code as a focused developer surface. */
+.md-typeset .highlight {
+    border: 1px solid #d0d7de;
+    border-radius: 0.5rem;
+    box-shadow: 0 0.2rem 0.7rem rgba(31, 35, 40, 0.06);
+    overflow: hidden;
+}
+
+[data-md-color-scheme="slate"] .md-typeset .highlight {
+    border-color: rgba(179, 136, 255, 0.24);
+    box-shadow: 0 0.55rem 1.4rem rgba(0, 0, 0, 0.22);
+}
+
+.md-typeset .highlight pre {
+    margin: 0;
+}
+
+/* Keep inline code subtle and distinct from full code blocks. */
+[data-md-color-scheme="default"] .md-typeset :not(pre) > code {
+    background-color: rgba(94, 53, 177, 0.08);
+    border: 1px solid rgba(94, 53, 177, 0.14);
+    color: #5e35b1;
+}
+
+[data-md-color-scheme="slate"] .md-typeset :not(pre) > code {
+    background-color: rgba(179, 136, 255, 0.12);
+    border: 1px solid rgba(179, 136, 255, 0.18);
+    color: #d1c4e9;
+}
+
+.md-typeset :not(pre) > code {
     border-radius: 0.3rem;
+    box-decoration-break: clone;
+    font-family: var(--md-code-font-family);
+    font-size: 0.85em;
+    padding: 0.08em 0.32em;
 }
 
 /* Make top-level navigation groups stand out from their child pages. */
@@ -40,8 +180,62 @@
     margin-top: 0.6rem;
 }
 
+/* Keep the desktop table of contents compact and transparent. */
+@media screen and (min-width: 60em) {
+    .md-sidebar--secondary,
+    .md-sidebar--secondary .md-sidebar__scrollwrap,
+    .md-sidebar--secondary .md-sidebar__inner,
+    .md-sidebar--secondary .md-nav {
+        background: transparent !important;
+    }
+
+    .md-sidebar--secondary .md-nav--secondary {
+        border-left: 1px solid var(--md-default-fg-color--lightest);
+        box-sizing: border-box;
+        padding-left: 0.75rem;
+    }
+
+    .md-sidebar--secondary .md-nav__title {
+        background: transparent !important;
+        box-shadow: none !important;
+        color: var(--md-primary-fg-color);
+        font-size: 0.72rem;
+        font-weight: 700;
+        line-height: 1.4;
+        margin: 0 0 0.45rem;
+        padding: 0.15rem 0;
+    }
+
+    .md-sidebar--secondary .md-nav__title::after {
+        display: none !important;
+    }
+
+    .md-sidebar--secondary .md-nav__link {
+        color: var(--md-default-fg-color--light);
+        font-size: 0.68rem;
+        line-height: 1.45;
+    }
+
+    .md-sidebar--secondary .md-nav__link:hover,
+    .md-sidebar--secondary .md-nav__link:focus,
+    .md-sidebar--secondary .md-nav__link--active {
+        color: var(--md-primary-fg-color);
+    }
+}
+
 /* The site name is already present in the desktop header. */
 @media screen and (min-width: 76.25em) {
+    .md-sidebar--primary,
+    .md-sidebar--primary .md-sidebar__scrollwrap,
+    .md-sidebar--primary .md-sidebar__inner,
+    .md-sidebar--primary .md-nav {
+        background: transparent !important;
+    }
+
+    .md-content {
+        border-left: 1px solid var(--md-default-fg-color--lightest);
+    }
+
     .md-sidebar--primary .md-nav--primary > .md-nav__title {
         display: none;
     }

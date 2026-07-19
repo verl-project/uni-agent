@@ -1,4 +1,4 @@
-<h1>Uni-Agent: Train Long-horizon Agents at Scale</h1>
+<h1>Uni-Agent: Train Long-Horizon Agents at Scale</h1>
 
 <p>
   <a href="https://uni-agent.readthedocs.io/en/latest/index.html"><img src="https://img.shields.io/badge/Documentation-6D28D9?style=flat-square" alt="Documentation"></a>

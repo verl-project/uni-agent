@@ -2,7 +2,7 @@
 
 Long-horizon agent tasks, such as software engineering, need a **persistent sandbox** where the agent can run commands, install packages, edit files, and preserve state across many steps. This document shows how to start an agent environment, install tools inside it, and run a simple persistence demo.
 
-The runnable example lives under `examples/agent_env`; the final section shows how to run it end to end.
+The runnable example lives under `examples/quickstart/sandbox`; the final section shows how to run it end to end.
 
 ---
 
@@ -258,7 +258,7 @@ env.close()
 You can run the full demo from the repo root with the deployment backend you want to test:
 
 ```bash
-DEPLOYMENT=<local|vefaas|modal> DEBUG_MODE=1 python examples/agent_env/demo.py
+SANDBOX_PROVIDER=<local|vefaas|modal> DEBUG_MODE=1 python examples/quickstart/sandbox/demo.py
 ```
 
 Set `DEBUG_MODE=1` when you want to print sandbox startup and runtime output in the current terminal.

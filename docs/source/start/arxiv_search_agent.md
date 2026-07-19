@@ -144,7 +144,7 @@ After that, it helps to understand what the script is doing internally. The demo
 
 ### Environment
 
-The script follows the same environment pattern as `examples/agent_env/demo.py` and uses `AgentEnv`:
+The script follows the same environment pattern as `examples/quickstart/sandbox/demo.py` and uses `AgentEnv`:
 
 ```python
 env_config = {

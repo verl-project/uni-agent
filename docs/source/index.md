@@ -1,34 +1,28 @@
-# Build, Run, and Train Agents at Scale
+# Uni-Agent: Train Long-Horizon Agents at Scale
 
-Uni-Agent is a framework for building, running, and training long-horizon agent
-workflows. It provides persistent sandboxes, tool-based interaction loops, and
-`verl` integration for scalable reinforcement learning.
+Uni-Agent is a framework for training long-horizon agents.
 
 [Get started](quickstart/installation.md){ .md-button .md-button--primary }
 [View on GitHub](https://github.com/verl-project/uni-agent){ .md-button }
 
-<div class="grid cards" markdown>
+<div class="grid cards ua-feature-grid" markdown>
 
--   **Build agents**
+-   **Pluggable**
 
-    Compose reusable agents, tools, tasks, and isolated sandbox environments.
+    Connect any existing agent harness to RL.
 
--   **Run at scale**
+-   **Extensible**
 
-    Execute long-horizon, stateful agent sessions with parallel workers.
+    Customize agents, tasks, tools, and sandboxes through modular interfaces.
 
--   **Train with RL**
+-   **Scalable**
 
-    Reuse the same interaction stack for evaluation and reinforcement learning.
+    Run thousands of stateful sessions and turn them into training-ready data (for both SFT and RL).
+
+-   **Reproducible**
+
+    Reproduce results with runnable recipes, complete configs, curves, and benchmarks.
 
 </div>
 
-![Uni-Agent architecture overview](assets/uni-agent.png){ width="900" }
-
-## Documentation
-
-- **Quickstart** — install Uni-Agent, launch a sandbox, build an agent, run
-  parallel interaction, and start reinforcement learning.
-- **Guides** — practical workflows and configuration references for evaluation
-  and training.
-- **Blog** — design notes, results, and write-ups of new features.
+![Uni-Agent architecture overview](assets/uni-agent.png?v=2){ width="900" }

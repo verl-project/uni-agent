@@ -1,4 +1,4 @@
-site_name: Uni-Agent
+site_name: Uni-Agent Docs
 site_description: Build, run, and train long-horizon agents at scale.
 site_url: https://uni-agent.readthedocs.io/en/latest/
 repo_name: verl-project/uni-agent
@@ -13,6 +13,7 @@ use_directory_urls: false
 theme:
   name: material
   language: en
+  favicon: assets/brand/uni-agent-mark.svg?v=6
   font:
     text: Inter
     code: JetBrains Mono
@@ -66,6 +67,7 @@ markdown_extensions:
   - toc:
       permalink: true
       toc_depth: 3
+      title: Contents
   - pymdownx.details
   - pymdownx.highlight:
       anchor_linenums: true
@@ -78,7 +80,7 @@ extra_javascript:
   - assets/js/runllm-widget.js
 
 extra_css:
-  - assets/stylesheets/extra.css
+  - assets/stylesheets/extra.css?v=20
 
 extra:
   social:
