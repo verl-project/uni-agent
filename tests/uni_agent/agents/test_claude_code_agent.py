@@ -4,6 +4,7 @@ import asyncio
 
 import pytest
 
+from uni_agent.agents.base import ModelConfig
 from uni_agent.agents.claude_code.agent import ClaudeCodeAgent, ClaudeCodeConfig
 from uni_agent.sandbox.base import ExecResult
 
@@ -13,6 +14,7 @@ class _FakeSandbox:
         self.probe_results = list(probe_results)
         self.install_exit_code = install_exit_code
         self.calls: list[dict] = []
+        self.exec_calls: list[dict] = []
 
     async def exec_shell(self, script: str, *, timeout=None, workdir=None, env=None) -> ExecResult:
         self.calls.append({"script": script, "timeout": timeout})
@@ -20,6 +22,10 @@ class _FakeSandbox:
             return ExecResult(exit_code=self.probe_results.pop(0), stdout="", stderr="")
         stderr = "npm failed" if self.install_exit_code else ""
         return ExecResult(exit_code=self.install_exit_code, stdout="", stderr=stderr)
+
+    async def exec(self, argv, *, timeout=None, workdir=None, env=None) -> ExecResult:
+        self.exec_calls.append({"argv": argv, "timeout": timeout, "workdir": workdir, "env": env})
+        return ExecResult(exit_code=0, stdout="done", stderr="")
 
 
 def _agent() -> ClaudeCodeAgent:
@@ -60,3 +66,18 @@ def test_ensure_claude_requires_binary_on_path_after_install():
 
     with pytest.raises(RuntimeError, match="not available on PATH"):
         asyncio.run(_agent()._ensure_claude(sandbox))
+
+
+def test_run_uses_sandbox_default_workdir():
+    config = ClaudeCodeConfig(model=ModelConfig(base_url="http://gateway:8000/v1", model_name="policy"))
+    sandbox = _FakeSandbox(probe_results=[0])
+
+    asyncio.run(
+        ClaudeCodeAgent(config).run(
+            sandbox=sandbox,
+            messages=[{"role": "user", "content": "fix the bug"}],
+        )
+    )
+
+    assert len(sandbox.exec_calls) == 1
+    assert sandbox.exec_calls[0]["workdir"] is None

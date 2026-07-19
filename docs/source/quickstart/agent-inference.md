@@ -53,17 +53,17 @@ Both inference modes use the same task configuration format. Choose an agent imp
 
     Claude Code is a black-box agent harness: the complete CLI runs inside the sandbox and connects to the configured model endpoint. See [`task_config_claude_code.yaml`](https://github.com/verl-project/uni-agent/blob/main/examples/inference/task_config_claude_code.yaml).
 
+    !!! note "Sandbox network access"
+        Make sure the sandbox can resolve and reach the configured model API endpoint.
+
     ```yaml
     - name: swe_bench
       log_dir: /tmp/uni_agent_logs/swe_bench_claude_code
       sandbox:
-        provider: "your-provider"
+        provider: "xxx"
         runtime_timeout: 7200
-        sandbox_kwargs:
-          memory_gb: 8
       agent:
         name: claude_code
-        workdir: /testbed
         max_turns: 200
         run_timeout: 4800
         verbose: true
@@ -81,7 +81,7 @@ Common fields:
 - `agent.model`: sampling parameters and total token budget.
 - `log_dir`: per-session execution logs.
 
-Agent-specific fields configure the interaction loop. ReAct declares its tools and `max_steps`; Claude Code configures its working directory, turn limit, and process timeout.
+Agent-specific fields configure the interaction loop. ReAct declares its tools and `max_steps`; Claude Code configures its turn limit and process timeout.
 
 ## External API
 

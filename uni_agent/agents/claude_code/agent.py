@@ -58,7 +58,6 @@ class ClaudeCodeConfig(AgentConfig):
     """Black-box launch params for Claude Code (policy endpoint lives on :attr:`AgentConfig.model`)."""
 
     name: str = "claude_code"
-    workdir: str = Field(default="/testbed", description="Dir claude runs in; SWE-bench scores this tree in place.")
     max_turns: int | None = Field(default=80, description="--max-turns budget; None to omit.")
     disallowed_tools: list[str] = Field(
         default_factory=lambda: ["WebFetch", "WebSearch", "AskUserQuestion"],
@@ -96,8 +95,8 @@ class ClaudeCodeAgent(Agent):
         endpoint = _strip_v1(base_url)
         argv = self._claude_argv(problem, system_prompt)
         env = self._claude_env(endpoint)
-        logger.info("claude_code: launch (workdir=%s, endpoint=%s)", cfg.workdir, endpoint)
-        proc = await sandbox.exec(argv, workdir=cfg.workdir, env=env, timeout=cfg.run_timeout)
+        logger.info("claude_code: launch (endpoint=%s)", endpoint)
+        proc = await sandbox.exec(argv, env=env, timeout=cfg.run_timeout)
 
         out_tail = (proc.stdout or "").strip()[-2000:]
         err_tail = (proc.stderr or "").strip()[-2000:]
