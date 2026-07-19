@@ -1,0 +1,19 @@
+working_dir: ./
+excludes: ["/.git/"]
+pip:
+  packages:
+    - "transferqueue==0.1.6 --no-deps"
+    - "byted-seed-sandbox"
+env_vars:
+  PYTHONPATH: "verl"
+  TORCH_NCCL_AVOID_RECORD_STREAMS: "1"
+  CUDA_DEVICE_MAX_CONNECTIONS: "1"
+  VLLM_DISABLE_COMPILE_CACHE: "1"
+  # if you use vefaas, set the following variables
+  VEFAAS_FUNCTION_ID: "xxxxxx"
+  VEFAAS_FUNCTION_ROUTE: "xxxxxx"
+  VOLCE_ACCESS_KEY: "xxxxxx"
+  VOLCE_SECRET_KEY: "xxxxxx"
+  # if you use modal, set the following variables
+  MODAL_TOKEN_ID: "ak-MWuXc0JB73Ll3y75lnTl1K"
+  MODAL_TOKEN_SECRET: "as-b3iq9Xf3igKAb3DfPQVNwG"

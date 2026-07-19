@@ -163,7 +163,7 @@ bash uni_agent/tools/search/localwiki/run_localwiki.sh
 Then run parallel inference with the search agent config:
 
 ```bash
-python examples/agent_interaction/parallel_infer.py \
+python examples/inference/parallel_infer.py \
     --data-path ~/uni_agent_data/data/asearcher_uni_processed/test.parquet \
     --model-path ~/uni_agent_data/model/Qwen3-30B-A3B-Thinking-2507 \
     --agent-config-path examples/search_agent/agent_config.yaml \

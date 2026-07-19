@@ -74,7 +74,7 @@ If you use a different backend, set `DEPLOYMENT` accordingly and point `TRAIN_FI
 Ray uses a runtime env file to package the working directory and inject credentials into the job. Start from the example:
 
 ```bash
-cp examples/agent_interaction/runtime_env.yaml \
+cp examples/inference/runtime_env.yaml \
    "${RAY_DATA_HOME}/data/swe_agent/runtime_env.yaml"
 ```
 
@@ -87,10 +87,10 @@ The training script controls the training system. The agent config controls what
 For Modal:
 
 ```bash
-cp examples/agent_interaction/agent_config_modal.yaml "${RAY_DATA_HOME}/data/swe_agent/agent_config.yaml"
+cp examples/inference/agent_config_modal.yaml "${RAY_DATA_HOME}/data/swe_agent/agent_config.yaml"
 ```
 
-For veFaaS, copy `examples/agent_interaction/agent_config_vefaas.yaml` instead.
+For veFaaS, copy `examples/inference/agent_config_vefaas.yaml` instead.
 
 At runtime, the trainer passes this path through:
 

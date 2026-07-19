@@ -8,7 +8,7 @@ This page shows how to:
 2. Sanity-check the parquet by running the gold solutions.
 3. Run parallel inference with a model and collect rewards.
 
-The runnable scripts live under `examples/data_preprocess/terminal_bench_v2.py` and `examples/agent_interaction/`.
+The runnable scripts live under `examples/data_preprocess/terminal_bench_v2.py` and `examples/inference/`.
 
 **Reference result:**
 
@@ -51,7 +51,7 @@ This writes `~/data/swe_agent/terminal_bench_v2_modal.parquet`. Two tasks (`qemu
 Before spending GPU time on inference, run the included gold solutions through the same Modal deployment + reward spec to confirm the parquet is healthy. `parallel_verify_terminal_bench.py` starts each task's sandbox, applies the gold `solve.sh`, runs `test.sh`, and aggregates pass / fail / timeout counts:
 
 ```bash
-python examples/agent_interaction/parallel_verify_terminal_bench.py \
+python examples/inference/parallel_verify_terminal_bench.py \
     --data-path ~/data/swe_agent/terminal_bench_v2_modal.parquet \
     --num-workers 8
 ```
@@ -70,7 +70,7 @@ A healthy parquet should resolve essentially all tasks. Anything in the `fail_tl
 Once the parquet verifies, run the agent loop with `parallel_infer.py`. The matching agent-loop YAML is intentionally minimal because the parquet carries the per-task config:
 
 ```yaml
-# examples/agent_interaction/agent_config_terminal_bench.yaml
+# examples/inference/agent_config_terminal_bench.yaml
 - name: swe_agent
   _target_: uni_agent.agent_loop.UniAgentLoop
   concurrency: 128
@@ -84,9 +84,9 @@ Submit the inference job (Qwen3.6-35B-A3B at 200K context is the reference confi
 ray job submit --no-wait \
     --runtime-env $RAY_DATA_HOME/data/swe_agent/runtime_env.yaml \
     --working-dir . \
-    -- python3 examples/agent_interaction/parallel_infer.py \
+    -- python3 examples/inference/parallel_infer.py \
     --data-path $RAY_DATA_HOME/data/swe_agent/terminal_bench_v2_modal.parquet \
-    --agent-config-path examples/agent_interaction/agent_config_terminal_bench.yaml \
+    --agent-config-path examples/inference/agent_config_terminal_bench.yaml \
     --model-path $RAY_DATA_HOME/models/Qwen3.6-35B-A3B --tp 8 \
     --prompt-length 8192 \
     --response-length 204800 \
@@ -106,4 +106,4 @@ Notes:
 
 - `uni_agent/reward/terminal_bench.py` — the `terminal_bench_v2` reward spec (uploads gold / tests archives, runs `test.sh`, parses `reward.json`).
 - `uni_agent/agent_loop.py` — `UniAgentLoop._init_config`, the merge between the YAML and per-sample `tools_kwargs`.
-- `examples/agent_interaction/agent_config_modal.yaml` vs. `agent_config_terminal_bench.yaml` — contrast a "YAML carries defaults" agent config with a "YAML is a thin shell" one.
+- `examples/inference/agent_config_modal.yaml` vs. `agent_config_terminal_bench.yaml` — contrast a "YAML carries defaults" agent config with a "YAML is a thin shell" one.

@@ -18,11 +18,11 @@ with no resolved/wrong-answer/timeout bucketing (just mean ``rm_scores``).
 
 Example (single node, 4-way tensor parallel)::
 
-    python examples/agent_interaction/parallel_infer_verl.py \
+    python examples/inference/parallel_infer_verl.py \
         --data-path ~/data/swe_agent/swe_bench_verified.parquet \
         --model-path ~/models/Qwen3-Coder-30B-A3B-Instruct \
         --tool-parser qwen3_coder --tensor-parallel-size 4 \
-        --task-config examples/agent_interaction/task_config.yaml --limit 8
+        --task-config examples/inference/task_config.yaml --limit 8
 
 ``--task-config`` is required (same YAML shape as ``parallel_infer_api.py``); the policy
 endpoint is the gateway session, bound by the runner, not a flag.

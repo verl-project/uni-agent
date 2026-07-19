@@ -5,7 +5,7 @@ Uni-Agent provides an isolated and persistent execution environment for agents. 
 This guide focuses on the ReAct Agent Tool workflow. It uses [`examples/quickstart/sandbox/demo.py`](https://github.com/verl-project/uni-agent/blob/main/examples/quickstart/sandbox/demo.py) to install a package, create and edit a Python script, execute it, and verify that state persists across tool calls.
 
 ```bash
-DEBUG_MODE=1 IMAGE=xxx python examples/quickstart/sandbox/demo.py
+DEBUG_MODE=1 python examples/quickstart/sandbox/demo.py
 ```
 
 !!! note "About `demo.py` and `DEBUG_MODE`"
@@ -24,7 +24,7 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
     Local commands run directly on the host and are not isolated.
 
     !!! warning "Local execution can modify your machine"
-        Commands can read, modify, or delete local files and change the active Python environment. Use this backend only for small-scale validation with trusted commands; use an isolated backend for untrusted agents or larger workloads.
+        Commands can read, modify, or delete local files and change the active Python environment. Use this backend only for small-scale validation with trusted commands.
 
     ```python
     from uni_agent.sandbox import SandboxConfig
@@ -81,7 +81,7 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
     modal token set
     ```
 
-    Alternatively, provide the Modal credentials through environment variables:
+    Alternatively, you can provide the Modal credentials through environment variables:
 
     ```bash
     export MODAL_TOKEN_ID="<token-id>"

@@ -4,7 +4,7 @@ After you can launch a single agent environment, the next step is to run many ag
 
 This page uses a **SWE agent** workflow as the running example. You will prepare SWE-Bench data, run model-environment interaction with multiple workers, and verify the generated solutions.
 
-The inference and verification scripts for this page live under `examples/agent_interaction`.
+The inference and verification scripts for this page live under `examples/inference`.
 
 **Reference results on SWE-Bench Verified with Uni-Agent:**
 
@@ -56,9 +56,9 @@ Once the dataset is ready, use `parallel_infer.py` to run the agent loop over ma
 
 ```bash
 DATA_PATH=~/data/swe_agent/swe_bench_verified_modal.parquet
-AGENT_CONFIG=examples/agent_interaction/agent_config_modal.yaml
+AGENT_CONFIG=examples/inference/agent_config_modal.yaml
 
-python examples/agent_interaction/parallel_infer.py \
+python examples/inference/parallel_infer.py \
     --data-path $DATA_PATH \
     --model-path ~/models/Qwen3-Coder-30B-A3B-Instruct \
     --agent-config-path $AGENT_CONFIG \
@@ -73,16 +73,16 @@ python examples/agent_interaction/parallel_infer.py \
 
 ### Multi-node / Ray job submission
 
-To run on a Ray cluster, submit the same script with `ray job submit` and provide a runtime environment YAML. Put backend credentials in that file, for example `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` for Modal, or `VEFAAS_FUNCTION_ID`, `VEFAAS_FUNCTION_ROUTE`, `VOLCE_ACCESS_KEY`, and `VOLCE_SECRET_KEY` for veFaaS. See `examples/agent_interaction/runtime_env.yaml` for an example.
+To run on a Ray cluster, submit the same script with `ray job submit` and provide a runtime environment YAML. Put backend credentials in that file, for example `MODAL_TOKEN_ID` and `MODAL_TOKEN_SECRET` for Modal, or `VEFAAS_FUNCTION_ID`, `VEFAAS_FUNCTION_ROUTE`, `VOLCE_ACCESS_KEY`, and `VOLCE_SECRET_KEY` for veFaaS. See `examples/inference/runtime_env.yaml` for an example.
 
 ```bash
 ray job submit --no-wait \
-    --runtime-env examples/agent_interaction/runtime_env.yaml \
+    --runtime-env examples/inference/runtime_env.yaml \
     --working-dir . \
-    -- python3 examples/agent_interaction/parallel_infer.py \
+    -- python3 examples/inference/parallel_infer.py \
     --data-path ~/data/swe_agent/swe_bench_verified_modal.parquet \
     --model-path ~/models/Qwen3-Coder-30B-A3B-Instruct \
-    --agent-config-path examples/agent_interaction/agent_config_modal.yaml \
+    --agent-config-path examples/inference/agent_config_modal.yaml \
     --nnodes 4 \
     --n-gpus-per-node 8 \
     --max-samples -1
@@ -92,12 +92,12 @@ Edit `runtime_env.yaml` to set your credentials, and do not commit real secrets.
 
 ### Agent config
 
-Uni-Agent groups the environment, tool, and interaction parameters into a single agent config. This example uses `examples/agent_interaction/agent_config_modal.yaml`; use `examples/agent_interaction/agent_config_vefaas.yaml` if you run on veFaaS.
+Uni-Agent groups the environment, tool, and interaction parameters into a single agent config. This example uses `examples/inference/agent_config_modal.yaml`; use `examples/inference/agent_config_vefaas.yaml` if you run on veFaaS.
 
 Below is the main shape of the config:
 
 ```yaml
-# examples/agent_interaction/agent_config_modal.yaml
+# examples/inference/agent_config_modal.yaml
 
 - name: swe_agent
   _target_: uni_agent.agent_loop.UniAgentLoop

@@ -64,7 +64,7 @@ env_vars:
   MODAL_TOKEN_SECRET: "xxx"
 ```
 
-Save this file as a runtime environment YAML, for example `examples/agent_interaction/runtime_env.yaml`. Then submit your job with `ray job submit`:
+Save this file as a runtime environment YAML, for example `examples/inference/runtime_env.yaml`. Then submit your job with `ray job submit`:
 
 ```bash
 ray job submit --runtime-env runtime_env.yaml -- python3 xxx.py
