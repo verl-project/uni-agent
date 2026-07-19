@@ -8,7 +8,7 @@ Uni-Agent supports two inference modes:
 This guide demonstrates both modes, using SWE-Bench task as an example:
 
 1. Run an ReAct Agent with an external modal API,
-2. Run Claude Code Agent with verl rollout engine.
+2. Run `Claude Code` with verl rollout engine.
 
 ## Prepare Data
 
@@ -72,8 +72,6 @@ Both inference modes use the same task configuration format. Choose an agent imp
           top_p: 0.95
           max_total_tokens: 131072
     ```
-
-    The sandbox image must include the `claude` CLI on `PATH`.
 
 Common fields:
 

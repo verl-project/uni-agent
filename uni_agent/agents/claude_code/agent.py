@@ -36,6 +36,9 @@ _CC_QUIET_ENV = {
     "DISABLE_NON_ESSENTIAL_MODEL_CALLS": "1",
 }
 
+_CLAUDE_INSTALL_COMMAND = "npm install -g @anthropic-ai/claude-code --no-audit --no-fund"
+_CLAUDE_INSTALL_TIMEOUT = 600
+
 
 def _strip_v1(base_url: str) -> str:
     """Drop a trailing ``/v1`` from an OpenAI-style base URL to get the Anthropic root.
@@ -85,8 +88,7 @@ class ClaudeCodeAgent(Agent):
             raise ValueError("claude_code: config.model.base_url is not set (the gateway/vLLM policy endpoint)")
         system_prompt, problem = self._split_messages(messages)
 
-        if (await sandbox.exec_shell("command -v claude >/dev/null 2>&1")).exit_code != 0:
-            raise RuntimeError("claude_code: claude not found on PATH.")
+        await self._ensure_claude(sandbox)
         # Let the agent's git commands trust the repo even if it's owned by another uid.
         await sandbox.exec_shell("git config --system safe.directory '*' || true")
 
@@ -112,6 +114,20 @@ class ClaudeCodeAgent(Agent):
         return AgentResult(info={"exit_code": proc.exit_code, "stdout_tail": out_tail, "stderr_tail": err_tail})
 
     # ----- helpers -----
+    async def _ensure_claude(self, sandbox: Sandbox) -> None:
+        if (await sandbox.exec_shell("command -v claude >/dev/null 2>&1")).exit_code == 0:
+            return
+
+        logger.info("claude_code: claude not found; installing it inside the sandbox")
+        result = await sandbox.exec_shell(_CLAUDE_INSTALL_COMMAND, timeout=_CLAUDE_INSTALL_TIMEOUT)
+        if result.exit_code != 0:
+            detail = (result.stderr or result.stdout or "unknown error").strip()[-2000:]
+            raise RuntimeError(f"claude_code: failed to install Claude Code: {detail}")
+
+        if (await sandbox.exec_shell("command -v claude >/dev/null 2>&1")).exit_code != 0:
+            raise RuntimeError("claude_code: installation finished but claude is not available on PATH")
+        logger.info("claude_code: installation completed")
+
     def _split_messages(self, messages: list[dict[str, Any]]) -> tuple[str | None, str]:
         if len(messages) > 2:
             raise ValueError(f"claude_code accepts at most 2 messages (system?, user), got {len(messages)}")
