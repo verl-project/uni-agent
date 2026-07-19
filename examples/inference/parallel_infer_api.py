@@ -34,8 +34,7 @@ import yaml
 from datasets import load_dataset
 from tqdm import tqdm
 
-from uni_agent.framework.task_runner import resolve_task_config
-from uni_agent.tasks import get_task
+from uni_agent.tasks import get_task, resolve_task_config
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 logger = logging.getLogger(__name__)

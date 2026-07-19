@@ -18,6 +18,7 @@ themselves, and are built with :func:`get_task` -- from either a config instance
 from __future__ import annotations
 
 from .base import Task, TaskConfig, TaskResult
+from .config import resolve_task_config
 from .registry import get_task
 
 __all__ = [
@@ -25,4 +26,5 @@ __all__ = [
     "TaskConfig",
     "TaskResult",
     "get_task",
+    "resolve_task_config",
 ]

@@ -21,7 +21,7 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
 
 === "Local"
 
-    Local commands run directly on the host and are not isolated.
+    **Local, non-isolated.** Commands run directly on the host.
 
     !!! warning "Local execution can modify your machine"
         Commands can read, modify, or delete local files and change the active Python environment. Use this backend only for small-scale validation with trusted commands.
@@ -34,13 +34,13 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
 
 === "Docker"
 
-    [Docker](https://www.docker.com/) is a local deployment option that runs agents in isolated containers.
+    **Local, isolated.** [Docker](https://www.docker.com/) runs agents in containers on your machine.
 
     Integration and configuration instructions are to be filled.
 
 === "veFaaS"
 
-    [veFaaS](https://www.volcengine.com/product/vefaas) provides isolated, elastic remote sandboxes for larger workloads.
+    **Remote cloud service.** [veFaaS](https://www.volcengine.com/product/vefaas) provides elastic, isolated sandboxes on Volcengine.
 
     Install its client dependencies:
 
@@ -72,7 +72,7 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
 
 === "Modal"
 
-    [Modal](https://modal.com/) provides an isolated remote sandbox and is the default backend in this demo.
+    **Remote cloud service.** [Modal](https://modal.com/) provides on-demand isolated sandboxes without requiring you to manage a cluster.
 
     Install and authenticate the Modal client:
 
@@ -103,7 +103,7 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
 
 === "YuanRong"
 
-    [YuanRong](https://docs.openyuanrong.org/zh-cn/latest/index.html) provides secure, elastic sandbox management for distributed agent workloads.
+    **Remote or self-hosted service.** [YuanRong](https://docs.openyuanrong.org/zh-cn/latest/index.html) provides elastic sandbox management for distributed agent workloads.
 
     Integration and configuration instructions are to be filled.
 
@@ -127,7 +127,7 @@ async with sandbox:
 
 ## Build a ReAct Toolbox
 
-A ReAct agent interacts with the sandbox through tools. The demo binds a stateful shell and a file editor to the same sandbox:
+A ReAct agent interacts with the sandbox through tools. The demo binds a stateful shell and a file editor:
 
 ```python
 from uni_agent.tools import Toolbox
@@ -147,7 +147,7 @@ async with toolbox.entered(retry=3, timeout=60):
     schemas = toolbox.schemas()
 ```
 
-`stateful_shell` is exposed to the model as `shell`. Both tools route their operations through the shared sandbox backend.
+`stateful_shell` is exposed to the model as `shell`. Tools route their operations through the sandbox backend.
 
 ## Run Tool Calls
 
@@ -225,4 +225,4 @@ After configuring a supported backend above, run the complete connectivity and p
     DEBUG_MODE=1 SANDBOX_PROVIDER=modal python examples/quickstart/sandbox/demo.py
     ```
 
-Next, [run agent inference](agent-inference.md) against a sandbox-backed task.
+Next, you can [run agent inference](agent-inference.md) against a sandbox-backed task.

@@ -3,83 +3,16 @@
 
 from __future__ import annotations
 
-import functools
 import logging
 from typing import TYPE_CHECKING, Any
 
-from uni_agent.tasks import TaskResult, get_task
+from uni_agent.tasks import TaskResult, get_task, resolve_task_config
+from uni_agent.tasks.config import deep_merge, route_task_config
 
 if TYPE_CHECKING:
     from uni_agent.gateway.session import SessionHandle
 
 logger = logging.getLogger(__name__)
-
-
-def deep_merge(base: dict, overrides: dict) -> dict:
-    """Recursively merge ``overrides`` on top of ``base``, returning a new dict.
-
-    Nested dicts merge key-wise (``overrides`` wins); lists and scalars replace
-    wholesale. ``base`` is never mutated. (Same semantics as the agent-loop's
-    and ``parallel_infer_api.py``'s.)
-    """
-    if not isinstance(base, dict) or not isinstance(overrides, dict):
-        return overrides
-    result = dict(base)
-    for key, value in overrides.items():
-        if isinstance(value, dict) and isinstance(result.get(key), dict):
-            result[key] = deep_merge(result[key], value)
-        else:
-            result[key] = value
-    return result
-
-
-def resolve_task_config(
-    tools_kwargs: dict[str, Any] | None,
-    *,
-    session_base_url: str | None,
-    task_defaults: dict[str, Any] | None = None,
-    api_key: str = "EMPTY",
-    model_name: str | None = None,
-) -> dict[str, Any]:
-    """Build the concrete task-config dict for one sample."""
-    if not tools_kwargs or "task" not in tools_kwargs:
-        raise ValueError("run_task requires tools_kwargs['task'] (the serialized task config)")
-
-    task = deep_merge(task_defaults or {}, tools_kwargs["task"])
-
-    model_cfg: dict[str, Any] = {"base_url": session_base_url, "api_key": api_key}
-    if model_name is not None:
-        model_cfg["model_name"] = model_name
-    return deep_merge(task, {"agent": {"model": model_cfg}})
-
-
-@functools.lru_cache(maxsize=8)
-def load_task_config_file(path: str) -> dict[str, dict[str, Any]]:
-    """Load a per-task-name config file into a ``{name: task_config}`` index.
-
-    Backs the training recipe's ``runner_kwargs.task_config_path`` -- the run-wide task
-    bases live in one YAML (a list of configs keyed by ``name``, the inference
-    ``task_config.yaml`` shape) instead of dozens of Hydra overrides;
-    :func:`route_task_config` picks the entry matching a row's task. Cached per path.
-    """
-    import yaml
-
-    raw = yaml.safe_load(open(path))
-    entries = raw if isinstance(raw, list) else [raw]
-    index: dict[str, dict[str, Any]] = {}
-    for entry in entries:
-        if not isinstance(entry, dict) or not entry.get("name"):
-            raise ValueError(f"task_config_path {path!r}: each entry must be a mapping with a 'name' (got {entry!r})")
-        index[str(entry["name"])] = entry
-    return index
-
-
-def route_task_config(path: str, task_name: str | None) -> dict[str, Any]:
-    """Return the task config whose ``name`` matches ``task_name`` (route by task name)."""
-    index = load_task_config_file(path)
-    if task_name is None or task_name not in index:
-        raise ValueError(f"task_config_path {path!r} has no config for task name {task_name!r} (have {sorted(index)})")
-    return index[task_name]
 
 
 async def run_task(

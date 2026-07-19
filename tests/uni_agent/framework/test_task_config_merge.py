@@ -2,8 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 
-from uni_agent.framework.task_runner import resolve_task_config
-from uni_agent.tasks import get_task
+from uni_agent.tasks import get_task, resolve_task_config
 
 
 def test_sample_config_overrides_task_defaults_and_runtime_endpoint_wins():

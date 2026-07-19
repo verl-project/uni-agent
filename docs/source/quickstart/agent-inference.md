@@ -34,7 +34,8 @@ Both inference modes use the same task configuration format. Choose an agent imp
     - name: swe_bench
       log_dir: /tmp/uni_agent_logs/swe_bench
       sandbox:
-        provider: modal
+        provider: xxx
+        runtime_timeout: 7200
       agent:
         name: react
         max_steps: 200
@@ -44,9 +45,9 @@ Both inference modes use the same task configuration format. Choose an agent imp
           - name: str_replace_editor
           - name: submit
         model:
-          temperature: 0.8
-          top_p: 0.9
-          max_total_tokens: 65536
+          temperature: 1.0
+          top_p: 0.95
+          max_total_tokens: 131072
     ```
 
 === "Claude Code"
@@ -54,7 +55,7 @@ Both inference modes use the same task configuration format. Choose an agent imp
     Claude Code is a black-box agent harness: the complete CLI runs inside the sandbox and connects to the configured model endpoint. See [`task_config_claude_code.yaml`](https://github.com/verl-project/uni-agent/blob/main/examples/inference/task_config_claude_code.yaml).
 
     !!! note "Sandbox network access"
-        Make sure the sandbox can resolve and reach the configured model API endpoint.
+        Claude Code runs inside the sandbox. The model API endpoint must therefore be resolvable and reachable **from inside the sandbox**.
 
     ```yaml
     - name: swe_bench
@@ -89,17 +90,18 @@ Use this mode when model serving is managed outside Uni-Agent. The endpoint can 
 
 ### Start a Model Server
 
-For example, start vLLM:
+If you self-host the model, start an inference server first. For example, launch vLLM with Qwen3-Coder:
 
 ```bash
 vllm serve Qwen/Qwen3-Coder-30B-A3B-Instruct \
     --served-model-name Qwen3-Coder-30B-A3B-Instruct \
     --enable-auto-tool-choice \
     --tool-call-parser qwen3_coder \
-    --tensor-parallel-size 4
+    --tensor-parallel-size 4 \
+    --port 8000
 ```
 
-The tool-call parser must match the model's chat template.
+If you already use a hosted model API, skip this step and continue to [Run Parallel Inference](#run-parallel-inference) with the provider's `BASE_URL`, `MODEL`, and `API_KEY`.
 
 ### Run Parallel Inference
 
@@ -108,11 +110,11 @@ Point `parallel_infer_api.py` at the endpoint:
 ```bash
 BASE_URL=http://localhost:8000/v1 \
 MODEL=Qwen3-Coder-30B-A3B-Instruct \
-GLOBAL_CONCURRENCY=32 \
+GLOBAL_CONCURRENCY=8 \
 NUM_WORKERS=4 \
 python examples/inference/parallel_infer_api.py \
     --data-path ~/data/swe_agent/swe_bench_verified.parquet \
-    --task-config examples/inference/task_config.yaml \
+    --task-config examples/quickstart/inference/task_config_react.yaml \
     --limit 8
 ```
 

@@ -4,7 +4,7 @@
     provider: modal
   agent:
     name: react
-    max_steps: 200
+    max_steps: 100
     tools:
       - name: stateful_shell
         command_timeout: 180
