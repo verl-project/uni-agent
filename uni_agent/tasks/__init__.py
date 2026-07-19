@@ -18,13 +18,13 @@ themselves, and are built with :func:`get_task` -- from either a config instance
 from __future__ import annotations
 
 from .base import Task, TaskConfig, TaskResult
-from .config import resolve_task_config
+from .config import TaskConfigResolver
 from .registry import get_task
 
 __all__ = [
     "Task",
     "TaskConfig",
+    "TaskConfigResolver",
     "TaskResult",
     "get_task",
-    "resolve_task_config",
 ]

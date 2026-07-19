@@ -24,7 +24,7 @@ Each row contains the prompt and a provider-agnostic task definition under `extr
 
 ## Task Configuration
 
-Both inference modes use the same task configuration format. Choose an agent implementation and configure its sandbox, interaction limits, and model parameters.
+Both inference modes use the same task configuration format. A file may contain one Task Config or a list keyed by `name`; each dataset sample is routed to the matching entry, then its Sample Config is merged on top. Choose an agent implementation and configure its sandbox, interaction limits, and model parameters.
 
 === "ReAct"
 
@@ -120,7 +120,7 @@ python examples/inference/parallel_infer_api.py \
 
 For an authenticated endpoint, also set `API_KEY` or pass `--api-key`.
 
-The script uses Ray actors to run tasks concurrently, but all model requests go directly to the external endpoint. It reports resolved tasks, wrong answers, timeout/errors, pass rate, and average evaluation time.
+The script runs tasks in parallel and prints a result summary. Per-sample logs are available at `<log_dir>/<run_id>/run.log`, for example `/tmp/uni_agent_logs/swe_bench/<run_id>/run.log`.
 
 Useful controls:
 

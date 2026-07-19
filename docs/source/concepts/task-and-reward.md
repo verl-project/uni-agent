@@ -145,6 +145,8 @@ Nested dictionaries are deep-merged. Lists and scalar values from the Sample Con
 
 The runtime injects `agent.model.base_url`, API key, and served model name after the two layers. Endpoint information is not sample-overridable because it belongs to the live policy service.
 
+`TaskConfigResolver` implements this routing and merge order for both standalone inference and Framework-managed rollouts.
+
 This allows one dataset batch to customize prompts, metadata, Sandbox images, Agents, or budgets sample by sample while retaining shared defaults.
 
 ## Register a Task

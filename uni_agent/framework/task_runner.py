@@ -6,8 +6,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
-from uni_agent.tasks import TaskResult, get_task, resolve_task_config
-from uni_agent.tasks.config import deep_merge, route_task_config
+from uni_agent.tasks import TaskConfigResolver, TaskResult, get_task
 
 if TYPE_CHECKING:
     from uni_agent.gateway.session import SessionHandle
@@ -21,7 +20,6 @@ async def run_task(
     tools_kwargs: dict[str, Any] | None = None,
     raw_prompt: Any = None,
     sample_index: int | None = None,
-    task_defaults: dict[str, Any] | None = None,
     task_config_path: str | None = None,
     api_key: str = "EMPTY",
     model_name: str | None = None,
@@ -34,26 +32,24 @@ async def run_task(
     / ``sample_index`` / ``tools_kwargs``). ``raw_prompt`` is accepted for protocol
     parity but unused: a uni_agent task carries its own prompt on the task config.
 
-    The run-wide task base may be supplied inline (``task_defaults``) and/or from a
-    per-task-name YAML file (``task_config_path``): the row's task name selects the
-    matching entry (:func:`route_task_config`), inline defaults are merged onto that
-    entry, and the row's sample config wins on top. When ``report_reward`` is set, the
-    task's reward + info are POSTed back to the session's reward-info endpoint so a
-    training reward manager can pick them up; the standalone evaluator reads the
-    returned :class:`TaskResult` directly and leaves this off.
+    Run-level defaults come from the per-task-name YAML file selected by
+    ``task_config_path``. ``TaskConfigResolver`` applies that Task Config, the
+    sample values, and the live endpoint in order. When ``report_reward`` is set,
+    the task's reward + info are POSTed back to the session's reward-info endpoint;
+    the standalone evaluator reads the returned :class:`TaskResult` directly.
     """
-    if task_config_path:
-        row_task = tools_kwargs.get("task") if tools_kwargs else None
-        task_name = row_task.get("name") if isinstance(row_task, dict) else None
-        routed = route_task_config(str(task_config_path), task_name)
-        task_defaults = deep_merge(routed, task_defaults or {})
+    sample_config = tools_kwargs.get("task") if tools_kwargs else None
+    if not isinstance(sample_config, dict):
+        raise ValueError("run_task requires tools_kwargs['task'] (the serialized Task Config)")
 
-    task = resolve_task_config(
-        tools_kwargs,
-        session_base_url=session.base_url,
-        task_defaults=task_defaults,
-        api_key=api_key,
-        model_name=model_name,
+    resolver = TaskConfigResolver.from_file(task_config_path) if task_config_path else TaskConfigResolver()
+    task = resolver.resolve(
+        sample_config,
+        runtime_model={
+            "base_url": session.base_url,
+            "api_key": api_key,
+            "model_name": model_name,
+        },
     )
 
     task_name = task.get("name")

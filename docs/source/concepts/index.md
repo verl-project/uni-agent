@@ -76,6 +76,24 @@ Nested dictionaries are merged recursively, while lists and scalar values from t
 
 The live model endpoint, API key, and served model name are injected after both layers. They are runtime state rather than a third user-configurable layer, so Sample Config cannot replace the active policy endpoint.
 
+`TaskConfigResolver` is the shared entry point used by standalone inference and the Agent Framework:
+
+```python
+from uni_agent.tasks import TaskConfigResolver
+
+resolver = TaskConfigResolver.from_file("task_config.yaml")
+resolved = resolver.resolve(
+    sample_config,
+    runtime_model={
+        "base_url": model_endpoint,
+        "api_key": api_key,
+        "model_name": model_name,
+    },
+)
+```
+
+The resolver loads every named Task Config, routes each Sample by `name`, applies the merge order, and validates missing or duplicate routes consistently.
+
 ## Customize Bottom-Up
 
 The overview is top-down, but customization is easier in dependency order:

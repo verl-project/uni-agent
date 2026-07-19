@@ -1,4 +1,3 @@
-# ruff: noqa: E501
 """Parallel agent inference against a running OpenAI-compatible API.
 
 Talks *directly* to a policy server you started yourself (no GPUs on the driver).
@@ -16,10 +15,10 @@ Bring up an OpenAI-compatible policy server, then run this against it:
         python examples/inference/parallel_infer_api.py \
         --task-config examples/inference/task_config.yaml --limit 8
 
-``--task-config`` (a YAML task config; see ``examples/inference/task_config.yaml``)
-is required and provides run-level defaults; each sample's task dict is merged on top.
-The endpoint (--base-url / --model / --api-key or env BASE_URL / MODEL / API_KEY) is
-layered onto agent.model last.
+``--task-config`` (see ``examples/inference/task_config.yaml``) accepts one Task
+Config mapping or a list keyed by ``name``. Each sample routes to the matching
+entry and is merged on top. The endpoint (--base-url / --model / --api-key or env
+BASE_URL / MODEL / API_KEY) is layered onto agent.model last.
 """
 
 import argparse
@@ -27,14 +26,12 @@ import asyncio
 import logging
 import os
 import time
-from pathlib import Path
 
 import ray
-import yaml
 from datasets import load_dataset
 from tqdm import tqdm
 
-from uni_agent.tasks import get_task, resolve_task_config
+from uni_agent.tasks import TaskConfigResolver, get_task
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 logger = logging.getLogger(__name__)
@@ -47,21 +44,10 @@ NUM_WORKERS = int(os.getenv("NUM_WORKERS", 8))
 class InferenceActor:
     _semaphore = asyncio.Semaphore(max(1, GLOBAL_CONCURRENCY // NUM_WORKERS))
 
-    async def run_single(self, sample: dict, task_defaults: dict) -> dict:
+    async def run_single(self, task: dict) -> dict:
         async with self._semaphore:
-            base_task = sample["extra_info"]["tools_kwargs"]["task"]
-            instance_id = base_task["metadata"]["instance_id"]
+            instance_id = task.get("metadata", {}).get("instance_id", "<unknown>")
             try:
-                # Run-level YAML provides defaults, the sample wins on top, and the
-                # live endpoint is injected last.
-                model_cfg = task_defaults.get("agent", {}).get("model", {})
-                task = resolve_task_config(
-                    {"task": base_task},
-                    session_base_url=model_cfg.get("base_url"),
-                    task_defaults=task_defaults,
-                    api_key=model_cfg.get("api_key", "EMPTY"),
-                    model_name=model_cfg.get("model_name"),
-                )
                 result = await get_task(task).run()
                 info = result.info or {}
                 resolved = bool(info.get("resolved", result.reward))
@@ -90,35 +76,6 @@ def _rule(text: str = "", width: int = 50, ch: str = "-") -> str:
     return f"{ch * (pad // 2)} {text} {ch * (pad - pad // 2)}"
 
 
-def _load_task_yaml(path: str) -> dict:
-    """Load a YAML task-config file into a dict."""
-    raw = yaml.safe_load(Path(path).expanduser().read_text())
-    if isinstance(raw, list):
-        if not raw or not isinstance(raw[0], dict):
-            raise ValueError(f"--task-config {path!r}: a YAML list must start with a mapping (the task config).")
-        raw = raw[0]
-    if not isinstance(raw, dict):
-        raise ValueError(f"--task-config {path!r} must be a YAML mapping (the task config), got {type(raw).__name__}")
-    return raw
-
-
-def build_task_defaults(args: argparse.Namespace) -> dict:
-    """Load required run-level Task Config defaults and attach the live endpoint."""
-    overrides = _load_task_yaml(args.task_config)
-
-    # endpoint = runtime state, layered onto the agent's model.
-    agent = overrides.setdefault("agent", {})
-    agent.setdefault("name", args.agent)
-    model = agent.setdefault("model", {})
-    if args.base_url:
-        model["base_url"] = args.base_url
-    if args.model:
-        model["model_name"] = args.model
-    model.setdefault("api_key", args.api_key)
-
-    return overrides
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="Parallel agent inference.")
     parser.add_argument(
@@ -126,55 +83,62 @@ def main() -> None:
         default=os.getenv("DATA_PATH", os.path.expanduser("~/data/swe_agent/swe_bench_verified.parquet")),
     )
     parser.add_argument("--limit", type=int, default=None, help="Only run the first N samples (smoke testing).")
-    parser.add_argument("--agent", default="react", help="Registered agent name to run.")
     parser.add_argument(
         "--task-config",
         required=True,
-        help="Path to a YAML task config (name/sandbox/agent/...), deep-merged onto each sample's task dict (required).",
+        help="YAML mapping or list of Task Config defaults, routed by each sample's task name (required).",
     )
 
     # Policy endpoint
     parser.add_argument("--base-url", default=os.getenv("BASE_URL"), help="OpenAI-compatible endpoint (env BASE_URL).")
-    parser.add_argument("--api-key", default=os.getenv("API_KEY", "EMPTY"), help="Bearer key (env API_KEY).")
+    parser.add_argument("--api-key", default=os.getenv("API_KEY"), help="Bearer key (env API_KEY).")
     parser.add_argument("--model", default=os.getenv("MODEL", ""), help="Served model name (env MODEL).")
 
     parser.add_argument("--n", type=int, default=1, help="Rollouts per instance (pass rate averages over all).")
     args = parser.parse_args()
 
-    task_defaults = build_task_defaults(args)
-    agent_cfg = task_defaults.get("agent", {})
-    model_cfg = agent_cfg.get("model", {})
-    if not model_cfg.get("base_url"):
-        logger.error("no policy endpoint: set BASE_URL (or --base-url), or agent.model.base_url in --task-config")
-        return
+    resolver = TaskConfigResolver.from_file(args.task_config)
+    runtime_model = {"api_key": args.api_key}
+    if args.base_url:
+        runtime_model["base_url"] = args.base_url
+    if args.model:
+        runtime_model["model_name"] = args.model
 
     dataset = load_dataset("parquet", data_files=args.data_path, split="train")
     samples = dataset.to_list()
     if args.limit is not None:
         samples = samples[: args.limit]
-    n = max(1, args.n)
-    samples = [s for s in samples for _ in range(n)]  # fan out N rollouts per instance
     if not samples:
         logger.warning("no samples selected; exiting")
         return
 
-    logger.info(f"loaded {len(samples)} rollouts ({n}x) from {args.data_path}")
+    resolved_tasks: list[dict] = []
+    try:
+        for sample in samples:
+            sample_config = sample["extra_info"]["tools_kwargs"]["task"]
+            resolved = resolver.resolve(sample_config, runtime_model=runtime_model)
+            task_name = resolved["name"]
+            if not resolved.get("agent", {}).get("model", {}).get("base_url"):
+                raise ValueError(f"no policy endpoint for sample task {task_name!r}")
+            resolved_tasks.append(resolved)
+    except (KeyError, TypeError, ValueError) as exc:
+        logger.error("failed to resolve Task Config: %s", exc)
+        return
+
+    n = max(1, args.n)
+    resolved_tasks = [task for task in resolved_tasks for _ in range(n)]
+
+    logger.info(f"loaded {len(resolved_tasks)} rollouts ({n}x) from {args.data_path}")
     logger.info(
-        f"task={task_defaults.get('name') or '<dataset>'} agent={agent_cfg.get('name', args.agent)} "
-        f"provider={task_defaults.get('sandbox', {}).get('provider')} "
-        f"endpoint={model_cfg.get('base_url')} model={model_cfg.get('model_name') or '<default>'}"
-    )
-    logger.info(
-        f"workers={NUM_WORKERS} concurrency={GLOBAL_CONCURRENCY} "
-        f"sampling=temp{model_cfg.get('temperature')}/top_p{model_cfg.get('top_p')}/top_k{model_cfg.get('top_k')} "
-        f"max_tokens_per_turn={model_cfg.get('max_tokens_per_turn')} "
-        f"max_total_tokens={model_cfg.get('max_total_tokens')} "
-        f"config=yaml:{args.task_config}"
+        "workers=%s concurrency=%s config=yaml:%s",
+        NUM_WORKERS,
+        GLOBAL_CONCURRENCY,
+        args.task_config,
     )
 
-    num_workers = min(NUM_WORKERS, len(samples))
+    num_workers = min(NUM_WORKERS, len(resolved_tasks))
     workers = [ray.remote(InferenceActor).remote() for _ in range(num_workers)]
-    futures = [workers[i % num_workers].run_single.remote(s, task_defaults) for i, s in enumerate(samples)]
+    futures = [workers[i % num_workers].run_single.remote(task) for i, task in enumerate(resolved_tasks)]
 
     fut_to_idx = {f: i for i, f in enumerate(futures)}
 

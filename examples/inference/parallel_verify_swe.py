@@ -1,4 +1,3 @@
-# ruff: noqa: E501
 """Parallel gold-patch verification for SWE-bench.
 
 Runs each dataset row's SWE-bench task in oracle mode (``run_gold_patch=True``):

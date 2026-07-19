@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from copy import deepcopy
 
-from uni_agent.tasks import get_task, resolve_task_config
+from uni_agent.tasks import TaskConfigResolver, get_task
 
 
-def test_sample_config_overrides_task_defaults_and_runtime_endpoint_wins():
-    task_defaults = {
+def test_sample_config_overrides_file_defaults_and_runtime_endpoint_wins():
+    file_defaults = {
         "name": "swe_bench",
         "log_dir": "/tmp/default",
         "sandbox": {
@@ -42,15 +42,16 @@ def test_sample_config_overrides_task_defaults_and_runtime_endpoint_wins():
         },
         "metadata": {"instance_id": "sample-1"},
     }
-    original_defaults = deepcopy(task_defaults)
+    original_defaults = deepcopy(file_defaults)
     original_sample = deepcopy(sample_config)
 
-    resolved = resolve_task_config(
-        {"task": sample_config},
-        session_base_url="http://gateway:8000/sessions/1/v1",
-        task_defaults=task_defaults,
-        api_key="runtime-key",
-        model_name="runtime-model",
+    resolved = TaskConfigResolver({"swe_bench": file_defaults}).resolve(
+        sample_config,
+        runtime_model={
+            "base_url": "http://gateway:8000/sessions/1/v1",
+            "api_key": "runtime-key",
+            "model_name": "runtime-model",
+        },
     )
 
     assert resolved["log_dir"] == "/tmp/default"
@@ -70,7 +71,7 @@ def test_sample_config_overrides_task_defaults_and_runtime_endpoint_wins():
     }
     assert resolved["metadata"] == {"instance_id": "sample-1"}
 
-    assert task_defaults == original_defaults
+    assert file_defaults == original_defaults
     assert sample_config == original_sample
 
     parsed = get_task(resolved).config
@@ -80,28 +81,31 @@ def test_sample_config_overrides_task_defaults_and_runtime_endpoint_wins():
 
 
 def test_model_fallbacks_do_not_override_task_config_defaults():
-    resolved = resolve_task_config(
+    resolved = TaskConfigResolver(
         {
-            "task": {
+            "swe_bench": {
                 "name": "swe_bench",
-                "metadata": {"instance_id": "sample-1"},
-            }
-        },
-        session_base_url="http://gateway:8000/sessions/1/v1",
-        task_defaults={
-            "name": "swe_bench",
-            "sandbox": {"provider": "local"},
-            "agent": {
-                "name": "react",
-                "model": {
-                    "temperature": 0.3,
-                    "top_p": 0.7,
-                    "top_k": 42,
+                "sandbox": {"provider": "local"},
+                "agent": {
+                    "name": "react",
+                    "model": {
+                        "temperature": 0.3,
+                        "top_p": 0.7,
+                        "top_k": 42,
+                    },
                 },
-            },
+            }
+        }
+    ).resolve(
+        {
+            "name": "swe_bench",
+            "metadata": {"instance_id": "sample-1"},
         },
-        api_key="runtime-key",
-        model_name="runtime-model",
+        runtime_model={
+            "base_url": "http://gateway:8000/sessions/1/v1",
+            "api_key": "runtime-key",
+            "model_name": "runtime-model",
+        },
     )
 
     model = get_task(resolved).config.agent.model

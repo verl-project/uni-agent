@@ -1,4 +1,3 @@
-# ruff: noqa: E501
 """Parallel agent inference over a verl-launched engine, through the training path.
 
 Same job as ``parallel_infer_api.py`` (run each row's task, report a score), but verl
@@ -39,7 +38,6 @@ from uuid import uuid4
 
 import numpy as np
 import ray
-import yaml
 from datasets import load_dataset
 from omegaconf import OmegaConf
 
@@ -51,6 +49,7 @@ except ImportError:  # fall back to verl's shim (mock raises a clear error if TQ
     from verl.utils.transferqueue_utils import tq
 
 from uni_agent.framework.entry import AgentFrameworkRolloutAdapter
+from uni_agent.tasks import TaskConfigResolver
 from verl.utils import tensordict_utils as tu
 from verl.workers.rollout.llm_server import LLMServerManager
 
@@ -75,16 +74,7 @@ def _rule(text: str = "", width: int = 50, ch: str = "-") -> str:
     return f"{ch * (pad // 2)} {text} {ch * (pad - pad // 2)}"
 
 
-def _load_task_entries(path: str) -> list[dict]:
-    """Load the task-config YAML into a list of per-task entries (each keyed by ``name``)."""
-    raw = yaml.safe_load(Path(path).expanduser().read_text())
-    entries = raw if isinstance(raw, list) else [raw]
-    if not entries or not all(isinstance(entry, dict) and entry.get("name") for entry in entries):
-        raise ValueError(f"--task-config {path!r}: expected a mapping (or list of mappings), each with a 'name'.")
-    return entries
-
-
-def init_config(args: argparse.Namespace, *, task_entries: list[dict], served_model_name: str):
+def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_model_name: str):
     """Compose verl's ``ppo_trainer`` config and override the engine + framework knobs."""
     from hydra import compose, initialize_config_dir
 
@@ -94,7 +84,7 @@ def init_config(args: argparse.Namespace, *, task_entries: list[dict], served_mo
 
     rollout = config.actor_rollout_ref.rollout
 
-    model_cfgs = [entry.get("agent", {}).get("model", {}) for entry in task_entries]
+    model_cfgs = [entry.get("agent", {}).get("model", {}) for entry in task_configs]
     temperature = model_cfgs[0].get("temperature", DEFAULT_TEMPERATURE)
     top_p = model_cfgs[0].get("top_p", DEFAULT_TOP_P)
     rollout.temperature = temperature
@@ -133,10 +123,6 @@ def init_config(args: argparse.Namespace, *, task_entries: list[dict], served_mo
     # --tool-call-parser, e.g. qwen3_coder for Qwen3-Coder, hermes for Qwen3).
     OmegaConf.update(config, "actor_rollout_ref.rollout.multi_turn.format", args.tool_parser, force_add=True)
 
-    # Framework wiring: gateway pool + the task runner that turns each gateway session into
-    # a uni_agent task. run_task routes each row to the matching entry in --task-config by the
-    # row's task name (route-by-name, same as training), so no single config overrides a row's
-    # task. report_reward makes it post the task reward to the session, read back as rm_scores.
     agent_framework_cfg = {
         "gateway_count": args.gateway_count,
         "agent_runners": {
@@ -152,7 +138,7 @@ def init_config(args: argparse.Namespace, *, task_entries: list[dict], served_mo
             }
         },
     }
-    log_dir = next((entry["log_dir"] for entry in task_entries if entry.get("log_dir")), None)
+    log_dir = next((entry["log_dir"] for entry in task_configs if entry.get("log_dir")), None)
     if log_dir:
         agent_framework_cfg["log_dir"] = log_dir
     OmegaConf.update(config, "actor_rollout_ref.rollout.custom.agent_framework", agent_framework_cfg, force_add=True)
@@ -320,7 +306,6 @@ def main() -> None:
         default=None,
         help="Model name sent on chat-completions requests (default: basename of --model-path).",
     )
-    parser.add_argument("--agent", default="react", help="Registered agent name to run.")
     parser.add_argument(
         "--task-config",
         required=True,
@@ -382,10 +367,7 @@ def main() -> None:
 
     ray.init()
 
-    task_entries = _load_task_entries(args.task_config)
-    first_entry = task_entries[0]
-    first_agent = first_entry.get("agent", {})
-    first_model = first_agent.get("model", {})
+    resolver = TaskConfigResolver.from_file(args.task_config)
     served_model_name = args.served_model_name or os.path.basename(os.path.expanduser(args.model_path).rstrip("/"))
 
     dataset = load_dataset("parquet", data_files=args.data_path, split="train")
@@ -397,29 +379,17 @@ def main() -> None:
         return
     n = max(1, args.n)
 
+    task_configs = list(resolver.defaults_by_name.values())
+
     logger.info(f"loaded {len(samples)} prompts (x n={n} sessions each) from {args.data_path}")
-    logger.info(
-        f"tasks=[{', '.join(entry['name'] for entry in task_entries)}] "
-        f"agent={first_agent.get('name', args.agent)} provider={first_entry.get('sandbox', {}).get('provider')} "
-        f"engine={args.engine} model={served_model_name} tool_parser={args.tool_parser}"
-    )
-    logger.info(
-        f"gateways={args.gateway_count} concurrency={args.concurrency} "
-        f"nnodes={args.nnodes} gpus/node={args.n_gpus_per_node} tp={args.tensor_parallel_size} "
-        f"max_total_tokens={first_model.get('max_total_tokens')} "
-        f"sampling=temp{first_model.get('temperature')}/top_p{first_model.get('top_p')}/top_k{first_model.get('top_k')} "
-        f"config=yaml:{args.task_config}"
-    )
 
     # 1. TransferQueue + verl inference engine (Ray auto-inits via the actors below).
     logger.info("initializing configuration, TransferQueue, and LLMServerManager...")
-    config = init_config(args, task_entries=task_entries, served_model_name=served_model_name)
+    config = init_config(args, task_configs=task_configs, served_model_name=served_model_name)
     tq.init(config.transfer_queue)
     llm_server_manager = LLMServerManager.create(config=config)
 
-    # 2. Framework rollout adapter over the engine. run_task posts each task's own
-    #    reward to its gateway session (report_reward=True); the framework reads it
-    #    back from reward_info and writes it as rm_scores -- no reward worker needed.
+    # 2. Framework rollout adapter over the engine.
     adapter = AgentFrameworkRolloutAdapter.create(
         config=config,
         llm_client=llm_server_manager.get_client(),
