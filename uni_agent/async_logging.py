@@ -28,6 +28,7 @@ if _debug_enabled():
         level="INFO",
         format=_LOG_FORMAT,
         filter=lambda record: "name" in record["extra"],
+        diagnose=False,
     )
 
 
@@ -58,8 +59,9 @@ def _dispatch(message) -> None:
         pass
 
 
-# One global sink: O(1) dispatch by run_id, a single background writer thread.
-logger.add(_dispatch, level="DEBUG", format=_LOG_FORMAT, enqueue=True)
+# One global sink: O(1) dispatch by run_id, a single background writer thread. diagnose=False on
+# both sinks: a rendered traceback would otherwise carry every frame's locals, secrets included.
+logger.add(_dispatch, level="DEBUG", format=_LOG_FORMAT, enqueue=True, diagnose=False)
 
 
 def add_file_handler(file_path: Path, run_id: str, level: str = "info") -> str:

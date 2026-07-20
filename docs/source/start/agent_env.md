@@ -93,6 +93,13 @@ export LOCAL_DEPLOYMENT_IMAGE=python:3.12
 export LOCAL_DEPLOYMENT_EXTRA_ARGS="--bind /data:/data"
 ```
 
+**Startup limits.**
+
+- **`LOCAL_MAX_STARTING_PER_WORKER`** (default `16`) caps concurrent starts per rollout worker and event loop; queueing counts toward the attempt timeout and startup budget.
+- **`LOCAL_INIT_WALL_BUDGET`** (default `600` seconds) bounds startup across retries. Cleanup may extend elapsed time beyond this budget.
+
+For large runs, bake `swe-rex` into the image and pre-pull it on every rollout node.
+
 ### veFaaS deployment
 
 veFaaS is a Volcengine FaaS platform. For workloads with many concurrent runs, it is often more stable and scales better than self-hosted local instances.
