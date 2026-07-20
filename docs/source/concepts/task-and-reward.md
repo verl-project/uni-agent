@@ -167,7 +167,7 @@ TASK_MODULES["my_task"] = "my_package.task"
 
 ## Implementation Rules
 
-- Keep the Task responsible for Sandbox and episode lifecycle.
+- Keep the Task responsible for the Sandbox and Task execution lifecycle.
 - Keep model-serving endpoints out of preprocessed datasets.
 - Put sample-specific evaluation data in `metadata`.
 - Wrap execution in `episode_logging()`.

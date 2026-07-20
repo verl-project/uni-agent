@@ -1,17 +1,20 @@
 # Core Abstractions
 
-Uni-Agent separates an agent workload into small, replaceable abstractions. A `Task` defines what should happen and how success is measured; an `Agent` decides how to solve it; a `Toolbox` exposes actions; and a `Sandbox` provides the execution environment.
-
+Uni-Agent separates an agent workload into small, replaceable abstractions.
 This section introduces each abstraction together with the interface used to customize it.
 
-## Episode Lifecycle
+![Uni-Agent architecture overview](../assets/uni-agent.png){ width="800" }
+
+A `Task` defines what should happen and how success is measured; an `Agent` decides how to solve it; a `Toolbox` exposes actions; and a `Sandbox` provides the execution environment.
+
+## Execution Lifecycle
 
 A normal episode runs from the top down:
 
 1. A runner resolves the task configuration for one dataset sample.
 2. The `Task` starts its `Sandbox` and builds the configured `Agent`.
-3. The `Agent` interacts with the sandbox directly or through a `Toolbox`.
-4. The `Task` evaluates the resulting sandbox state.
+3. The `Agent` interacts with the sandbox directly (black-box agent) or through a `Toolbox` (white-box agent).
+4. The `Task` evaluates the resulting sandbox state via `reward` module.
 5. The task returns a `TaskResult` containing the reward, metrics, and evaluation details.
 
 ```text
@@ -27,7 +30,7 @@ When inference or training uses the verl-managed rollout path, the Uni-Agent Gat
 ## Ownership
 
 - **Gateway** owns session-scoped model routing and token-level trajectory capture for the training pipeline.
-- **Task** owns the episode lifecycle, task metadata, prompt, and reward computation.
+- **Task** owns the Task execution lifecycle, task metadata, prompt, and reward computation.
 - **Agent** owns the solving strategy. A white-box agent owns its loop; a black-box agent delegates the loop to an external agent harness, such as Claude Code.
 - **Tool** owns one model-visible action and any host-side state required by that action. **Toolbox** owns a set of tool instances bound to one sandbox.
 - **Sandbox** owns the execution environment, filesystem, and command data plane.
@@ -37,7 +40,7 @@ When inference or training uses the verl-managed rollout path, the Uni-Agent Gat
 Uni-Agent uses two Task Config layers for both standalone inference and training:
 
 1. **Task Config:** run-level defaults shared by the workload.
-2. **Sample Config:** sample-wise values stored under `extra_info.tools_kwargs.task`, merged on top of the Task Config.
+2. **Sample Config:** sample-wise values, merged on top of the Task Config.
 
 The run-level Task Config defines common behavior such as the Agent, Tools, Sandbox provider, and sampling settings:
 
