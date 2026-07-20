@@ -1,11 +1,9 @@
 working_dir: ./
 excludes:
   - "/.git/"
-  - "/docs/_build/"
 
 pip:
   packages:
-    - "transferqueue==0.1.6 --no-deps"
     - "modal"
 
 env_vars:
