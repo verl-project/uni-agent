@@ -91,7 +91,7 @@ extra_javascript:
   - assets/js/runllm-widget.js
 
 extra_css:
-  - assets/stylesheets/extra.css?v=20
+  - assets/stylesheets/extra.css?v=24
 
 extra:
   social:

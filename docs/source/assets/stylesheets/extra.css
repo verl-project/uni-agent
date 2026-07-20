@@ -2,8 +2,8 @@
 
 /* Add a subtle purple atmosphere without reducing content contrast. */
 body[data-md-color-scheme="default"] {
-    --md-code-bg-color: #f3f4f6;
-    --md-code-fg-color: #24292f;
+    --md-code-bg-color: #f1eef8;
+    --md-code-fg-color: #292532;
     background-color: #f6f1ff;
 }
 
@@ -135,7 +135,7 @@ body[data-md-color-scheme] .md-content__inner {
 
 /* Present fenced code as a focused developer surface. */
 .md-typeset .highlight {
-    border: 1px solid #d0d7de;
+    border: 1px solid #d8d1e8;
     border-radius: 0.5rem;
     box-shadow: 0 0.2rem 0.7rem rgba(31, 35, 40, 0.06);
     overflow: hidden;
@@ -148,6 +148,12 @@ body[data-md-color-scheme] .md-content__inner {
 
 .md-typeset .highlight pre {
     margin: 0;
+}
+
+[data-md-color-scheme="default"] .md-typeset .highlight,
+[data-md-color-scheme="default"] .md-typeset .highlight pre,
+[data-md-color-scheme="default"] .md-typeset .highlight code {
+    background: #f1eef8 !important;
 }
 
 /* Keep inline code subtle and distinct from full code blocks. */
