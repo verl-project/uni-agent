@@ -43,7 +43,7 @@ class TestEvalActor:
             task_config = sample["extra_info"]["tools_kwargs"]["task"]
             instance_id = task_config["metadata"]["instance_id"]
             log_id = f"verify-{uuid4().hex}"
-            log_path = str(Path(self.log_dir).expanduser() / log_id / "run.log") if self.log_dir else None
+            log_path = str(Path(self.log_dir).expanduser() / log_id / "task.log") if self.log_dir else None
             async with sample_logging.from_context(LogContext(log_id, log_path)):
                 try:
                     task_config["run_gold_patch"] = True

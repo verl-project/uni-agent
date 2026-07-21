@@ -3,12 +3,9 @@
 Uni-Agent supports two inference modes:
 
 1. **External API mode:** connect an agent to an existing model endpoint.
-2. **veRL rollout mode:** launch a rollout engine using `verl` and run inference.
+2. **verl rollout mode:** launch a rollout engine using `verl` and run inference.
 
-This guide demonstrates both modes, using SWE-Bench task as an example:
-
-1. Run an ReAct Agent with an external modal API,
-2. Run `Claude Code` with verl rollout engine.
+This guide demonstrates both modes by running `Claude Code` and `ReAct` agents on SWE-Bench.
 
 ## Prepare Data
 
@@ -24,43 +21,25 @@ Each row contains the prompt and a provider-agnostic task definition under `extr
 
 ## Task Configuration
 
-Both inference modes use the same task configuration format. A file may contain one Task Config or a list keyed by `name`; each dataset sample is routed to the matching entry, then its Sample Config is merged on top. Choose an agent implementation and configure its sandbox, interaction limits, and model parameters.
+For each dataset sample, Uni-Agent resolves the final Task Config in this order:
 
-=== "ReAct"
+1. Select the YAML defaults whose `name` matches the sample's task name.
+2. Deep-merge the sample Task Config over those defaults.
+3. Inject the runtime model endpoint as the final override.
 
-    ReAct is a white-box agent: Uni-Agent owns the interaction loop and exposes an explicit list of tools to the model. See [`task_config.yaml`](https://github.com/verl-project/uni-agent/blob/main/examples/inference/task_config.yaml).
-
-    ```yaml
-    - name: swe_bench
-      sandbox:
-        provider: xxx
-        runtime_timeout: 7200
-      agent:
-        name: react
-        max_steps: 200
-        tools:
-          - name: stateful_shell
-            command_timeout: 180
-          - name: str_replace_editor
-          - name: submit
-        model:
-          temperature: 1.0
-          top_p: 0.95
-          max_total_tokens: 131072
-    ```
+The Quickstart includes two ready-to-use configs:
 
 === "Claude Code"
 
-    Claude Code is a black-box agent harness: the complete CLI runs inside the sandbox and connects to the configured model endpoint. See [`task_config_claude_code.yaml`](https://github.com/verl-project/uni-agent/blob/main/examples/inference/task_config_claude_code.yaml).
-
-    !!! note "Sandbox network access"
-        Claude Code runs inside the sandbox. The model API endpoint must therefore be resolvable and reachable **from inside the sandbox**.
+    `examples/quickstart/inference/task_config_claude_code.yaml`
 
     ```yaml
     - name: swe_bench
       sandbox:
-        provider: "xxx"
+        provider: modal
         runtime_timeout: 7200
+        sandbox_kwargs:
+          memory_gb: 8
       agent:
         name: claude_code
         max_turns: 200
@@ -72,22 +51,46 @@ Both inference modes use the same task configuration format. A file may contain 
           max_total_tokens: 131072
     ```
 
-Common fields:
+=== "ReAct"
 
-- `name`: task name used to route each dataset row.
-- `sandbox`: backend and lifecycle settings for the task environment.
-- `agent.name`: agent implementation or harness to launch.
-- `agent.model`: sampling parameters and total token budget.
+    `examples/quickstart/inference/task_config_react.yaml`
 
-Agent-specific fields configure the interaction loop. ReAct declares its tools and `max_steps`; Claude Code configures its turn limit and process timeout.
+    ```yaml
+    - name: swe_bench
+      sandbox:
+        provider: modal
+      agent:
+        name: react
+        max_steps: 100
+        tools:
+          - name: stateful_shell
+            command_timeout: 180
+            env_vars:
+              PIP_PROGRESS_BAR: "off"
+              PAGER: "cat"
+              TQDM_DISABLE: "1"
+              GIT_PAGER: "cat"
+          - name: str_replace_editor
+          - name: submit
+        model:
+          temperature: 0.8
+          top_p: 0.9
+          max_total_tokens: 65536
+    ```
 
-## External API
+Configure the sandbox provider and Agent limits in YAML. Do not hard-code the runtime endpoint there unless every run uses the same service: API mode injects it from `--base-url` and `--model`, while verl mode injects the session Gateway endpoint.
 
-Use this mode when model serving is managed outside Uni-Agent. The endpoint can come from an external API service or a self-hosted inference engine such as vLLM or SGLang.
+!!! note "Claude Code network access"
+    Claude Code runs inside the sandbox and calls the Anthropic Messages endpoint from there. The endpoint must therefore be resolvable and reachable **from inside the sandbox**.
 
-### Start a Model Server
+## External API Mode
 
-If you self-host the model, start an inference server first. For example, launch vLLM with Qwen3-Coder:
+The endpoint must support the protocol used by the selected Agent:
+
+- ReAct calls OpenAI-compatible `POST /v1/chat/completions`.
+- Claude Code calls Anthropic-compatible `POST /v1/messages`.
+
+Modern vLLM can expose both routes. If you self-host the model, start the server before running Uni-Agent:
 
 ```bash
 vllm serve Qwen/Qwen3-Coder-30B-A3B-Instruct \
@@ -95,29 +98,27 @@ vllm serve Qwen/Qwen3-Coder-30B-A3B-Instruct \
     --enable-auto-tool-choice \
     --tool-call-parser qwen3_coder \
     --tensor-parallel-size 4 \
+    --host 0.0.0.0 \
     --port 8000
 ```
 
-If you already use a hosted model API, skip this step and continue to [Run Parallel Inference](#run-parallel-inference) with the provider's `BASE_URL`, `MODEL`, and `API_KEY`.
-
-### Run Parallel Inference
-
-Point `parallel_infer_api.py` at the endpoint:
+Then point the API runner at the service:
 
 ```bash
-BASE_URL=http://localhost:8000/v1 \
+BASE_URL=http://model-service:8000/v1 \
 MODEL=Qwen3-Coder-30B-A3B-Instruct \
 GLOBAL_CONCURRENCY=8 \
 NUM_WORKERS=4 \
 python examples/inference/parallel_infer_api.py \
     --data-path ~/data/swe_agent/swe_bench_verified.parquet \
-    --task-config examples/quickstart/inference/task_config_react.yaml \
+    --task-config /path/to/task_config.yaml \
+    --log-dir /mnt/shared/uni_agent_logs \
     --limit 8
 ```
 
-For an authenticated endpoint, also set `API_KEY` or pass `--api-key`.
+For an authenticated endpoint, also set `API_KEY` or pass `--api-key`. The script expands `--n` rollout attempts per sample, distributes them across Ray actors, and prints resolved, wrong-answer, and timeout/error counts.
 
-The script runs tasks in parallel and prints a result summary. Per-sample logs are written to `<log_dir>/<log_id>/run.log`; the default root is `/tmp/uni_agent_logs`.
+Each rollout writes `<log_dir>/<log_id>/task.log`. Set `--log-dir` to a shared-storage path when Ray workers may run on different nodes.
 
 Useful controls:
 
@@ -125,13 +126,11 @@ Useful controls:
 - `NUM_WORKERS`: number of Ray inference actors.
 - `--limit`: number of dataset rows to run.
 - `--n`: rollout attempts per task.
-- `--log-dir`: runtime root for per-rollout `run.log` files.
+- `--log-dir`: runtime root for per-rollout `task.log` files.
 
-## verl Rollout Engine
+## verl Rollout Engine Mode
 
-`parallel_infer_verl.py` asks `verl` to launch and manage the rollout engine, then sends agent sessions through the Uni-Agent training stack.
-
-The execution path is:
+This mode requires the standard `verl` inference environment, GPUs, Ray, and TransferQueue. The execution path is:
 
 ```text
 verl LLMServerManager (vLLM or SGLang)
@@ -141,19 +140,19 @@ verl LLMServerManager (vLLM or SGLang)
     -> TransferQueue trajectories and rewards
 ```
 
-This mode requires the standard `verl` inference environment, GPUs, and TransferQueue.
-
-Run a small single-node example:
+Run a small example from the Ray head node:
 
 ```bash
 python examples/inference/parallel_infer_verl.py \
     --data-path ~/data/swe_agent/swe_bench_verified.parquet \
     --model-path Qwen/Qwen3-Coder-30B-A3B-Instruct \
-    --task-config examples/quickstart/inference/task_config.yaml \
+    --task-config /path/to/task_config.yaml \
     --engine vllm \
     --tool-parser qwen3_coder \
     --tensor-parallel-size 4 \
     --n-gpus-per-node 4 \
+    --n 1 \
+    --log-dir /mnt/shared/uni_agent_logs \
     --limit 8
 ```
 
@@ -169,40 +168,89 @@ Important controls:
 - `--result-path`: optional JSON output containing aggregate and per-session scores.
 - `--log-dir`: runtime root for Framework logs, Task logs, and trajectory artifacts.
 
-The task reports its reward to the Gateway. The Agent Framework writes the reward and token-level trajectory to TransferQueue, and the script reads back `rm_scores` to produce the inference summary.
+Task/Agent/Tool events go to `task.log`; Framework events go to `framework.log`.
 
-Standalone inference runs as validation, so Session logs are grouped directly under `<log_dir>/<log_id>/`, with Task/Agent/Tool events in `run.log` and Framework events in `framework.log`.
+For a Ray cluster, you can submit your job via a pre-defined Runtime Environment, for example:
 
-## Ray Cluster
+```yaml
+working_dir: ./
+excludes:
+  - "/.git/"
 
-The verl-managed entry point can be submitted as a Ray job:
+pip:
+  packages:
+    - "modal"
+
+env_vars:
+  PYTHONPATH: "verl"
+  TORCH_NCCL_AVOID_RECORD_STREAMS: "1"
+  CUDA_DEVICE_MAX_CONNECTIONS: "1"
+  VLLM_DISABLE_COMPILE_CACHE: "1"
+
+  # if you use veFaaS Sandbox
+  VEFAAS_FUNCTION_ID: "<vefaas-function-id>"
+  VEFAAS_FUNCTION_ROUTE: "<vefaas-function-route>"
+  VOLCE_ACCESS_KEY: "<volcengine-access-key>"
+  VOLCE_SECRET_KEY: "<volcengine-secret-key>"
+
+  # if you use Modal Sandbox
+  MODAL_TOKEN_ID: "<modal-token-id>"
+  MODAL_TOKEN_SECRET: "<modal-token-secret>"
+```
+
+Then submit your job
 
 ```bash
 ray job submit --no-wait \
     --runtime-env examples/quickstart/inference/runtime_env.yaml \
     --working-dir . \
-    -- python3 examples/inference/parallel_infer_verl.py \
-    --data-path ~/data/swe_agent/swe_bench_verified.parquet \
-    --model-path /path/to/model \
-    --task-config examples/quickstart/inference/task_config.yaml \
-    --tool-parser qwen3_coder \
-    --tensor-parallel-size 4 \
-    --nnodes 2 \
-    --n-gpus-per-node 8 \
-    --concurrency 128
+    -- python3 examples/inference/parallel_infer_verl.py ...
 ```
 
-Use the Ray Runtime Environment to distribute the repository, expose the bundled `verl` source, install optional dependencies, and inject sandbox credentials.
+## Practical Recipes
 
-## Run the Demo
+### Claude Code
 
-Replace the Modal credential placeholders in `examples/quickstart/inference/runtime_env.yaml`, then launch a small verl-managed inference job:
+Claude Code is a black-box Agent Harness: the complete CLI runs inside the sandbox and owns its interaction loop and tools. Use `task_config_claude_code.yaml` with either serving mode.
+
+=== "External API"
+
+    Use an endpoint that exposes `POST /v1/messages` and is reachable from the sandbox. Do not use `localhost` when the sandbox is remote.
+
+    ```bash
+    BASE_URL=http://model-service:8000/v1 \
+    MODEL=Qwen/Qwen3.6-35B-A3B \
+    GLOBAL_CONCURRENCY=128 \
+    NUM_WORKERS=8 \
+    python examples/inference/parallel_infer_api.py \
+        --data-path ~/data/swe_agent/swe_bench_verified.parquet \
+        --task-config examples/quickstart/inference/task_config_claude_code.yaml \
+        --log-dir /mnt/shared/uni_agent_logs \
+        --limit 8
+    ```
+
+    For endpoints that validate Anthropic credentials, provide the required Claude Code environment variables through `agent.extra_env`.
+
+=== "verl Rollout Engine"
+
+    Replace the Modal credential placeholders in `examples/quickstart/inference/runtime_env.yaml`, then review the model path, data path, hardware, and shared log path in `run_infer_claude_code.sh`.
+
+    ```bash
+    bash examples/quickstart/inference/run_infer_claude_code.sh
+    ```
+
+    The script submits a Ray job. `verl` launches the model engine, and Uni-Agent gives each Claude Code rollout a Gateway endpoint that exposes `/v1/messages`.
+
+### ReAct
+
+ReAct is a white-box Agent: Uni-Agent owns the interaction loop and exposes `stateful_shell`, `str_replace_editor`, and `submit` from `task_config_react.yaml`.
+
+Replace the Modal credential placeholders in `runtime_env.yaml`, review the model and cluster settings in `run_infer_react.sh`, then run:
 
 ```bash
-MODEL_PATH=/path/to/model \
-bash examples/quickstart/inference/run_infer.sh
+bash examples/quickstart/inference/run_infer_react.sh
 ```
 
-Override `DATA_PATH`, `TASK_CONFIG`, `LIMIT`, `NNODES`, `N_GPUS_PER_NODE`, or `CONCURRENCY` as needed.
+Each rollout gets an independent Gateway Session and Toolbox while sharing the verl-managed model engine. Use `--limit 8` in the script for a smoke test before running the full dataset.
 
 Next, you can [train an agent with RL](rl-training.md) using the same task and rollout configuration.

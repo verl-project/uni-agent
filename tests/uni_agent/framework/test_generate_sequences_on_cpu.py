@@ -376,20 +376,20 @@ async def test_framework_and_runner_logs_share_one_session_directory(tmp_path, f
     assert session_dirs[0].name.startswith("session-sample-0-rollout-0-")
 
     framework_log = session_dirs[0] / "framework.log"
-    run_log = session_dirs[0] / "run.log"
+    task_log = session_dirs[0] / "task.log"
     for _ in range(50):
-        if run_log.exists() and "runner task log" in run_log.read_text():
-            parent_log = framework_log if dispatch_mode == "ray_task" else run_log
+        if task_log.exists() and "runner task log" in task_log.read_text():
+            parent_log = framework_log if dispatch_mode == "ray_task" else task_log
             if parent_log.exists() and "session session-sample-0-rollout-0-" in parent_log.read_text():
                 break
         await asyncio.sleep(0.02)
 
-    assert "runner task log" in run_log.read_text()
+    assert "runner task log" in task_log.read_text()
     if dispatch_mode == "ray_task":
         assert "session session-sample-0-rollout-0-" in framework_log.read_text()
     else:
         assert not framework_log.exists()
-        assert "session session-sample-0-rollout-0-" in run_log.read_text()
+        assert "session session-sample-0-rollout-0-" in task_log.read_text()
 
 
 @pytest.mark.asyncio
@@ -406,7 +406,7 @@ async def test_validation_logs_omit_global_step_directory(tmp_path, fake_tq):
     session_dirs = list(tmp_path.iterdir())
     assert len(session_dirs) == 1
     assert session_dirs[0].name.startswith("session-sample-0-rollout-0-")
-    assert (session_dirs[0] / "run.log").exists()
+    assert (session_dirs[0] / "task.log").exists()
 
     batch = fake_tq.batch_puts[0]
     assert batch["partition_id"] == "val"

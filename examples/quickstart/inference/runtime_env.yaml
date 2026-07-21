@@ -12,6 +12,15 @@ env_vars:
   CUDA_DEVICE_MAX_CONNECTIONS: "1"
   VLLM_DISABLE_COMPILE_CACHE: "1"
 
-  # Replace these placeholders when using the Modal task config.
+  # if you use vefaas, set the following variables
+  VEFAAS_FUNCTION_ID: "xxxxxx"
+  VEFAAS_FUNCTION_ROUTE: "xxxxxx"
+  VOLCE_ACCESS_KEY: "xxxxxx"
+  VOLCE_SECRET_KEY: "xxxxxx"
+
+  # if you use modal, set the following variables
   MODAL_TOKEN_ID: "<modal-token-id>"
   MODAL_TOKEN_SECRET: "<modal-token-secret>"
+
+  # if you use other model serving services
+  # ......

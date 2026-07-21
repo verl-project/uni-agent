@@ -604,12 +604,12 @@ class OpenAICompatibleAgentFramework(AgentFramework):
             log_root = Path(self._log_dir)
             run_dir = (log_root if global_steps is None else log_root / f"step_{int(global_steps)}") / session_id
             framework_log = LogContext(session_id, str(run_dir / "framework.log"))
-            run_log = LogContext(session_id, str(run_dir / "run.log"))
-            parent_log = framework_log if runner_config.dispatch_mode == "ray_task" else run_log
+            task_log = LogContext(session_id, str(run_dir / "task.log"))
+            parent_log = framework_log if runner_config.dispatch_mode == "ray_task" else task_log
         else:
             run_dir = None
             framework_log = None
-            run_log = None
+            task_log = None
             parent_log = None
 
         raw_prompt = sample_fields["raw_prompt"]
@@ -638,7 +638,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
                         session=session,
                         sample_index=sample_index,
                         tools_kwargs=tools_kwargs,
-                        log_context=run_log,
+                        log_context=task_log,
                     )
                     await object_ref
                 else:
@@ -703,7 +703,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         logger.info("\n".join(lines))
 
     def _dump_trajectories(self, run_dir: Path, session_id: str, trajectories: list[Trajectory]) -> None:
-        """Persist finalized trajectories next to ``run.log``.
+        """Persist finalized trajectories next to ``task.log``.
 
         Split by cost: a small human-readable summary (reward, turns, lengths) is written
         to ``trajectory.json``; the bulky per-token arrays (ids / mask / logprobs) go to a

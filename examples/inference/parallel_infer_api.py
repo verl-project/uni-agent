@@ -141,7 +141,7 @@ def main() -> None:
     for sample_index, task in enumerate(resolved_tasks):
         for rollout_index in range(n):
             log_id = f"external-{sample_index}-{rollout_index}-{uuid4().hex}"
-            log_path = str(Path(args.log_dir).expanduser() / log_id / "run.log") if args.log_dir else None
+            log_path = str(Path(args.log_dir).expanduser() / log_id / "task.log") if args.log_dir else None
             work_items.append((task, LogContext(log_id=log_id, log_path=log_path)))
 
     logger.info(f"loaded {len(work_items)} rollouts ({n}x) from {args.data_path}")
