@@ -9,8 +9,8 @@ This guide demonstrates both modes by running `Claude Code` and `ReAct` agents o
 
 Specifically, this guide covers:
 
-- **Claude Code:** Doubao through an external API, and Qwen3.6-35B-A3B through the verl rollout engine.
-- **ReAct:** Doubao through an external API, plus Qwen3-Coder-30B-A3B-Instruct and Qwen3.6-35B-A3B through the verl rollout engine.
+- **Claude Code** with `Doubao-Seed-2.1-Pro` through an external API, and `Qwen3.6-35B-A3B` through the verl rollout engine.
+- **ReAct Agent** with `Doubao-Seed-2.1-Pro` through an external API, plus `Qwen3-Coder-30B-A3B-Instruct` and `Qwen3.6-35B-A3B` through the verl rollout engine.
 
 ## Prepare Data
 
@@ -262,7 +262,7 @@ Claude Code is a black-box Agent Harness: the complete CLI runs inside the sandb
     ```
 
     !!! success "Result"
-        Claude Code with Qwen3.6-35B-A3B achieved a **67.8% resolve rate** on SWE-Bench Verified, with `max-turns` = 200, `temperature` = 1.0, `top-p` = 0.95
+        Claude Code with Qwen3.6-35B-A3B achieved a **67.8% resolve rate** on SWE-Bench Verified, with `max-turns` = 200, `temperature` = 1.0, `top-p` = 0.95.
 
 ### ReAct Agent
 
@@ -287,8 +287,8 @@ ReAct is a white-box Agent: Uni-Agent owns the interaction loop and exposes `sta
         --concurrency 512
     ```
 
-    !!! info "Result"
-        _To be added._
+    !!! success "Result"
+        ReAct with Qwen3-Coder-30B-A3B-Instruct achieved a **48.8% resolve rate** on SWE-Bench Verified, with `max-turns` = 100, `temperature` = 0.8, `top-p` = 0.9.
 
 === "Qwen3.6-35B-A3B"
 
@@ -309,8 +309,8 @@ ReAct is a white-box Agent: Uni-Agent owns the interaction loop and exposes `sta
         --concurrency 512
     ```
 
-    !!! info "Result"
-        _To be added._
+    !!! success "Result"
+        ReAct with Qwen3.6-35B-A3B achieved a **72.6% resolve rate** on SWE-Bench Verified, with `max-turns` = 200, `temperature` = 1.0, `top-p` = 0.95.
 
 === "Doubao-Seed-2.1-Pro"
 
