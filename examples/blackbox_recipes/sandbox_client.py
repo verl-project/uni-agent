@@ -1,10 +1,9 @@
-"""AKernel remote sandbox command execution.
+"""openYuanrong remote sandbox command execution.
 
-AKernel is an agent sandbox infra collaboratively developed by the
-OpenYuanrong team and the Ant AKernel team.
-Uses ``akernel_sdk.Sandbox`` with sidecar ``Mount`` to inject the
-mini-swe-agent tool image.  Supports upstream tunnel so the agent
-inside the sandbox can reach the gateway via ``http://127.0.0.1:<proxy_port>``.
+This sandbox infra is developed collaboratively by the OpenYuanrong team and the Ant AKernel team.
+
+Wraps remote sandbox lifecycle (create, run commands, cleanup) for blackbox agent
+recipes such as mini-swe-agent, including sidecar tool mounts and gateway tunnel helpers.
 """
 
 from __future__ import annotations
@@ -12,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import sys
 import uuid
 from dataclasses import dataclass
 from typing import Any
@@ -30,19 +30,6 @@ class CommandResult:
 logger = logging.getLogger(__name__)
 
 DEFAULT_PROXY_PORT = 38197
-
-
-def _configure_akernel_env() -> None:
-    """Validate AKernel credentials and map the tunnel SSL flag for akernel_sdk.
-
-    ``akernel_sdk`` reads ``AKERNEL_SERVER_ADDRESS`` / ``AKERNEL_TOKEN`` directly,
-    so only the tunnel SSL flag needs to be translated to ``TUNNEL_SSL_VERIFY``.
-    """
-    server = os.getenv("AKERNEL_SERVER_ADDRESS")
-    token = os.getenv("AKERNEL_TOKEN")
-    if not server or not token:
-        raise ValueError("AKERNEL_SERVER_ADDRESS and AKERNEL_TOKEN environment variables must be set for sandbox")
-    os.environ["TUNNEL_SSL_VERIFY"] = os.getenv("AKERNEL_TUNNEL_SSL_VERIFY", "0")
 
 
 def _resolve_sandbox_name() -> str | None:
@@ -84,6 +71,46 @@ def rewrite_gateway_url(
 class SandboxClient:
     """Command execution via remote sandbox."""
 
+    _sdk_initialized = False
+
+    @classmethod
+    def init(cls) -> None:
+        """Configure env and select sandbox SDK via ``sys.modules`` injection."""
+        if cls._sdk_initialized:
+            return
+
+        # Require OpenYuanrong credentials from the caller environment.
+        server = os.getenv("OPENYUANRONG_SERVER_ADDRESS")
+        token = os.getenv("OPENYUANRONG_TOKEN")
+        if not server or not token:
+            raise ValueError(
+                "OPENYUANRONG_SERVER_ADDRESS and OPENYUANRONG_TOKEN "
+                "environment variables must be set for sandbox"
+            )
+        # Reverse tunnel TLS verify
+        os.environ["TUNNEL_SSL_VERIFY"] = os.getenv("OPENYUANRONG_TUNNEL_SSL_VERIFY", "0")
+
+        if os.getenv("USE_OPENYUANRONG_SDK", "0") == "1":
+            try:
+                import openyuanrong_sandbox_sdk as _sdk_module
+            except ImportError:
+                raise ImportError(
+                    "USE_OPENYUANRONG_SDK=1 but openyuanrong_sandbox_sdk is not installed. "
+                    "Please install openyuanrong_sandbox_sdk or set USE_OPENYUANRONG_SDK=0."
+                ) from None
+        else:
+            os.environ["AKERNEL_SERVER_ADDRESS"] = server
+            os.environ["AKERNEL_TOKEN"] = token
+            try:
+                import akernel_sdk as _sdk_module
+            except ImportError:
+                raise ImportError(
+                    "USE_OPENYUANRONG_SDK=0 but akernel_sdk is not installed. "
+                    "Please install akernel_sdk or set USE_OPENYUANRONG_SDK=1."
+                ) from None
+        sys.modules["openyuanrong_sandbox_sdk"] = _sdk_module
+        cls._sdk_initialized = True
+
     def __init__(self, sandbox: Any) -> None:
         self._sandbox = sandbox
 
@@ -112,13 +139,15 @@ class SandboxClient:
         """Create an sandbox client with sidecar tool mounted.
 
         The sidecar image is mounted at ``sidecar_target`` inside the
-        sandbox via ``akernel_sdk.Mount``.
+        sandbox via the ``openyuanrong_sandbox_sdk.Mount`` class.
 
         If ``upstream`` is provided, a tunnel is set up so the sandbox can
         reach the local gateway via ``http://127.0.0.1:<proxy_port>``.
         """
-        _configure_akernel_env()
-        from akernel_sdk import Mount, Sandbox
+        if not cls._sdk_initialized:
+            cls.init()
+
+        from openyuanrong_sandbox_sdk import Mount, Sandbox
 
         sb_kwargs: dict[str, Any] = {
             "image": image,
@@ -136,39 +165,46 @@ class SandboxClient:
             sb_kwargs["proxy_port"] = proxy_port
         if env:
             sb_kwargs["env"] = env
-        name = _resolve_sandbox_name()
-        if name is not None:
-            sb_kwargs["name"] = name
         sb_kwargs.update(sandbox_kwargs)
 
         logger.info(
-            "Creating sandbox (image=%s, cpu=%d, memory=%d, sidecar=%s:%s, upstream=%s, name=%s)",
+            "Creating sandbox (image=%s, cpu=%d, memory=%d, sidecar=%s:%s, upstream=%s)",
             image,
             cpu,
             memory,
             sidecar_image,
             sidecar_target,
             upstream or "none",
-            name or "auto",
         )
         last_error: Exception | None = None
         for retry in range(max_retries):
-            sandbox = None
+            # Regenerate name each attempt so retries do not collide on the same name.
+            name = _resolve_sandbox_name()
+            if name is not None:
+                sb_kwargs["name"] = name
             try:
                 sandbox = await asyncio.to_thread(lambda: Sandbox(**sb_kwargs))
-                logger.info("sandbox created: %s", getattr(sandbox, "sandbox_id", "?"))
+                logger.info(
+                    "sandbox created: %s (image=%s)",
+                    getattr(sandbox, "sandbox_id", "?"),
+                    image,
+                )
                 return cls(sandbox=sandbox)
             except Exception as exc:
                 last_error = exc
-                sandbox_id = getattr(sandbox, "sandbox_id", None)
-                logger.critical(
-                    "Failed to create sandbox (sandbox_id=%s): %s",
-                    sandbox_id or "n/a",
+                logger.warning(
+                    "Failed to create sandbox (image=%s, name=%s, attempt=%d/%d): %s",
+                    image,
+                    name or "auto",
+                    retry + 1,
+                    max_retries,
                     exc,
                 )
-                if sandbox is not None:
+                # Create may fail after remote allocation while the local handle
+                # was never assigned; clean up by name when available.
+                if name is not None:
                     try:
-                        await asyncio.to_thread(sandbox.kill)
+                        await asyncio.to_thread(lambda n=name: Sandbox.delete(n))
                     except Exception:
                         pass
                 if retry < max_retries - 1:
