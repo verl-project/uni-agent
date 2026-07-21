@@ -733,9 +733,7 @@ async def test_generate_sequences_keeps_other_prompts_when_one_prompt_fails(fake
     ]
     assert len(runtime.aborted_sessions) == 1
     assert runtime.aborted_sessions[0].startswith("session-sample-0-rollout-0-")
-    assert all(
-        session_id.startswith("session-sample-1-rollout-0-") for session_id in runtime.finalized_sessions
-    )
+    assert all(session_id.startswith("session-sample-1-rollout-0-") for session_id in runtime.finalized_sessions)
 
 
 # ---------------------------------------------------------------------------
