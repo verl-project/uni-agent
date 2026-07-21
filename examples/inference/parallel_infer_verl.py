@@ -138,9 +138,7 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
             }
         },
     }
-    log_dir = next((entry["log_dir"] for entry in task_configs if entry.get("log_dir")), None)
-    if log_dir:
-        agent_framework_cfg["log_dir"] = log_dir
+    agent_framework_cfg["log_dir"] = args.log_dir
     OmegaConf.update(config, "actor_rollout_ref.rollout.custom.agent_framework", agent_framework_cfg, force_add=True)
 
     # TransferQueue carries the rollout trajectories (and their rm_scores).
@@ -361,6 +359,11 @@ def main() -> None:
         type=int,
         default=GLOBAL_CONCURRENCY,
         help="Max in-flight gateway sessions for the runner (runner.max_concurrent_sessions; env GLOBAL_CONCURRENCY).",
+    )
+    parser.add_argument(
+        "--log-dir",
+        default=os.getenv("UNI_AGENT_LOG_DIR", "/tmp/uni_agent_logs"),
+        help="Root directory for per-session logs and trajectories; use an empty value to disable.",
     )
 
     args = parser.parse_args()

@@ -21,7 +21,7 @@ from tensordict import TensorDict
 from tensordict.tensorclass import NonTensorData, NonTensorStack
 
 from uni_agent.gateway.session import SessionHandle, Trajectory
-from uni_agent.logging import sample_logging
+from uni_agent.logging import LogContext, sample_logging
 from verl.tools.tool_registry import initialize_tools_from_config
 from verl.utils import tensordict_utils as tu
 from verl.utils.import_utils import load_class_from_fqn
@@ -98,6 +98,12 @@ def _materialize_runner(runner_fqn: str, runner_kwargs: dict[str, object]):
     return runner
 
 
+def _log_scope(log_context: LogContext | None):
+    if log_context is None:
+        return contextlib.nullcontext()
+    return sample_logging.from_context(log_context)
+
+
 @ray.remote
 def _run_agent_runner_ray_task(
     *,
@@ -107,17 +113,19 @@ def _run_agent_runner_ray_task(
     session: SessionHandle,
     sample_index: int,
     tools_kwargs: object | None,
+    log_context: LogContext | None,
 ) -> None:
     """Run only the user runner in Ray; parent owns session lifecycle outputs."""
     runner = _materialize_runner(runner_fqn, runner_kwargs)
-    asyncio.run(
-        runner(
-            raw_prompt=raw_prompt,
-            session=session,
-            sample_index=sample_index,
-            **({"tools_kwargs": tools_kwargs} if tools_kwargs is not None else {}),
+    with _log_scope(log_context):
+        asyncio.run(
+            runner(
+                raw_prompt=raw_prompt,
+                session=session,
+                sample_index=sample_index,
+                **({"tools_kwargs": tools_kwargs} if tools_kwargs is not None else {}),
+            )
         )
-    )
 
 
 def _short_failure_reason(error: BaseException) -> str:
@@ -295,7 +303,11 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         for runner_name, runner_cfg in agent_runners_cfg.items():
             runner_registry[str(runner_name)] = _RunnerConfig.from_config(runner_name, runner_cfg)
 
-        log_dir = af_cfg.get("log_dir") or os.environ.get("UNI_AGENT_LOG_DIR") or "/tmp/uni_agent_logs"
+        if "log_dir" in af_cfg:
+            configured_log_dir = af_cfg.get("log_dir")
+            log_dir = str(configured_log_dir) if configured_log_dir else None
+        else:
+            log_dir = os.environ.get("UNI_AGENT_LOG_DIR") or "/tmp/uni_agent_logs"
 
         if not bool(af_cfg.get("use_reward_loop_worker", True)):
             reward_loop_worker_handles = None
@@ -588,15 +600,19 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         """Run one gateway session lifecycle and return finalized trajectories."""
         session_id = f"session-{sample_index}-{session_index}-{uuid4().hex}"
         if self._log_dir:
-            run_id = uuid4().hex
-            run_dir = Path(self._log_dir) / f"step_{int(global_steps)}" / run_id
-            log_ctx = sample_logging(run_id, run_dir / "run.log")
+            run_dir = Path(self._log_dir) / f"step_{int(global_steps)}" / session_id
+            framework_log = LogContext(session_id, str(run_dir / "framework.log"))
+            run_log = LogContext(session_id, str(run_dir / "run.log"))
+            parent_log = framework_log if runner_config.dispatch_mode == "ray_task" else run_log
         else:
             run_dir = None
-            log_ctx = contextlib.nullcontext()
-        async with log_ctx:
-            raw_prompt = sample_fields["raw_prompt"]
-            tools_kwargs = sample_fields.get("tools_kwargs")
+            framework_log = None
+            run_log = None
+            parent_log = None
+
+        raw_prompt = sample_fields["raw_prompt"]
+        tools_kwargs = sample_fields.get("tools_kwargs")
+        async with _log_scope(parent_log):
             session = await self.gateway_manager.create_session(
                 session_id,
                 sampling_params=dict(sampling_params),
@@ -620,6 +636,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
                         session=session,
                         sample_index=sample_index,
                         tools_kwargs=tools_kwargs,
+                        log_context=run_log,
                     )
                     await object_ref
                 else:
@@ -668,9 +685,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
 
     def _log_trajectory_summary(self, session_id: str, trajectories: list[Trajectory]) -> None:
         """Log a per-session trajectory summary -- the info the task layer can't emit,
-        since trajectories exist only after the session finalizes. Written as INFO under
-        the session's run_id, so it lands in that sample's log next to the runner's
-        agent/tool/sandbox lines."""
+        since trajectories exist only after the session finalizes."""
         lines = [f"session {session_id}: {len(trajectories)} trajectory(ies)"]
         for i, traj in enumerate(trajectories):
             model_tokens = sum(traj.response_mask) if traj.response_mask else 0

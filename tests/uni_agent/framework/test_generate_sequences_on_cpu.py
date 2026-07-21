@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
+from tests.uni_agent.support import logging_runner
 from uni_agent.framework.framework import OpenAICompatibleAgentFramework
 from uni_agent.gateway.session import SessionHandle, Trajectory
 from verl.utils import tensordict_utils as tu
@@ -73,10 +76,13 @@ async def _build_framework_with_agent_runners(
     reward_loop_worker_handles=None,
     n: int = 1,
     val_n: int = 1,
+    log_dir: str | None = None,
 ):
     from omegaconf import OmegaConf
 
     agent_framework_cfg: dict[str, object] = {"agent_runners": agent_runners}
+    if log_dir is not None:
+        agent_framework_cfg["log_dir"] = log_dir
 
     config = OmegaConf.create(
         {
@@ -337,6 +343,48 @@ async def test_agent_runners_registry_materializes_runners_and_selects_by_agent_
     assert [call["sample_index"] for call in calls] == [0, 1]
     assert [call["kwargs"]["tools_kwargs"] for call in calls] == [{"tool": 0}, {"tool": 1}]
     assert all("gateway_manager" not in call["kwargs"] for call in calls)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dispatch_mode", ["inline_async", "ray_task"])
+async def test_framework_and_runner_logs_share_one_session_directory(tmp_path, fake_tq, dispatch_mode):
+    runtime = _FakeGatewayManager({"session-0-0": [_trajectory()]})
+    runner_config = (
+        _inline_runner_config(logging_runner)
+        if dispatch_mode == "inline_async"
+        else {
+            "runner_fqn": "tests.uni_agent.support.logging_runner",
+            "dispatch_mode": "ray_task",
+        }
+    )
+    framework = await _build_framework_with_agent_runners(
+        agent_runners={"runner": runner_config},
+        gateway_manager=runtime,
+        log_dir=str(tmp_path),
+    )
+
+    await framework.generate_sequences(_build_prompts(count=1, global_steps=12))
+
+    step_dir = tmp_path / "step_12"
+    session_dirs = list(step_dir.iterdir())
+    assert len(session_dirs) == 1
+    assert session_dirs[0].name.startswith("session-0-0-")
+
+    framework_log = session_dirs[0] / "framework.log"
+    run_log = session_dirs[0] / "run.log"
+    for _ in range(50):
+        if run_log.exists() and "runner task log" in run_log.read_text():
+            parent_log = framework_log if dispatch_mode == "ray_task" else run_log
+            if parent_log.exists() and "session session-0-0-" in parent_log.read_text():
+                break
+        await asyncio.sleep(0.02)
+
+    assert "runner task log" in run_log.read_text()
+    if dispatch_mode == "ray_task":
+        assert "session session-0-0-" in framework_log.read_text()
+    else:
+        assert not framework_log.exists()
+        assert "session session-0-0-" in run_log.read_text()
 
 
 @pytest.mark.asyncio

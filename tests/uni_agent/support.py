@@ -1,9 +1,14 @@
 import asyncio
 import json
+import logging
 
 import torch
 
 from verl.workers.rollout.replica import TokenOutput
+
+
+async def logging_runner(**kwargs):
+    logging.getLogger("test.runner").info("runner task log")
 
 
 class FakeTokenizer:

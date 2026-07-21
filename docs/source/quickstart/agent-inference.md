@@ -32,7 +32,6 @@ Both inference modes use the same task configuration format. A file may contain 
 
     ```yaml
     - name: swe_bench
-      log_dir: /tmp/uni_agent_logs/swe_bench
       sandbox:
         provider: xxx
         runtime_timeout: 7200
@@ -59,7 +58,6 @@ Both inference modes use the same task configuration format. A file may contain 
 
     ```yaml
     - name: swe_bench
-      log_dir: /tmp/uni_agent_logs/swe_bench_claude_code
       sandbox:
         provider: "xxx"
         runtime_timeout: 7200
@@ -80,7 +78,6 @@ Common fields:
 - `sandbox`: backend and lifecycle settings for the task environment.
 - `agent.name`: agent implementation or harness to launch.
 - `agent.model`: sampling parameters and total token budget.
-- `log_dir`: per-session execution logs.
 
 Agent-specific fields configure the interaction loop. ReAct declares its tools and `max_steps`; Claude Code configures its turn limit and process timeout.
 
@@ -120,7 +117,7 @@ python examples/inference/parallel_infer_api.py \
 
 For an authenticated endpoint, also set `API_KEY` or pass `--api-key`.
 
-The script runs tasks in parallel and prints a result summary. Per-sample logs are available at `<log_dir>/<run_id>/run.log`, for example `/tmp/uni_agent_logs/swe_bench/<run_id>/run.log`.
+The script runs tasks in parallel and prints a result summary. Per-sample logs are written to `<log_dir>/<log_id>/run.log`; the default root is `/tmp/uni_agent_logs`.
 
 Useful controls:
 
@@ -128,6 +125,7 @@ Useful controls:
 - `NUM_WORKERS`: number of Ray inference actors.
 - `--limit`: number of dataset rows to run.
 - `--n`: rollout attempts per task.
+- `--log-dir`: runtime root for per-rollout `run.log` files.
 
 ## verl Rollout Engine
 
@@ -169,8 +167,11 @@ Important controls:
 - `--concurrency`: maximum number of in-flight Gateway sessions.
 - `--n`: rollout sessions per task.
 - `--result-path`: optional JSON output containing aggregate and per-session scores.
+- `--log-dir`: runtime root for Framework logs, Task logs, and trajectory artifacts.
 
 The task reports its reward to the Gateway. The Agent Framework writes the reward and token-level trajectory to TransferQueue, and the script reads back `rm_scores` to produce the inference summary.
+
+Session logs are grouped by `log_id` under `<log_dir>/step_0/<log_id>/`, with Task/Agent/Tool events in `run.log` and Framework events in `framework.log`.
 
 ## Ray Cluster
 

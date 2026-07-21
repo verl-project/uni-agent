@@ -2,13 +2,16 @@ from __future__ import annotations
 
 from copy import deepcopy
 
-from uni_agent.tasks import TaskConfigResolver, get_task
+from uni_agent.tasks import TaskConfig, TaskConfigResolver, get_task
+
+
+def test_task_config_has_no_logging_runtime_fields():
+    assert "log_dir" not in TaskConfig.model_fields
 
 
 def test_sample_config_overrides_file_defaults_and_runtime_endpoint_wins():
     file_defaults = {
         "name": "swe_bench",
-        "log_dir": "/tmp/default",
         "sandbox": {
             "provider": "modal",
             "runtime_timeout": 3600,
@@ -54,7 +57,6 @@ def test_sample_config_overrides_file_defaults_and_runtime_endpoint_wins():
         },
     )
 
-    assert resolved["log_dir"] == "/tmp/default"
     assert resolved["sandbox"] == {
         "provider": "vefaas",
         "runtime_timeout": 3600,

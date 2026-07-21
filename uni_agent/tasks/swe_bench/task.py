@@ -30,34 +30,32 @@ class SWEBenchTask(Task):
         cfg: SWEBenchTaskConfig = self.config  # type: ignore[assignment]
         sample = cfg.metadata  # the dataset sample is carried on the task config
 
-        # Route this episode's logs (agent, tools, sandbox) to the run's log stream.
-        async with self.episode_logging():
-            instance_id = sample.get("instance_id", "?") if isinstance(sample, dict) else "?"
-            task_config_dump = cfg.model_dump(mode="json", exclude={"metadata", "prompt"})
-            logger.info(
-                f"starting swe_bench task (instance_id={instance_id}, run_gold_patch={cfg.run_gold_patch})\n"
-                f"task config: {json.dumps(task_config_dump, indent=2)}"
-            )
-            async with self.build_sandbox() as sandbox:
-                if cfg.run_gold_patch:
-                    logger.info("applying gold patch to /testbed")
-                    await sandbox.write_file("/tmp/gold_patch.patch", sample["patch"])
-                    await sandbox.exec(
-                        ["git", "apply", "--whitespace=fix", "/tmp/gold_patch.patch"], workdir="/testbed"
-                    )
-                else:
-                    agent = self.build_agent()
-                    messages = cfg.prompt
-                    # The endpoint the agent calls lives on cfg.agent.model (the agent validates it).
-                    await agent.run(sandbox=sandbox, messages=messages)
-
-                from .reward import compute_reward
-
-                result = await compute_reward(sample, sandbox)
-
-                logger.info(f"task done: resolved={result['resolved']}")
-                return TaskResult(
-                    reward=float(result["resolved"]),
-                    accuracy=float(result["resolved"]),
-                    info=result,
+        instance_id = sample.get("instance_id", "?") if isinstance(sample, dict) else "?"
+        task_config_dump = cfg.model_dump(mode="json", exclude={"metadata", "prompt"})
+        logger.info(
+            f"starting swe_bench task (instance_id={instance_id}, run_gold_patch={cfg.run_gold_patch})\n"
+            f"task config: {json.dumps(task_config_dump, indent=2)}"
+        )
+        async with self.build_sandbox() as sandbox:
+            if cfg.run_gold_patch:
+                logger.info("applying gold patch to /testbed")
+                await sandbox.write_file("/tmp/gold_patch.patch", sample["patch"])
+                await sandbox.exec(
+                    ["git", "apply", "--whitespace=fix", "/tmp/gold_patch.patch"], workdir="/testbed"
                 )
+            else:
+                agent = self.build_agent()
+                messages = cfg.prompt
+                # The endpoint the agent calls lives on cfg.agent.model (the agent validates it).
+                await agent.run(sandbox=sandbox, messages=messages)
+
+            from .reward import compute_reward
+
+            result = await compute_reward(sample, sandbox)
+
+            logger.info(f"task done: resolved={result['resolved']}")
+            return TaskResult(
+                reward=float(result["resolved"]),
+                accuracy=float(result["resolved"]),
+                info=result,
+            )

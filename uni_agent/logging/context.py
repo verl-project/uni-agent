@@ -1,7 +1,7 @@
-"""Run-id context and shared config for the logging package.
+"""Log-ID context and shared config for the logging package.
 
-``run_id`` identifies one sample's log stream, carried implicitly via a ContextVar
-(set by ``sample_logging``) or bound explicitly via :func:`get_logger`.
+``log_id`` identifies one execution log and is carried implicitly through a
+ContextVar set by ``sample_logging``.
 """
 
 from __future__ import annotations
@@ -9,10 +9,10 @@ from __future__ import annotations
 import contextvars
 import logging
 import os
+from dataclasses import dataclass
 
-# Set by ``sample_logging`` for one sample; read by the dispatch handler and console
-# filter to route/gate records.
-_current_run_id: contextvars.ContextVar[str | None] = contextvars.ContextVar("uni_agent_run_id", default=None)
+# Set by ``sample_logging``; read by the dispatch handler and console filter.
+_current_log_id: contextvars.ContextVar[str | None] = contextvars.ContextVar("uni_agent_log_id", default=None)
 
 # Fixed-width logger-name column so the ``|`` separators line up; _AlignedFormatter
 # trims each name to _NAME_WIDTH and fills ``shortname``.
@@ -34,26 +34,13 @@ def _debug_enabled() -> bool:
 _FLUSH_EACH_LINE = _env_flag("LOG_FLUSH_EACH_LINE")
 
 
-def resolve_run_id(record: logging.LogRecord) -> str | None:
-    """The record's explicit run_id (from :func:`get_logger`), else the ambient one."""
-    run_id = getattr(record, "run_id", None)
-    return run_id if run_id is not None else _current_run_id.get()
+@dataclass(frozen=True)
+class LogContext:
+    """Explicit routing information for one logical execution log."""
+
+    log_id: str
+    log_path: str | None = None
 
 
-def current_run_id() -> str | None:
-    """The run_id bound by an enclosing :func:`~uni_agent.logging.sample_logging`, or ``None``.
-
-    Lets a nested caller reuse the ambient per-sample log stream instead of opening its
-    own file -- e.g. a task run under the agent framework reuses the framework's
-    session-level run_id so both write to one file (the dispatch handler doesn't
-    ref-count, so a second open/close would clobber the shared file)."""
-    return _current_run_id.get()
-
-
-def get_logger(name: str, run_id: str) -> logging.LoggerAdapter:
-    """A logger whose records are tagged with ``run_id``, for explicit callers that
-    don't use ``sample_logging`` (e.g. the RL agent loop). Pairs with
-    :func:`~uni_agent.logging.add_file_handler` on the same ``run_id``."""
-    lg = logging.getLogger(name)
-    lg.setLevel(logging.INFO)  # records are gated per file at the dispatch handler
-    return logging.LoggerAdapter(lg, {"run_id": run_id})
+def _resolve_log_id(record: logging.LogRecord) -> str | None:
+    return _current_log_id.get()

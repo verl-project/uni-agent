@@ -1,5 +1,4 @@
 - name: swe_bench
-  log_dir: /tmp/uni_agent_logs/swe_bench
   sandbox:
     provider: modal
   agent:

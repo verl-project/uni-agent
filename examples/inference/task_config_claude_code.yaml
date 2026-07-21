@@ -1,5 +1,4 @@
 - name: swe_bench
-  log_dir: /tmp/uni_agent_logs/swe_bench_claude_code
   sandbox:
     provider: xxx
     runtime_timeout: 7200

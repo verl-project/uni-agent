@@ -12,11 +12,14 @@ import asyncio
 import logging
 import os
 import time
+from pathlib import Path
+from uuid import uuid4
 
 import ray
 from datasets import load_dataset
 from tqdm import tqdm
 
+from uni_agent.logging import LogContext, sample_logging
 from uni_agent.tasks import get_task
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s", force=True)
@@ -32,33 +35,40 @@ RUNTIME_TIMEOUT = float(os.getenv("RUNTIME_TIMEOUT", 3600))
 class TestEvalActor:
     _semaphore = asyncio.Semaphore(max(1, GLOBAL_CONCURRENCY // NUM_WORKERS))
 
+    def __init__(self, log_dir: str | None):
+        self.log_dir = log_dir
+
     async def run_single(self, sample: dict) -> dict:
         async with self._semaphore:
             task_config = sample["extra_info"]["tools_kwargs"]["task"]
             instance_id = task_config["metadata"]["instance_id"]
-            try:
-                task_config["run_gold_patch"] = True
-                task_config["log_dir"] = "/tmp/eval_gold_patch"
-                task_config["sandbox"]["provider"] = SANDBOX_PROVIDER
-                task_config["sandbox"]["runtime_timeout"] = RUNTIME_TIMEOUT
-                result = await get_task(task_config).run()
-                info = result.info or {}
-                resolved = bool(info.get("resolved", result.reward))
-                return {
-                    "instance_id": instance_id,
-                    "resolved": resolved,
-                    "eval_completed": bool(info.get("eval_completed", True)),
-                    "eval_execution_time": info.get("eval_execution_time"),
-                }
-            except Exception as e:
-                logger.error(f"error verifying {instance_id}: {type(e).__name__}: {e}")
-                return {
-                    "instance_id": instance_id,
-                    "resolved": False,
-                    "eval_completed": False,
-                    "eval_execution_time": None,
-                    "error": f"{type(e).__name__}: {e}",
-                }
+            log_id = f"verify-{uuid4().hex}"
+            log_path = str(Path(self.log_dir).expanduser() / log_id / "run.log") if self.log_dir else None
+            async with sample_logging.from_context(LogContext(log_id, log_path)):
+                try:
+                    task_config["run_gold_patch"] = True
+                    task_config["sandbox"]["provider"] = SANDBOX_PROVIDER
+                    task_config["sandbox"]["runtime_timeout"] = RUNTIME_TIMEOUT
+                    result = await get_task(task_config).run()
+                    info = result.info or {}
+                    resolved = bool(info.get("resolved", result.reward))
+                    return {
+                        "instance_id": instance_id,
+                        "log_id": log_id,
+                        "resolved": resolved,
+                        "eval_completed": bool(info.get("eval_completed", True)),
+                        "eval_execution_time": info.get("eval_execution_time"),
+                    }
+                except Exception as e:
+                    logger.error(f"error verifying {instance_id}: {type(e).__name__}: {e}")
+                    return {
+                        "instance_id": instance_id,
+                        "log_id": log_id,
+                        "resolved": False,
+                        "eval_completed": False,
+                        "eval_execution_time": None,
+                        "error": f"{type(e).__name__}: {e}",
+                    }
 
 
 def _rule(text: str = "", width: int = 50, ch: str = "-") -> str:
@@ -77,6 +87,11 @@ def main() -> None:
     )
     parser.add_argument("--num-workers", type=int, default=NUM_WORKERS)
     parser.add_argument("--limit", type=int, default=None, help="Only verify the first N samples (smoke testing).")
+    parser.add_argument(
+        "--log-dir",
+        default=os.getenv("UNI_AGENT_LOG_DIR", "/tmp/eval_gold_patch"),
+        help="Root directory for per-sample logs; use an empty value to disable file logging.",
+    )
     args = parser.parse_args()
 
     ray.init()
@@ -93,7 +108,7 @@ def main() -> None:
     logger.info(f"provider={SANDBOX_PROVIDER} workers={args.num_workers} concurrency={GLOBAL_CONCURRENCY}")
 
     num_workers = min(args.num_workers, len(samples))
-    workers = [TestEvalActor.remote() for _ in range(num_workers)]
+    workers = [TestEvalActor.remote(args.log_dir) for _ in range(num_workers)]
     # One future per sample (round-robin across workers) so we can stream
     # per-sample progress; the actor semaphore still bounds real concurrency.
     futures = [workers[i % num_workers].run_single.remote(s) for i, s in enumerate(samples)]

@@ -26,11 +26,14 @@ import asyncio
 import logging
 import os
 import time
+from pathlib import Path
+from uuid import uuid4
 
 import ray
 from datasets import load_dataset
 from tqdm import tqdm
 
+from uni_agent.logging import LogContext, sample_logging
 from uni_agent.tasks import TaskConfigResolver, get_task
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
@@ -44,28 +47,31 @@ NUM_WORKERS = int(os.getenv("NUM_WORKERS", 8))
 class InferenceActor:
     _semaphore = asyncio.Semaphore(max(1, GLOBAL_CONCURRENCY // NUM_WORKERS))
 
-    async def run_single(self, task: dict) -> dict:
+    async def run_single(self, task: dict, log_context: LogContext) -> dict:
         async with self._semaphore:
             instance_id = task.get("metadata", {}).get("instance_id", "<unknown>")
-            try:
-                result = await get_task(task).run()
-                info = result.info or {}
-                resolved = bool(info.get("resolved", result.reward))
-                return {
-                    "instance_id": instance_id,
-                    "resolved": resolved,
-                    "eval_completed": bool(info.get("eval_completed", True)),
-                    "eval_execution_time": info.get("eval_execution_time"),
-                }
-            except Exception as e:
-                logger.error(f"error running {instance_id}: {type(e).__name__}: {e}")
-                return {
-                    "instance_id": instance_id,
-                    "resolved": False,
-                    "eval_completed": False,
-                    "eval_execution_time": None,
-                    "error": f"{type(e).__name__}: {e}",
-                }
+            async with sample_logging.from_context(log_context):
+                try:
+                    result = await get_task(task).run()
+                    info = result.info or {}
+                    resolved = bool(info.get("resolved", result.reward))
+                    return {
+                        "instance_id": instance_id,
+                        "log_id": log_context.log_id,
+                        "resolved": resolved,
+                        "eval_completed": bool(info.get("eval_completed", True)),
+                        "eval_execution_time": info.get("eval_execution_time"),
+                    }
+                except Exception as e:
+                    logger.error(f"error running {instance_id}: {type(e).__name__}: {e}")
+                    return {
+                        "instance_id": instance_id,
+                        "log_id": log_context.log_id,
+                        "resolved": False,
+                        "eval_completed": False,
+                        "eval_execution_time": None,
+                        "error": f"{type(e).__name__}: {e}",
+                    }
 
 
 def _rule(text: str = "", width: int = 50, ch: str = "-") -> str:
@@ -95,6 +101,11 @@ def main() -> None:
     parser.add_argument("--model", default=os.getenv("MODEL", ""), help="Served model name (env MODEL).")
 
     parser.add_argument("--n", type=int, default=1, help="Rollouts per instance (pass rate averages over all).")
+    parser.add_argument(
+        "--log-dir",
+        default=os.getenv("UNI_AGENT_LOG_DIR", "/tmp/uni_agent_logs"),
+        help="Root directory for per-rollout logs; use an empty value to disable file logging.",
+    )
     args = parser.parse_args()
 
     resolver = TaskConfigResolver.from_file(args.task_config)
@@ -126,9 +137,14 @@ def main() -> None:
         return
 
     n = max(1, args.n)
-    resolved_tasks = [task for task in resolved_tasks for _ in range(n)]
+    work_items: list[tuple[dict, LogContext]] = []
+    for sample_index, task in enumerate(resolved_tasks):
+        for rollout_index in range(n):
+            log_id = f"external-{sample_index}-{rollout_index}-{uuid4().hex}"
+            log_path = str(Path(args.log_dir).expanduser() / log_id / "run.log") if args.log_dir else None
+            work_items.append((task, LogContext(log_id=log_id, log_path=log_path)))
 
-    logger.info(f"loaded {len(resolved_tasks)} rollouts ({n}x) from {args.data_path}")
+    logger.info(f"loaded {len(work_items)} rollouts ({n}x) from {args.data_path}")
     logger.info(
         "workers=%s concurrency=%s config=yaml:%s",
         NUM_WORKERS,
@@ -136,9 +152,12 @@ def main() -> None:
         args.task_config,
     )
 
-    num_workers = min(NUM_WORKERS, len(resolved_tasks))
+    num_workers = min(NUM_WORKERS, len(work_items))
     workers = [ray.remote(InferenceActor).remote() for _ in range(num_workers)]
-    futures = [workers[i % num_workers].run_single.remote(task) for i, task in enumerate(resolved_tasks)]
+    futures = [
+        workers[i % num_workers].run_single.remote(task, log_context)
+        for i, (task, log_context) in enumerate(work_items)
+    ]
 
     fut_to_idx = {f: i for i, f in enumerate(futures)}
 

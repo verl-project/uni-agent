@@ -12,18 +12,13 @@ A *task* is the top-level unit a trainer / evaluator instantiates. The base
 from __future__ import annotations
 
 import dataclasses
-import os
-import uuid
 from abc import ABC, abstractmethod
-from collections.abc import AsyncIterator, Mapping
-from contextlib import asynccontextmanager
-from pathlib import Path
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny, field_validator
 
 from uni_agent.agents import AgentConfig
-from uni_agent.logging import current_run_id, sample_logging
 from uni_agent.sandbox import SandboxConfig
 
 if TYPE_CHECKING:
@@ -49,11 +44,6 @@ class TaskConfig(BaseModel):
     )
     prompt: list[dict[str, Any]] = Field(default_factory=list, description="The task prompt.")
     metadata: dict[str, Any] = Field(default_factory=dict)
-    log_dir: str = Field(
-        default="",
-        description="Directory for this episode's per-sample log (<log_dir>/<run_id>/run.log); "
-        "empty falls back to /tmp/uni_agent_logs/<task_name>.",
-    )
 
     model_config = ConfigDict(extra="forbid", protected_namespaces=())
 
@@ -119,22 +109,3 @@ class Task(ABC):
         from uni_agent.agents import build_agent
 
         return build_agent(self.config.agent)
-
-    @asynccontextmanager
-    async def episode_logging(self) -> AsyncIterator[None]:
-        """Scope this episode's logs to a run_id via :func:`sample_logging`.
-
-        Reuses the caller's ambient run_id when set (the framework binds
-        run_id = session_id, so agent/tool/sandbox logs join that session's file);
-        otherwise mints one and opens ``<log_dir>/<run_id>/run.log`` (standalone eval).
-        Yields nothing -- use as ``async with self.episode_logging():``.
-        """
-        ambient_run_id = current_run_id()
-        if ambient_run_id is not None:
-            run_id, log_path = ambient_run_id, None
-        else:
-            run_id = str(uuid.uuid4())
-            log_dir = os.path.expanduser(self.config.log_dir or f"/tmp/uni_agent_logs/{self.name}")
-            log_path = Path(log_dir) / run_id / "run.log"
-        async with sample_logging(run_id, log_path):
-            yield

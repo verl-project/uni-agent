@@ -22,7 +22,6 @@ Every Task configuration inherits from `TaskConfig`:
 - `agent`: concrete Agent configuration.
 - `prompt`: OpenAI-style messages.
 - `metadata`: sample-specific data used by execution and scoring.
-- `log_dir`: per-episode log root.
 
 Task-specific configs can add validated fields:
 
@@ -55,19 +54,18 @@ class MyTask(Task):
     async def run(self) -> TaskResult:
         config: MyTaskConfig = self.config
 
-        async with self.episode_logging():
-            async with self.build_sandbox() as sandbox:
-                agent = self.build_agent()
-                agent_result = await agent.run(
-                    sandbox=sandbox,
-                    messages=config.prompt,
-                )
+        async with self.build_sandbox() as sandbox:
+            agent = self.build_agent()
+            agent_result = await agent.run(
+                sandbox=sandbox,
+                messages=config.prompt,
+            )
 
-                score = await compute_reward(
-                    config.metadata,
-                    sandbox,
-                    agent_result,
-                )
+            score = await compute_reward(
+                config.metadata,
+                sandbox,
+                agent_result,
+            )
 
         return TaskResult(
             reward=score,
@@ -76,7 +74,7 @@ class MyTask(Task):
         )
 ```
 
-`build_sandbox()` and `build_agent()` dispatch through their registries. `episode_logging()` creates a run ID for standalone execution or reuses the session ID supplied by the Agent Framework.
+`build_sandbox()` and `build_agent()` dispatch through their registries. Logging is provided by the runtime that invokes the Task; the Task only emits normal log records.
 
 ## Reward Design
 
@@ -170,7 +168,7 @@ TASK_MODULES["my_task"] = "my_package.task"
 - Keep the Task responsible for the Sandbox and Task execution lifecycle.
 - Keep model-serving endpoints out of preprocessed datasets.
 - Put sample-specific evaluation data in `metadata`.
-- Wrap execution in `episode_logging()`.
+- Emit normal log records and let the invoking runtime bind their `LogContext`.
 - Return a `TaskResult` for every successful episode.
 - Let infrastructure failures propagate instead of silently converting them to zero reward.
 - Keep reward implementation close to the Task; do not force unrelated tasks into one reward schema.
