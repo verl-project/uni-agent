@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import TextIO
 
 from .context import _DATE_FORMAT, _FLUSH_EACH_LINE, _LOG_FORMAT, _NAME_WIDTH, _debug_enabled, _resolve_log_id
+from .redaction import _redact_sensitive_text
 
 
 class _AlignedFormatter(logging.Formatter):
@@ -29,7 +30,7 @@ class _AlignedFormatter(logging.Formatter):
         if len(name) > _NAME_WIDTH:
             name = "…" + name[-(_NAME_WIDTH - 1) :]
         record.shortname = name
-        return super().format(record)
+        return _redact_sensitive_text(super().format(record))
 
 
 _formatter = _AlignedFormatter(_LOG_FORMAT, datefmt=_DATE_FORMAT)

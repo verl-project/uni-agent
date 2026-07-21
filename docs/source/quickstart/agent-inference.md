@@ -7,6 +7,11 @@ Uni-Agent supports two inference modes:
 
 This guide demonstrates both modes by running `Claude Code` and `ReAct` agents on SWE-Bench.
 
+Specifically, this guide covers:
+
+- **Claude Code:** Doubao through an external API, and Qwen3.6-35B-A3B through the verl rollout engine.
+- **ReAct:** Doubao through an external API, plus Qwen3-Coder-30B-A3B-Instruct and Qwen3.6-35B-A3B through the verl rollout engine.
+
 ## Prepare Data
 
 This guide uses SWE-Bench Verified as the running example. Preprocess a small subset first:
@@ -107,11 +112,11 @@ Then point the API runner at the service:
 ```bash
 BASE_URL=http://model-service:8000/v1 \
 MODEL=Qwen3-Coder-30B-A3B-Instruct \
-GLOBAL_CONCURRENCY=8 \
 NUM_WORKERS=4 \
 python examples/inference/parallel_infer_api.py \
     --data-path ~/data/swe_agent/swe_bench_verified.parquet \
     --task-config /path/to/task_config.yaml \
+    --concurrency 8 \
     --log-dir /mnt/shared/uni_agent_logs \
     --limit 8
 ```
@@ -122,7 +127,7 @@ Each rollout writes `<log_dir>/<log_id>/task.log`. Set `--log-dir` to a shared-s
 
 Useful controls:
 
-- `GLOBAL_CONCURRENCY`: maximum number of in-flight tasks across all workers.
+- `--concurrency`: maximum number of in-flight tasks across all workers; defaults to `GLOBAL_CONCURRENCY`.
 - `NUM_WORKERS`: number of Ray inference actors.
 - `--limit`: number of dataset rows to run.
 - `--n`: rollout attempts per task.
@@ -207,50 +212,127 @@ ray job submit --no-wait \
     -- python3 examples/inference/parallel_infer_verl.py ...
 ```
 
-## Practical Recipes
+## Recipes
 
 ### Claude Code
 
-Claude Code is a black-box Agent Harness: the complete CLI runs inside the sandbox and owns its interaction loop and tools. Use `task_config_claude_code.yaml` with either serving mode.
+Claude Code is a black-box Agent Harness: the complete CLI runs inside the sandbox and owns its interaction loop and tools. The following examples run it with `doubao-seed-2.1-pro` through an external API and with `qwen3.6-35b-a3b` through the verl rollout engine.
 
-=== "External API"
+=== "Doubao-Seed-2.1-Pro"
 
-    Use an endpoint that exposes `POST /v1/messages` and is reachable from the sandbox. Do not use `localhost` when the sandbox is remote.
+    Configure any Anthropic-compatible model service that is reachable from the sandbox. The example below uses Doubao through Volcengine Ark:
 
     ```bash
-    BASE_URL=http://model-service:8000/v1 \
-    MODEL=Qwen/Qwen3.6-35B-A3B \
-    GLOBAL_CONCURRENCY=128 \
-    NUM_WORKERS=8 \
-    python examples/inference/parallel_infer_api.py \
+    export BASE_URL="https://ark.cn-beijing.volces.com/api/compatible"
+    export API_KEY="replace-with-your-ark-api-key"
+    export MODEL="doubao-seed-2-1-pro-260628"
+
+    python3 examples/inference/parallel_infer_api.py \
         --data-path ~/data/swe_agent/swe_bench_verified.parquet \
         --task-config examples/quickstart/inference/task_config_claude_code.yaml \
+        --base-url "${BASE_URL}" \
+        --model "${MODEL}" \
+        --api-key "${API_KEY}" \
+        --concurrency 64 \
         --log-dir /mnt/shared/uni_agent_logs \
-        --limit 8
+        --limit 4
     ```
 
-    For endpoints that validate Anthropic credentials, provide the required Claude Code environment variables through `agent.extra_env`.
+    !!! note "Result"
+        We ran only a small subset with Doubao. Treat this as an end-to-end smoke test, not a benchmark result.
 
-=== "verl Rollout Engine"
+=== "Qwen3.6-35B-A3B"
 
-    Replace the Modal credential placeholders in `examples/quickstart/inference/runtime_env.yaml`, then review the model path, data path, hardware, and shared log path in `run_infer_claude_code.sh`.
+    Choose your sandbox backend and replace the credential placeholders in `runtime_env.yaml`, then submit the job via:
 
     ```bash
-    bash examples/quickstart/inference/run_infer_claude_code.sh
+    ray job submit --no-wait \
+        --runtime-env examples/quickstart/inference/runtime_env.yaml \
+        --working-dir . \
+        -- python3 examples/inference/parallel_infer_verl.py \
+        --data-path ~/data/swe_agent/swe_bench_verified.parquet \
+        --model-path Qwen/Qwen3.6-35B-A3B \
+        --task-config examples/quickstart/inference/task_config_claude_code.yaml \
+        --tool-parser qwen3_coder \
+        --tensor-parallel-size 4 \
+        --nnodes 8 \
+        --n-gpus-per-node 8 \
+        --log-dir /mnt/shared/uni_agent_logs \
+        --concurrency 128
     ```
 
-    The script submits a Ray job. `verl` launches the model engine, and Uni-Agent gives each Claude Code rollout a Gateway endpoint that exposes `/v1/messages`.
+    !!! success "Result"
+        Claude Code with Qwen3.6-35B-A3B achieved a **67.8% resolve rate** on SWE-Bench Verified, with `max-turns` = 200, `temperature` = 1.0, `top-p` = 0.95
 
-### ReAct
+### ReAct Agent
 
-ReAct is a white-box Agent: Uni-Agent owns the interaction loop and exposes `stateful_shell`, `str_replace_editor`, and `submit` from `task_config_react.yaml`.
+ReAct is a white-box Agent: Uni-Agent owns the interaction loop and exposes `stateful_shell`, `str_replace_editor`, and `submit` from `task_config_react.yaml`. The examples below run the same Agent with an external Doubao service and two verl-managed Qwen checkpoints.
 
-Replace the Modal credential placeholders in `runtime_env.yaml`, review the model and cluster settings in `run_infer_react.sh`, then run:
+=== "Qwen3-Coder-30B-A3B-Instruct"
 
-```bash
-bash examples/quickstart/inference/run_infer_react.sh
-```
+    ```bash
+    ray job submit --no-wait \
+        --runtime-env examples/quickstart/inference/runtime_env.yaml \
+        --working-dir . \
+        -- python3 examples/inference/parallel_infer_verl.py \
+        --data-path ~/data/swe_agent/swe_bench_verified.parquet \
+        --model-path Qwen/Qwen3-Coder-30B-A3B-Instruct \
+        --task-config examples/quickstart/inference/task_config_react.yaml \
+        --tool-parser qwen3_coder \
+        --tensor-parallel-size 4 \
+        --nnodes 8 \
+        --n-gpus-per-node 8 \
+        --log-dir /mnt/shared/uni_agent_logs \
+        --result-path /mnt/shared/results/react_qwen3_coder_30b.json \
+        --concurrency 512
+    ```
 
-Each rollout gets an independent Gateway Session and Toolbox while sharing the verl-managed model engine. Use `--limit 8` in the script for a smoke test before running the full dataset.
+    !!! info "Result"
+        _To be added._
+
+=== "Qwen3.6-35B-A3B"
+
+    ```bash
+    ray job submit --no-wait \
+        --runtime-env examples/quickstart/inference/runtime_env.yaml \
+        --working-dir . \
+        -- python3 examples/inference/parallel_infer_verl.py \
+        --data-path ~/data/swe_agent/swe_bench_verified.parquet \
+        --model-path Qwen/Qwen3.6-35B-A3B \
+        --task-config examples/quickstart/inference/task_config_react.yaml \
+        --tool-parser qwen3_coder \
+        --tensor-parallel-size 4 \
+        --nnodes 8 \
+        --n-gpus-per-node 8 \
+        --log-dir /mnt/shared/uni_agent_logs \
+        --result-path /mnt/shared/results/react_qwen3_6_35b.json \
+        --concurrency 512
+    ```
+
+    !!! info "Result"
+        _To be added._
+
+=== "Doubao-Seed-2.1-Pro"
+
+    ReAct uses the OpenAI-compatible Chat Completions protocol. Configure an endpoint that is reachable from the Ray inference workers; the example below uses Volcengine Ark:
+
+    ```bash
+    export BASE_URL="https://ark.cn-beijing.volces.com/api/v3"
+    export API_KEY="replace-with-your-ark-api-key"
+    export MODEL="doubao-seed-2-1-pro-260628"
+
+    python3 examples/inference/parallel_infer_api.py \
+        --data-path ~/data/swe_agent/swe_bench_verified.parquet \
+        --task-config examples/quickstart/inference/task_config_react.yaml \
+        --base-url "${BASE_URL}" \
+        --model "${MODEL}" \
+        --api-key "${API_KEY}" \
+        --concurrency 64 \
+        --log-dir /mnt/shared/uni_agent_logs \
+        --limit 4
+    ```
+
+    !!! note "Result"
+        _To be added._
 
 Next, you can [train an agent with RL](rl-training.md) using the same task and rollout configuration.

@@ -45,7 +45,8 @@ NUM_WORKERS = int(os.getenv("NUM_WORKERS", 8))
 
 
 class InferenceActor:
-    _semaphore = asyncio.Semaphore(max(1, GLOBAL_CONCURRENCY // NUM_WORKERS))
+    def __init__(self, max_concurrency: int):
+        self._semaphore = asyncio.Semaphore(max_concurrency)
 
     async def run_single(self, task: dict, log_context: LogContext) -> dict:
         async with self._semaphore:
@@ -82,6 +83,12 @@ def _rule(text: str = "", width: int = 50, ch: str = "-") -> str:
     return f"{ch * (pad // 2)} {text} {ch * (pad - pad // 2)}"
 
 
+def _allocate_worker_concurrency(total_concurrency: int, num_workers: int) -> list[int]:
+    """Split a global concurrency budget across Ray actors without exceeding it."""
+    per_worker, remainder = divmod(total_concurrency, num_workers)
+    return [per_worker + (worker_index < remainder) for worker_index in range(num_workers)]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Parallel agent inference.")
     parser.add_argument(
@@ -102,11 +109,21 @@ def main() -> None:
 
     parser.add_argument("--n", type=int, default=1, help="Rollouts per instance (pass rate averages over all).")
     parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=GLOBAL_CONCURRENCY,
+        help="Maximum in-flight rollouts across all Ray actors (env GLOBAL_CONCURRENCY).",
+    )
+    parser.add_argument(
         "--log-dir",
         default=os.getenv("UNI_AGENT_LOG_DIR", "/tmp/uni_agent_logs"),
         help="Root directory for per-rollout logs; use an empty value to disable file logging.",
     )
     args = parser.parse_args()
+    if args.concurrency <= 0:
+        parser.error("--concurrency must be positive")
+    if NUM_WORKERS <= 0:
+        parser.error("NUM_WORKERS must be positive")
 
     resolver = TaskConfigResolver.from_file(args.task_config)
     runtime_model = {"api_key": args.api_key}
@@ -144,16 +161,22 @@ def main() -> None:
             log_path = str(Path(args.log_dir).expanduser() / log_id / "task.log") if args.log_dir else None
             work_items.append((task, LogContext(log_id=log_id, log_path=log_path)))
 
+    num_workers = min(NUM_WORKERS, len(work_items), args.concurrency)
+    worker_concurrency = _allocate_worker_concurrency(args.concurrency, num_workers)
+
     logger.info(f"loaded {len(work_items)} rollouts ({n}x) from {args.data_path}")
     logger.info(
-        "workers=%s concurrency=%s config=yaml:%s",
-        NUM_WORKERS,
-        GLOBAL_CONCURRENCY,
+        "workers=%s concurrency=%s worker_concurrency=%s config=yaml:%s",
+        num_workers,
+        args.concurrency,
+        worker_concurrency,
         args.task_config,
     )
 
-    num_workers = min(NUM_WORKERS, len(work_items))
-    workers = [ray.remote(InferenceActor).remote() for _ in range(num_workers)]
+    workers = [
+        ray.remote(InferenceActor).remote(max_concurrency)
+        for max_concurrency in worker_concurrency
+    ]
     futures = [
         workers[i % num_workers].run_single.remote(task, log_context)
         for i, (task, log_context) in enumerate(work_items)

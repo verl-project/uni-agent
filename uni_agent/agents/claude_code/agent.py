@@ -36,7 +36,25 @@ _CC_QUIET_ENV = {
     "DISABLE_NON_ESSENTIAL_MODEL_CALLS": "1",
 }
 
-_CLAUDE_INSTALL_COMMAND = "npm install -g @anthropic-ai/claude-code --no-audit --no-fund"
+_CLAUDE_NPM_INSTALL_COMMAND = "npm install -g @anthropic-ai/claude-code --no-audit --no-fund"
+_CLAUDE_NATIVE_INSTALL_COMMAND = r"""
+set -euo pipefail
+if command -v curl >/dev/null 2>&1; then
+  curl -fsSL https://claude.ai/install.sh
+elif command -v wget >/dev/null 2>&1; then
+  wget -qO- https://claude.ai/install.sh
+else
+  echo "Claude Code native install requires curl or wget" >&2
+  exit 1
+fi | bash -s stable
+
+claude_bin="${HOME:-/root}/.local/bin/claude"
+if [ ! -x "${claude_bin}" ]; then
+  echo "native installer did not create ${claude_bin}" >&2
+  exit 1
+fi
+ln -sf "${claude_bin}" /usr/local/bin/claude
+""".strip()
 _CLAUDE_INSTALL_TIMEOUT = 600
 
 
@@ -117,11 +135,14 @@ class ClaudeCodeAgent(Agent):
         if (await sandbox.exec_shell("command -v claude >/dev/null 2>&1")).exit_code == 0:
             return
 
-        logger.info("claude_code: claude not found; installing it inside the sandbox")
-        result = await sandbox.exec_shell(_CLAUDE_INSTALL_COMMAND, timeout=_CLAUDE_INSTALL_TIMEOUT)
+        has_npm = (await sandbox.exec_shell("command -v npm >/dev/null 2>&1")).exit_code == 0
+        install_method = "npm" if has_npm else "native installer"
+        install_command = _CLAUDE_NPM_INSTALL_COMMAND if has_npm else _CLAUDE_NATIVE_INSTALL_COMMAND
+        logger.info("claude_code: claude not found; installing it with %s", install_method)
+        result = await sandbox.exec_shell(install_command, timeout=_CLAUDE_INSTALL_TIMEOUT)
         if result.exit_code != 0:
             detail = (result.stderr or result.stdout or "unknown error").strip()[-2000:]
-            raise RuntimeError(f"claude_code: failed to install Claude Code: {detail}")
+            raise RuntimeError(f"claude_code: failed to install Claude Code with {install_method}: {detail}")
 
         if (await sandbox.exec_shell("command -v claude >/dev/null 2>&1")).exit_code != 0:
             raise RuntimeError("claude_code: installation finished but claude is not available on PATH")
@@ -157,14 +178,17 @@ class ClaudeCodeAgent(Agent):
         model = cfg.model.model_name
         if not model:
             raise ValueError("claude_code: set config.model.model_name (the model claude sends)")
+        configured_api_key = cfg.model.api_key
+        has_external_api_key = bool(configured_api_key and configured_api_key != "EMPTY")
         return {
             "ANTHROPIC_BASE_URL": endpoint,
             # We always run inside a sandbox: lets `--dangerously-skip-permissions` run as
             # root (else the CLI refuses) and skips its 529-overload guard path.
             "IS_SANDBOX": "1",
-            # The server ignores the key/token values, but the CLI requires both to be set.
-            "ANTHROPIC_API_KEY": "sk-ant-uni-agent-placeholder",
-            "ANTHROPIC_AUTH_TOKEN": str(uuid.uuid4()),
+            # External endpoints receive ModelConfig's Bearer key. The session Gateway
+            # ignores auth, but Claude Code still requires non-empty placeholder values.
+            "ANTHROPIC_API_KEY": "" if has_external_api_key else "sk-ant-uni-agent-placeholder",
+            "ANTHROPIC_AUTH_TOKEN": configured_api_key if has_external_api_key else str(uuid.uuid4()),
             # Route every model slot to our single served model. Besides the main tiers,
             # Claude Code fires *background*/subagent calls (summaries, sub-tasks) on the
             # haiku + subagent slots. On direct vLLM leaving those unset 404s on a name it
