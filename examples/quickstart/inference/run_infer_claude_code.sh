@@ -12,4 +12,5 @@ ray job submit --no-wait \
     --tensor-parallel-size 4 \
     --nnodes 8 \
     --n-gpus-per-node 8 \
+    --log-dir /mnt/shared/uni_agent_logs \
     --concurrency 128

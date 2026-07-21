@@ -9,11 +9,12 @@ behaviour across rollouts.
 
 from __future__ import annotations
 
+import json
 import os
 from collections import defaultdict
 from typing import TYPE_CHECKING, Any
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from .base import Tool, ToolError, ToolResult, register_tool
 
@@ -64,10 +65,21 @@ class StrReplaceEditorArguments(BaseModel):
         default=None,
         description="Required parameter of `insert` command. The `new_str` will be inserted AFTER the line `insert_line` of `path`.",  # noqa: E501
     )
-    view_range: list[int] = Field(
+    view_range: list[int] | None = Field(
         default=None,
         description="Optional parameter of `view` command when `path` points to a file. If none is given, the full file is shown. If provided, the file will be shown in the indicated line number range, e.g. [11, 12] will show lines 11 and 12. Indexing at 1 to start. Setting `[start_line, -1]` shows all lines from `start_line` to the end of the file.",  # noqa: E501
     )
+
+    @field_validator("view_range", mode="before")
+    @classmethod
+    def parse_json_view_range(cls, value: Any) -> Any:
+        """Accept a JSON-encoded list emitted by an otherwise valid tool call."""
+        if not isinstance(value, str):
+            return value
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return value
 
 
 def _maybe_truncate(content: str, truncate_after: int | None = MAX_RESPONSE_LEN) -> str:

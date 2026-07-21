@@ -58,7 +58,7 @@ logger = logging.getLogger(__name__)
 
 
 GLOBAL_CONCURRENCY = int(os.getenv("GLOBAL_CONCURRENCY", 128))
-PARTITION_ID = "train"  # framework routes non-"validate" batches to the "train" TQ partition
+PARTITION_ID = "val"
 
 DEFAULT_TEMPERATURE = 0.8
 DEFAULT_TOP_P = 0.9
@@ -102,6 +102,7 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
 
     # Fan-out: the framework runs rollout.n gateway sessions per prompt.
     rollout.n = max(1, args.n)
+    rollout.val_kwargs.n = rollout.n
 
     # Hardware.
     rollout.nnodes = args.nnodes
@@ -153,31 +154,19 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
 
 
 def _build_prompts(samples: list, uids: list):
-    """Assemble the TensorDict batch the framework's ``generate_sequences`` expects.
-
-    Only the fields the framework needs are included: ``raw_prompt`` (required by
-    the session lifecycle, unused by run_task), ``uid`` (TQ key namespace), and
-    ``tools_kwargs`` (carries the per-sample task). ``global_steps`` is a
-    batch-level scalar the framework tags every record with.
-    """
+    """Assemble the TensorDict batch the framework's ``generate_sequences`` expects."""
     return tu.get_tensordict(
         tensor_dict={
             "raw_prompt": [sample.get("prompt") for sample in samples],
             "uid": list(uids),
             "tools_kwargs": [sample["extra_info"]["tools_kwargs"] for sample in samples],
         },
-        non_tensor_dict={"global_steps": 0},
+        non_tensor_dict={"global_steps": None, "validate": True},
     )
 
 
 def _read_rm_scores(uids: list, *, partition_id: str = PARTITION_ID) -> dict:
-    """Read each session's final trajectory back from TQ and score it.
-
-    Trajectory records are keyed ``{uid}_{session}_{index}``; a session may span
-    several records (multi-turn segments), so we keep the highest ``index`` per
-    ``(uid, session)`` -- the final segment -- and take ``rm_scores.sum(dim=-1)``
-    as that session's score (same reduction as ``main_ppo_sync._validate``).
-    """
+    """Read each session's final trajectory back from TQ and score it."""
     input_uids = set(uids)
     listing = tq.kv_list() or {}
     partition = listing.get(partition_id, {}) or {}

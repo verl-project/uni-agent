@@ -171,7 +171,7 @@ Important controls:
 
 The task reports its reward to the Gateway. The Agent Framework writes the reward and token-level trajectory to TransferQueue, and the script reads back `rm_scores` to produce the inference summary.
 
-Session logs are grouped by `log_id` under `<log_dir>/step_0/<log_id>/`, with Task/Agent/Tool events in `run.log` and Framework events in `framework.log`.
+Standalone inference runs as validation, so Session logs are grouped directly under `<log_dir>/<log_id>/`, with Task/Agent/Tool events in `run.log` and Framework events in `framework.log`.
 
 ## Ray Cluster
 

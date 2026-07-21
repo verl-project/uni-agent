@@ -145,7 +145,7 @@ Important knobs include:
 - `agent_runners`: Runner import paths and arguments.
 - `dispatch_mode`: inline async execution or Ray tasks.
 - `max_concurrent_sessions`: per-Runner concurrency limit.
-- `log_dir`: runtime log root. Each Ray-dispatched Session writes `framework.log`, `run.log`, and trajectory artifacts under `step_<global_step>/<log_id>/`.
+- `log_dir`: runtime log root. Sessions with a global step write `framework.log`, `run.log`, and trajectory artifacts under `step_<global_step>/<log_id>/`; Sessions whose `global_steps` is `None` write directly under `<log_id>/`.
 - `rollout.n`: sessions per prompt.
 - `rollout.multi_turn.format`: model-specific Tool parser.
 - `transfer_queue.enable`: enables asynchronous trajectory storage.

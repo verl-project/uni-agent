@@ -351,11 +351,12 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         if self._rollout_config is None:
             raise RuntimeError("OpenAICompatibleAgentFramework requires rollout_config for generate_sequences")
 
+        is_validate = bool(tu.get(prompts, "validate", False))
+        partition_id = "val" if is_validate else "train"
         global_steps = tu.get(prompts, "global_steps")
-        if global_steps is None:
-            raise ValueError("OpenAICompatibleAgentFramework requires prompts['global_steps']")
+        if global_steps is None and not is_validate:
+            raise ValueError("OpenAICompatibleAgentFramework requires prompts['global_steps'] for training")
 
-        partition_id = "val" if "validate" in prompts.keys() else "train"
         if partition_id == "val":
             val_kwargs = self._rollout_config.get("val_kwargs", {})
             num_sessions = int(val_kwargs.get("n"))
@@ -393,7 +394,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         self,
         prompts: TensorDict,
         *,
-        global_steps: int,
+        global_steps: int | None,
         partition_id: str,
         num_sessions: int = 1,
     ) -> dict:
@@ -448,7 +449,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         *,
         sample_fields: dict[str, object],
         sample_index: int,
-        global_steps: int,
+        global_steps: int | None,
         partition_id: str,
         num_sessions: int,
     ) -> dict:
@@ -533,7 +534,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         sample_fields: dict[str, object],
         sample_index: int,
         session_index: int,
-        global_steps: int,
+        global_steps: int | None,
         sampling_params: dict[str, object],
     ) -> tuple[list[Trajectory], dict[str, object]]:
         # Lazy-init semaphores on first use and rebind if the running loop
@@ -592,15 +593,16 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         sample_fields: dict[str, object],
         sample_index: int,
         session_index: int,
-        global_steps: int,
+        global_steps: int | None,
         runner_name: str,
         runner_config: _RunnerConfig,
         sampling_params: dict[str, object],
     ) -> tuple[list[Trajectory], dict[str, object]]:
         """Run one gateway session lifecycle and return finalized trajectories."""
-        session_id = f"session-{sample_index}-{session_index}-{uuid4().hex}"
+        session_id = f"session-sample-{sample_index}-rollout-{session_index}-{uuid4().hex}"
         if self._log_dir:
-            run_dir = Path(self._log_dir) / f"step_{int(global_steps)}" / session_id
+            log_root = Path(self._log_dir)
+            run_dir = (log_root if global_steps is None else log_root / f"step_{int(global_steps)}") / session_id
             framework_log = LogContext(session_id, str(run_dir / "framework.log"))
             run_log = LogContext(session_id, str(run_dir / "run.log"))
             parent_log = framework_log if runner_config.dispatch_mode == "ray_task" else run_log
@@ -822,7 +824,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         session_index: int,
         trajectories: list[Trajectory],
         sample_fields: dict[str, object],
-        global_steps: int,
+        global_steps: int | None,
         partition_id: str,
     ) -> None:
         keys = []
@@ -853,7 +855,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         trajectory: Trajectory,
         sample_fields: dict[str, object],
         session_index: int,
-        global_steps: int,
+        global_steps: int | None,
         uid: str,
     ) -> tuple[dict[str, object], dict[str, object]]:
         prompts = torch.tensor(trajectory.prompt_ids, dtype=torch.long)
