@@ -173,10 +173,7 @@ def main() -> None:
         args.task_config,
     )
 
-    workers = [
-        ray.remote(InferenceActor).remote(max_concurrency)
-        for max_concurrency in worker_concurrency
-    ]
+    workers = [ray.remote(InferenceActor).remote(max_concurrency) for max_concurrency in worker_concurrency]
     futures = [
         workers[i % num_workers].run_single.remote(task, log_context)
         for i, (task, log_context) in enumerate(work_items)
