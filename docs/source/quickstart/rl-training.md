@@ -3,7 +3,7 @@
 This guide demonstrates Agentic RL training for both white-box and black-box agents:
 
 1. Train `Qwen3-Coder-30B-A3B-Instruct` with the white-box `ReAct Agent`.
-2. Train `Qwen3.5-9B` with the black-box `Claude Code` Agent.
+2. Train `Qwen3.5-4B` with the black-box `Claude Code` Agent.
 
 ## Prerequisites
 
@@ -182,14 +182,90 @@ Training runs as a Ray job. Use a Runtime Environment to distribute the reposito
 
 ### Launch Training
 
+This recipe trains `Qwen3-Coder-30B-A3B-Instruct` with the ReAct Task Config. Set the shared data and runtime roots, then launch it from the repository root:
+
+```bash
+DATA_DIR=/path/to/data \
+RUNTIME_DIR=/path/to/runtime \
+NNODES=8 \
+ADV_ESTIMATOR=rloo \
+TASK_CONFIG=examples/quickstart/training/task_config_react.yaml \
+EXP_NAME=react_qwen3_coder_30b \
+bash examples/quickstart/training/train_qwen3_moe.sh
+```
+
+The default layout is:
+
+```text
+<DATA_DIR>/
+├── models/Qwen3-Coder-30B-A3B-Instruct/
+└── data/uni_agent/
+    ├── swe_rebench_filtered_1150.parquet
+    └── swe_bench_verified.parquet
+
+<RUNTIME_DIR>/
+├── data/uni_agent/runtime_env.yaml
+├── ckpts/
+└── logs/
+```
+
+Override `MODEL_PATH`, `TRAIN_FILE`, `TEST_FILE`, `RUNTIME_ENV`, or `TASK_CONFIG` when your layout differs.
+
 ### Monitor the Run
 
+Checkpoints and per-session Agent logs are written under:
+
+```text
+<RUNTIME_DIR>/ckpts/Uni-Agent-Qwen3-Coder-30B-megatron/<EXP_NAME>/
+<RUNTIME_DIR>/logs/Uni-Agent-Qwen3-Coder-30B-megatron/<EXP_NAME>/
+```
+
 ### Results
+
+_To be added._
 
 ## Case 2: Claude Code RL
 
 ### Launch Training
 
+This recipe trains `Qwen3.5-4B` with the Claude Code Task Config:
+
+```bash
+DATA_DIR=/path/to/data \
+RUNTIME_DIR=/path/to/runtime \
+NNODES=8 \
+ADV_ESTIMATOR=rloo \
+TASK_CONFIG=examples/quickstart/training/task_config_claude_code.yaml \
+EXP_NAME=claude_code_qwen3_5_4b \
+bash examples/quickstart/training/train_qwen3p5_dense.sh
+```
+
+The script expects:
+
+```text
+<DATA_DIR>/
+├── models/Qwen3.5-4B/
+└── data/uni_agent/
+    ├── swe_rebench_filtered_1150.parquet
+    └── swe_bench_verified.parquet
+
+<RUNTIME_DIR>/
+├── data/uni_agent/runtime_env.yaml
+├── ckpts/
+└── logs/
+```
+
+The Claude Code sandbox must be able to reach the session-scoped Gateway running on the GPU cluster.
+
 ### Monitor the Run
 
+Outputs are written under:
+
+```text
+<RUNTIME_DIR>/ckpts/Uni-Agent-Qwen3.5-4B-megatron/<EXP_NAME>/
+<RUNTIME_DIR>/logs/Uni-Agent-Qwen3.5-4B-megatron/<EXP_NAME>/
+```
+
 ### Results
+
+_To be added._

@@ -15,5 +15,5 @@ env_vars:
   VOLCE_ACCESS_KEY: "xxxxxx"
   VOLCE_SECRET_KEY: "xxxxxx"
   # if you use modal, set the following variables
-  MODAL_TOKEN_ID: "ak-MWuXc0JB73Ll3y75lnTl1K"
-  MODAL_TOKEN_SECRET: "as-b3iq9Xf3igKAb3DfPQVNwG"
+  MODAL_TOKEN_ID: "<modal-token-id>"
+  MODAL_TOKEN_SECRET: "<modal-token-secret>"

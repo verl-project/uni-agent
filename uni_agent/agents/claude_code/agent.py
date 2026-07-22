@@ -26,14 +26,12 @@ logger = logging.getLogger(__name__)
 
 _CC_QUIET_ENV = {
     "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+    "CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS": "1",
+    "CLAUDE_CODE_ATTRIBUTION_HEADER": "0",
     "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
-    "CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL": "1",
+    "CLAUDE_CODE_FORK_SUBAGENT": "0",
+    "CLAUDE_CODE_SKIP_PROMPT_HISTORY": "1",
     "CLAUDE_CODE_DISABLE_TERMINAL_TITLE": "1",
-    "DISABLE_AUTOUPDATER": "1",
-    "DISABLE_TELEMETRY": "1",
-    "DISABLE_ERROR_REPORTING": "1",
-    "DISABLE_BUG_COMMAND": "1",
-    "DISABLE_NON_ESSENTIAL_MODEL_CALLS": "1",
 }
 
 _CLAUDE_NPM_INSTALL_COMMAND = "npm install -g @anthropic-ai/claude-code --no-audit --no-fund"
@@ -78,13 +76,15 @@ class ClaudeCodeConfig(AgentConfig):
     name: str = "claude_code"
     max_turns: int | None = Field(default=80, description="--max-turns budget; None to omit.")
     disallowed_tools: list[str] = Field(
-        default_factory=lambda: ["WebFetch", "WebSearch", "AskUserQuestion"],
+        default_factory=lambda: ["Agent", "Task", "WebFetch", "WebSearch", "AskUserQuestion"],
         description=(
-            "--disallowedTools deny-list. Under --dangerously-skip-permissions an *allow*-list is a "
-            "no-op (bypass approves every tool), so we DENY the tools that can't work in a headless, "
-            "offline sandbox: web tools (no egress) and AskUserQuestion (would hang on input). A bare "
-            "tool name drops it from Claude's context entirely, and deny wins even under bypass."
+            "--disallowedTools deny-list. Subagent, web, and interactive-user tools are disabled "
+            "to keep each headless rollout self-contained and deterministic."
         ),
+    )
+    permission_mode: str = Field(
+        default="bypassPermissions",
+        description="Claude Code --permission-mode used for unattended Sandbox execution.",
     )
     verbose: bool = Field(default=False, description="Pass --verbose (streams per-turn detail; noisy at scale).")
     run_timeout: float = Field(default=1800.0, description="Wallclock cap (s) on the claude process.")
@@ -159,7 +159,21 @@ class ClaudeCodeAgent(Agent):
 
     def _claude_argv(self, problem: str, system_prompt: str | None) -> list[str]:
         cfg: ClaudeCodeConfig = self.config  # type: ignore[assignment]
-        argv = ["claude", "-p", problem]
+        model = cfg.model.model_name
+        if not model:
+            raise ValueError("claude_code: set config.model.model_name (the model claude sends)")
+        argv = [
+            "claude",
+            "--bare",
+            "--no-session-persistence",
+            "-p",
+            problem,
+            "--model",
+            model,
+            "--permission-mode",
+            cfg.permission_mode,
+            "--disable-slash-commands",
+        ]
         if cfg.disallowed_tools:
             argv += ["--disallowedTools", ",".join(cfg.disallowed_tools)]
         if cfg.max_turns is not None:
@@ -167,8 +181,6 @@ class ClaudeCodeAgent(Agent):
         if system_prompt:
             # Append (don't replace) so Claude Code keeps its built-in tool/safety prompt.
             argv += ["--append-system-prompt", system_prompt]
-        # Headless runs must not block on permission prompts.
-        argv += ["--dangerously-skip-permissions"]
         if cfg.verbose:
             argv += ["--verbose"]
         return argv + list(cfg.extra_args)
@@ -182,8 +194,8 @@ class ClaudeCodeAgent(Agent):
         has_external_api_key = bool(configured_api_key and configured_api_key != "EMPTY")
         return {
             "ANTHROPIC_BASE_URL": endpoint,
-            # We always run inside a sandbox: lets `--dangerously-skip-permissions` run as
-            # root (else the CLI refuses) and skips its 529-overload guard path.
+            # We always run inside a sandbox: allows unattended permission bypass
+            # while running as root and skips Claude Code's overload guard path.
             "IS_SANDBOX": "1",
             # External endpoints receive ModelConfig's Bearer key. The session Gateway
             # ignores auth, but Claude Code still requires non-empty placeholder values.
