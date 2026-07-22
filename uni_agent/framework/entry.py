@@ -45,6 +45,7 @@ def build_gateway_manager(*, config, llm_client) -> GatewayManager:
         apply_chat_template_kwargs=dict(apply_chat_template_kwargs),
         prompt_length=config.actor_rollout_ref.rollout.prompt_length,
         response_length=config.actor_rollout_ref.rollout.response_length,
+        enable_last_assistant_rollback=af_cfg.get("enable_last_assistant_rollback", True),
     )
 
     return GatewayManager(

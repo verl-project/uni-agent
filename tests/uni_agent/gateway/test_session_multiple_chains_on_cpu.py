@@ -2,6 +2,7 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
+import torch
 from fastapi import HTTPException
 
 from tests.uni_agent.support import FakeProcessor, FakeTokenizer, SequencedBackend, fake_vision_info_extractor
@@ -33,6 +34,7 @@ def _session(
     *,
     response_length: int | None = None,
     sampling_params: dict | None = None,
+    enable_last_assistant_rollback: bool = False,
     processor=None,
     vision_info_extractor=None,
     tool_parser_name: str | None = None,
@@ -47,6 +49,7 @@ def _session(
         ),
         response_length=response_length,
         sampling_params=sampling_params,
+        enable_last_assistant_rollback=enable_last_assistant_rollback,
     )
 
 
@@ -55,6 +58,15 @@ def test_gateway_session_rejects_non_positive_response_length(response_length):
     """Reject non-positive session response budgets during construction."""
     with pytest.raises(ValueError, match="response_length must be positive"):
         _session("invalid-response-length", response_length=response_length)
+
+
+def test_gateway_session_enables_last_assistant_rollback_by_default():
+    session = GatewaySession(
+        SessionHandle(session_id="rollback-default"),
+        MessageCodec(FakeTokenizer()),
+    )
+
+    assert session._enable_last_assistant_rollback is True
 
 
 async def _run(session: GatewaySession, backend: SequencedBackend, messages: list[dict], **payload_extra):
@@ -112,6 +124,20 @@ class _ControlledParallelBackend:
 
     def release_call(self, index: int) -> None:
         self.calls[index]["release"].set()
+
+
+class _ExpandedImageTokenProcessor(FakeProcessor):
+    """Mirror vision processors that expand one image into multiple model tokens."""
+
+    def __call__(self, **kwargs):
+        output = super().__call__(**kwargs)
+        if kwargs.get("images"):
+            expanded_ids = []
+            for token_id in output["input_ids"][0].tolist():
+                expanded_ids.extend([token_id, token_id] if token_id == self.image_token_id else [token_id])
+            output["input_ids"] = torch.tensor([expanded_ids], dtype=torch.long)
+            output["attention_mask"] = torch.ones_like(output["input_ids"])
+        return output
 
 
 def _image_message(url: str, text: str) -> dict:
@@ -226,6 +252,287 @@ async def test_multiple_chains_context_compaction_starts_new_chain():
     assert len(trajectories) == 2
     assert decoded == ["DETAILED", "AFTER_SUMMARY"]
     assert all(t.response_mask == [1] * len(t.response_ids) for t in trajectories)
+
+
+@pytest.mark.asyncio
+async def test_last_assistant_rollback_reencodes_replacement_suffix_as_masked_context():
+    """Drop an abandoned assistant and retain its replacement prompt as context."""
+    session = _session(
+        "rollback-token-truth",
+        sampling_params={"logprobs": True},
+        enable_last_assistant_rollback=True,
+    )
+    first_messages = [{"role": "user", "content": "run mini-swe"}]
+    rewrite_messages = [
+        *first_messages,
+        {"role": "user", "content": "user_error: missing import"},
+    ]
+    expected_suffix = "user:user_error: missing import\nassistant:"
+
+    await _run(session, _LogprobBackend([("FORMAT_ERROR", "full")]), first_messages)
+    await _run(session, _LogprobBackend([("FIXED", "full")]), rewrite_messages)
+
+    state = session.snapshot_state()
+    assert state["active_chain_ids"] == [1]
+    assert state["rollback_count"] == 1
+    assert state["rollback_dropped_trainable_tokens_total"] == len("FORMAT_ERROR")
+    [chain] = session.active_chains
+    assert [message["role"] for message in chain.message_history] == ["user", "user", "assistant"]
+    assert _decode_response_ids(chain.buffer.response_ids) == expected_suffix + "FIXED"
+    assert chain.buffer.response_mask == [0] * len(expected_suffix) + [1] * len("FIXED")
+    assert chain.buffer.response_logprobs == [0.0] * len(expected_suffix) + [-0.1] * len("FIXED")
+    assert len(chain.buffer.response_logprobs) == len(chain.buffer.response_ids)
+
+
+@pytest.mark.asyncio
+async def test_last_assistant_rollback_splits_when_history_changes_before_boundary():
+    """Split when request drift starts before the latest assistant boundary."""
+    session = _session("rollback-split-before-boundary", enable_last_assistant_rollback=True)
+    backend = SequencedBackend(["A1", "A2", "A3"])
+    first_messages = [{"role": "user", "content": "start"}]
+    second_messages = [
+        *first_messages,
+        {"role": "assistant", "content": "A1"},
+        {"role": "user", "content": "original tool result"},
+    ]
+    edited_messages = [
+        *first_messages,
+        {"role": "assistant", "content": "A1"},
+        {"role": "user", "content": "edited tool result"},
+        {"role": "assistant", "content": "A2"},
+        {"role": "user", "content": "continue"},
+    ]
+
+    await _run(session, backend, first_messages)
+    await _run(session, backend, second_messages)
+    await _run(session, backend, edited_messages)
+
+    state = session.snapshot_state()
+    assert state["active_chain_ids"] == [1, 2]
+    assert state["rollback_count"] == 0
+    chains_by_id = {chain.chain_id: chain for chain in session.active_chains}
+    assert chains_by_id[1].message_history[2]["content"] == "original tool result"
+    assert chains_by_id[2].message_history[2]["content"] == "edited tool result"
+    assert _decode_response_ids(chains_by_id[1].buffer.response_ids).endswith("A2")
+    assert _decode_response_ids(chains_by_id[2].buffer.response_ids) == "A3"
+
+
+@pytest.mark.asyncio
+async def test_last_assistant_rollback_ambiguous_deepest_boundary_splits_over_shallower_exact():
+    """Do not fall back to a shallower exact chain when the deepest rewrite is ambiguous."""
+    session = _session("rollback-ambiguous-deepest", enable_last_assistant_rollback=True)
+    prompt = [{"role": "user", "content": "same prompt"}]
+    continuation = [
+        *prompt,
+        {"role": "assistant", "content": "A1"},
+        {"role": "user", "content": "second turn"},
+    ]
+    rewrite = [*continuation, {"role": "user", "content": "user_error"}]
+    backend = SequencedBackend(["A1", "A1", "A1", "A2A", "A2B", "FIXED"])
+
+    await _run(session, backend, prompt)
+    await _run(session, backend, prompt)
+    await _run(session, backend, prompt)
+    await _run(session, backend, continuation)
+    await _run(session, backend, continuation)
+    await _run(session, backend, rewrite)
+
+    state = session.snapshot_state()
+    assert state["active_chain_ids"] == [1, 2, 3, 4]
+    assert state["rollback_count"] == 0
+    chains_by_id = {chain.chain_id: chain for chain in session.active_chains}
+    assert _decode_response_ids(chains_by_id[1].buffer.response_ids) == "A1"
+    assert _decode_response_ids(chains_by_id[4].buffer.response_ids) == "FIXED"
+
+
+@pytest.mark.asyncio
+async def test_last_assistant_rollback_ignores_shallower_candidate_for_unique_deepest_boundary():
+    """Rollback the unique deepest match even when a shallower rewrite also matches."""
+    session = _session("rollback-deepest", enable_last_assistant_rollback=True)
+    prompt = [{"role": "user", "content": "same prompt"}]
+    continuation = [
+        *prompt,
+        {"role": "assistant", "content": "A1"},
+        {"role": "user", "content": "second turn"},
+    ]
+    rewrite = [*continuation, {"role": "user", "content": "user_error"}]
+
+    await _run(session, SequencedBackend(["SHALLOW"]), prompt)
+    await _run(session, SequencedBackend(["A1"]), prompt)
+    await _run(session, SequencedBackend(["A2"]), continuation)
+    await _run(session, SequencedBackend(["FIXED"]), rewrite)
+
+    state = session.snapshot_state()
+    assert state["active_chain_ids"] == [1, 2]
+    assert state["rollback_count"] == 1
+    chains_by_id = {chain.chain_id: chain for chain in session.active_chains}
+    assert _decode_response_ids(chains_by_id[1].buffer.response_ids) == "SHALLOW"
+    deep_text = _decode_response_ids(chains_by_id[2].buffer.response_ids)
+    assert deep_text.startswith("A1")
+    assert deep_text.endswith("FIXED")
+    assert "A2" not in deep_text
+
+
+@pytest.mark.asyncio
+async def test_last_assistant_rollback_excludes_reserved_candidate():
+    """Do not select an in-flight chain as a rollback target."""
+    session = _session("rollback-reserved", enable_last_assistant_rollback=True)
+    prompt = [{"role": "user", "content": "same prompt"}]
+    rewrite_messages = [
+        *prompt,
+        {"role": "user", "content": "user_error while busy"},
+    ]
+
+    await _run(session, SequencedBackend(["BAD"]), prompt)
+    session.reserved_chain_ids.add(1)
+    await _run(session, SequencedBackend(["FIXED"]), rewrite_messages)
+
+    state = session.snapshot_state()
+    assert state["active_chain_ids"] == [1, 2]
+    assert state["rollback_count"] == 0
+    chains_by_id = {chain.chain_id: chain for chain in session.active_chains}
+    assert _decode_response_ids(chains_by_id[1].buffer.response_ids) == "BAD"
+    assert _decode_response_ids(chains_by_id[2].buffer.response_ids) == "FIXED"
+
+
+@pytest.mark.asyncio
+async def test_last_assistant_rollback_prefers_longer_service_chain_over_exact_short_chain():
+    """Rollback the deeper live chain instead of continuing its exact prefix sibling."""
+    session = _session("rollback-longest-service", enable_last_assistant_rollback=True)
+    prompt = [{"role": "user", "content": "same prompt"}]
+    continuation = [
+        *prompt,
+        {"role": "assistant", "content": "A1"},
+        {"role": "user", "content": "second turn"},
+    ]
+    rewrite_messages = [
+        *continuation,
+        {"role": "user", "content": "user_error replaces old assistant"},
+    ]
+
+    await _run(session, SequencedBackend(["A1"]), prompt)
+    await _run(session, SequencedBackend(["A1"]), prompt)
+    await _run(session, SequencedBackend(["A2"]), continuation)
+    await _run(session, SequencedBackend(["FIXED"]), rewrite_messages)
+
+    state = session.snapshot_state()
+    assert state["active_chain_ids"] == [1, 2]
+    assert state["rollback_count"] == 1
+    chains_by_id = {chain.chain_id: chain for chain in session.active_chains}
+    assert _decode_response_ids(chains_by_id[1].buffer.response_ids) == "A1"
+    long_chain_text = _decode_response_ids(chains_by_id[2].buffer.response_ids)
+    assert long_chain_text.startswith("A1")
+    assert long_chain_text.endswith("FIXED")
+    assert "A2" not in long_chain_text
+
+
+@pytest.mark.asyncio
+async def test_last_assistant_rollback_tie_prefers_exact_chain_without_drop():
+    """Continue the exact chain when its service value ties a rollback candidate."""
+    session = _session("rollback-exact-tie", enable_last_assistant_rollback=True)
+    prompt = [{"role": "user", "content": "same prompt"}]
+    echoed_assistant = [*prompt, {"role": "assistant", "content": "A1"}]
+    rewrite_messages = [
+        *echoed_assistant,
+        {"role": "user", "content": "replace the newer assistant"},
+    ]
+
+    await _run(session, SequencedBackend(["A1"]), prompt)
+    await _run(session, SequencedBackend(["A1"]), prompt)
+    await _run(session, SequencedBackend(["A2"]), echoed_assistant)
+    await _run(session, SequencedBackend(["FIXED"]), rewrite_messages)
+
+    state = session.snapshot_state()
+    assert state["active_chain_ids"] == [1, 2]
+    assert state["rollback_count"] == 0
+    chains_by_id = {chain.chain_id: chain for chain in session.active_chains}
+    assert _decode_response_ids(chains_by_id[1].buffer.response_ids).endswith("FIXED")
+    assert _decode_response_ids(chains_by_id[2].buffer.response_ids).endswith("A2")
+
+
+def test_chain_prefix_hash_match_accepts_empty_history_for_any_request():
+    """Document the current empty-history wildcard behavior without changing it."""
+    session = _session("empty-history-prefix")
+    incoming_hashes = session._extend_message_prefix_hashes(
+        [],
+        [{"role": "user", "content": "any request"}],
+    )
+    empty_chain = SimpleNamespace(message_history=[], message_tip_hash="unused")
+
+    assert session._is_chain_prefix_hash_match(
+        chain=empty_chain,
+        incoming_message_prefix_hashes=incoming_hashes,
+    )
+
+
+@pytest.mark.asyncio
+async def test_last_assistant_rollback_rejects_misaligned_stored_logprobs():
+    """Fail loudly instead of slicing a chain whose token truth is already corrupt."""
+    session = _session(
+        "rollback-logprob-assert",
+        sampling_params={"logprobs": True},
+        enable_last_assistant_rollback=True,
+    )
+    prompt = [{"role": "user", "content": "run"}]
+    rewrite_messages = [*prompt, {"role": "user", "content": "user_error"}]
+
+    await _run(session, _LogprobBackend([("BAD", "full")]), prompt)
+    session.active_chains[0].buffer.response_logprobs.pop()
+
+    with pytest.raises(AssertionError, match="response_logprobs must be empty or aligned"):
+        await _run(session, _LogprobBackend([("FIXED", "full")]), rewrite_messages)
+
+
+@pytest.mark.asyncio
+async def test_last_assistant_rollback_multimodal_suffix_reencodes_expanded_media_tokens():
+    """Keep rollback media aligned when one image expands into multiple tokens."""
+    session = _session(
+        "rollback-multimodal",
+        processor=_ExpandedImageTokenProcessor(),
+        vision_info_extractor=fake_vision_info_extractor,
+        enable_last_assistant_rollback=True,
+    )
+    first_messages = [_image_message("image://old.png", "inspect old")]
+    replacement_message = _image_message("image://error.png", "user_error image")
+    rewrite_messages = [*first_messages, replacement_message]
+    backend = SequencedBackend(["BAD_IMAGE", "FIXED_IMAGE"])
+    expected_suffix_ids = session._codec.encode_incremental(
+        [replacement_message],
+        image_data=["image://error.png"],
+    )
+
+    await _run(session, backend, first_messages)
+    await _run(session, backend, rewrite_messages)
+
+    state = session.snapshot_state()
+    assert state["active_chain_ids"] == [1]
+    assert state["rollback_count"] == 1
+    assert state["rollback_dropped_trainable_tokens_total"] == len("BAD_IMAGE")
+    assert backend.calls[1]["image_data"] == ["image://old.png", "image://error.png"]
+    [chain] = session.active_chains
+    assert chain.image_data == ["image://old.png", "image://error.png"]
+    assert chain.video_data is None
+    assert chain.buffer.response_ids[: len(expected_suffix_ids)] == expected_suffix_ids
+    assert chain.buffer.response_mask == [0] * len(expected_suffix_ids) + [1] * len("FIXED_IMAGE")
+
+
+@pytest.mark.asyncio
+async def test_last_assistant_rollback_disabled_splits_rewritten_assistant():
+    """Allow explicit opt-out so rewritten assistants still split trajectories."""
+    session = _session("rollback-disabled", enable_last_assistant_rollback=False)
+    prompt = [{"role": "user", "content": "run mini-swe"}]
+    rewrite = [*prompt, {"role": "user", "content": "user_error"}]
+    backend = SequencedBackend(["BAD", "FIXED"])
+
+    await _run(session, backend, prompt)
+    await _run(session, backend, rewrite)
+
+    state = session.snapshot_state()
+    assert state["active_chain_ids"] == [1, 2]
+    assert state["rollback_count"] == 0
+    chains_by_id = {chain.chain_id: chain for chain in session.active_chains}
+    assert _decode_response_ids(chains_by_id[1].buffer.response_ids) == "BAD"
+    assert _decode_response_ids(chains_by_id[2].buffer.response_ids) == "FIXED"
 
 
 @pytest.mark.asyncio

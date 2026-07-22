@@ -112,15 +112,22 @@ async def _build_framework_with_agent_runners(
 
 
 @pytest.mark.parametrize(
-    ("data_config", "expected_chat_template_kwargs"),
+    ("data_config", "rollback_config", "expected_rollback", "expected_chat_template_kwargs"),
     [
-        ({}, {}),
-        ({"apply_chat_template_kwargs": {"thinking": True}}, {"thinking": True}),
+        ({}, {}, True, {}),
+        (
+            {"apply_chat_template_kwargs": {"thinking": True}},
+            {"enable_last_assistant_rollback": False},
+            False,
+            {"thinking": True},
+        ),
     ],
 )
 def test_build_gateway_manager_wires_gateway_config_defaults(
     monkeypatch,
     data_config,
+    rollback_config,
+    expected_rollback,
     expected_chat_template_kwargs,
 ):
     from omegaconf import OmegaConf
@@ -152,7 +159,12 @@ def test_build_gateway_manager_wires_gateway_config_defaults(
                     "prompt_length": 128,
                     "response_length": 64,
                     "multi_turn": {"format": "hermes"},
-                    "custom": {"agent_framework": {"gateway_count": 2}},
+                    "custom": {
+                        "agent_framework": {
+                            "gateway_count": 2,
+                            **rollback_config,
+                        }
+                    },
                 },
             },
         }
@@ -166,6 +178,7 @@ def test_build_gateway_manager_wires_gateway_config_defaults(
     assert captured["gateway_actor_config"].prompt_length == 128
     assert captured["gateway_actor_config"].response_length == 64
     assert captured["gateway_actor_config"].tool_parser_name == "hermes"
+    assert captured["gateway_actor_config"].enable_last_assistant_rollback is expected_rollback
     assert isinstance(captured["gateway_actor_config"].apply_chat_template_kwargs, dict)
     assert captured["gateway_actor_config"].apply_chat_template_kwargs == expected_chat_template_kwargs
 

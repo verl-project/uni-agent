@@ -80,6 +80,7 @@ class _GatewayActor:
         )
         self._prompt_length = config.prompt_length
         self._response_length = config.response_length
+        self._enable_last_assistant_rollback = config.enable_last_assistant_rollback
         self._sessions: dict[str, GatewaySession] = {}
         self._app = FastAPI()
         self._server_port: int | None = None
@@ -253,6 +254,7 @@ class _GatewayActor:
             prompt_length=self._prompt_length,
             response_length=self._response_length,
             sampling_params=sampling_params,
+            enable_last_assistant_rollback=self._enable_last_assistant_rollback,
         )
         return handle
 

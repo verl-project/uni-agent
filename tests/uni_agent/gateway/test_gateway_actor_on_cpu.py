@@ -49,6 +49,43 @@ def test_gateway_actor_config_rejects_non_positive_response_length(response_leng
         GatewayActorConfig(tokenizer=FakeTokenizer(), response_length=response_length)
 
 
+@pytest.mark.parametrize("value", ["true", 1, None])
+def test_gateway_actor_config_rejects_non_bool_last_assistant_rollback(value):
+    from uni_agent.gateway.config import GatewayActorConfig
+
+    with pytest.raises(ValueError, match="enable_last_assistant_rollback must be a bool"):
+        GatewayActorConfig(tokenizer=FakeTokenizer(), enable_last_assistant_rollback=value)
+
+
+def test_gateway_actor_config_enables_last_assistant_rollback_by_default():
+    from uni_agent.gateway.config import GatewayActorConfig
+
+    assert GatewayActorConfig(tokenizer=FakeTokenizer()).enable_last_assistant_rollback is True
+
+
+@pytest.mark.asyncio
+async def test_gateway_actor_forwards_last_assistant_rollback_to_session():
+    from uni_agent.gateway.config import GatewayActorConfig
+    from uni_agent.gateway.gateway import _GatewayActor
+
+    actor = _GatewayActor(
+        GatewayActorConfig(tokenizer=FakeTokenizer()),
+        SequencedBackend(["BAD", "FIXED"]),
+    )
+    actor._server_base_url = "http://test"
+    await actor.create_session("rollback-enabled")
+    prompt = [{"role": "user", "content": "run"}]
+    await actor._handle_openai_chat_completions("rollback-enabled", {"messages": prompt})
+    await actor._handle_openai_chat_completions(
+        "rollback-enabled",
+        {"messages": [*prompt, {"role": "user", "content": "user_error"}]},
+    )
+
+    state = await actor.get_session_state("rollback-enabled")
+    assert state["active_chain_ids"] == [1]
+    assert state["rollback_count"] == 1
+
+
 @pytest.mark.asyncio
 async def test_gateway_actor_max_tokens_clamped_to_remaining_response_budget():
     """Continuation requests clamp ``max_tokens`` to the selected chain budget."""
@@ -773,7 +810,7 @@ async def test_gateway_actor_continuation_with_tool_returned_image_appends_media
     import uni_agent.gateway.session.codec as codec_mod
     from uni_agent.gateway.config import GatewayActorConfig
     from uni_agent.gateway.gateway import _GatewayActor
-    from verl.utils.chat_template import apply_chat_template, initialize_system_prompt
+    from verl.utils.tokenizer.chat_template import apply_chat_template, initialize_system_prompt
 
     monkeypatch.setattr(codec_mod, "_extract_tool_calls_with_sglang_or_vllm", fake_tool_call_dispatch)
     processor = FakeProcessor()

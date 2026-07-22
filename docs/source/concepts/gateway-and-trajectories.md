@@ -78,6 +78,13 @@ One session may contain multiple model turns. Tool observations are encoded as c
 
 Concurrent requests may create multiple chains within one session. Chains sharing a message prefix reuse the same encoded context where possible, then materialize as separate trajectories during finalization.
 
+When a client rewrites only the most recent Assistant message, the Gateway rolls
+the matching chain back to the start of that Assistant turn and re-encodes the
+replacement suffix. This preserves token, mask, and rollout-log-probability
+alignment without materializing a redundant trajectory. The behavior is enabled
+by default and can be disabled with
+`actor_rollout_ref.rollout.custom.agent_framework.enable_last_assistant_rollback=false`.
+
 ## Reward Flow
 
 The built-in Task Runner posts:
@@ -142,6 +149,9 @@ actor_rollout_ref.rollout.custom.agent_framework
 Important knobs include:
 
 - `gateway_count`: Gateway actor pool size.
+- `enable_last_assistant_rollback`: reuses a chain when only its latest Assistant
+  message is rewritten. Defaults to `true`; set it to `false` to preserve the
+  previous split-on-rewrite behavior.
 - `agent_runners`: Runner import paths and arguments.
 - `dispatch_mode`: inline async execution or Ray tasks.
 - `max_concurrent_sessions`: per-Runner concurrency limit.

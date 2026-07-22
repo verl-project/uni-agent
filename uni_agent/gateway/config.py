@@ -29,6 +29,8 @@ class GatewayActorConfig:
         vision_info_extractor_kwargs: Static kwargs forwarded to the extractor.
         prompt_length: Optional prompt-token budget stored on gateway sessions.
         response_length: Optional response-token budget stored on gateway sessions.
+        enable_last_assistant_rollback: Whether latest-assistant rewrites may
+            rollback and reuse an existing chain. Enabled by default.
     """
 
     tokenizer: Any
@@ -41,7 +43,13 @@ class GatewayActorConfig:
     vision_info_extractor_kwargs: dict[str, Any] | None = None
     prompt_length: int | None = None
     response_length: int | None = None
+    enable_last_assistant_rollback: bool = True
 
     def __post_init__(self) -> None:
+        if type(self.enable_last_assistant_rollback) is not bool:
+            raise ValueError(
+                "enable_last_assistant_rollback must be a bool, "
+                f"got {type(self.enable_last_assistant_rollback).__name__}"
+            )
         if self.response_length is not None and self.response_length <= 0:
             raise ValueError(f"response_length must be positive when set, got {self.response_length}")
