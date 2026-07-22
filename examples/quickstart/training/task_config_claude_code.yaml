@@ -1,0 +1,25 @@
+- name: swe_bench
+  sandbox:
+    provider: vefaas
+    runtime_timeout: 7200
+  agent:
+    name: claude_code
+    max_turns: 200
+    run_timeout: 7200
+    model:
+      temperature: 1.0
+      top_p: 1.0
+      max_total_tokens: 131072
+
+- name: swe_rebench
+  sandbox:
+    provider: vefaas
+    runtime_timeout: 7200
+  agent:
+    name: claude_code
+    max_turns: 200
+    run_timeout: 7200
+    model:
+      temperature: 1.0
+      top_p: 1.0
+      max_total_tokens: 131072

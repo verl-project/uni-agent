@@ -22,7 +22,7 @@ AGENT_LOG_DIR=${AGENT_LOG_DIR:-"${RUNTIME_DIR}/logs/${project_name}/${exp_name}"
 # Run-wide task base (agent + sandbox + sampling), loaded from this YAML by
 # uni_agent.framework.task_runner.run_task and deep-merged onto each row's task.
 # Same file-path idea as the old agent_loop_config_path; new (task-config) schema.
-TASK_CONFIG=${TASK_CONFIG:-"examples/agent_train/task_config.yaml"}
+TASK_CONFIG=${TASK_CONFIG:-"examples/quickstart/training/task_config_react.yaml"}
 TOOL_PARSER=${TOOL_PARSER:-"qwen3_coder"}    # gateway tool-call parser; MUST match the model chat template
 GATEWAY_COUNT=${GATEWAY_COUNT:-8}            # gateway actors fronting the engine
 CONCURRENCY=${CONCURRENCY:-512}              # max in-flight rollout sessions (runner cap)
