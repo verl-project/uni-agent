@@ -27,6 +27,7 @@ def test_registry_builds_docker_sandbox_from_config():
     assert isinstance(sandbox, DockerSandbox)
     assert sandbox.image == "example:local"
     assert sandbox.run_args == ["--network", "none"]
+    assert sandbox.pull_policy == "missing"
     assert "_exec" in DockerSandbox.__dict__
     assert "exec" not in DockerSandbox.__dict__
     assert DockerSandbox.exec is Sandbox.exec
@@ -37,6 +38,7 @@ def test_start_requires_local_image_and_builds_detached_run(monkeypatch):
         image="example:local",
         container_name="agent-test",
         run_args=["--network", "none"],
+        pull_policy="never",
     )
     calls: list[tuple[str, ...]] = []
 
@@ -68,8 +70,36 @@ def test_start_requires_local_image_and_builds_detached_run(monkeypatch):
     assert sandbox._container_name == "agent-test"
 
 
+def test_start_pulls_missing_image_through_docker_run(monkeypatch):
+    sandbox = DockerSandbox(image="registry.example.com/agent:latest", container_name="agent-test")
+    calls: list[tuple[str, ...]] = []
+
+    async def fake_run(*args: str, timeout=None):
+        calls.append(args)
+        return _ok("container-id\n")
+
+    monkeypatch.setattr(sandbox, "_run_docker", fake_run)
+    asyncio.run(sandbox.start())
+
+    assert calls == [
+        (
+            "run",
+            "--rm",
+            "-d",
+            "--name",
+            "agent-test",
+            "--pull",
+            "missing",
+            "--entrypoint",
+            "sleep",
+            "registry.example.com/agent:latest",
+            "infinity",
+        )
+    ]
+
+
 def test_start_rejects_missing_local_image(monkeypatch):
-    sandbox = DockerSandbox(image="missing:local")
+    sandbox = DockerSandbox(image="missing:local", pull_policy="never")
 
     async def fake_run(*args: str, timeout=None):
         return ExecResult(exit_code=1, stdout="", stderr="No such image")
@@ -79,6 +109,11 @@ def test_start_rejects_missing_local_image(monkeypatch):
     with pytest.raises(RuntimeError, match="not available locally"):
         asyncio.run(sandbox.start())
     assert sandbox._container_name is None
+
+
+def test_rejects_unknown_pull_policy():
+    with pytest.raises(ValueError, match="pull_policy"):
+        DockerSandbox(pull_policy="sometimes")
 
 
 def test_exec_forwards_workdir_environment_and_argv(monkeypatch):

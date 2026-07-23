@@ -36,12 +36,7 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
 
     **Local, isolated.** [Docker](https://www.docker.com/) runs agents in containers on your machine.
 
-    Install Docker and make sure its daemon is running. The image must already be available locally;
-    Uni-Agent does not pull it automatically.
-
-    ```bash
-    docker pull python:3.12
-    ```
+    Install Docker and make sure its daemon is running. By default, Docker pulls the image when it is not already available locally.
 
     ```python
     from uni_agent.sandbox import SandboxConfig
@@ -50,6 +45,8 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
         provider="docker",
         image="python:3.12",
         sandbox_kwargs={
+            # "missing" (default), "always", or "never".
+            "pull_policy": "missing",
             # Optional arguments inserted before the image in `docker run`.
             "run_args": ["--network", "none"],
         },
@@ -59,7 +56,8 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
     The provider starts an ephemeral container, executes commands with `docker exec`,
     transfers files with `docker cp`, and removes the container when the sandbox exits.
     The default container command is `sleep infinity`; images without `sleep` can override
-    `entrypoint` and `command` in `sandbox_kwargs`.
+    `entrypoint` and `command` in `sandbox_kwargs`. Run `docker login <registry>` first when
+    pulling from a private registry.
 
 === "veFaaS"
 

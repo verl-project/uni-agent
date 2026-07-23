@@ -23,6 +23,7 @@ class DockerSandbox(Sandbox):
         docker_binary: str = "docker",
         container_name: str | None = None,
         run_args: list[str] | None = None,
+        pull_policy: str = "missing",
         entrypoint: str = "sleep",
         command: list[str] | None = None,
     ) -> None:
@@ -30,6 +31,9 @@ class DockerSandbox(Sandbox):
         self.docker_binary = docker_binary
         self.container_name = container_name
         self.run_args = list(run_args or [])
+        if pull_policy not in {"always", "missing", "never"}:
+            raise ValueError("pull_policy must be one of: 'always', 'missing', 'never'")
+        self.pull_policy = pull_policy
         self.entrypoint = entrypoint
         self.command = list(command or ["infinity"])
         self._container_name: str | None = None
@@ -69,13 +73,14 @@ class DockerSandbox(Sandbox):
         if self._container_name is not None:
             return
 
-        inspected = await self._run_docker("image", "inspect", self.image)
-        if inspected.exit_code != 0:
-            detail = inspected.stderr.strip() or inspected.stdout.strip()
-            raise RuntimeError(f"Docker image {self.image!r} is not available locally: {detail}")
+        if self.pull_policy == "never":
+            inspected = await self._run_docker("image", "inspect", self.image)
+            if inspected.exit_code != 0:
+                detail = inspected.stderr.strip() or inspected.stdout.strip()
+                raise RuntimeError(f"Docker image {self.image!r} is not available locally: {detail}")
 
         name = self.container_name or f"uni-agent-{uuid.uuid4().hex[:12]}"
-        args = ["run", "--rm", "-d", "--name", name, "--pull", "never"]
+        args = ["run", "--rm", "-d", "--name", name, "--pull", self.pull_policy]
         if self.entrypoint:
             args.extend(["--entrypoint", self.entrypoint])
         args.extend(self.run_args)
