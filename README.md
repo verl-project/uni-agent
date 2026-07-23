@@ -63,7 +63,7 @@ Detailed settings and additional reference results are available in [Inference a
 ### Agent Reinforcement Learning
 
 Uni-Agent supports agent RL training with the same interaction stack used at inference time. We provide fully async training recipes across multiple tasks, models and datasets, with GRPO/GSPO-style objectives and partial rollout support.
-Example scripts are available in [examples/agent_train](examples/agent_train).
+Example scripts are available in [examples/quickstart/training](examples/quickstart/training).
 
 
 | Model                        | Dataset      | Method | Setting | Base | RL |

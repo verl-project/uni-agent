@@ -40,7 +40,7 @@ This run uses SWE-reBench for training and SWE-Bench Verified for validation, wi
 
 ## Reproduce
 
-Training recipes live under `examples/agent_train/`.
+Training recipes live under `examples/quickstart/training/`.
 
 For every published result, retain:
 

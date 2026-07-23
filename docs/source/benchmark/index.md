@@ -33,4 +33,4 @@ Inference and training evolve quickly. A complete result should record:
 
 Inference entry points live under `examples/inference/`. Quickstart Task Configs and Runtime Env examples live under `examples/quickstart/inference/`.
 
-RL recipes live under `examples/agent_train/`. Each published result should link back to a runnable recipe and retain its validation curves and configuration.
+RL recipes live under `examples/quickstart/training/`. Each published result should link back to a runnable recipe and retain its validation curves and configuration.
