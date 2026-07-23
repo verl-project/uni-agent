@@ -35,6 +35,7 @@ kl_loss_coef=${KL_LOSS_COEF:-0.0}
 
 clip_ratio_low=${CLIP_RATIO_LOW:-0.2}
 clip_ratio_high=${CLIP_RATIO_HIGH:-0.28}
+clip_ratio_c=${CLIP_RATIO_C:-10.0}
 
 # Response length parameters
 max_prompt_length=${MAX_PROMPT_LENGTH:-$((1024 * 8))}
@@ -44,7 +45,7 @@ overlong_buffer_len=${OVERLONG_BUFFER_LEN:-$((1024 * 4))}  # unused
 overlong_penalty_factor=${OVERLONG_PENALTY_FACTOR:-1.0}
 
 loss_agg_mode=${LOSS_AGG_MODE:-"token-mean"}
-loss_mode=${LOSS_MODE:-bypass_mode}
+loss_mode=${LOSS_MODE:-vanilla}
 
 # Algorithm
 temperature=${TEMPERATURE:-1.0}
@@ -90,11 +91,11 @@ lr_decay_steps=${LR_DECAY_STEPS:-2000}
 test_freq=${TEST_FREQ:-10}
 
 # ============================================================================
-# Behavior-policy anchored PPO: ratio = pi_train / pi_rollout.
-# The PPO ratio is both the importance-sampling ratio and the proximal ratio,
-# so explicit rollout IS weights stay disabled to avoid double counting.
+# Rollout correction is disabled by default for the standard GRPO + PPO
+# baseline. Override these variables to enable behavior-anchor or decoupled
+# rollout-correction experiments.
 # ============================================================================
-bypass_mode=${BYPASS_MODE:-True}                                 # True => old_log_prob = rollout_log_prob
+bypass_mode=${BYPASS_MODE:-False}                                # True => old_log_prob = rollout_log_prob
 bypass_loss_type=${BYPASS_LOSS_TYPE:-ppo_clip}                   # ppo_clip | reinforce
 rollout_is=${ROLLOUT_IS:-null}                                   # PPO clip already applies the IS ratio
 rollout_is_threshold=${ROLLOUT_IS_THRESHOLD:-2.0}                # single float => TIS upper clamp; "lo_hi" string => IcePop
@@ -134,7 +135,7 @@ ray job submit --no-wait --runtime-env $RUNTIME_ENV \
     actor_rollout_ref.actor.kl_loss_coef=${kl_loss_coef} \
     actor_rollout_ref.actor.clip_ratio_low=${clip_ratio_low} \
     actor_rollout_ref.actor.clip_ratio_high=${clip_ratio_high} \
-    actor_rollout_ref.actor.clip_ratio_c=10.0 \
+    actor_rollout_ref.actor.clip_ratio_c=${clip_ratio_c} \
     +actor_rollout_ref.model.override_config.model_config.max_position_embeddings=$((max_prompt_length + max_response_length)) \
     actor_rollout_ref.model.use_fused_kernels=True \
     actor_rollout_ref.actor.use_dynamic_bsz=${use_dynamic_bsz} \

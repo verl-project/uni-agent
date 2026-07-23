@@ -188,11 +188,22 @@ This recipe trains `Qwen3-Coder-30B-A3B-Instruct` with the ReAct Task Config. Se
 DATA_DIR=/path/to/data \
 RUNTIME_DIR=/path/to/runtime \
 NNODES=8 \
-ADV_ESTIMATOR=rloo \
+TP=1 PP=1 CP=4 EP=8 ETP=1 \
 TASK_CONFIG=examples/quickstart/training/task_config_react.yaml \
-EXP_NAME=react_qwen3_coder_30b \
+EXP_NAME=react_qwen3_coder_30b_dppo_tv \
+ADV_ESTIMATOR=rloo \
+LOSS_MODE=dppo_tv \
+CLIP_RATIO_LOW=0.15 \
+CLIP_RATIO_HIGH=0.15 \
+CLIP_RATIO_C=10000 \
+LOSS_AGG_MODE=seq-mean-token-sum-norm \
+BYPASS_MODE=False \
+ROLLOUT_IS=null \
+ROLLOUT_RS=null \
 bash examples/quickstart/training/train_qwen3_moe.sh
 ```
+
+This command uses TP1, PP1, CP4, and EP8 to split the 128K Agent context while avoiding tensor- and pipeline-parallel communication. It uses the DPPO-TV settings from the verl reference recipe. To run DPPO-KL instead, set `LOSS_MODE=dppo_kl` and use `CLIP_RATIO_LOW=0.05` and `CLIP_RATIO_HIGH=0.05`.
 
 The default layout is:
 
