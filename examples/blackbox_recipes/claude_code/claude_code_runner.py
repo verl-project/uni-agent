@@ -36,7 +36,7 @@ TOOL_TARGET = "/opt/claude-code"
 
 class SandboxEnvForReward:
     """Adapts :class:`SandboxClient` to the async env interface used by reward
-    specs (``communicate``, ``write_file``, ``read_file``).
+    evaluation (``communicate``, ``write_file``, ``read_file``, ``exec_shell``).
     """
 
     def __init__(self, sandbox):
@@ -54,6 +54,11 @@ class SandboxEnvForReward:
 
     async def read_file(self, path: str | Path, **_) -> str:
         return await self.communicate(f"cat {path}")
+
+    async def exec_shell(self, command: str, *, workdir=None, timeout=600):
+        if workdir is not None:
+            command = f"cd {shlex.quote(str(workdir))} && {command}"
+        return await self._sandbox.run(command, timeout=int(timeout))
 
 
 def extract_task(raw_prompt) -> str:

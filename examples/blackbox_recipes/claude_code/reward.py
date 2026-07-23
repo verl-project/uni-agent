@@ -37,18 +37,6 @@ def compute_score(data_source: str, solution_str: str, ground_truth: str, extra_
     return {"score": score}
 
 
-def _get_reward_spec(data_source: str):
-    """Load reward spec class by data_source name."""
-    from uni_agent.reward.registry import REWARD_SPEC_REGISTRY, _load_reward_spec_module
-
-    if data_source not in REWARD_SPEC_REGISTRY:
-        _load_reward_spec_module(data_source)
-    cls = REWARD_SPEC_REGISTRY.get(data_source)
-    if cls is None:
-        raise ValueError(f"Unknown data_source: {data_source}. Available: {list(REWARD_SPEC_REGISTRY.keys())}")
-    return cls
-
-
 async def evaluate_in_env(
     env,
     metadata: dict[str, Any],
@@ -62,16 +50,12 @@ async def evaluate_in_env(
     data_source = metadata.get("data_source", "unknown")
     reward_model = metadata.get("reward_model", {})
 
-    spec_cls = _get_reward_spec(data_source)
+    if data_source != "swe_bench":
+        raise ValueError(f"Unsupported reward data source: {data_source}")
+
+    from uni_agent.tasks.swe_bench.reward import compute_reward
+
     spec_metadata = reward_model.get("ground_truth", reward_model)
-
-    spec = spec_cls(
-        run_id="swe_bb_eval",
-        metadata=spec_metadata,
-        env=env,
-        eval_timeout=eval_timeout,
-    )
-
-    resolved, result = await spec.compute_reward()
-    score = 1.0 if resolved else 0.0
+    result = await compute_reward(spec_metadata, env, eval_timeout=eval_timeout)
+    score = 1.0 if result.get("resolved", False) else 0.0
     return score, result
