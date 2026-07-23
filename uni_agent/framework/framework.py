@@ -63,9 +63,7 @@ class _RunnerConfig:
         if self.max_concurrent_sessions < 0:
             raise ValueError(f"max_concurrent_sessions must be non-negative, got {self.max_concurrent_sessions}")
         if self.trajectory_selection not in {"all", "longest"}:
-            raise ValueError(
-                f"Unknown trajectory selection: {self.trajectory_selection}. Expected 'all' or 'longest'"
-            )
+            raise ValueError(f"Unknown trajectory selection: {self.trajectory_selection}. Expected 'all' or 'longest'")
 
     @classmethod
     def from_config(cls, runner_name: object, runner_cfg) -> _RunnerConfig:
@@ -161,8 +159,7 @@ def _select_session_trajectories(
         ),
     )
     logger.info(
-        "session %s: selected longest trajectory index=%s model_tokens=%s "
-        "response_tokens=%s turns=%s candidates=%s",
+        "session %s: selected longest trajectory index=%s model_tokens=%s response_tokens=%s turns=%s candidates=%s",
         session_id,
         index,
         sum(trajectory.response_mask),
