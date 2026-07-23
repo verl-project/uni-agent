@@ -131,10 +131,12 @@ def test_run_uses_sandbox_default_workdir():
     assert len(sandbox.exec_calls) == 1
     assert sandbox.exec_calls[0]["workdir"] is None
     argv = sandbox.exec_calls[0]["argv"]
-    assert argv[:4] == ["claude", "--bare", "--no-session-persistence", "-p"]
+    assert argv[:2] == ["claude", "-p"]
     assert argv[argv.index("--model") + 1] == "policy"
     assert argv[argv.index("--permission-mode") + 1] == "bypassPermissions"
-    assert "--disable-slash-commands" in argv
+    assert "--bare" not in argv
+    assert "--no-session-persistence" not in argv
+    assert "--disable-slash-commands" not in argv
     assert "--dangerously-skip-permissions" not in argv
     disallowed_tools = argv[argv.index("--disallowedTools") + 1].split(",")
     assert set(disallowed_tools) == {"Agent", "Task", "WebFetch", "WebSearch", "AskUserQuestion"}

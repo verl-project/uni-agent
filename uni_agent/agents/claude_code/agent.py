@@ -164,15 +164,12 @@ class ClaudeCodeAgent(Agent):
             raise ValueError("claude_code: set config.model.model_name (the model claude sends)")
         argv = [
             "claude",
-            "--bare",
-            "--no-session-persistence",
             "-p",
             problem,
             "--model",
             model,
             "--permission-mode",
             cfg.permission_mode,
-            "--disable-slash-commands",
         ]
         if cfg.disallowed_tools:
             argv += ["--disallowedTools", ",".join(cfg.disallowed_tools)]
