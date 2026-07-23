@@ -190,6 +190,7 @@ This recipe trains `Qwen3-Coder-30B-A3B-Instruct` with the ReAct Task Config. Se
 DATA_DIR=/path/to/data \
 RUNTIME_DIR=/path/to/runtime \
 NNODES=8 \
+CONCURRENCY=1024 \
 TP=1 PP=2 CP=4 EP=8 ETP=1 \
 TASK_CONFIG=examples/quickstart/training/task_config_react.yaml \
 EXP_NAME=react_qwen3_coder_30b_dppo_tv \
@@ -245,6 +246,7 @@ This recipe trains `Qwen3.5-4B` with the Claude Code Task Config:
 DATA_DIR=/path/to/data \
 RUNTIME_DIR=/path/to/runtime \
 NNODES=8 \
+CONCURRENCY=1024 \
 TASK_CONFIG=examples/quickstart/training/task_config_claude_code.yaml \
 EXP_NAME=claude_code_qwen3_5_4b_dppo_tv \
 ADV_ESTIMATOR=rloo \
