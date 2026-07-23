@@ -58,6 +58,7 @@ def _inline_runner_config(
     runner,
     *,
     dispatch_mode: str = "inline_async",
+    trajectory_selection: str | None = None,
 ) -> dict[str, object]:
     runner_key = f"runner-{len(_TEST_INLINE_RUNNERS)}"
     _TEST_INLINE_RUNNERS[runner_key] = runner
@@ -66,6 +67,8 @@ def _inline_runner_config(
         "runner_kwargs": {"runner_key": runner_key},
         "dispatch_mode": dispatch_mode,
     }
+    if trajectory_selection is not None:
+        config["trajectory_selection"] = trajectory_selection
     return config
 
 
@@ -276,6 +279,7 @@ def _trajectory(
     *,
     prompt_ids: list[int] | None = None,
     response_ids: list[int] | None = None,
+    response_mask: list[int] | None = None,
     response_logprobs: list[float] | None = None,
     reward_info: dict[str, object] | None = None,
     num_turns: int = 2,
@@ -283,10 +287,11 @@ def _trajectory(
 ):
     prompt_ids = prompt_ids or [10, 11]
     response_ids = response_ids or [20, 21]
+    response_mask = response_mask if response_mask is not None else [1] * len(response_ids)
     return Trajectory(
         prompt_ids=prompt_ids,
         response_ids=response_ids,
-        response_mask=[1] * len(response_ids),
+        response_mask=response_mask,
         response_logprobs=response_logprobs,
         reward_info=dict(reward_info or {}),
         reward_score=None,
@@ -639,6 +644,58 @@ async def test_generate_sequences_batches_length_trajectory_before_normal_trajec
     assert "materialization_reason" not in batch["fields"].keys()
     assert batch["fields"]["responses"][0].tolist() == [20]
     assert batch["fields"]["responses"][1].tolist() == [21]
+
+
+@pytest.mark.asyncio
+async def test_generate_sequences_selects_longest_model_token_trajectory(fake_tq):
+    runtime = _FakeGatewayManager(
+        {
+            "session-sample-0-rollout-0": [
+                _trajectory(
+                    response_ids=[20, 21, 22, 23, 24, 25],
+                    response_mask=[1, 0, 0, 0, 0, 0],
+                    num_turns=10,
+                ),
+                _trajectory(
+                    response_ids=[30, 31, 32],
+                    response_mask=[1, 1, 1],
+                    num_turns=2,
+                ),
+            ]
+        }
+    )
+    framework = await _build_framework_with_agent_runners(
+        agent_runners={
+            "runner": _inline_runner_config(
+                _async_noop_runner,
+                trajectory_selection="longest",
+            )
+        },
+        gateway_manager=runtime,
+    )
+
+    await framework.generate_sequences(_build_prompts(count=1, global_steps=8))
+
+    assert len(fake_tq.batch_puts) == 1
+    batch = fake_tq.batch_puts[0]
+    assert batch["keys"] == ["uid-0_0_0"]
+    assert batch["fields"]["responses"][0].tolist() == [30, 31, 32]
+    assert batch["fields"]["response_mask"][0].tolist() == [1, 1, 1]
+    assert batch["fields"]["num_turns"].tolist() == [2]
+
+
+@pytest.mark.asyncio
+async def test_framework_rejects_unknown_trajectory_selection(fake_tq):
+    with pytest.raises(ValueError, match="Unknown trajectory selection"):
+        await _build_framework_with_agent_runners(
+            agent_runners={
+                "runner": _inline_runner_config(
+                    _async_noop_runner,
+                    trajectory_selection="shortest",
+                )
+            },
+            gateway_manager=_FakeGatewayManager({}),
+        )
 
 
 @pytest.mark.asyncio

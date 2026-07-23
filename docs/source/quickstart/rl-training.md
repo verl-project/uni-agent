@@ -259,6 +259,8 @@ ROLLOUT_RS=null \
 bash examples/quickstart/training/train_qwen3p5_dense.sh
 ```
 
+The Claude Code runner sets `trajectory_selection=longest`. If a Gateway session materializes multiple trajectories, the Framework keeps only the trajectory with the most model-generated tokens before reward assignment, artifact dumping, and TransferQueue writes.
+
 The script expects:
 
 ```text
