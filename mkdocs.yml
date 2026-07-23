@@ -52,7 +52,7 @@ nav:
       - Installation: quickstart/installation.md
       - Launch a Sandbox: quickstart/launch-sandbox.md
       - Run Agent Inference: quickstart/agent-inference.md
-      - Train an Agent with RL: quickstart/rl-training.md
+      - Run Agent RL Training: quickstart/rl-training.md
   - Concepts:
       - Overview: concepts/index.md
       - Sandbox: concepts/sandbox.md

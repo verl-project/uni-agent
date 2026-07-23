@@ -1,6 +1,8 @@
-# Train an Agent with RL
+# Run Agent RL Training
 
-This guide demonstrates Agentic RL training for both white-box and black-box agents:
+Uni-Agent supports RL training for both white-box and black-box Agents. By integrating with the bundled `verl` module, the same Agent workflow can move seamlessly from inference to training.
+
+This guide demonstrates:
 
 1. Train `Qwen3-Coder-30B-A3B-Instruct` with the white-box `ReAct Agent`.
 2. Train `Qwen3.5-4B` with the black-box `Claude Code` Agent.
@@ -51,7 +53,7 @@ The Quickstart provides separate configs for the two Agent types:
     ```yaml
     - name: swe_bench
       sandbox:
-        provider: vefaas
+        provider: vefaas  # <-- Change to your Sandbox provider.
         runtime_timeout: 7200
       agent:
         name: react
@@ -74,7 +76,7 @@ The Quickstart provides separate configs for the two Agent types:
 
     - name: swe_rebench
       sandbox:
-        provider: vefaas
+        provider: vefaas  # <-- Change to your Sandbox provider.
         runtime_timeout: 7200
       agent:
         name: react
@@ -101,7 +103,7 @@ The Quickstart provides separate configs for the two Agent types:
     ```yaml
     - name: swe_bench
       sandbox:
-        provider: vefaas
+        provider: vefaas  # <-- Change to your Sandbox provider.
         runtime_timeout: 7200
       agent:
         name: claude_code
@@ -114,7 +116,7 @@ The Quickstart provides separate configs for the two Agent types:
 
     - name: swe_rebench
       sandbox:
-        provider: vefaas
+        provider: vefaas  # <-- Change to your Sandbox provider.
         runtime_timeout: 7200
       agent:
         name: claude_code
@@ -188,7 +190,7 @@ This recipe trains `Qwen3-Coder-30B-A3B-Instruct` with the ReAct Task Config. Se
 DATA_DIR=/path/to/data \
 RUNTIME_DIR=/path/to/runtime \
 NNODES=8 \
-TP=1 PP=1 CP=4 EP=8 ETP=1 \
+TP=1 PP=2 CP=4 EP=8 ETP=1 \
 TASK_CONFIG=examples/quickstart/training/task_config_react.yaml \
 EXP_NAME=react_qwen3_coder_30b_dppo_tv \
 ADV_ESTIMATOR=rloo \
@@ -202,8 +204,6 @@ ROLLOUT_IS=null \
 ROLLOUT_RS=null \
 bash examples/quickstart/training/train_qwen3_moe.sh
 ```
-
-This command uses TP1, PP1, CP4, and EP8 to split the 128K Agent context while avoiding tensor- and pipeline-parallel communication. It uses the DPPO-TV settings from the verl reference recipe. To run DPPO-KL instead, set `LOSS_MODE=dppo_kl` and use `CLIP_RATIO_LOW=0.05` and `CLIP_RATIO_HIGH=0.05`.
 
 The default layout is:
 
@@ -245,9 +245,17 @@ This recipe trains `Qwen3.5-4B` with the Claude Code Task Config:
 DATA_DIR=/path/to/data \
 RUNTIME_DIR=/path/to/runtime \
 NNODES=8 \
-ADV_ESTIMATOR=rloo \
 TASK_CONFIG=examples/quickstart/training/task_config_claude_code.yaml \
-EXP_NAME=claude_code_qwen3_5_4b \
+EXP_NAME=claude_code_qwen3_5_4b_dppo_tv \
+ADV_ESTIMATOR=rloo \
+LOSS_MODE=dppo_tv \
+CLIP_RATIO_LOW=0.15 \
+CLIP_RATIO_HIGH=0.15 \
+CLIP_RATIO_C=10000 \
+LOSS_AGG_MODE=seq-mean-token-sum-norm \
+BYPASS_MODE=False \
+ROLLOUT_IS=null \
+ROLLOUT_RS=null \
 bash examples/quickstart/training/train_qwen3p5_dense.sh
 ```
 
