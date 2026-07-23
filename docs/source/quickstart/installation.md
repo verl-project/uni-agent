@@ -41,6 +41,14 @@ Task dependencies provide task-specific datasets, verifiers, and reward implemen
 
 Install the client package for the sandbox backend you plan to use, for example:
 
+=== "Docker"
+
+    Install [Docker](https://docs.docker.com/engine/install/) and verify that its daemon is available:
+
+    ```bash
+    docker version
+    ```
+
 === "Modal"
 
     ```bash

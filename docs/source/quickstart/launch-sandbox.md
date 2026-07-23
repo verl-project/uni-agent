@@ -36,7 +36,30 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
 
     **Local, isolated.** [Docker](https://www.docker.com/) runs agents in containers on your machine.
 
-    Integration and configuration instructions are to be filled.
+    Install Docker and make sure its daemon is running. The image must already be available locally;
+    Uni-Agent does not pull it automatically.
+
+    ```bash
+    docker pull python:3.12
+    ```
+
+    ```python
+    from uni_agent.sandbox import SandboxConfig
+
+    config = SandboxConfig(
+        provider="docker",
+        image="python:3.12",
+        sandbox_kwargs={
+            # Optional arguments inserted before the image in `docker run`.
+            "run_args": ["--network", "none"],
+        },
+    )
+    ```
+
+    The provider starts an ephemeral container, executes commands with `docker exec`,
+    transfers files with `docker cp`, and removes the container when the sandbox exits.
+    The default container command is `sleep infinity`; images without `sleep` can override
+    `entrypoint` and `command` in `sandbox_kwargs`.
 
 === "veFaaS"
 
@@ -211,6 +234,12 @@ After configuring a supported backend above, run the complete connectivity and p
 
     ```bash
     DEBUG_MODE=1 SANDBOX_PROVIDER=local python examples/quickstart/sandbox/demo.py
+    ```
+
+=== "Docker"
+
+    ```bash
+    DEBUG_MODE=1 SANDBOX_PROVIDER=docker python examples/quickstart/sandbox/demo.py
     ```
 
 === "veFaaS"

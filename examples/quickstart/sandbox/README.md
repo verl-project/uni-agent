@@ -12,6 +12,16 @@ The local provider requires no credentials, but runs commands directly on the ho
 DEBUG_MODE=1 SANDBOX_PROVIDER=local python examples/quickstart/sandbox/demo.py
 ```
 
+## Run with Docker
+
+Docker provides a local isolated environment. Its daemon must be running and the image must
+already exist locally:
+
+```bash
+docker pull python:3.12
+DEBUG_MODE=1 SANDBOX_PROVIDER=docker IMAGE=python:3.12 python examples/quickstart/sandbox/demo.py
+```
+
 ## Run with Modal
 
 Install and authenticate Modal first:
