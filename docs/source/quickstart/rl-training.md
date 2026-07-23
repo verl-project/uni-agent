@@ -108,7 +108,7 @@ The Quickstart provides separate configs for the two Agent types:
       agent:
         name: claude_code
         max_turns: 100
-        run_timeout: 7200
+        run_timeout: 4800
         model:
           temperature: 1.0
           top_p: 1.0
@@ -121,7 +121,7 @@ The Quickstart provides separate configs for the two Agent types:
       agent:
         name: claude_code
         max_turns: 100
-        run_timeout: 7200
+        run_timeout: 4800
         model:
           temperature: 1.0
           top_p: 1.0
@@ -245,8 +245,9 @@ This recipe trains `Qwen3.5-4B` with the Claude Code Task Config:
 ```bash
 DATA_DIR=/path/to/data \
 RUNTIME_DIR=/path/to/runtime \
-NNODES=8 \
+NNODES=4 \
 CONCURRENCY=1024 \
+TP=4 PP=2 CP=1 \
 TASK_CONFIG=examples/quickstart/training/task_config_claude_code.yaml \
 EXP_NAME=claude_code_qwen3_5_4b_dppo_tv \
 ADV_ESTIMATOR=rloo \
@@ -261,7 +262,7 @@ ROLLOUT_RS=null \
 bash examples/quickstart/training/train_qwen3p5_dense.sh
 ```
 
-The Claude Code runner sets `trajectory_selection=longest`. If a Gateway session materializes multiple trajectories, the Framework keeps only the trajectory with the most model-generated tokens before reward assignment, artifact dumping, and TransferQueue writes.
+The Claude Code runner sets `trajectory_selection=longest`. If a Gateway session materializes multiple trajectories, the Framework keeps only the trajectory with the most model-generated tokens for RL training.
 
 The script expects:
 
