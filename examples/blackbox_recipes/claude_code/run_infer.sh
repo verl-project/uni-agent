@@ -36,10 +36,10 @@ AGENT_MAX_TURNS="${AGENT_MAX_TURNS:-100}"
 CLAUDE_CODE_TOOL_IMAGE="${CLAUDE_CODE_TOOL_IMAGE:-swr.cn-east-3.myhuaweicloud.com/openyuanrong/claude-code-tool:latest}"
 SWE_AGENT_RUN_TIMEOUT="${SWE_AGENT_RUN_TIMEOUT:-7200}"
 
-# ── AKernel (remote sandbox) ─────────────────────────────────────────────
-export AKERNEL_SERVER_ADDRESS="${AKERNEL_SERVER_ADDRESS:-}"
-export AKERNEL_TOKEN="${AKERNEL_TOKEN:-}"
-export AKERNEL_TUNNEL_SSL_VERIFY="${AKERNEL_TUNNEL_SSL_VERIFY:-0}"
+# ── openYuanrong (remote sandbox) ─────────────────────────────────────────────
+export OPENYUANRONG_SERVER_ADDRESS="${OPENYUANRONG_SERVER_ADDRESS:-}"
+export OPENYUANRONG_TOKEN="${OPENYUANRONG_TOKEN:-}"
+export OPENYUANRONG_TUNNEL_SSL_VERIFY="${OPENYUANRONG_TUNNEL_SSL_VERIFY:-0}"
 
 # ── Logging & env ────────────────────────────────────────────────────────
 export VERL_LOGGING_LEVEL="${VERL_LOGGING_LEVEL:-INFO}"

@@ -146,7 +146,7 @@ def test_is_timeout_error_override_is_honored_by_exec():
 
 # --------------------------- provider wiring ---------------------------
 
-_PROVIDERS = ["local", "modal", "vefaas", "seed"]
+_PROVIDERS = ["local", "docker", "modal", "vefaas", "seed"]
 
 
 @pytest.mark.parametrize("name", _PROVIDERS)
@@ -226,6 +226,12 @@ def test_modal_is_alive_false_before_start():
     from uni_agent.sandbox.modal import ModalSandbox
 
     assert asyncio.run(ModalSandbox().is_alive()) is False
+
+
+def test_docker_is_alive_false_before_start():
+    from uni_agent.sandbox.docker import DockerSandbox
+
+    assert asyncio.run(DockerSandbox().is_alive()) is False
 
 
 def test_seed_is_alive_false_before_start():

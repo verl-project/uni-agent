@@ -24,7 +24,7 @@ sandbox = build_sandbox(config)
 The standard fields are:
 
 - `provider`: registered backend name.
-- `image`: image used by remote providers.
+- `image`: container image used by image-backed providers such as Docker and Modal.
 - `runtime_timeout`: maximum remote sandbox lifetime.
 - `sandbox_kwargs`: provider-specific constructor arguments.
 
@@ -62,7 +62,7 @@ await sandbox.download(remote_path, local_path)
 await sandbox.expose_port(port)
 ```
 
-The base class provides portable command, file, and directory-transfer implementations. Providers may override file methods when they have a native data plane. For example, Local uses the host filesystem directly and Modal uses its filesystem API for absolute paths.
+The base class provides portable command, file, and directory-transfer implementations. Providers may override file methods when they have a native data plane. For example, Local uses the host filesystem directly, Docker uses `docker cp`, and Modal uses its filesystem API for absolute paths.
 
 ## Error Policy
 

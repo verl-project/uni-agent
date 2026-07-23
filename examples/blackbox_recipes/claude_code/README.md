@@ -32,7 +32,7 @@ config) lives in this directory and does not depend on `mini_swe_agent/`.
 
 | Type | Description |
 |------|-------------|
-| openyuanrong | Uses `akernel_sdk.Mount` and `sandbox.commands.run()` |
+| openyuanrong | Uses `openyuanrong_sandbox_sdk.Mount` and `sandbox.commands.run()` |
 
 ## Architecture
 
@@ -40,7 +40,7 @@ config) lives in this directory and does not depend on `mini_swe_agent/`.
 [Rollouter Host: claude_code_runner]
   |
   |-- SandboxClient.create(image, sidecar_image, sidecar_target="/opt/claude-code")
-  |     `-- akernel: Sandbox(mounts=[Mount(target="/opt/claude-code", ...)])
+  |     `-- openYuanrong: Sandbox(mounts=[Mount(target="/opt/mini-swe-agent", ...)])
   |
   |-- sandbox.run("<env> /opt/claude-code/bin/claude -p <task> ...")
   |     `-- [Inside Sandbox]
@@ -53,7 +53,7 @@ config) lives in this directory and does not depend on `mini_swe_agent/`.
 
 ## Prerequisites
 
-1. **AKernel** — set `AKERNEL_SERVER_ADDRESS` and `AKERNEL_TOKEN`.
+1. **OpenYuanrong** - set `OPENYUANRONG_SERVER_ADDRESS` and `OPENYUANRONG_TOKEN`.
 2. **Tool image** — build the claude-code tool image and push it to a remote
    registry if the sandbox service cannot access local Docker images.
 
@@ -94,8 +94,8 @@ After pushing, point training at it with `CLAUDE_CODE_TOOL_IMAGE`.
 ## 2. Training (Fully Async)
 
 ```bash
-AKERNEL_SERVER_ADDRESS="6.2.179.37:8888" \
-AKERNEL_TOKEN="<token>" \
+OPENYUANRONG_SERVER_ADDRESS="6.2.179.37:8888" \
+OPENYUANRONG_TOKEN="<token>" \
 CLAUDE_CODE_TOOL_IMAGE=swr.cn-east-3.myhuaweicloud.com/openyuanrong/claude-code-tool:latest \
 MODEL_PATH=~/models/Qwen3.5-9B \
 bash examples/blackbox_recipes/claude_code/run_train.sh
