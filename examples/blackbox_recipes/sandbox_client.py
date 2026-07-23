@@ -84,8 +84,7 @@ class SandboxClient:
         token = os.getenv("OPENYUANRONG_TOKEN")
         if not server or not token:
             raise ValueError(
-                "OPENYUANRONG_SERVER_ADDRESS and OPENYUANRONG_TOKEN "
-                "environment variables must be set for sandbox"
+                "OPENYUANRONG_SERVER_ADDRESS and OPENYUANRONG_TOKEN environment variables must be set for sandbox"
             )
         # Reverse tunnel TLS verify
         os.environ["TUNNEL_SSL_VERIFY"] = os.getenv("OPENYUANRONG_TUNNEL_SSL_VERIFY", "0")
