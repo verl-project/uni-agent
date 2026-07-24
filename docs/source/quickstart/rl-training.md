@@ -191,18 +191,28 @@ DATA_DIR=/path/to/data \
 RUNTIME_DIR=/path/to/runtime \
 NNODES=8 \
 CONCURRENCY=1024 \
+GEN_TP=4 \
 TP=1 PP=2 CP=4 EP=8 ETP=1 \
+TRAIN_PROMPT_BSZ=64 \
+N_RESP_PER_PROMPT=8 \
+PPO_MINI_BATCH_SIZE=16 \
 TASK_CONFIG=examples/quickstart/training/task_config_react.yaml \
-EXP_NAME=react_qwen3_coder_30b_dppo_tv \
+EXP_NAME=react_qwen3_coder_30b_gspo_r3 \
 ADV_ESTIMATOR=rloo \
-LOSS_MODE=dppo_tv \
-CLIP_RATIO_LOW=0.15 \
-CLIP_RATIO_HIGH=0.15 \
-CLIP_RATIO_C=10000 \
-LOSS_AGG_MODE=seq-mean-token-sum-norm \
+LOSS_MODE=gspo \
+CLIP_RATIO_LOW=4e-4 \
+CLIP_RATIO_HIGH=4e-4 \
+CLIP_RATIO_C=10 \
+LOSS_AGG_MODE=token-mean \
 BYPASS_MODE=False \
-ROLLOUT_IS=null \
+ROLLOUT_IS=token \
+ROLLOUT_IS_THRESHOLD=2.0 \
+ROLLOUT_IS_BATCH_NORMALIZE=False \
 ROLLOUT_RS=null \
+ROUTER_REPLAY_MODE=R3 \
+ENABLE_ROLLOUT_ROUTING_REPLAY=True \
+LR_DECAY_STEPS=10000 \
+TEST_FREQ=-1 \
 bash examples/quickstart/training/train_qwen3_moe.sh
 ```
 

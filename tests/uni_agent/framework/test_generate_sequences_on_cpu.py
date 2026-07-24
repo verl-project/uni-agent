@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 
+import numpy as np
 import pytest
+import torch
 
 from tests.uni_agent.support import logging_runner
-from uni_agent.framework.framework import OpenAICompatibleAgentFramework
+from uni_agent.framework.framework import OpenAICompatibleAgentFramework, _align_routed_experts
 from uni_agent.gateway.session import SessionHandle, Trajectory
 from verl.utils import tensordict_utils as tu
 
@@ -283,6 +285,7 @@ def _trajectory(
     response_logprobs: list[float] | None = None,
     reward_info: dict[str, object] | None = None,
     num_turns: int = 2,
+    routed_experts: object | None = None,
     extra_fields: dict[str, object] | None = None,
 ):
     prompt_ids = prompt_ids or [10, 11]
@@ -296,6 +299,7 @@ def _trajectory(
         reward_info=dict(reward_info or {}),
         reward_score=None,
         num_turns=num_turns,
+        routed_experts=routed_experts,
         multi_modal_data={"images": ["raw-image-should-not-be-written"]},
         extra_fields=dict(extra_fields or {}),
     )
@@ -535,6 +539,14 @@ async def test_generate_sequences_writes_tq_schema_for_each_session(monkeypatch,
             "session-sample-0-rollout-0": [
                 _trajectory(
                     response_logprobs=[-0.1, -0.2],
+                    routed_experts=np.array(
+                        [
+                            [[0, 1], [2, 3]],
+                            [[4, 5], [6, 7]],
+                            [[8, 9], [10, 11]],
+                        ],
+                        dtype=np.uint8,
+                    ),
                     extra_fields={"materialization_reason": "max_response_length"},
                 )
             ],
@@ -592,6 +604,8 @@ async def test_generate_sequences_writes_tq_schema_for_each_session(monkeypatch,
     assert fields["input_ids"].is_nested
     assert fields["response_mask"].is_nested
     assert fields["position_ids"].is_nested
+    assert fields["routed_experts"].is_nested
+    assert fields["routed_experts"].dtype == torch.uint8
     assert fields["prompts"][0].tolist() == [10, 11]
     assert fields["responses"][0].tolist() == [20, 21]
     assert fields["response_mask"][0].tolist() == [1, 1]
@@ -599,6 +613,12 @@ async def test_generate_sequences_writes_tq_schema_for_each_session(monkeypatch,
     assert fields["input_ids"][0].tolist() == [10, 11, 20, 21]
     assert fields["attention_mask"][0].tolist() == [1, 1, 1, 1]
     assert fields["position_ids"][0].tolist() == [0, 1, 2, 3]
+    assert fields["routed_experts"][0].tolist() == [
+        [[0, 1], [2, 3]],
+        [[4, 5], [6, 7]],
+        [[8, 9], [10, 11]],
+        [[0, 0], [0, 0]],
+    ]
     assert fields["rollout_log_probs"][0].tolist() == pytest.approx([-0.1, -0.2])
     assert fields["rm_scores"][0].tolist() == [0.0, 0.25]
     assert tu.get(fields, "multi_modal_inputs") == [{}]
@@ -613,6 +633,14 @@ async def test_generate_sequences_writes_tq_schema_for_each_session(monkeypatch,
     assert tu.get(fields, "global_steps") == [7]
     assert fields["num_turns"].tolist() == [2]
     assert "multi_modal_data" not in fields.keys()
+
+
+def test_align_routed_experts_preserves_backend_dtype():
+    aligned = _align_routed_experts(np.array([[[256, 511]]], dtype=np.uint16), seq_len=2)
+
+    assert aligned is not None
+    assert aligned.dtype == torch.uint16
+    assert aligned.tolist() == [[[256, 511]], [[0, 0]]]
 
 
 @pytest.mark.asyncio

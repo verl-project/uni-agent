@@ -201,18 +201,11 @@ def _json_default(obj: object) -> object:
 
 
 def _align_routed_experts(source: object, seq_len: int) -> torch.Tensor | None:
-    """Return R3 routing as an int64 ``[seq_len, layers, topk]`` tensor aligned to input_ids.
-
-    The gateway stores the last turn's routing, which already spans ``prompt + response``
-    (the backend re-prefills the full context each turn). Zero-pad / truncate defensively so
-    the field always matches ``input_ids`` even on early-return trajectories with trailing
-    context tokens; a wrong length would crash Megatron's packed-sequence replay.
-    """
-    experts = torch.as_tensor(source)
+    """Return R3 routing as ``[seq_len, layers, topk]`` aligned to input_ids."""
+    experts = torch.as_tensor(source, device="cpu")
     if experts.dim() != 3:
         return None
-    experts = experts.to(dtype=torch.int64, device="cpu")
-    out = torch.zeros((seq_len, experts.shape[1], experts.shape[2]), dtype=torch.int64)
+    out = torch.zeros((seq_len, experts.shape[1], experts.shape[2]), dtype=experts.dtype)
     covered = min(experts.shape[0], seq_len)
     if covered > 0:
         out[:covered] = experts[:covered]
