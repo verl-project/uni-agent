@@ -213,21 +213,23 @@ class SandboxClient:
 
         raise RuntimeError(f"Failed to create sandbox after {max_retries} retries") from last_error
 
-    async def run(self, cmd: str, *, timeout: int = 600) -> CommandResult:
-        """Execute *cmd* inside the sandbox via ``sandbox.commands.run``."""
+    async def run(
+        self, cmd: str, *, timeout: int = 600,
+        cwd: str | None = None, envs: dict[str, str] | None = None
+    ) -> CommandResult:
+        """Run *cmd* in a one-shot shell; stderr is merged into stdout."""
+        shell = None
         try:
-            result = await asyncio.to_thread(
-                self._sandbox.commands.run,
-                cmd,
-                timeout=timeout,
-            )
-            return CommandResult(
-                stdout=getattr(result, "stdout", ""),
-                stderr=getattr(result, "stderr", ""),
-                exit_code=getattr(result, "exit_code", -1),
-            )
+            shell = await self._sandbox.shells.create(cwd=cwd, envs=envs)
+            return await shell.run(cmd, timeout=timeout)
         except Exception as e:
             return CommandResult(stdout="", stderr=str(e), exit_code=-1)
+        finally:
+            if shell is not None:
+                try:
+                    await shell.kill()
+                except Exception:
+                    pass
 
     async def cleanup(self) -> None:
         """Kill the sandbox if still running."""
