@@ -890,8 +890,6 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         }
         if trajectory.response_logprobs is not None:
             field["rollout_log_probs"] = torch.tensor(trajectory.response_logprobs, dtype=torch.float32)
-        else:
-            field["rollout_log_probs"] = torch.zeros_like(responses, dtype=torch.float32)
         if trajectory.routed_experts is not None:
             aligned_experts = _align_routed_experts(trajectory.routed_experts, input_ids.size(0))
             if aligned_experts is not None:

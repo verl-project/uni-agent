@@ -98,14 +98,13 @@ async def test_gateway_actor_max_tokens_clamped_to_remaining_response_budget():
             tokenizer=FakeTokenizer(),
             prompt_length=2048,
             response_length=100,
-            base_sampling_params={"top_p": 0.8},
             allowed_request_sampling_param_keys={"max_tokens"},
         ),
         backend,
     )
     await actor.start()
     try:
-        await actor.create_session("s1")
+        await actor.create_session("s1", sampling_params={"top_p": 0.8})
         first_messages = [{"role": "user", "content": "hi"}]
         await actor._handle_openai_chat_completions("s1", {"messages": first_messages})
         assert backend.calls[-1]["sampling_params"]["max_tokens"] == 100
@@ -980,7 +979,7 @@ async def test_gateway_actor_context_change_splits_trajectory(ray_runtime, sessi
                     "SAFE",
                     expected_sampling_params={"temperature": 0.25, "top_p": 0.8, "max_tokens": 128},
                 ),
-                "base_sampling_params": {"temperature": 0.1, "top_p": 0.8, "max_tokens": 64},
+                "session_sampling_params": {"temperature": 0.1, "top_p": 0.8, "max_tokens": 64},
                 "allowed_request_sampling_param_keys": {"temperature", "max_tokens"},
             },
             "session-envelope-boundary",
@@ -991,14 +990,14 @@ async def test_gateway_actor_context_change_splits_trajectory(ray_runtime, sessi
                 "tools": [{"type": "function", "function": {"name": "search", "parameters": {"type": "object"}}}],
             },
         ),
-        # Non-whitelisted key (top_p) in request is ignored; base_sampling_params used as-is.
+        # Non-whitelisted key (top_p) in request is ignored; session sampling params are used as-is.
         (
             {
                 "backend": RejectRequestEnvelopeBackend(
                     "SAFE",
                     expected_sampling_params={"temperature": 0.1, "top_p": 0.9},
                 ),
-                "base_sampling_params": {"temperature": 0.1, "top_p": 0.9},
+                "session_sampling_params": {"temperature": 0.1, "top_p": 0.9},
                 "allowed_request_sampling_param_keys": {"temperature"},
             },
             "session-non-whitelist",
@@ -1009,16 +1008,19 @@ async def test_gateway_actor_context_change_splits_trajectory(ray_runtime, sessi
 async def test_gateway_actor_allowlist_filters_sampling_params(ray_runtime, backend_kwargs, session_id, request_extra):
     """The sampling-param allowlist filters request keys: non-whitelisted keys
     (e.g. ``presence_penalty``) are stripped, and envelope fields (model,
-    tools, messages) never leak into sampling params. Base sampling params
+    tools, messages) never leak into sampling params. Session sampling params
     supply defaults when the request omits a key."""
     from uni_agent.gateway.config import GatewayActorConfig
     from uni_agent.gateway.gateway import GatewayActor
 
     backend = backend_kwargs["backend"]
-    config_kwargs = {key: value for key, value in backend_kwargs.items() if key != "backend"}
+    session_sampling_params = backend_kwargs["session_sampling_params"]
+    config_kwargs = {
+        key: value for key, value in backend_kwargs.items() if key not in {"backend", "session_sampling_params"}
+    }
     actor = GatewayActor.remote(GatewayActorConfig(tokenizer=FakeTokenizer(), **config_kwargs), backend)
     ray.get(actor.start.remote())
-    session = ray.get(actor.create_session.remote(session_id))
+    session = ray.get(actor.create_session.remote(session_id, sampling_params=session_sampling_params))
 
     async with httpx.AsyncClient(timeout=5.0, trust_env=False) as client:
         response = await client.post(
@@ -1038,7 +1040,7 @@ async def test_gateway_actor_allowlist_filters_sampling_params(ray_runtime, back
 @pytest.mark.asyncio
 @pytest.mark.parametrize("provider", ["openai", "anthropic"])
 async def test_gateway_actor_session_sampling_defaults_are_isolated_and_request_overridable(provider):
-    """Both provider handlers apply base, session, then request sampling params."""
+    """Both provider handlers apply session defaults, then request sampling params."""
     from uni_agent.gateway.config import GatewayActorConfig
     from uni_agent.gateway.gateway import _GatewayActor
 
@@ -1046,25 +1048,31 @@ async def test_gateway_actor_session_sampling_defaults_are_isolated_and_request_
     actor = _GatewayActor(
         GatewayActorConfig(
             tokenizer=FakeTokenizer(),
-            base_sampling_params={
-                "temperature": 0.1,
-                "top_p": 0.2,
-                "top_k": 1,
-                "presence_penalty": 0.3,
-            },
             response_length=64,
         ),
         backend,
     )
     await actor.start()
-    train_sampling_params = {"temperature": 0.4, "top_p": 0.5, "logprobs": True}
+    train_sampling_params = {
+        "temperature": 0.4,
+        "top_p": 0.5,
+        "top_k": 1,
+        "presence_penalty": 0.3,
+        "logprobs": True,
+    }
     handler = actor._handle_openai_chat_completions if provider == "openai" else actor._handle_anthropic_messages
     try:
         await actor.create_session("train-session", sampling_params=train_sampling_params)
         train_sampling_params["temperature"] = 9.0
         await actor.create_session(
             "val-session",
-            sampling_params={"temperature": 0, "top_p": 0.9, "top_k": -1, "logprobs": False},
+            sampling_params={
+                "temperature": 0,
+                "top_p": 0.9,
+                "top_k": -1,
+                "presence_penalty": 0.3,
+                "logprobs": False,
+            },
         )
 
         await handler(

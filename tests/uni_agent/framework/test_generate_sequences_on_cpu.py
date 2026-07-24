@@ -697,9 +697,8 @@ async def test_generate_sequences_marks_prompt_failure_when_all_sessions_fail(fa
 
 
 @pytest.mark.asyncio
-async def test_generate_sequences_zero_fills_missing_trainer_fields(fake_tq):
-    """Without reward workers or backend logprobs, trainer-selected optional
-    fields are still emitted as zeros."""
+async def test_generate_sequences_omits_missing_rollout_log_probs(fake_tq):
+    """Missing backend logprobs are omitted while reward scores remain zero-filled."""
     runtime = _FakeGatewayManager({"session-sample-0-rollout-0": [_trajectory(response_logprobs=None)]})
 
     framework = await _build_framework_with_agent_runners(
@@ -713,7 +712,7 @@ async def test_generate_sequences_zero_fills_missing_trainer_fields(fake_tq):
 
     fields = fake_tq.batch_puts[0]["fields"]
     assert fields["rm_scores"][0].tolist() == [0.0, 0.0]
-    assert fields["rollout_log_probs"][0].tolist() == [0.0, 0.0]
+    assert "rollout_log_probs" not in fields
 
 
 @pytest.mark.asyncio

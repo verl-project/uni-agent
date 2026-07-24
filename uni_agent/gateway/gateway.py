@@ -72,7 +72,6 @@ class _GatewayActor:
             tool_parser_name=config.tool_parser_name,
             apply_chat_template_kwargs=config.apply_chat_template_kwargs,
         )
-        self._base_sampling_params = dict(config.base_sampling_params or {})
         self._allowed_request_sampling_param_keys = (
             DEFAULT_ALLOWED_REQUEST_SAMPLING_KEYS
             if config.allowed_request_sampling_param_keys is None
@@ -172,7 +171,7 @@ class _GatewayActor:
         try:
             internal = openai_to_internal(
                 payload,
-                base_sampling_params={**self._base_sampling_params, **session.sampling_params},
+                base_sampling_params=dict(session.sampling_params),
                 allowed_sampling_keys=self._allowed_request_sampling_param_keys,
             )
             _validate_sampling_params(internal["sampling_params"])
@@ -198,7 +197,7 @@ class _GatewayActor:
         try:
             internal = anthropic_to_internal(
                 payload,
-                base_sampling_params={**self._base_sampling_params, **session.sampling_params},
+                base_sampling_params=dict(session.sampling_params),
                 allowed_sampling_keys=self._allowed_request_sampling_param_keys,
             )
             _validate_sampling_params(internal["sampling_params"])
