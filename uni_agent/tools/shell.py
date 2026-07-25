@@ -104,7 +104,7 @@ class ShellChannel:
         self.height = height
         self._shell = shell
         self._env = dict(env or {})
-        self._dir = f"/tmp/uni-agent-shell/{self.session_id}"
+        self._dir = f"/uni-agent-tmp/sandbox/shell/{self.session_id}"
         self._sock = f"{self._dir}/tmux.sock"
         self._counter = 0
 

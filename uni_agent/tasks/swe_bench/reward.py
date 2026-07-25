@@ -133,7 +133,7 @@ async def compute_reward(metadata, sandbox, eval_timeout: float = 300.0) -> dict
     eval_script = "\n".join(["#!/bin/bash", "set -uxo pipefail"] + eval_script_list) + "\n"
 
     # write eval script to container
-    eval_script_container = f"/tmp/eval_script_{uuid.uuid4()}.sh"
+    eval_script_container = f"/uni-agent-tmp/sandbox/tasks/eval_script_{uuid.uuid4()}.sh"
     await sandbox.write_file(eval_script_container, eval_script)
 
     logger.info(f"running eval for {instance_id} (repo={repo}, timeout={eval_timeout:.0f}s)")

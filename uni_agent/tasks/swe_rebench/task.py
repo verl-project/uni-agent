@@ -59,8 +59,9 @@ class SWEREBenchTask(Task):
 
             if cfg.run_gold_patch:
                 logger.info("applying gold patch to /testbed")
-                await sandbox.write_file("/tmp/gold_patch.patch", sample["patch"])
-                await sandbox.exec(["git", "apply", "--whitespace=fix", "/tmp/gold_patch.patch"], workdir="/testbed")
+                patch_path = "/uni-agent-tmp/sandbox/tasks/gold_patch.patch"
+                await sandbox.write_file(patch_path, sample["patch"])
+                await sandbox.exec(["git", "apply", "--whitespace=fix", patch_path], workdir="/testbed")
             else:
                 agent = self.build_agent()
                 messages = cfg.prompt
