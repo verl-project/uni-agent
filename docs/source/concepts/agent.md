@@ -61,7 +61,7 @@ The built-in ReAct Agent demonstrates the white-box pattern:
 4. Append Tool observations to the transcript.
 5. Stop on a plain assistant answer, `submit`/`finish`, token limit, timeout budget, or max steps.
 
-ReAct sets `AgentResult.finished=true` only for a plain assistant answer or an explicit `submit`/`finish` call.
+ReAct sets `AgentResult.finished=true` only for a non-truncated plain assistant answer or a successful `submit`/`finish` call.
 
 ReAct configuration exposes the loop:
 
@@ -91,7 +91,7 @@ The Claude Code Agent demonstrates the black-box pattern:
 3. Launch the harness through `sandbox.exec()`.
 4. Return process metadata while the Task evaluates the modified Sandbox.
 
-Claude Code sets `AgentResult.finished` from whether its process exit code is `0`.
+Claude Code sets `AgentResult.finished=true` only when the process exits with code `0` and its structured result event reports `subtype=success` without an error. Limit exits such as `error_max_turns` remain unfinished.
 
 ```yaml
 agent:

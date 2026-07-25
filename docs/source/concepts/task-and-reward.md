@@ -116,7 +116,7 @@ Custom Tasks may return scalar, dense, rubric-based, or multi-component rewards.
 `TaskResult.reward`; additional metrics belong in `accuracy` and `info`.
 
 `TaskResult.trainable` defaults to `True`. When `mask_unfinished_trajectories=true`, the built-in SWE Tasks inspect
-`AgentResult.finished`; unfinished ReAct runs and nonzero Claude Code exits therefore make the trajectory
+`AgentResult.finished`; unfinished ReAct runs and unsuccessful Claude Code result events therefore make the trajectory
 untrainable. The switch defaults to `false`. This decision belongs to the Task and is independent of the evaluation
 outcome.
 

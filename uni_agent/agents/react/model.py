@@ -99,7 +99,7 @@ class OpenAICompatibleChatModel:
         messages: list[dict[str, Any]],
         *,
         sampling_params: dict[str, Any] | None = None,
-    ) -> tuple[str, list[dict], dict[str, int]]:
+    ) -> tuple[str, list[dict], dict[str, Any]]:
         """Run one chat-completion call.
 
         Returns ``(text, tool_calls, generation_info)``. ``tool_calls`` is the
@@ -140,6 +140,7 @@ class OpenAICompatibleChatModel:
         generation_info = {
             "prompt_tokens": usage.get("prompt_tokens", 0),
             "completion_tokens": usage.get("completion_tokens", 0),
+            "finish_reason": data["choices"][0].get("finish_reason"),
         }
         return response_content, serialized_tool_calls, generation_info
 

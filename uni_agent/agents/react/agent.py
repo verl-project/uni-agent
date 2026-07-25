@@ -133,6 +133,7 @@ class ReActAgent(Agent):
             sampling_params["max_tokens"] = max_tokens
         content, tool_calls, gen_info = await model.query(transcript, sampling_params=sampling_params)
         info["total_tokens"] = gen_info["prompt_tokens"] + gen_info["completion_tokens"]
+        finish_reason = gen_info.get("finish_reason")
         logger.info(
             f"Prompt Tokens: {gen_info['prompt_tokens']}, Completion Tokens: {gen_info['completion_tokens']} "
             f"(total {info['total_tokens']})"
@@ -144,6 +145,9 @@ class ReActAgent(Agent):
             assistant_msg["tool_calls"] = tool_calls
         transcript.append(assistant_msg)
 
+        if finish_reason == "length":
+            logger.info("Exit: model response was truncated (finish_reason=length).")
+            return "token_limit"
         if cfg.model.max_total_tokens is not None and info["total_tokens"] >= cfg.model.max_total_tokens:
             logger.info(f"Exit: token budget reached ({info['total_tokens']}/{cfg.model.max_total_tokens}).")
             return "token_limit"
@@ -166,9 +170,9 @@ class ReActAgent(Agent):
                 logger.warning(
                     f"⏳ TIMEOUT ({name}): {info['timeouts']}/{cfg.timeout_budget} budget used\n{observation}"
                 )
-            elif tool_result.status == "error":  # a tool raised ToolError, skipped by Toolbox.call
+            elif tool_result.status != "ok":
                 info["errors"] += 1
-                logger.error(f"❌ TOOL ERROR ({name}):\n{observation}")
+                logger.error(f"❌ TOOL {tool_result.status.upper()} ({name}):\n{observation}")
             else:
                 logger.info(f"👀 OBSERVATION ({name}):\n{observation}")
 
@@ -193,7 +197,7 @@ class ReActAgent(Agent):
                         }
                     )
                 return "timeout_limit"
-            if name in _FINISH_TOOLS:
+            if name in _FINISH_TOOLS and tool_result.status == "ok":
                 saw_finish = True
         if saw_finish:
             logger.info("💬 FINISHED: policy called a finish tool.")
