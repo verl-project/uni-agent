@@ -122,11 +122,51 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
     )
     ```
 
-=== "YuanRong"
+=== "OpenYuanrong"
 
-    **Remote or self-hosted service.** [YuanRong](https://docs.openyuanrong.org/zh-cn/latest/index.html) provides elastic sandbox management for distributed agent workloads.
+    **Remote or self-hosted service.** [OpenYuanrong](https://docs.openyuanrong.org/zh-cn/latest/index.html) provides elastic sandbox management for distributed agent workloads.
 
-    Integration and configuration instructions are to be filled.
+    Install the sandbox SDK:
+
+    ```bash
+    pip install akernel_sdk
+    pip install openyuanrong_sdk
+    ```
+
+    Configure the service endpoint and credentials through environment variables:
+
+    ```bash
+    export OPENYUANRONG_SERVER_ADDRESS="<server-address>"
+    export OPENYUANRONG_TOKEN="<token>"
+    # Optional: toggle SSL verification on the reverse tunnel (default "0").
+    export OPENYUANRONG_TUNNEL_SSL_VERIFY="0"
+    ```
+
+    Configure the image, lifecycle timeout, and optional resource limits, mounts, and reverse tunnel:
+
+    ```python
+    from uni_agent.sandbox import SandboxConfig
+
+    config = SandboxConfig(
+        provider="openyuanrong",
+        image="python:3.12",
+        runtime_timeout=3600,
+        sandbox_kwargs={
+            "cpu": 1000,
+            "memory": 2048,
+            "cpu_limit": 4000,
+            "mem_limit": 8192,
+            "idle_timeout": 7200,
+            # Mount a image (e.g. a tool runtime) at a target path.
+            "mounts": [{"target": "/opt/tool", "image_url": "<image-url>"}],
+            # Reverse tunnel: let the sandbox reach a local gateway via 127.0.0.1:<proxy_port>.
+            "upstream": "<gateway-host>:<gateway-port>",
+            "proxy_port": 38197,
+            # Forward sandbox ports to the host.
+            "port_forwardings": [8080],
+        },
+    )
+    ```
 
 ### Start and Stop the Sandbox
 
@@ -250,6 +290,12 @@ After configuring a supported backend above, run the complete connectivity and p
 
     ```bash
     DEBUG_MODE=1 SANDBOX_PROVIDER=modal python examples/quickstart/sandbox/demo.py
+    ```
+
+=== "OpenYuanrong"
+
+    ```bash
+    DEBUG_MODE=1 SANDBOX_PROVIDER=openyuanrong python examples/quickstart/sandbox/demo.py
     ```
 
 Next, you can [run agent inference](agent-inference.md) against a sandbox-backed task.

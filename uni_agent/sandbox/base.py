@@ -157,6 +157,8 @@ class Sandbox(abc.ABC):
 
     #: Registry key for this provider, stamped by ``@register_sandbox``.
     provider: ClassVar[str] = ""
+    #: Whether this sandbox natively supports a long-lived shell session. False by default.
+    supports_shell: ClassVar[bool] = False
 
     @classmethod
     def from_config(cls, config: SandboxConfig) -> Sandbox:
@@ -177,6 +179,21 @@ class Sandbox(abc.ABC):
     async def stop(self) -> None:
         """Terminate the sandbox and release resources."""
         ...
+
+    async def open_shell(
+        self,
+        *,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+    ) -> Any:
+        """Open a long-lived native shell handle (cwd/env persist across runs).
+
+        The handle must expose ``async run(command, *, timeout=...) -> ExecResult``
+        and ``async close()``. :mod:`uni_agent.tools.shell` wraps it as its
+        :class:`~uni_agent.tools.shell.Shell`. Providers set
+        ``supports_shell = True`` when implementing this. Default raises.
+        """
+        raise NotImplementedError(f"{type(self).__name__} does not support native shells")
 
     async def _run_start(self) -> None:
         """Run :meth:`start`, bounding it by the ``SANDBOX_STARTUP_TIMEOUT`` env cap (``<=0`` disables)."""

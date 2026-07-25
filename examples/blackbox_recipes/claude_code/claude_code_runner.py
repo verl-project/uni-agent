@@ -16,17 +16,14 @@ import os
 import shlex
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 import httpx
 
 from examples.blackbox_recipes.claude_code.dataset import extract_image
 from examples.blackbox_recipes.claude_code.reward import build_reward_context, evaluate_in_env
-from examples.blackbox_recipes.sandbox_client import (
-    SandboxClient,
-    extract_upstream,
-    rewrite_gateway_url,
-)
 from uni_agent.gateway.session import SessionHandle
+from uni_agent.sandbox import Sandbox, SandboxConfig, build_sandbox
 
 logger = logging.getLogger(__name__)
 
@@ -34,8 +31,26 @@ DEFAULT_TOOL_IMAGE = "swr.cn-east-3.myhuaweicloud.com/openyuanrong/claude-code-t
 TOOL_TARGET = "/opt/claude-code"
 
 
+def extract_upstream(gateway_url: str) -> str:
+    """Extract host:port from a gateway URL for upstream tunnel config."""
+    parsed = urlparse(gateway_url)
+    return f"{parsed.hostname}:{parsed.port}"
+
+
+def rewrite_gateway_url(
+    gateway_url: str,
+    proxy_port: int = 38197,
+    *,
+    strip_v1: bool = False,
+) -> str:
+    """Rewrite gateway URL to the sandbox-internal tunnel (127.0.0.1:<proxy_port>)."""
+    parsed = urlparse(gateway_url)
+    path = parsed.path.removesuffix("/v1") if strip_v1 else parsed.path
+    return f"http://127.0.0.1:{proxy_port}{path}"
+
+
 class SandboxEnvForReward:
-    """Adapts :class:`SandboxClient` to the async env interface used by reward
+    """Adapts :class:`Sandbox` to the async env interface used by reward
     evaluation (``communicate``, ``write_file``, ``read_file``, ``exec_shell``).
     """
 
@@ -43,9 +58,11 @@ class SandboxEnvForReward:
         self._sandbox = sandbox
 
     async def communicate(self, input: str, timeout=600, check="ignore", error_msg="Command failed") -> str:
-        result = await self._sandbox.run(input, timeout=int(timeout))
+        result = await self._sandbox.exec_shell(input, timeout=int(timeout))
         if check == "raise" and result.exit_code != 0:
-            raise RuntimeError(f"{error_msg}: {result.stdout[:200]}")
+            raise RuntimeError(
+                f"{error_msg} (exit_code={result.exit_code}) stdout={result.stdout[:200]} stderr={result.stderr[:200]}"
+            )
         return result.stdout
 
     async def write_file(self, path: str | Path, content: str) -> None:
@@ -56,9 +73,7 @@ class SandboxEnvForReward:
         return await self.communicate(f"cat {path}")
 
     async def exec_shell(self, command: str, *, workdir=None, timeout=600):
-        if workdir is not None:
-            command = f"cd {shlex.quote(str(workdir))} && {command}"
-        return await self._sandbox.run(command, timeout=int(timeout))
+        return await self._sandbox.exec_shell(command, workdir=workdir, timeout=int(timeout))
 
 
 def extract_task(raw_prompt) -> str:
@@ -194,16 +209,19 @@ async def _create_claude_sandbox(
     image: str,
     sidecar_image: str,
     gateway_url: str,
-    max_retries: int = 10,
-):
-    upstream = extract_upstream(gateway_url) if gateway_url else ""
-    return await SandboxClient.create(
+) -> Sandbox:
+    upstream = extract_upstream(gateway_url) if gateway_url else None
+    config = SandboxConfig(
+        provider=os.getenv("SANDBOX_PROVIDER", "openyuanrong"),
         image=image,
-        sidecar_image=sidecar_image,
-        sidecar_target=TOOL_TARGET,
-        upstream=upstream,
-        max_retries=int(max_retries),
+        sandbox_kwargs={
+            "mounts": [{"target": TOOL_TARGET, "image_url": sidecar_image}],
+            "upstream": upstream,
+        },
     )
+    sandbox = build_sandbox(config)
+    await sandbox.__aenter__(retry=10)
+    return sandbox
 
 
 async def claude_code_runner(
@@ -215,7 +233,6 @@ async def claude_code_runner(
     tool_image: str = DEFAULT_TOOL_IMAGE,
     run_timeout: int = 7200,
     conda_env: str = "testbed",
-    sandbox_max_retries: int = 10,
     **kwargs,
 ) -> None:
     """Run Claude Code inside a sandbox with sidecar tool mount.
@@ -243,13 +260,12 @@ async def claude_code_runner(
         image=image,
         sidecar_image=tool_image,
         gateway_url=gateway_url,
-        max_retries=sandbox_max_retries,
     )
 
     try:
         post_setup_cmd = env_config.get("post_setup_cmd", "")
         if post_setup_cmd:
-            setup_result = await sandbox.run(post_setup_cmd, timeout=120)
+            setup_result = await sandbox.exec_shell(post_setup_cmd, timeout=120)
             if setup_result.exit_code != 0:
                 logger.warning(
                     "post_setup_cmd failed rc=%s: %.300s",
@@ -267,7 +283,7 @@ async def claude_code_runner(
         )
 
         started_at = time.perf_counter()
-        result = await sandbox.run(agent_cmd, timeout=int(run_timeout))
+        result = await sandbox.exec_shell(agent_cmd, timeout=int(run_timeout))
         elapsed = time.perf_counter() - started_at
         logger.info("[sample %d] claude-code finished rc=%s elapsed=%.1fs", sample_index, result.exit_code, elapsed)
         if result.exit_code != 0:
@@ -293,4 +309,4 @@ async def claude_code_runner(
             response = await client.post(session.reward_info_url, json={"reward_info": reward_info})
             response.raise_for_status()
     finally:
-        await sandbox.cleanup()
+        await sandbox.stop()
