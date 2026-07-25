@@ -68,11 +68,7 @@ class ReActAgent(Agent):
             base_url=cfg.model.base_url,
             api_key=cfg.model.api_key,
             model_name=cfg.model.model_name,
-            sampling_params={
-                "temperature": cfg.model.temperature,
-                "top_p": cfg.model.top_p,
-                "top_k": cfg.model.top_k,
-            },
+            sampling_params=cfg.model.sampling_params(),
             tools_schemas=toolbox.schemas(),
         )
 
@@ -132,11 +128,7 @@ class ReActAgent(Agent):
                 return "token_limit"
             max_tokens = min(max_tokens, remaining)
 
-        sampling_params: dict[str, Any] = {
-            "temperature": cfg.model.temperature,
-            "top_p": cfg.model.top_p,
-            "top_k": cfg.model.top_k,
-        }
+        sampling_params: dict[str, Any] = cfg.model.sampling_params()
         if max_tokens is not None:  # both budgets unset -> let the server run to EOS
             sampling_params["max_tokens"] = max_tokens
         content, tool_calls, gen_info = await model.query(transcript, sampling_params=sampling_params)

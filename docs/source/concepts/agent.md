@@ -20,10 +20,12 @@ class AgentConfig(BaseModel):
 `ModelConfig` contains:
 
 - `base_url`, `api_key`, and `model_name`.
-- `temperature`, `top_p`, and `top_k`.
+- Optional `temperature`, `top_p`, and `top_k` overrides.
 - Per-turn and episode token budgets.
 
-The model endpoint is runtime state. Dataset rows and Task YAML should define sampling behavior, but the live runner or Gateway injects `base_url`, credentials, and served model name last.
+The model endpoint is runtime state. Dataset rows and Task YAML may override sampling behavior; omitted sampling
+fields inherit the endpoint default (the rollout configuration during RL training). The live runner or Gateway
+injects `base_url`, credentials, and served model name last.
 
 ## Agent Contract
 
