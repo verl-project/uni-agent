@@ -78,6 +78,16 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
     export VOLCE_SECRET_KEY="<secret-key>"
     ```
 
+    To spread load across several veFaaS functions, pass a comma-separated list
+    to each variable; the i-th id pairs with the i-th route (so the two lists
+    must have the same length), and each sandbox binds to one randomly chosen
+    pair for its lifetime:
+
+    ```bash
+    export VEFAAS_FUNCTION_ID="<function-id-1>,<function-id-2>"
+    export VEFAAS_FUNCTION_ROUTE="<function-route-1>,<function-route-2>"
+    ```
+
     Create the sandbox configuration:
 
     ```python

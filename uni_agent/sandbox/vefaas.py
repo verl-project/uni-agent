@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import random
 import uuid
 from time import monotonic
 from typing import TYPE_CHECKING, Any
@@ -31,6 +32,58 @@ def _to_vefaas_image(image: str) -> str:
         return image.replace("swerebench/", "enterprise-public-cn-beijing.cr.volces.com/swe-rebench/") + ":latest"
     else:
         raise ValueError(f"Unsupported image: {image}")
+
+
+def _split_env_list(raw: str | None) -> list[str]:
+    """Parse a comma-separated env value into a list of trimmed, non-empty items."""
+    if not raw:
+        return []
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def _function_pairs() -> list[tuple[str, str]]:
+    """Return all configured ``(function_id, function_route)`` pairs from env.
+
+    ``VEFAAS_FUNCTION_ID`` / ``VEFAAS_FUNCTION_ROUTE`` may each list several
+    comma-separated values; the i-th id pairs with the i-th route (one route per
+    veFaaS function). A single value keeps the original single-function behaviour.
+    """
+    ids = _split_env_list(os.getenv("VEFAAS_FUNCTION_ID"))
+    routes = _split_env_list(os.getenv("VEFAAS_FUNCTION_ROUTE"))
+
+    if not ids:
+        raise ValueError("VEFAAS_FUNCTION_ID is not set")
+    if not routes:
+        raise ValueError("VEFAAS_FUNCTION_ROUTE is not set")
+    if len(ids) != len(routes):
+        raise ValueError(
+            f"VEFAAS_FUNCTION_ID has {len(ids)} entries but VEFAAS_FUNCTION_ROUTE has {len(routes)}; "
+            "they must pair up one-to-one"
+        )
+    return list(zip(ids, routes, strict=True))
+
+
+def _select_function_pair() -> tuple[str, str]:
+    """Pick one ``(function_id, function_route)`` pair at random from the env config.
+
+    One pair is chosen per sandbox so load spreads evenly across functions
+    without any shared/coordinated state across processes.
+    """
+    return random.choice(_function_pairs())
+
+
+def _install_command(token: str) -> str:
+    """Return the sandbox bootstrap command that starts swerex."""
+    # Download-then-exec instead of `curl ... | bash`: with a pipe, the shell
+    # running the install script is a child of the pipeline, never PID 1, so the
+    # script's SIGTERM trap can't fire on KillSandbox and the sandbox hangs in
+    # Terminating until the grace window expires. Here the platform runs this
+    # command through a shell (the old `|` pipe relied on that too), so `exec`
+    # replaces PID 1 with the script's bash and it receives SIGTERM directly.
+    return (
+        "curl -fsSL https://vefaas-swe.tos-cn-beijing.ivolces.com/swe-rex/install_1.4.0.sh "
+        f"-o /tmp/swe-rex-install.sh && exec bash /tmp/swe-rex-install.sh {token}"
+    )
 
 
 class _VefaasRuntime:
@@ -163,15 +216,25 @@ class _VefaasRuntime:
             logger.debug("veFaaS runtime close() failed", exc_info=True)
 
 
-def _get_vefaas_client():
-    """Build a Volcengine veFaaS API client (blocking SDK; call off the event loop)."""
+def _get_vefaas_client(
+    access_key: str | None = None,
+    secret_key: str | None = None,
+    region: str | None = None,
+    proxy: str | None = None,
+):
+    """Build a Volcengine veFaaS API client (blocking SDK; call off the event loop).
+
+    Args default to the standard env vars (``VOLCE_ACCESS_KEY`` /
+    ``VOLCE_SECRET_KEY`` / ``VEFAAS_REGION`` / ``SANDBOX_PROXY``); callers that
+    build their own client pool (e.g. the stress driver) may pass them explicitly.
+    """
     import volcenginesdkcore
     import volcenginesdkvefaas
 
-    access_key = os.getenv("VOLCE_ACCESS_KEY") or os.getenv("VOLCENGINE_ACCESS_KEY")
-    secret_key = os.getenv("VOLCE_SECRET_KEY") or os.getenv("VOLCENGINE_SECRET_KEY")
-    region = os.getenv("VEFAAS_REGION", "cn-beijing")
-    proxy = os.getenv("SANDBOX_PROXY")
+    access_key = access_key or os.getenv("VOLCE_ACCESS_KEY") or os.getenv("VOLCENGINE_ACCESS_KEY")
+    secret_key = secret_key or os.getenv("VOLCE_SECRET_KEY") or os.getenv("VOLCENGINE_SECRET_KEY")
+    region = region or os.getenv("VEFAAS_REGION", "cn-beijing")
+    proxy = proxy if proxy is not None else os.getenv("SANDBOX_PROXY")
 
     if not (access_key and secret_key):
         raise ValueError("VefaasSandbox needs Volcengine credentials: set VOLCE_ACCESS_KEY / VOLCE_SECRET_KEY.")
@@ -203,20 +266,20 @@ class VefaasSandbox(Sandbox):
         self.image = image
         self.runtime_timeout = runtime_timeout
         self.startup_timeout = startup_timeout
-        self._function_id: str = os.getenv("VEFAAS_FUNCTION_ID")
-        self._function_route: str = os.getenv("VEFAAS_FUNCTION_ROUTE")
+        # A sandbox binds to one (function_id, function_route) pair for its whole
+        # lifetime; when several are configured, one pair is picked at random.
+        self._function_id, self._function_route = _select_function_pair()
         self._client: Any | None = None
         self._sandbox_id: str | None = None
         self._runtime: _VefaasRuntime | None = None
-
-        assert self._function_id is not None, "VEFAAS_FUNCTION_ID is not set"
-        assert self._function_route is not None, "VEFAAS_FUNCTION_ROUTE is not set"
 
     @classmethod
     def from_config(cls, config: SandboxConfig) -> VefaasSandbox:
         # Standard fields map to constructor args (extras like startup_timeout ride in
         # sandbox_kwargs). function_id / function_route / proxy come from env vars
-        # (VEFAAS_FUNCTION_ID / VEFAAS_FUNCTION_ROUTE / SANDBOX_PROXY).
+        # (VEFAAS_FUNCTION_ID / VEFAAS_FUNCTION_ROUTE / SANDBOX_PROXY). The two
+        # function env vars may each hold a comma-separated list of paired values;
+        # each sandbox binds to one randomly chosen pair.
         return cls(
             image=_to_vefaas_image(config.image), runtime_timeout=config.runtime_timeout, **config.sandbox_kwargs
         )
@@ -231,9 +294,7 @@ class VefaasSandbox(Sandbox):
         self._client = _get_vefaas_client()
 
         token = uuid.uuid4().hex
-        command = (
-            f"curl -fsSL https://vefaas-swe.tos-cn-beijing.ivolces.com/swe-rex/install_1.4.0.sh | bash -s -- {token}"
-        )
+        command = _install_command(token)
         instance_image_info = volcenginesdkvefaas.InstanceImageInfoForCreateSandboxInput(
             image=self.image,
             port=_RUNTIME_PORT,

@@ -336,6 +336,68 @@ def test_seed_exec_merges_caller_env_over_base():
     assert env["PYTHONPATH"] == "/custom"  # caller-provided values pass through untouched
 
 
+# --------------------------- veFaaS multi-function selection ---------------------------
+
+
+def test_vefaas_single_function_pair(monkeypatch):
+    monkeypatch.setenv("VEFAAS_FUNCTION_ID", "fid")
+    monkeypatch.setenv("VEFAAS_FUNCTION_ROUTE", "route")
+    from uni_agent.sandbox.vefaas import VefaasSandbox
+
+    sb = VefaasSandbox()
+    assert (sb._function_id, sb._function_route) == ("fid", "route")
+
+
+def test_vefaas_multi_function_pairs_by_index(monkeypatch):
+    # Comma-separated ids/routes pair up one-to-one; whitespace is trimmed.
+    monkeypatch.setenv("VEFAAS_FUNCTION_ID", "fid1, fid2 ,fid3")
+    monkeypatch.setenv("VEFAAS_FUNCTION_ROUTE", "route1,route2,route3")
+    from uni_agent.sandbox import vefaas as vefaas_mod
+
+    expected = [("fid1", "route1"), ("fid2", "route2"), ("fid3", "route3")]
+    choices = iter(expected)
+
+    def pick(items):
+        assert items == expected
+        return next(choices)
+
+    monkeypatch.setattr(vefaas_mod.random, "choice", pick)
+    seen = []
+    for fid, route in expected:
+        sb = vefaas_mod.VefaasSandbox()
+        assert (sb._function_id, sb._function_route) == (fid, route)
+        seen.append((sb._function_id, sb._function_route))
+    assert seen == expected
+
+
+def test_vefaas_mismatched_pair_counts_raise(monkeypatch):
+    monkeypatch.setenv("VEFAAS_FUNCTION_ID", "fid1,fid2")
+    monkeypatch.setenv("VEFAAS_FUNCTION_ROUTE", "route1")
+    from uni_agent.sandbox.vefaas import VefaasSandbox
+
+    with pytest.raises(ValueError, match="pair up one-to-one"):
+        VefaasSandbox()
+
+
+def test_vefaas_missing_function_env_raises(monkeypatch):
+    monkeypatch.delenv("VEFAAS_FUNCTION_ID", raising=False)
+    monkeypatch.setenv("VEFAAS_FUNCTION_ROUTE", "route")
+    from uni_agent.sandbox.vefaas import VefaasSandbox
+
+    with pytest.raises(ValueError, match="VEFAAS_FUNCTION_ID is not set"):
+        VefaasSandbox()
+
+
+def test_vefaas_install_command_downloads_then_execs():
+    from uni_agent.sandbox.vefaas import _install_command
+
+    command = _install_command("token123")
+    assert command.startswith("curl -fsSL ")
+    assert " -o /tmp/swe-rex-install.sh && exec bash /tmp/swe-rex-install.sh token123" in command
+    assert "| bash" not in command
+    assert "bash -s" not in command
+
+
 if __name__ == "__main__":
     import sys
 
