@@ -101,9 +101,7 @@ The built-in Task Runner posts:
 
 The Agent Framework reads the session reward, applies it to finalized trajectories, and writes a sparse token-level `rm_scores` tensor with the reward on the final token.
 
-Trainability is session-scoped. When `trainable` is `false`, finalized trajectories are still written and tagged
-as successful, but their TransferQueue `response_mask` is all zero so they do not contribute policy gradients.
-Missing trainability defaults to `true`.
+Trainability is session-scoped. When `trainable` is `false`, finalized trajectories are still written and tagged as successful, but their TransferQueue `response_mask` and `loss_mask` are all zero so they do not contribute policy gradients, normalization counts, or auxiliary losses. Missing trainability defaults to `true`.
 
 If no Task reward is reported, an optional verl Reward Loop Worker can score the final trajectory. Without either source, `rm_scores` remains zero and the framework emits a warning.
 

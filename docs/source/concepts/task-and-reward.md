@@ -120,10 +120,7 @@ Custom Tasks may return scalar, dense, rubric-based, or multi-component rewards.
 untrainable. The switch defaults to `false`. This decision belongs to the Task and is independent of the evaluation
 outcome.
 
-An untrainable trajectory is still stored with its reward and token data, but its emitted `response_mask` is zeroed
-so PPO, entropy, and KL losses contribute no gradient. Its original model-token mask remains in `loss_mask` for
-sequence alignment and stable batch normalization. TransferQueue tags also carry `trainable` for filtering and
-diagnostics.
+An untrainable trajectory is still stored with its reward and token data, but its emitted `response_mask` is zeroed so PPO, entropy, and KL losses contribute no gradient. Its emitted `loss_mask` is also zeroed so normalization and auxiliary losses exclude it. TransferQueue tags still carry `trainable` for filtering and diagnostics.
 
 ## Dataset Contract
 

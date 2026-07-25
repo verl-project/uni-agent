@@ -921,10 +921,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
             "prompts": prompts,
             "responses": responses,
             "response_mask": response_mask,
-            # Keep the source mask for model-output alignment and global token
-            # normalization. VERL's PPO/rejection path uses response_mask as the
-            # effective gradient mask.
-            "loss_mask": source_response_mask,
+            "loss_mask": response_mask,
             "input_ids": input_ids,
             "attention_mask": attention_mask,
             "position_ids": position_ids,
@@ -945,7 +942,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         extra_fields.pop("materialization_reason", None)
         field.update(extra_fields)
         field["response_mask"] = response_mask
-        field["loss_mask"] = source_response_mask
+        field["loss_mask"] = response_mask
         field.pop("multi_modal_data", None)
         for key in ("uid", "raw_prompt", "data_source", "reward_model", "extra_info", "tools_kwargs", "agent_name"):
             if key in sample_fields:

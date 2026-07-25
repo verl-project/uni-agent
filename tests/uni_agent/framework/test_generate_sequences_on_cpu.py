@@ -660,7 +660,7 @@ async def test_generate_sequences_masks_invalid_trajectory_without_dropping_it(f
     assert batch["keys"] == ["uid-0_0_0"]
     assert batch["fields"]["responses"][0].tolist() == [20, 21, 22]
     assert batch["fields"]["response_mask"][0].tolist() == [0, 0, 0]
-    assert batch["fields"]["loss_mask"][0].tolist() == [1, 0, 1]
+    assert batch["fields"]["loss_mask"][0].tolist() == [0, 0, 0]
     assert batch["fields"]["rm_scores"][0].tolist() == [0.0, 0.0, 0.5]
     assert batch["tags"][0]["status"] == "success"
     assert batch["tags"][0]["trainable"] is False
