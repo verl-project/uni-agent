@@ -22,6 +22,7 @@ Every Task configuration inherits from `TaskConfig`:
 - `agent`: concrete Agent configuration.
 - `prompt`: OpenAI-style messages.
 - `metadata`: sample-specific data used by execution and scoring.
+- `mask_unfinished_trajectories`: opt in to masking unfinished Agent trajectories; defaults to `false`.
 
 Task-specific configs can add validated fields:
 
@@ -66,11 +67,13 @@ class MyTask(Task):
                 sandbox,
                 agent_result,
             )
+            trainable = not config.mask_unfinished_trajectories or agent_result.finished
 
         return TaskResult(
             reward=score,
             accuracy=score,
             info={"score": score},
+            trainable=trainable,
         )
 ```
 
@@ -105,10 +108,22 @@ TaskResult(
     reward=float(result["resolved"]),
     accuracy=float(result["resolved"]),
     info=result,
+    trainable=trainable,
 )
 ```
 
-Custom Tasks may return scalar, dense, rubric-based, or multi-component rewards. The framework consumes `TaskResult.reward`; additional metrics belong in `accuracy` and `info`.
+Custom Tasks may return scalar, dense, rubric-based, or multi-component rewards. The framework consumes
+`TaskResult.reward`; additional metrics belong in `accuracy` and `info`.
+
+`TaskResult.trainable` defaults to `True`. When `mask_unfinished_trajectories=true`, the built-in SWE Tasks inspect
+`AgentResult.finished`; unfinished ReAct runs and nonzero Claude Code exits therefore make the trajectory
+untrainable. The switch defaults to `false`. This decision belongs to the Task and is independent of the evaluation
+outcome.
+
+An untrainable trajectory is still stored with its reward and token data, but its emitted `response_mask` is zeroed
+so PPO, entropy, and KL losses contribute no gradient. Its original model-token mask remains in `loss_mask` for
+sequence alignment and stable batch normalization. TransferQueue tags also carry `trainable` for filtering and
+diagnostics.
 
 ## Dataset Contract
 

@@ -43,7 +43,7 @@ class ReActConfig(AgentConfig):
     )
     timeout_budget: int = Field(
         default=3,
-        description="Tool-call timeouts tolerated per episode before it stops (exit_reason='timeout_limit').",
+        description="Tool-call timeouts tolerated per episode before it stops with a timeout-limit reason.",
     )
 
 
@@ -81,32 +81,32 @@ class ReActAgent(Agent):
             "timeouts": 0,
             "errors": 0,
             "total_tokens": 0,
-            "exit_reason": "unknown",
         }
+        termination_reason = "unknown"
         try:
             async with toolbox.entered(retry=3, timeout=60):
                 for step_idx in range(1, cfg.max_steps + 1):
                     trajectory_info["steps"] = step_idx
                     stop_reason = await self.step(cfg, model, toolbox, transcript, trajectory_info)
                     if stop_reason != "completed":
-                        trajectory_info["exit_reason"] = stop_reason
+                        termination_reason = stop_reason
                         break
                 else:  # loop ran the full step budget without an early stop
-                    trajectory_info["exit_reason"] = "max_steps"
+                    termination_reason = "max_steps"
                     logger.warning(f"Reached max steps ({cfg.max_steps}) without finishing.")
         except Exception as exc:  # keep the partial transcript; the task buckets the failure
             logger.exception("react loop failed at step %s", trajectory_info["steps"])
-            trajectory_info["exit_reason"] = "unknown_error"
+            termination_reason = "unknown_error"
             trajectory_info["error"] = f"{type(exc).__name__}: {exc}"
         finally:
             await model.aclose()  # release the reused HTTP session
 
         logger.info(
-            f"Episode done: exit_reason={trajectory_info['exit_reason']} steps={trajectory_info['steps']} "
+            f"Episode done: termination_reason={termination_reason} steps={trajectory_info['steps']} "
             f"tool_calls={trajectory_info['num_tool_calls']} timeouts={trajectory_info['timeouts']} "
             f"errors={trajectory_info['errors']} total_tokens={trajectory_info['total_tokens']}"
         )
-        return AgentResult(transcript=transcript, info=trajectory_info)
+        return AgentResult(transcript=transcript, info=trajectory_info, finished=termination_reason == "finished")
 
     async def step(
         self,

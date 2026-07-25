@@ -46,7 +46,8 @@ The Task has already started the Sandbox. The Agent must not stop it.
 
 - `output`: final structured output.
 - `transcript`: messages and Tool observations produced by a white-box loop.
-- `info`: implementation-specific metadata such as exit reason, token counts, or process status.
+- `info`: implementation-specific metadata such as token counts or process status.
+- `finished`: whether the episode completed normally; defaults to `false`.
 
 The Task decides how the resulting Sandbox state and AgentResult are scored.
 
@@ -59,6 +60,8 @@ The built-in ReAct Agent demonstrates the white-box pattern:
 3. Execute returned Tool calls.
 4. Append Tool observations to the transcript.
 5. Stop on a plain assistant answer, `submit`/`finish`, token limit, timeout budget, or max steps.
+
+ReAct sets `AgentResult.finished=true` only for a plain assistant answer or an explicit `submit`/`finish` call.
 
 ReAct configuration exposes the loop:
 
@@ -87,6 +90,8 @@ The Claude Code Agent demonstrates the black-box pattern:
 2. Convert `ModelConfig` into the environment variables expected by the harness.
 3. Launch the harness through `sandbox.exec()`.
 4. Return process metadata while the Task evaluates the modified Sandbox.
+
+Claude Code sets `AgentResult.finished` from whether its process exit code is `0`.
 
 ```yaml
 agent:

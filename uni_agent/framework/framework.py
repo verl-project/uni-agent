@@ -724,10 +724,12 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         lines = [f"session {session_id}: {len(trajectories)} trajectory(ies)"]
         for i, traj in enumerate(trajectories):
             model_tokens = sum(traj.response_mask) if traj.response_mask else 0
+            trainable = traj.reward_info.get("trainable", True)
             reason = (traj.extra_fields or {}).get("materialization_reason")
             lines.append(
                 f"  [{i}] turns={traj.num_turns} prompt_tokens={len(traj.prompt_ids)} "
                 f"response_tokens={len(traj.response_ids)} model_tokens={model_tokens} "
+                f"trainable={trainable} "
                 f"logprobs={'yes' if traj.response_logprobs else 'no'} "
                 f"experts={'yes' if traj.routed_experts is not None else 'no'} "
                 f"reward_score={traj.reward_score} reward_info={traj.reward_info or {}}"
@@ -777,6 +779,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         extra = traj.extra_fields or {}
         return {
             "num_turns": traj.num_turns,
+            "trainable": traj.reward_info.get("trainable", True),
             "reward_score": traj.reward_score,
             "reward_info": traj.reward_info or {},
             "reward_extra_info": extra.get("reward_extra_info"),
@@ -793,8 +796,9 @@ class OpenAICompatibleAgentFramework(AgentFramework):
     ) -> list[tuple[float, dict[str, object]]] | None:
         """Score from the reward the runner posted to the session, if any.
 
-        reward_score = the posted ``reward``; anything else posted (e.g. ``acc``) rides
-        along as reward_extra_info. See ``task_runner._post_reward_info`` for what's posted.
+        reward_score = the posted ``reward``; anything else posted (e.g. ``acc`` or
+        ``trainable``) rides along as reward_extra_info. See
+        ``task_runner._post_reward_info`` for what's posted.
         """
         reward_info = dict(session_trajectories[-1].reward_info or {})
         reward = reward_info.pop("reward", None)
@@ -893,7 +897,9 @@ class OpenAICompatibleAgentFramework(AgentFramework):
     ) -> tuple[dict[str, object], dict[str, object]]:
         prompts = torch.tensor(trajectory.prompt_ids, dtype=torch.long)
         responses = torch.tensor(trajectory.response_ids, dtype=torch.long)
-        response_mask = torch.tensor(trajectory.response_mask, dtype=torch.long)
+        source_response_mask = torch.tensor(trajectory.response_mask, dtype=torch.long)
+        trainable = trajectory.reward_info.get("trainable", True)
+        response_mask = source_response_mask if trainable else torch.zeros_like(source_response_mask)
         input_ids = torch.cat([prompts, responses], dim=0)
         attention_mask = torch.ones_like(input_ids, dtype=torch.long)
         multi_modal_inputs = compute_multi_modal_inputs(
@@ -915,7 +921,10 @@ class OpenAICompatibleAgentFramework(AgentFramework):
             "prompts": prompts,
             "responses": responses,
             "response_mask": response_mask,
-            "loss_mask": response_mask,
+            # Keep the source mask for model-output alignment and global token
+            # normalization. VERL's PPO/rejection path uses response_mask as the
+            # effective gradient mask.
+            "loss_mask": source_response_mask,
             "input_ids": input_ids,
             "attention_mask": attention_mask,
             "position_ids": position_ids,
@@ -935,6 +944,8 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         extra_fields = dict(trajectory.extra_fields)
         extra_fields.pop("materialization_reason", None)
         field.update(extra_fields)
+        field["response_mask"] = response_mask
+        field["loss_mask"] = source_response_mask
         field.pop("multi_modal_data", None)
         for key in ("uid", "raw_prompt", "data_source", "reward_model", "extra_info", "tools_kwargs", "agent_name"):
             if key in sample_fields:
@@ -957,6 +968,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
             "response_len": response_len,
             "seq_len": prompt_len + response_len,
             "uid": uid,
+            "trainable": trainable,
         }
         materialization_reason = trajectory.extra_fields.get("materialization_reason")
         if materialization_reason is not None:

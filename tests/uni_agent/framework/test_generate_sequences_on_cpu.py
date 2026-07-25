@@ -598,6 +598,7 @@ async def test_generate_sequences_writes_tq_schema_for_each_session(monkeypatch,
         "uid": "uid-0",
         "materialization_reason": "max_response_length",
     }
+    assert tag["trainable"] is True
     assert "length_truncated" not in tag
     assert "traj_exit_reason" not in tag
     assert "materialization_reason" not in fields
@@ -633,6 +634,37 @@ async def test_generate_sequences_writes_tq_schema_for_each_session(monkeypatch,
     assert tu.get(fields, "global_steps") == [7]
     assert fields["num_turns"].tolist() == [2]
     assert "multi_modal_data" not in fields.keys()
+
+
+@pytest.mark.asyncio
+async def test_generate_sequences_masks_invalid_trajectory_without_dropping_it(fake_tq):
+    runtime = _FakeGatewayManager(
+        {
+            "session-sample-0-rollout-0": [
+                _trajectory(
+                    response_ids=[20, 21, 22],
+                    response_mask=[1, 0, 1],
+                    reward_info={"reward": 0.5, "trainable": False},
+                )
+            ]
+        }
+    )
+    framework = await _build_framework_with_agent_runners(
+        agent_runners={"runner": _inline_runner_config(_async_noop_runner)},
+        gateway_manager=runtime,
+    )
+
+    await framework.generate_sequences(_build_prompts(count=1, global_steps=7))
+
+    batch = fake_tq.batch_puts[0]
+    assert batch["keys"] == ["uid-0_0_0"]
+    assert batch["fields"]["responses"][0].tolist() == [20, 21, 22]
+    assert batch["fields"]["response_mask"][0].tolist() == [0, 0, 0]
+    assert batch["fields"]["loss_mask"][0].tolist() == [1, 0, 1]
+    assert batch["fields"]["rm_scores"][0].tolist() == [0.0, 0.0, 0.5]
+    assert batch["tags"][0]["status"] == "success"
+    assert batch["tags"][0]["trainable"] is False
+    assert fake_tq.puts == [{"key": "uid-0", "partition_id": "train", "tag": {"status": "finished"}}]
 
 
 def test_align_routed_experts_preserves_backend_dtype():

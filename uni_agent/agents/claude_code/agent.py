@@ -128,7 +128,10 @@ class ClaudeCodeAgent(Agent):
         else:
             logger.info("claude_code: claude finished (exit 0)\n--- stdout (tail) ---\n%s", out_tail)
 
-        return AgentResult(info={"exit_code": proc.exit_code, "stdout_tail": out_tail, "stderr_tail": err_tail})
+        return AgentResult(
+            info={"exit_code": proc.exit_code, "stdout_tail": out_tail, "stderr_tail": err_tail},
+            finished=proc.exit_code == 0,
+        )
 
     # ----- helpers -----
     async def _ensure_claude(self, sandbox: Sandbox) -> None:

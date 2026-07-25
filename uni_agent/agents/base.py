@@ -72,11 +72,12 @@ class AgentConfig(BaseModel):
 
 @dataclasses.dataclass
 class AgentResult:
-    """Artifacts one agent produced for an episode -- the task scores these."""
+    """Artifacts one Agent produced for an episode."""
 
     output: dict[str, Any] = dataclasses.field(default_factory=dict)
     transcript: list[dict[str, Any]] = dataclasses.field(default_factory=list)
     info: dict[str, Any] = dataclasses.field(default_factory=dict)
+    finished: bool = False
 
 
 class Agent(ABC):

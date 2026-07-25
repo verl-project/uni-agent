@@ -62,22 +62,21 @@ async def run_task(
         await _post_reward_info(session.reward_info_url, result)
         reward_posted = True
     logger.info(
-        "run_task done: task=%s reward=%s acc=%s reward_posted=%s",
+        "run_task done: task=%s reward=%s acc=%s trainable=%s reward_posted=%s",
         task_name,
         result.reward,
         result.accuracy,
+        result.trainable,
         reward_posted,
     )
     return result
 
 
 async def _post_reward_info(reward_info_url: str, result: TaskResult) -> None:
-    """Best-effort POST of the task reward + accuracy to the gateway session."""
+    """Best-effort POST of task reward, accuracy, and trajectory validity."""
     import aiohttp
 
-    reward_info: dict[str, Any] = {"reward": result.reward}
-    if result.accuracy is not None:
-        reward_info["acc"] = result.accuracy
+    reward_info = _reward_info_from_result(result)
     try:
         timeout = aiohttp.ClientTimeout(total=None)
         async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -86,3 +85,16 @@ async def _post_reward_info(reward_info_url: str, result: TaskResult) -> None:
         logger.debug("posted reward_info to %s: %s", reward_info_url, reward_info)
     except Exception as exc:  # noqa: BLE001 - reward-info is best-effort telemetry
         logger.warning("failed to post reward_info to %s: %s: %s", reward_info_url, type(exc).__name__, exc)
+
+
+def _reward_info_from_result(result: TaskResult) -> dict[str, Any]:
+    """Build the session reward payload consumed by the trajectory framework."""
+    if type(result.trainable) is not bool:
+        raise ValueError("TaskResult.trainable must be a bool")
+    reward_info: dict[str, Any] = {
+        "reward": result.reward,
+        "trainable": result.trainable,
+    }
+    if result.accuracy is not None:
+        reward_info["acc"] = result.accuracy
+    return reward_info
