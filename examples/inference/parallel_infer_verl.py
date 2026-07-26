@@ -118,6 +118,9 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
     rollout.response_length = response_length
     rollout.tensor_model_parallel_size = args.tensor_parallel_size
     rollout.gpu_memory_utilization = args.gpu_memory_utilization
+    rollout.calculate_log_probs = True
+    rollout.enable_rollout_routing_replay = args.enable_rollout_routing_replay
+    rollout.disable_log_stats = False
 
     # Gateway tool-call parser: the gateway decodes tool calls from raw tokens, so
     # this must match the model's chat template (the analog of vLLM's
@@ -325,6 +328,11 @@ def main() -> None:
         default="vllm",
         choices=["vllm", "sglang"],
         help="Inference engine backend.",
+    )
+    parser.add_argument(
+        "--enable-rollout-routing-replay",
+        action="store_true",
+        help="Enable R3 routed-expert capture in the rollout engine for routing-replay diagnostics.",
     )
     parser.add_argument("--nnodes", type=int, default=1, help="Number of nodes to run the engine on.")
     parser.add_argument("--n-gpus-per-node", type=int, default=8, help="Number of GPUs per node.")
