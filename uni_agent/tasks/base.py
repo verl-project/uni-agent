@@ -67,11 +67,7 @@ class TaskConfig(BaseModel):
 
 @dataclasses.dataclass
 class TaskResult:
-    """Outcome of one task episode.
-
-    ``finished`` reports the Agent's factual completion state. Training
-    policy belongs to the Framework and must not be decided by the Task.
-    """
+    """Outcome of one task episode."""
 
     reward: Any
     accuracy: float | None = None
