@@ -52,7 +52,6 @@ class SWEREBenchTask(Task):
             f"starting swe_rebench task (instance_id={instance_id}, run_gold_patch={cfg.run_gold_patch})\n"
             f"task config: {json.dumps(task_config_dump, indent=2)}"
         )
-        finished = True
         async with self.build_sandbox() as sandbox:
             # Clean future history before anything reads the repo.
             await sandbox.exec_shell(_GIT_CLEAN_HISTORY, workdir="/testbed")
@@ -61,6 +60,7 @@ class SWEREBenchTask(Task):
                 logger.info("applying gold patch to /testbed")
                 await sandbox.write_file("/tmp/gold_patch.patch", sample["patch"])
                 await sandbox.exec(["git", "apply", "--whitespace=fix", "/tmp/gold_patch.patch"], workdir="/testbed")
+                finished = True
             else:
                 agent = self.build_agent()
                 messages = cfg.prompt

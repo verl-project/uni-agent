@@ -161,10 +161,6 @@ class ReActAgent(Agent):
             logger.info(f"Exit: token budget reached ({info['total_tokens']}/{cfg.model.max_total_tokens}).")
             return "token_limit"
 
-        # A truncated turn never counts as a finish, and its tool calls are never
-        # dispatched: arguments decoded out of a cut-off response can be half
-        # written. The Gateway also reports length with an empty message once the
-        # session's response budget is spent.
         if finish_reason == "length":
             logger.info("Exit: response truncated at a token cap.")
             return "token_limit"
