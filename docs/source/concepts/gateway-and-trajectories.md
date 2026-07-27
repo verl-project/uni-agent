@@ -103,7 +103,7 @@ The Agent Framework reads the session reward, applies it to finalized trajectori
 
 Agent completion is factual session metadata; the Framework, not the Task,
 decides how training consumes it. When the training configuration enables
-`mask_unfinished_trajectories`, a session with `finished=false` is still
+`mask_unfinished_episode`, a session with `finished=false` is still
 written and tagged as successful, but its TransferQueue `response_mask` and
 `loss_mask` are all zero so it does not contribute policy gradients,
 normalization counts, or auxiliary losses.
@@ -157,7 +157,7 @@ actor_rollout_ref.rollout.custom.agent_framework
 Important knobs include:
 
 - `gateway_count`: Gateway actor pool size.
-- `mask_unfinished_trajectories`: zeroes training masks for sessions that report
+- `mask_unfinished_episode`: zeroes training masks for sessions that report
   `finished=false`. Sessions without completion metadata remain trainable.
   Defaults to `false`.
 - `enable_last_assistant_rollback`: reuses a chain when only its latest Assistant

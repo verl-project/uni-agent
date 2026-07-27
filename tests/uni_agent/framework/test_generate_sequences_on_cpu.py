@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 import numpy as np
 import pytest
@@ -82,13 +83,13 @@ async def _build_framework_with_agent_runners(
     n: int = 1,
     val_n: int = 1,
     log_dir: str | None = None,
-    mask_unfinished_trajectories: bool = False,
+    mask_unfinished_episode: bool = False,
 ):
     from omegaconf import OmegaConf
 
     agent_framework_cfg: dict[str, object] = {
         "agent_runners": agent_runners,
-        "mask_unfinished_trajectories": mask_unfinished_trajectories,
+        "mask_unfinished_episode": mask_unfinished_episode,
     }
     if log_dir is not None:
         agent_framework_cfg["log_dir"] = log_dir
@@ -661,7 +662,7 @@ async def test_generate_sequences_masks_unfinished_trajectory_without_dropping_i
     framework = await _build_framework_with_agent_runners(
         agent_runners={"runner": _inline_runner_config(_async_noop_runner)},
         gateway_manager=runtime,
-        mask_unfinished_trajectories=True,
+        mask_unfinished_episode=True,
     )
 
     await framework.generate_sequences(_build_prompts(count=1, global_steps=7))
@@ -726,7 +727,7 @@ async def test_masking_keeps_trajectory_trainable_when_completion_metadata_is_mi
     framework = await _build_framework_with_agent_runners(
         agent_runners={"runner": _inline_runner_config(_async_noop_runner)},
         gateway_manager=runtime,
-        mask_unfinished_trajectories=True,
+        mask_unfinished_episode=True,
     )
 
     await framework.generate_sequences(_build_prompts(count=1, global_steps=7))
@@ -737,12 +738,37 @@ async def test_masking_keeps_trajectory_trainable_when_completion_metadata_is_mi
 
 
 @pytest.mark.asyncio
+async def test_generate_sequences_reports_unfinished_episode_count(fake_tq, caplog):
+    # A session materializing two trajectories is still one episode: completion is
+    # session-level metadata copied onto every trajectory it produced.
+    runtime = _FakeGatewayManager(
+        {
+            "session-sample-0-rollout-0": [
+                _trajectory(reward_info={"reward": 0.5, "finished": False}),
+                _trajectory(reward_info={"reward": 0.5, "finished": False}),
+            ]
+        }
+    )
+    framework = await _build_framework_with_agent_runners(
+        agent_runners={"runner": _inline_runner_config(_async_noop_runner)},
+        gateway_manager=runtime,
+        mask_unfinished_episode=True,
+    )
+
+    with caplog.at_level(logging.INFO, logger="uni_agent.framework.framework"):
+        await framework.generate_sequences(_build_prompts(count=1, global_steps=7))
+
+    assert "num_success_outputs=2" in caplog.text
+    assert "num_unfinished_episodes=1" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_framework_rejects_non_boolean_masking_config():
-    with pytest.raises(ValueError, match="mask_unfinished_trajectories must be a bool"):
+    with pytest.raises(ValueError, match="mask_unfinished_episode must be a bool"):
         await _build_framework_with_agent_runners(
             agent_runners={"runner": _inline_runner_config(_async_noop_runner)},
             gateway_manager=_FakeGatewayManager({}),
-            mask_unfinished_trajectories="true",  # type: ignore[arg-type]
+            mask_unfinished_episode="true",  # type: ignore[arg-type]
         )
 
 

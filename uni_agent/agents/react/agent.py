@@ -22,6 +22,46 @@ logger = logging.getLogger(__name__)
 _FINISH_TOOLS = {"submit", "finish"}
 
 
+def _truncated_turn_reason(
+    *,
+    per_turn_cap: int | None,
+    requested_max_tokens: int | None,
+    completion_tokens: int,
+    tool_calls: list[dict],
+    transcript: list[dict[str, Any]],
+    info: dict[str, Any],
+) -> str:
+    """Decide how to continue after the server cut a response off at a token cap.
+
+    A truncated message never counts as a finish, and its tool calls are never
+    dispatched: partially decoded arguments are not safe to run. Only a cap this
+    agent asked for on a single turn is recoverable -- anything else means the
+    episode or Gateway session budget is spent, so the episode stops. The
+    Gateway clamps ``max_tokens`` down to the session's remaining budget, which
+    shows up as a shorter completion than the cap we asked for.
+    """
+    recoverable = (
+        per_turn_cap is not None and requested_max_tokens == per_turn_cap and completion_tokens >= per_turn_cap
+    )
+    if not recoverable:
+        logger.info("Exit: response truncated by the episode or session token budget.")
+        return "token_limit"
+
+    info["truncations"] += 1
+    logger.warning(f"✂️ TRUNCATED: response hit max_tokens_per_turn ({per_turn_cap}); its tool calls are skipped.")
+    for tool_call in tool_calls:
+        transcript.append(
+            {
+                "role": "tool",
+                "tool_call_id": tool_call.get("id"),
+                "name": tool_call.get("function", {}).get("name", ""),
+                "content": "Skipped: your previous message was truncated at the per-turn token limit. "
+                "Answer again with a shorter message.",
+            }
+        )
+    return "completed"
+
+
 class ReActConfig(AgentConfig):
     """White-box launch params: host-side tools + step / timeout budgets."""
 
@@ -80,6 +120,7 @@ class ReActAgent(Agent):
             "num_tool_calls": 0,
             "timeouts": 0,
             "errors": 0,
+            "truncations": 0,
             "total_tokens": 0,
         }
         termination_reason = "unknown"
@@ -104,7 +145,8 @@ class ReActAgent(Agent):
         logger.info(
             f"Episode done: termination_reason={termination_reason} steps={trajectory_info['steps']} "
             f"tool_calls={trajectory_info['num_tool_calls']} timeouts={trajectory_info['timeouts']} "
-            f"errors={trajectory_info['errors']} total_tokens={trajectory_info['total_tokens']}"
+            f"errors={trajectory_info['errors']} truncations={trajectory_info['truncations']} "
+            f"total_tokens={trajectory_info['total_tokens']}"
         )
         return AgentResult(transcript=transcript, info=trajectory_info, finished=termination_reason == "finished")
 
@@ -145,12 +187,18 @@ class ReActAgent(Agent):
             assistant_msg["tool_calls"] = tool_calls
         transcript.append(assistant_msg)
 
-        if finish_reason == "length":
-            logger.info("Exit: model response was truncated (finish_reason=length).")
-            return "token_limit"
         if cfg.model.max_total_tokens is not None and info["total_tokens"] >= cfg.model.max_total_tokens:
             logger.info(f"Exit: token budget reached ({info['total_tokens']}/{cfg.model.max_total_tokens}).")
             return "token_limit"
+        if finish_reason == "length":
+            return _truncated_turn_reason(
+                per_turn_cap=cfg.model.max_tokens_per_turn,
+                requested_max_tokens=max_tokens,
+                completion_tokens=gen_info["completion_tokens"],
+                tool_calls=tool_calls,
+                transcript=transcript,
+                info=info,
+            )
 
         if not tool_calls:  # policy answered with plain text -> done
             logger.info("💬 FINISHED: policy replied with plain text (no tool call).")

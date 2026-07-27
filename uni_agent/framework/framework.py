@@ -295,7 +295,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         processor=None,
         rollout_config=None,
         log_dir: str | None = None,
-        mask_unfinished_trajectories: bool = False,
+        mask_unfinished_episode: bool = False,
     ):
         self.gateway_manager = gateway_manager
         self.runner_registry = runner_registry
@@ -312,7 +312,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         self._runner_semaphores: dict[str, asyncio.Semaphore] = {}
         self._semaphore_loop: asyncio.AbstractEventLoop | None = None
         self._log_dir = log_dir
-        self._mask_unfinished_trajectories = mask_unfinished_trajectories
+        self._mask_unfinished_episode = mask_unfinished_episode
 
     @classmethod
     def from_config(
@@ -342,10 +342,10 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         if not bool(af_cfg.get("use_reward_loop_worker", True)):
             reward_loop_worker_handles = None
 
-        mask_unfinished_trajectories = af_cfg.get("mask_unfinished_trajectories", False)
-        if type(mask_unfinished_trajectories) is not bool:
+        mask_unfinished_episode = af_cfg.get("mask_unfinished_episode", False)
+        if type(mask_unfinished_episode) is not bool:
             raise ValueError(
-                "actor_rollout_ref.rollout.custom.agent_framework.mask_unfinished_trajectories must be a bool"
+                "actor_rollout_ref.rollout.custom.agent_framework.mask_unfinished_episode must be a bool"
             )
 
         return cls(
@@ -355,7 +355,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
             processor=processor,
             rollout_config=config.actor_rollout_ref.rollout,
             log_dir=log_dir,
-            mask_unfinished_trajectories=mask_unfinished_trajectories,
+            mask_unfinished_episode=mask_unfinished_episode,
         )
 
     def _build_session_sampling_params(
@@ -412,11 +412,13 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         )
         logger.info(
             "generate_sequences summary: num_input_prompts=%s num_success_sessions=%s "
-            "num_failed_sessions=%s num_success_outputs=%s num_failed_uids=%s failure_reasons=%s",
+            "num_failed_sessions=%s num_success_outputs=%s num_unfinished_episodes=%s "
+            "num_failed_uids=%s failure_reasons=%s",
             stats["num_input_prompts"],
             stats["num_success_sessions"],
             stats["num_failed_sessions"],
             stats["num_success_outputs"],
+            stats["num_unfinished_episodes"],
             stats["num_failed_uids"],
             stats["failure_reasons"][:3],
         )
@@ -461,6 +463,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
             "num_success_sessions": 0,
             "num_failed_sessions": 0,
             "num_success_outputs": 0,
+            "num_unfinished_episodes": 0,
             "num_failed_uids": 0,
             "failure_reasons": failure_reasons,
         }
@@ -477,6 +480,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
             stats["num_success_sessions"] += outcome["num_success_sessions"]
             stats["num_failed_sessions"] += outcome["num_failed_sessions"]
             stats["num_success_outputs"] += outcome["num_success_outputs"]
+            stats["num_unfinished_episodes"] += outcome["num_unfinished_episodes"]
             stats["num_failed_uids"] += outcome["num_failed_uids"]
             failure_reasons.extend(outcome["failure_reasons"])
         return stats
@@ -516,6 +520,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         success_sessions = 0
         failed_sessions = 0
         success_outputs = 0
+        unfinished_episodes = 0
         failure_reasons: list[str] = []
         for session_index, outcome in enumerate(outcomes):
             if isinstance(outcome, Exception):
@@ -549,6 +554,10 @@ class OpenAICompatibleAgentFramework(AgentFramework):
             else:
                 success_sessions += 1
                 success_outputs += len(trajectories)
+                # One session is one episode; its trajectories all carry the same
+                # session-level completion flag, so this counts episodes, not tokens.
+                if any(traj.reward_info.get("finished") is False for traj in trajectories):
+                    unfinished_episodes += 1
 
         if success_sessions > 0:
             await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "finished"})
@@ -561,6 +570,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
             "num_success_sessions": success_sessions,
             "num_failed_sessions": failed_sessions,
             "num_success_outputs": success_outputs,
+            "num_unfinished_episodes": unfinished_episodes,
             "num_failed_uids": failed_uids,
             "failure_reasons": failure_reasons,
         }
@@ -913,7 +923,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
             raise ValueError("reward_info.finished must be a bool or null")
         response_mask = (
             torch.zeros_like(source_response_mask)
-            if self._mask_unfinished_trajectories and finished is False
+            if self._mask_unfinished_episode and finished is False
             else source_response_mask
         )
         input_ids = torch.cat([prompts, responses], dim=0)

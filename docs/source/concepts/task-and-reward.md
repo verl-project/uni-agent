@@ -116,7 +116,7 @@ Custom Tasks may return scalar, dense, rubric-based, or multi-component rewards.
 `TaskResult.finished` is factual episode metadata copied from
 `AgentResult.finished`; it does not decide whether the trajectory contributes to
 training. The Agent Framework owns that policy through
-`mask_unfinished_trajectories`, so the same Task Config can be reused for
+`mask_unfinished_episode`, so the same Task Config can be reused for
 inference, evaluation, and different training runs without embedding optimizer
 behavior in the Task or dataset.
 

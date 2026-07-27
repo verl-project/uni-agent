@@ -21,7 +21,7 @@ TOOL_PARSER=${TOOL_PARSER:-"qwen3_coder"}    # gateway tool-call parser; MUST ma
 GATEWAY_COUNT=${GATEWAY_COUNT:-8}            # gateway actors fronting the engine
 CONCURRENCY=${CONCURRENCY:-512}              # max in-flight rollout sessions (runner cap)
 SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-"$(basename "${MODEL_PATH}")"}
-MASK_UNFINISHED_TRAJECTORIES=${MASK_UNFINISHED_TRAJECTORIES:-True}
+MASK_UNFINISHED_EPISODE=${MASK_UNFINISHED_EPISODE:-False}  # opt-in: zero the loss mask for unfinished episodes
 
 rollout_mode=${ROLLOUT_MODE:-"async"}
 rollout_name=${ROLLOUT_NAME:-"vllm"} # sglang or vllm
@@ -207,7 +207,7 @@ ray job submit --no-wait --runtime-env $RUNTIME_ENV \
     ++actor_rollout_ref.rollout.custom.agent_framework.agent_runners.task.runner_kwargs.task_config_path=${TASK_CONFIG} \
     ++actor_rollout_ref.rollout.custom.agent_framework.agent_runners.task.runner_kwargs.model_name=${SERVED_MODEL_NAME} \
     ++actor_rollout_ref.rollout.custom.agent_framework.agent_runners.task.runner_kwargs.report_reward=True \
-    ++actor_rollout_ref.rollout.custom.agent_framework.mask_unfinished_trajectories=${MASK_UNFINISHED_TRAJECTORIES} \
+    ++actor_rollout_ref.rollout.custom.agent_framework.mask_unfinished_episode=${MASK_UNFINISHED_EPISODE} \
     ++actor_rollout_ref.rollout.custom.agent_framework.use_reward_loop_worker=False \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.7 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp} \
