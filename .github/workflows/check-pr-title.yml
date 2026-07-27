@@ -1,19 +1,20 @@
-name: check-pr-title
+name: check-pr-metadata
 
 on:
   pull_request:
     types: [opened, edited, synchronize, reopened]
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 permissions:
   contents: read
 
 jobs:
-  check-title:
+  check-metadata:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -23,12 +24,15 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Run PR title checker
+      - name: Test PR metadata checkers
+        run: python3 -m unittest discover -s tests/special_sanity -p "test_*.py"
+
+      - name: Validate PR title
         run: python3 tests/special_sanity/check_pr_title.py
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
 
-      - name: Run PR description checker
+      - name: Validate PR description
         run: python3 tests/special_sanity/check_pr_description.py
         env:
           GITHUB_EVENT_PATH: ${{ github.event_path }}

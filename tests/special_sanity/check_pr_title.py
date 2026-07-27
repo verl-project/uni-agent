@@ -1,72 +1,131 @@
+#!/usr/bin/env python3
+
 import os
 import re
+import sys
+from dataclasses import dataclass
 
-pr_title = os.environ.get("PR_TITLE", "").strip()
-
-allowed_modules = [
-    "core",
-    "interaction",
-    "model",
-    "env",
+ALLOWED_AREAS = (
+    "agents",
+    "framework",
+    "gateway",
+    "logging",
+    "sandbox",
+    "tasks",
     "tools",
-    "deployment",
-    "reward",
-    "dashboard",
+    "training",
+    "app",
     "docs",
     "examples",
-    "data",
-    "train",
     "ci",
     "build",
     "deps",
     "misc",
-]
-allowed_types = ["feat", "fix", "refactor", "chore", "test"]
+)
+ALLOWED_TYPES = (
+    "feat",
+    "fix",
+    "refactor",
+    "perf",
+    "test",
+    "docs",
+    "chore",
+    "revert",
+)
+
+TITLE_FORMAT = "[area] type: summary"
+TITLE_EXAMPLE = "[agents, sandbox] feat: add isolated harness execution"
+
+TITLE_PATTERN = re.compile(
+    r"^(?:\[(?P<series_index>[1-9]\d*)/(?P<series_total>[1-9]\d*|N)\])?"
+    r"(?P<breaking>\[BREAKING\])?"
+    r"\[(?P<areas>[a-z]+(?:, [a-z]+)*)\] "
+    r"(?P<change_type>[a-z]+): "
+    r"(?P<summary>\S(?:.*\S)?)$"
+)
 
 
-progress_match = re.match(r"^\[\d/[\dNn]\]\s*(.+)$", pr_title, re.IGNORECASE)
-if progress_match:
-    pr_title = progress_match.group(1).strip()
+class PRTitleError(ValueError):
+    """Raised when a pull request title does not follow the project convention."""
 
 
-breaking_match = re.match(r"^\[BREAKING\]\s*(.+)$", pr_title, re.IGNORECASE)
-if breaking_match:
-    core_pr_title = breaking_match.group(1).strip()
-    is_breaking = True
-else:
-    core_pr_title = pr_title
-    is_breaking = False
+@dataclass(frozen=True)
+class PRTitle:
+    areas: tuple[str, ...]
+    change_type: str
+    summary: str
+    breaking: bool = False
+    series_index: int | None = None
+    series_total: int | str | None = None
 
 
-re_modules_pattern = re.compile(r"^\[([a-z_,\s]+)\]", re.IGNORECASE)
-re_modules = re_modules_pattern.match(core_pr_title)
-if not re_modules:
-    print(f"Invalid PR title: '{pr_title}'")
-    print("Expected format: [BREAKING][module] type: description")
-    print(f"Allowed modules: {', '.join(allowed_modules)}")
-    raise Exception("Invalid PR title")
+def parse_pr_title(title: str) -> PRTitle:
+    if not title:
+        raise PRTitleError(f"PR title is empty. Expected '{TITLE_FORMAT}'.")
+    if title != title.strip():
+        raise PRTitleError("PR title must not have leading or trailing whitespace.")
 
-modules = re.findall(r"[a-z_]+", re_modules.group(1).lower())
-if not modules:
-    print(f"Invalid PR title: '{pr_title}'")
-    print("At least one module must be specified")
-    raise Exception("Invalid PR title")
+    match = TITLE_PATTERN.fullmatch(title)
+    if match is None:
+        raise PRTitleError(f"Expected '{TITLE_FORMAT}' with lowercase areas and type. Example: '{TITLE_EXAMPLE}'.")
 
-if not all(module in allowed_modules for module in modules):
-    invalid_modules = [module for module in modules if module not in allowed_modules]
-    print(f"Invalid modules: {', '.join(invalid_modules)}")
-    print(f"Allowed modules: {', '.join(allowed_modules)}")
-    raise Exception("Invalid PR title")
+    areas = tuple(match.group("areas").split(", "))
+    unknown_areas = tuple(area for area in areas if area not in ALLOWED_AREAS)
+    if unknown_areas:
+        raise PRTitleError(f"Unknown area(s): {', '.join(unknown_areas)}. Allowed areas: {', '.join(ALLOWED_AREAS)}.")
 
-types_pattern = "|".join(re.escape(t) for t in allowed_types)
-re_types_pattern = re.compile(rf"^\[[a-z_,\s]+\]\s+({types_pattern}):\s+.+$", re.IGNORECASE)
-match = re_types_pattern.match(core_pr_title)
-if not match:
-    print(f"Invalid PR title: '{pr_title}'")
-    print("Expected format: [BREAKING][module] type: description")
-    print(f"Allowed types: {', '.join(allowed_types)}")
-    raise Exception("Invalid PR title")
+    duplicate_areas = tuple(dict.fromkeys(area for area in areas if areas.count(area) > 1))
+    if duplicate_areas:
+        raise PRTitleError(f"Duplicate area(s): {', '.join(duplicate_areas)}.")
 
-change_type = match.group(1).lower()
-breaking_info = " (BREAKING CHANGE)" if is_breaking else ""
-print(f"PR title is valid: {pr_title}, modules: {modules}, type: {change_type}{breaking_info}")
+    change_type = match.group("change_type")
+    if change_type not in ALLOWED_TYPES:
+        raise PRTitleError(f"Unknown type '{change_type}'. Allowed types: {', '.join(ALLOWED_TYPES)}.")
+
+    series_index_text = match.group("series_index")
+    series_total_text = match.group("series_total")
+    series_index = int(series_index_text) if series_index_text is not None else None
+    if series_total_text is None:
+        series_total: int | str | None = None
+    elif series_total_text == "N":
+        series_total = series_total_text
+    else:
+        series_total = int(series_total_text)
+
+    if isinstance(series_total, int) and series_index is not None and series_index > series_total:
+        raise PRTitleError(f"Stacked PR index {series_index} cannot be greater than total {series_total}.")
+
+    return PRTitle(
+        areas=areas,
+        change_type=change_type,
+        summary=match.group("summary"),
+        breaking=match.group("breaking") is not None,
+        series_index=series_index,
+        series_total=series_total,
+    )
+
+
+def _escape_workflow_command(value: str) -> str:
+    return value.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+
+def main() -> int:
+    title = os.environ.get("PR_TITLE", "")
+    try:
+        parsed = parse_pr_title(title)
+    except PRTitleError as error:
+        print(f"::error title=Invalid PR title::{_escape_workflow_command(str(error))}")
+        return 1
+
+    flags = []
+    if parsed.breaking:
+        flags.append("breaking")
+    if parsed.series_index is not None:
+        flags.append(f"stack {parsed.series_index}/{parsed.series_total}")
+    suffix = f" ({', '.join(flags)})" if flags else ""
+    print(f"PR title is valid: areas={', '.join(parsed.areas)}, type={parsed.change_type}{suffix}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

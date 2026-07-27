@@ -1,72 +1,107 @@
-name: "Feature request"
-description: Propose an improvement or new capability for Uni-Agent
+name: Feature request
+description: Propose a new capability or an improvement to Uni-Agent
+title: "[Feature] "
 labels: ["enhancement"]
 body:
   - type: markdown
     attributes:
       value: |
-        Thanks for sharing a feature request.
+        Start with the user problem and desired outcome. A proposed implementation is useful, but it should respect the ownership boundaries between Task, Agent, Tool, Sandbox, Gateway, and the training framework.
 
-        The most useful requests clearly describe the user problem, why the current workflow is insufficient, and how the change fits Uni-Agent's model-tool-env runtime or training workflow.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What workflow is difficult or impossible today, and who is affected?
+      placeholder: I cannot reuse the same Task across ... because ...
+    validations:
+      required: true
 
   - type: textarea
     id: proposal
     attributes:
-      label: Feature proposal
-      description: Describe the feature or change you want to see.
-      placeholder: Add a built-in tool for ... / support a new deployment backend for ...
-    validations:
-      required: true
-
-  - type: textarea
-    id: motivation
-    attributes:
-      label: Motivation and use case
-      description: Explain the problem this solves and who benefits from it.
-      placeholder: This is needed because ...
+      label: Desired behavior
+      description: Describe the capability and the user-visible outcome without assuming a specific implementation.
+      placeholder: Uni-Agent should allow ...
     validations:
       required: true
 
   - type: dropdown
-    id: area
+    id: component
     attributes:
-      label: Related area
+      label: Owning component
+      description: Which layer should own this behavior?
       options:
-        - core agent loop
-        - interaction
-        - tools
-        - environment
-        - deployment
-        - reward / verification
-        - training
-        - dashboard
-        - docs / examples
-        - installation / dependencies
-        - other
+        - Agent or agent harness
+        - Framework or rollout orchestration
+        - Gateway, model protocol, or trajectory capture
+        - Sandbox
+        - Task, reward, or dataset
+        - Tool or Toolbox
+        - Logging or observability
+        - Training or verl integration
+        - App or external integration
+        - Documentation or examples
+        - Installation, build, or dependencies
+        - Cross-cutting or not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: execution_path
+    attributes:
+      label: Target execution path
+      options:
+        - Standalone inference with an external model API
+        - verl-managed inference
+        - RL training
+        - All inference and training paths
+        - Sandbox or Tool usage without an Agent
+        - Other or not applicable
+    validations:
+      required: true
+
+  - type: textarea
+    id: use_case
+    attributes:
+      label: Example use case
+      description: Show a concrete workflow, config, API call, or input/output example.
     validations:
       required: true
 
   - type: textarea
     id: design
     attributes:
-      label: Proposed design or API
-      description: If you already have an API shape, config schema, or UX flow in mind, describe it here.
+      label: Proposed design
+      description: If you have an implementation in mind, describe the API, config, lifecycle, and the component that owns each behavior.
       placeholder: |
-        Proposed CLI / config:
-        Proposed Python API:
-        Backward compatibility considerations:
+        Python API:
+        Task or Agent config:
+        Runtime flow:
+
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility and migration
+      description: Note any impact on public Python APIs, Task or Sample Config, datasets, trajectories, checkpoints, or existing recipes.
 
   - type: textarea
     id: alternatives
     attributes:
       label: Alternatives considered
-      description: Describe current workarounds or alternative approaches you evaluated.
+      description: Describe current workarounds or other designs you evaluated.
+
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation
+      description: How would we know this feature works? Include expected tests, metrics, or benchmark evidence when relevant.
 
   - type: textarea
     id: references
     attributes:
       label: Additional context
-      description: Link related papers, repos, issues, PRs, benchmarks, or docs if relevant.
+      description: Link related issues, PRs, papers, repositories, benchmarks, or documentation.
 
   - type: checkboxes
     id: contribution

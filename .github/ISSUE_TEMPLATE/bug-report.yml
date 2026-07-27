@@ -1,20 +1,57 @@
-name: "Bug report"
-description: Report a reproducible problem in Uni-Agent
+name: Bug report
+description: Report incorrect or unexpected Uni-Agent behavior
+title: "[Bug] "
 labels: ["bug"]
 body:
   - type: markdown
     attributes:
       value: |
-        Thanks for taking the time to file a bug report.
+        Thanks for helping improve Uni-Agent. Please search existing issues and include the smallest reproduction you can provide.
 
-        Please provide enough detail for us to reproduce the issue. If this problem is caused by code under `verl/`, please mention whether the issue belongs to Uni-Agent integration code or to the submodule itself.
+        Do not include API keys, access tokens, private model responses, proprietary datasets, or other sensitive information.
 
   - type: textarea
     id: summary
     attributes:
-      label: Bug summary
-      description: A short description of what went wrong.
-      placeholder: Running parallel interaction hangs after environment startup when using ...
+      label: Summary
+      description: What failed, and what impact did it have?
+      placeholder: A task using the ReAct agent stops after the first tool call when ...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Affected component
+      description: Choose the layer that owns the failing behavior.
+      options:
+        - Agent or agent harness
+        - Framework or rollout orchestration
+        - Gateway, model protocol, or trajectory capture
+        - Sandbox
+        - Task, reward, or dataset
+        - Tool or Toolbox
+        - Logging or observability
+        - Training or verl integration
+        - App or external integration
+        - Documentation or examples
+        - Installation, build, or dependencies
+        - Other or not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: execution_path
+    attributes:
+      label: Execution path
+      description: Where does the problem occur?
+      options:
+        - Standalone inference with an external model API
+        - verl-managed inference
+        - RL training
+        - Sandbox or Tool usage without an Agent
+        - Documentation, installation, or build
+        - Other or not sure
     validations:
       required: true
 
@@ -22,14 +59,19 @@ body:
     id: reproduction
     attributes:
       label: Reproduction
-      description: |
-        Provide the exact steps needed to reproduce the problem.
-        Include commands, config files, and dataset or model details when relevant.
+      description: Provide exact commands and the smallest config or sample that reproduces the problem. For intermittent failures, include frequency and timing.
       placeholder: |
-        1. Initialize the repo with `git submodule update --init --recursive`
-        2. Install with `pip install --no-deps -e ./verl && pip install -e .`
-        3. Run `python ...`
-        4. Observe ...
+        1. Install commit ...
+        2. Run `python ... --task-config ...`
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed behavior
+      description: Include the complete error, relevant stack trace, exit code, or incorrect output.
     validations:
       required: true
 
@@ -37,66 +79,48 @@ body:
     id: expected
     attributes:
       label: Expected behavior
-      description: What did you expect to happen?
+      description: What should have happened instead?
     validations:
       required: true
 
   - type: textarea
-    id: actual
+    id: configuration
     attributes:
-      label: Actual behavior
-      description: What actually happened? Include error messages, stack traces, or screenshots if helpful.
-    validations:
-      required: true
+      label: Relevant configuration
+      description: Include the Task Config, Sample Config, Agent, Sandbox provider, model backend, and important CLI flags. Remove secrets.
+      render: yaml
 
-  - type: dropdown
-    id: area
+  - type: textarea
+    id: logs
     attributes:
-      label: Affected area
-      description: Which part of the project is most related to this issue?
-      options:
-        - core agent loop
-        - interaction
-        - tools
-        - environment
-        - deployment
-        - reward / verification
-        - training
-        - dashboard
-        - docs / examples
-        - installation / dependencies
-        - other
-    validations:
-      required: true
+      label: Logs
+      description: Paste the smallest relevant log excerpt as text. Include session or trajectory identifiers when applicable.
+      render: shell
 
   - type: textarea
     id: environment
     attributes:
       label: Environment
-      description: Include OS, Python version, GPU/runtime info, model backend, and any relevant package versions.
+      description: Provide versions relevant to the failing execution path.
       placeholder: |
+        Uni-Agent commit:
+        verl commit (if applicable):
         OS:
         Python:
-        CUDA:
-        Backend (vllm / sglang / other):
-        Uni-Agent commit:
-        verl commit:
+        CUDA / accelerator:
+        Model backend and version:
+        Agent:
+        Task:
+        Sandbox provider:
     validations:
       required: true
-
-  - type: textarea
-    id: config
-    attributes:
-      label: Relevant config and logs
-      description: Paste relevant YAML, CLI flags, or log excerpts. Prefer code blocks over screenshots.
-      render: shell
 
   - type: checkboxes
     id: checks
     attributes:
       label: Checklist
       options:
-        - label: I searched existing issues and did not find an obvious duplicate.
+        - label: I searched existing issues and did not find a duplicate.
           required: true
-        - label: I can reproduce this with the information provided above.
+        - label: I removed credentials, private data, and other sensitive information.
           required: true
