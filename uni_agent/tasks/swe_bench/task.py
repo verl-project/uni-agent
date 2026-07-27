@@ -36,7 +36,7 @@ class SWEBenchTask(Task):
             f"starting swe_bench task (instance_id={instance_id}, run_gold_patch={cfg.run_gold_patch})\n"
             f"task config: {json.dumps(task_config_dump, indent=2)}"
         )
-        trainable = True
+        finished = True
         async with self.build_sandbox() as sandbox:
             if cfg.run_gold_patch:
                 logger.info("applying gold patch to /testbed")
@@ -48,9 +48,7 @@ class SWEBenchTask(Task):
                 messages = cfg.prompt
                 # The endpoint the agent calls lives on cfg.agent.model (the agent validates it).
                 agent_result = await agent.run(sandbox=sandbox, messages=messages)
-                if cfg.mask_unfinished_trajectories:
-                    # Agents report completion; the Task owns whether that outcome is trainable.
-                    trainable = agent_result.finished
+                finished = agent_result.finished
 
             from .reward import compute_reward
 
@@ -60,6 +58,6 @@ class SWEBenchTask(Task):
             return TaskResult(
                 reward=float(result["resolved"]),
                 accuracy=float(result["resolved"]),
-                info=result,
-                trainable=trainable,
+                finished=finished,
+                extra_info=result,
             )

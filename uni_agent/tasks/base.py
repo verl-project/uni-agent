@@ -7,8 +7,6 @@ A *task* is the top-level unit a trainer / evaluator instantiates. The base
 * **agent**   -- who solves it and how it is launched (an
   :class:`~uni_agent.agents.AgentConfig`; the model it talks to lives on the agent,
   not here, and is filled in by the runner).
-* **mask_unfinished_trajectories** -- whether unfinished Agent runs are excluded
-  from gradient calculation.
 """
 
 from __future__ import annotations
@@ -46,10 +44,6 @@ class TaskConfig(BaseModel):
     )
     prompt: list[dict[str, Any]] = Field(default_factory=list, description="The task prompt.")
     metadata: dict[str, Any] = Field(default_factory=dict)
-    mask_unfinished_trajectories: bool = Field(
-        default=False,
-        description="Mask trajectories whose AgentResult.finished is false.",
-    )
 
     model_config = ConfigDict(extra="forbid", protected_namespaces=())
 
@@ -75,14 +69,14 @@ class TaskConfig(BaseModel):
 class TaskResult:
     """Outcome of one task episode.
 
-    ``trainable=False`` keeps the rollout for observability while asking
-    the training adapter to zero its effective response mask.
+    ``finished`` reports the Agent's factual completion state. Training
+    policy belongs to the Framework and must not be decided by the Task.
     """
 
     reward: Any
     accuracy: float | None = None
-    info: dict[str, Any] | None = None
-    trainable: bool = True
+    finished: bool | None = None
+    extra_info: dict[str, Any] | None = None
 
 
 class Task(ABC):

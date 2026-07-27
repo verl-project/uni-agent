@@ -54,7 +54,7 @@ class InferenceActor:
             async with sample_logging.from_context(log_context):
                 try:
                     result = await get_task(task).run()
-                    info = result.info or {}
+                    info = result.extra_info or {}
                     resolved = bool(info.get("resolved", result.reward))
                     return {
                         "instance_id": instance_id,

@@ -197,6 +197,7 @@ TRAIN_PROMPT_BSZ=64 \
 N_RESP_PER_PROMPT=8 \
 PPO_MINI_BATCH_SIZE=16 \
 TASK_CONFIG=examples/quickstart/training/task_config_react.yaml \
+MASK_UNFINISHED_TRAJECTORIES=True \
 EXP_NAME=react_qwen3_coder_30b_gspo_r3 \
 ADV_ESTIMATOR=rloo \
 LOSS_MODE=gspo \
@@ -259,6 +260,7 @@ NNODES=4 \
 CONCURRENCY=1024 \
 TP=4 PP=2 CP=1 \
 TASK_CONFIG=examples/quickstart/training/task_config_claude_code.yaml \
+MASK_UNFINISHED_TRAJECTORIES=True \
 EXP_NAME=claude_code_qwen3_5_4b_dppo_tv \
 ADV_ESTIMATOR=rloo \
 LOSS_MODE=dppo_tv \
@@ -273,6 +275,12 @@ bash examples/quickstart/training/train_qwen3p5_dense.sh
 ```
 
 The Claude Code runner sets `trajectory_selection=longest`. If a Gateway session materializes multiple trajectories, the Framework keeps only the trajectory with the most model-generated tokens for RL training.
+
+Both training scripts pass `MASK_UNFINISHED_TRAJECTORIES` to the Agent
+Framework. When it is `True` (the recipe default), completed Task rewards and
+trajectories are retained, but tokens from Agents that did not finish normally
+are excluded from policy optimization. Set it to `False` to train on every
+finalized trajectory.
 
 The script expects:
 

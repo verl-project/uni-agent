@@ -52,7 +52,7 @@ class SWEREBenchTask(Task):
             f"starting swe_rebench task (instance_id={instance_id}, run_gold_patch={cfg.run_gold_patch})\n"
             f"task config: {json.dumps(task_config_dump, indent=2)}"
         )
-        trainable = True
+        finished = True
         async with self.build_sandbox() as sandbox:
             # Clean future history before anything reads the repo.
             await sandbox.exec_shell(_GIT_CLEAN_HISTORY, workdir="/testbed")
@@ -67,9 +67,7 @@ class SWEREBenchTask(Task):
                 messages = cfg.prompt
                 # The endpoint the agent calls lives on cfg.agent.model (the agent validates it).
                 agent_result = await agent.run(sandbox=sandbox, messages=messages)
-                if cfg.mask_unfinished_trajectories:
-                    # Agents report completion; the Task owns whether that outcome is trainable.
-                    trainable = agent_result.finished
+                finished = agent_result.finished
 
             try:
                 from .reward import compute_reward
@@ -83,6 +81,6 @@ class SWEREBenchTask(Task):
             return TaskResult(
                 reward=float(result["resolved"]),
                 accuracy=float(result["resolved"]),
-                info=result,
-                trainable=trainable,
+                finished=finished,
+                extra_info=result,
             )

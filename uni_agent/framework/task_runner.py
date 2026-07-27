@@ -62,18 +62,18 @@ async def run_task(
         await _post_reward_info(session.reward_info_url, result)
         reward_posted = True
     logger.info(
-        "run_task done: task=%s reward=%s acc=%s trainable=%s reward_posted=%s",
+        "run_task done: task=%s reward=%s acc=%s finished=%s reward_posted=%s",
         task_name,
         result.reward,
         result.accuracy,
-        result.trainable,
+        result.finished,
         reward_posted,
     )
     return result
 
 
 async def _post_reward_info(reward_info_url: str, result: TaskResult) -> None:
-    """Best-effort POST of task reward, accuracy, and trajectory validity."""
+    """Best-effort POST of task reward, accuracy, and Agent completion."""
     import aiohttp
 
     reward_info = _reward_info_from_result(result)
@@ -89,12 +89,11 @@ async def _post_reward_info(reward_info_url: str, result: TaskResult) -> None:
 
 def _reward_info_from_result(result: TaskResult) -> dict[str, Any]:
     """Build the session reward payload consumed by the trajectory framework."""
-    if type(result.trainable) is not bool:
-        raise ValueError("TaskResult.trainable must be a bool")
-    reward_info: dict[str, Any] = {
-        "reward": result.reward,
-        "trainable": result.trainable,
-    }
+    if result.finished is not None and type(result.finished) is not bool:
+        raise ValueError("TaskResult.finished must be a bool or None")
+    reward_info: dict[str, Any] = {"reward": result.reward}
     if result.accuracy is not None:
         reward_info["acc"] = result.accuracy
+    if result.finished is not None:
+        reward_info["finished"] = result.finished
     return reward_info

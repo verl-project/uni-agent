@@ -22,7 +22,6 @@ Every Task configuration inherits from `TaskConfig`:
 - `agent`: concrete Agent configuration.
 - `prompt`: OpenAI-style messages.
 - `metadata`: sample-specific data used by execution and scoring.
-- `mask_unfinished_trajectories`: opt in to masking unfinished Agent trajectories; defaults to `false`.
 
 Task-specific configs can add validated fields:
 
@@ -67,13 +66,12 @@ class MyTask(Task):
                 sandbox,
                 agent_result,
             )
-            trainable = not config.mask_unfinished_trajectories or agent_result.finished
 
         return TaskResult(
             reward=score,
             accuracy=score,
-            info={"score": score},
-            trainable=trainable,
+            finished=agent_result.finished,
+            extra_info={"score": score},
         )
 ```
 
@@ -107,20 +105,20 @@ The Task converts that payload into `TaskResult`:
 TaskResult(
     reward=float(result["resolved"]),
     accuracy=float(result["resolved"]),
-    info=result,
-    trainable=trainable,
+    finished=agent_result.finished,
+    extra_info=result,
 )
 ```
 
 Custom Tasks may return scalar, dense, rubric-based, or multi-component rewards. The framework consumes
-`TaskResult.reward`; additional metrics belong in `accuracy` and `info`.
+`TaskResult.reward`; additional metrics belong in `accuracy` and `extra_info`.
 
-`TaskResult.trainable` defaults to `True`. When `mask_unfinished_trajectories=true`, the built-in SWE Tasks inspect
-`AgentResult.finished`; unfinished ReAct runs and unsuccessful Claude Code result events therefore make the trajectory
-untrainable. The switch defaults to `false`. This decision belongs to the Task and is independent of the evaluation
-outcome.
-
-An untrainable trajectory is still stored with its reward and token data, but its emitted `response_mask` is zeroed so PPO, entropy, and KL losses contribute no gradient. Its emitted `loss_mask` is also zeroed so normalization and auxiliary losses exclude it. TransferQueue tags still carry `trainable` for filtering and diagnostics.
+`TaskResult.finished` is factual episode metadata copied from
+`AgentResult.finished`; it does not decide whether the trajectory contributes to
+training. The Agent Framework owns that policy through
+`mask_unfinished_trajectories`, so the same Task Config can be reused for
+inference, evaluation, and different training runs without embedding optimizer
+behavior in the Task or dataset.
 
 ## Dataset Contract
 

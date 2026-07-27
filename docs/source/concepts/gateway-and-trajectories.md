@@ -94,14 +94,20 @@ The built-in Task Runner posts:
   "reward_info": {
     "reward": 1.0,
     "acc": 1.0,
-    "trainable": true
+    "finished": true
   }
 }
 ```
 
 The Agent Framework reads the session reward, applies it to finalized trajectories, and writes a sparse token-level `rm_scores` tensor with the reward on the final token.
 
-Trainability is session-scoped. When `trainable` is `false`, finalized trajectories are still written and tagged as successful, but their TransferQueue `response_mask` and `loss_mask` are all zero so they do not contribute policy gradients, normalization counts, or auxiliary losses. Missing trainability defaults to `true`.
+Agent completion is factual session metadata; the Framework, not the Task,
+decides how training consumes it. When the training configuration enables
+`mask_unfinished_trajectories`, a session with `finished=false` is still
+written and tagged as successful, but its TransferQueue `response_mask` and
+`loss_mask` are all zero so it does not contribute policy gradients,
+normalization counts, or auxiliary losses. The policy defaults to `false`. When
+it is enabled, the Runner must report `finished`.
 
 If no Task reward is reported, an optional verl Reward Loop Worker can score the final trajectory. Without either source, `rm_scores` remains zero and the framework emits a warning.
 
@@ -152,6 +158,9 @@ actor_rollout_ref.rollout.custom.agent_framework
 Important knobs include:
 
 - `gateway_count`: Gateway actor pool size.
+- `mask_unfinished_trajectories`: zeroes training masks for sessions that report
+  `finished=false`. Defaults to `false` and requires completion metadata
+  when enabled.
 - `enable_last_assistant_rollback`: reuses a chain when only its latest Assistant
   message is rewritten. Defaults to `true`; set it to `false` to preserve the
   previous split-on-rewrite behavior.

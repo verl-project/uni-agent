@@ -50,7 +50,7 @@ class TestEvalActor:
                     task_config["sandbox"]["provider"] = SANDBOX_PROVIDER
                     task_config["sandbox"]["runtime_timeout"] = RUNTIME_TIMEOUT
                     result = await get_task(task_config).run()
-                    info = result.info or {}
+                    info = result.extra_info or {}
                     resolved = bool(info.get("resolved", result.reward))
                     return {
                         "instance_id": instance_id,
