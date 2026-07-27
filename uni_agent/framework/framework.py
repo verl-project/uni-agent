@@ -344,9 +344,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
 
         mask_unfinished_episode = af_cfg.get("mask_unfinished_episode", False)
         if type(mask_unfinished_episode) is not bool:
-            raise ValueError(
-                "actor_rollout_ref.rollout.custom.agent_framework.mask_unfinished_episode must be a bool"
-            )
+            raise ValueError("actor_rollout_ref.rollout.custom.agent_framework.mask_unfinished_episode must be a bool")
 
         return cls(
             gateway_manager=gateway_manager,
