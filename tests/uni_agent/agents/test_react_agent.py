@@ -75,7 +75,7 @@ def _step_info(*, total_tokens: int = 0) -> dict:
         "num_tool_calls": 0,
         "timeouts": 0,
         "errors": 0,
-        "truncations": 0,
+        "format_errors": 0,
         "total_tokens": total_tokens,
     }
 
@@ -150,6 +150,19 @@ async def test_length_finish_reason_is_unfinished():
 
 
 @pytest.mark.asyncio
+async def test_length_exhausted_empty_response_ends_the_episode():
+    # What the Gateway returns once the session's response budget is spent: an
+    # empty assistant message, finish_reason=length, zero completion tokens.
+    agent = _agent()
+    cfg: ReActConfig = agent.config  # type: ignore[assignment]
+    model = _StepModel(finish_reason="length", completion_tokens=0)
+
+    reason = await agent.step(cfg, model, _StepToolbox(), [], _step_info())
+
+    assert reason == "token_limit"
+
+
+@pytest.mark.asyncio
 async def test_total_tokens_tracks_current_context_size():
     agent = _agent()
     cfg: ReActConfig = agent.config  # type: ignore[assignment]
@@ -160,6 +173,23 @@ async def test_total_tokens_tracks_current_context_size():
 
     assert reason == "finished"
     assert info["total_tokens"] == 102
+
+
+@pytest.mark.asyncio
+async def test_plain_text_retries_when_finish_tool_is_configured():
+    model = ModelConfig(base_url="http://gateway:8000/v1", model_name="policy")
+    agent = ReActAgent(ReActConfig(model=model, tools=[{"name": "submit"}], max_steps=2))
+    cfg: ReActConfig = agent.config  # type: ignore[assignment]
+    transcript: list[dict] = []
+    info = _step_info()
+
+    reason = await agent.step(cfg, _StepModel(), _StepToolbox(), transcript, info)
+
+    assert reason == "completed"
+    assert info["format_errors"] == 1
+    assert [message["role"] for message in transcript] == ["assistant", "user"]
+    assert "No tool call found" in transcript[-1]["content"]
+    assert "submit or finish" in transcript[-1]["content"]
 
 
 @pytest.mark.asyncio
@@ -192,6 +222,9 @@ async def test_failed_finish_tool_does_not_finish():
 
 @pytest.mark.asyncio
 async def test_truncated_tool_call_is_not_dispatched():
+    # The Gateway reports tool_calls, never length, whenever it parsed a tool call
+    # out of the response; a third-party endpoint may report both, and a tool call
+    # decoded from a cut-off response can carry half-written arguments.
     agent = _agent()
     cfg: ReActConfig = agent.config  # type: ignore[assignment]
     toolbox = _StepToolbox()
@@ -223,59 +256,26 @@ def _per_turn_capped_agent(*, max_tokens_per_turn: int, max_total_tokens: int | 
 
 
 @pytest.mark.asyncio
-async def test_per_turn_cap_truncation_continues_the_episode():
+async def test_per_turn_cap_truncation_ends_the_episode():
     agent = _per_turn_capped_agent(max_tokens_per_turn=8)
     cfg: ReActConfig = agent.config  # type: ignore[assignment]
-    toolbox = _StepToolbox()
-    model = _StepModel(
-        tool_calls=[
-            {
-                "id": "call-1",
-                "type": "function",
-                "function": {"name": "stateful_shell", "arguments": '{"command": "rm -rf /tmp/wo'},
-            }
-        ],
-        finish_reason="length",
-        completion_tokens=8,
-    )
-    transcript: list[dict] = []
-    info = _step_info()
+    model = _StepModel(finish_reason="length", completion_tokens=8)
 
-    reason = await agent.step(cfg, model, toolbox, transcript, info)
+    reason = await agent.step(cfg, model, _StepToolbox(), [], _step_info())
 
-    assert reason == "completed"
-    assert toolbox.calls == []
-    assert info["truncations"] == 1
-    assert transcript[-1]["role"] == "tool"
-    assert "truncated at the per-turn token limit" in transcript[-1]["content"]
-
-
-@pytest.mark.asyncio
-async def test_session_clamped_truncation_ends_the_episode():
-    agent = _per_turn_capped_agent(max_tokens_per_turn=8)
-    cfg: ReActConfig = agent.config  # type: ignore[assignment]
-    # The Gateway clamped max_tokens to the session budget, so the completion is
-    # shorter than the per-turn cap we asked for.
-    model = _StepModel(finish_reason="length", completion_tokens=3)
-    info = _step_info()
-
-    reason = await agent.step(cfg, model, _StepToolbox(), [], info)
-
+    assert model.sampling_params["max_tokens"] == 8
     assert reason == "token_limit"
-    assert info["truncations"] == 0
 
 
 @pytest.mark.asyncio
-async def test_episode_budget_truncation_ends_the_episode():
+async def test_max_tokens_is_clamped_to_the_remaining_episode_budget():
     agent = _per_turn_capped_agent(max_tokens_per_turn=8, max_total_tokens=105)
     cfg: ReActConfig = agent.config  # type: ignore[assignment]
-    # remaining episode budget (5) is below the per-turn cap (8), so the cap that
-    # produced the truncation was the episode budget, not one turn's.
+    # remaining episode budget (5) is below the per-turn cap (8), so the turn asks
+    # for the smaller of the two.
     model = _StepModel(finish_reason="length", completion_tokens=5, prompt_tokens=99)
-    info = _step_info(total_tokens=100)
 
-    reason = await agent.step(cfg, model, _StepToolbox(), [], info)
+    reason = await agent.step(cfg, model, _StepToolbox(), [], _step_info(total_tokens=100))
 
     assert model.sampling_params["max_tokens"] == 5
     assert reason == "token_limit"
-    assert info["truncations"] == 0

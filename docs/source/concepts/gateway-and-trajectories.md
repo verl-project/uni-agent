@@ -101,12 +101,9 @@ The built-in Task Runner posts:
 
 The Agent Framework reads the session reward, applies it to finalized trajectories, and writes a sparse token-level `rm_scores` tensor with the reward on the final token.
 
-Agent completion is factual session metadata; the Framework, not the Task,
-decides how training consumes it. When the training configuration enables
-`mask_unfinished_episode`, a session with `finished=false` is still
-written and tagged as successful, but its TransferQueue `response_mask` and
-`loss_mask` are all zero so it does not contribute policy gradients,
-normalization counts, or auxiliary losses.
+Agent completion is factual session metadata; the Framework, not the Task, decides how training consumes it. When the training configuration enables `mask_unfinished_episode`, a session with `finished=false` is still written and tagged as successful, but its TransferQueue `response_mask` and `loss_mask` are all zero so it does not contribute policy gradients, loss-normalization counts, or auxiliary losses.
+
+Masking stops at the loss. The trajectory keeps its reward in `rm_scores`, so a group-relative estimator such as GRPO or RLOO still folds that reward into the group mean and standard deviation, shifting the advantages of the sibling rollouts sharing its `uid`. The masked trajectory itself gets a zero advantage, and it still costs a full forward and backward pass. Treat unfinished episodes as evidence that keeps the baseline honest, not as samples removed from the batch.
 
 If no Task reward is reported, an optional verl Reward Loop Worker can score the final trajectory. Without either source, `rm_scores` remains zero and the framework emits a warning.
 

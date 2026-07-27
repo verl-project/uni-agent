@@ -59,9 +59,7 @@ The built-in ReAct Agent demonstrates the white-box pattern:
 2. Send messages and Tool schemas to an OpenAI-compatible model endpoint.
 3. Execute returned Tool calls.
 4. Append Tool observations to the transcript.
-5. Stop on a plain assistant answer, `submit`/`finish`, token limit, timeout budget, or max steps.
-
-ReAct sets `AgentResult.finished=true` only for a non-truncated plain assistant answer or a successful `submit`/`finish` call.
+5. Stop on `submit`/`finish`, token limit, timeout budget, or max steps.
 
 ReAct configuration exposes the loop:
 

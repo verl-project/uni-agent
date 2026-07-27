@@ -1,6 +1,7 @@
 import contextlib
 import io
 import os
+import re
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -119,12 +120,32 @@ class MainTest(unittest.TestCase):
 
 
 class PRTemplateTest(unittest.TestCase):
-    def test_documents_every_allowed_area_and_type(self):
-        template = (REPOSITORY_ROOT / ".github" / "PULL_REQUEST_TEMPLATE.md").read_text(encoding="utf-8")
+    """The area and type lists are duplicated for humans; keep every copy honest."""
 
-        for value in (*ALLOWED_AREAS, *ALLOWED_TYPES):
-            with self.subTest(value=value):
-                self.assertIn(f"`{value}`", template)
+    def _template_line_values(self, prefix: str) -> set[str]:
+        template = (REPOSITORY_ROOT / ".github" / "PULL_REQUEST_TEMPLATE.md").read_text(encoding="utf-8")
+        lines = [line for line in template.splitlines() if line.startswith(prefix)]
+        self.assertEqual(len(lines), 1, f"expected exactly one '{prefix}' line in the PR template")
+        return set(re.findall(r"`([^`]+)`", lines[0]))
+
+    def _guide_block_values(self, heading: str) -> set[str]:
+        guide = (REPOSITORY_ROOT / "CONTRIBUTING.md").read_text(encoding="utf-8")
+        match = re.search(rf"{re.escape(heading)}\s*```text\n(?P<body>.*?)\n```", guide, re.DOTALL)
+        self.assertIsNotNone(match, f"CONTRIBUTING.md is missing a '{heading}' block")
+        body = match.group("body").replace("\n", " ")
+        return {item.strip() for item in body.split(",")}
+
+    def test_template_area_list_matches_the_checker(self):
+        self.assertEqual(self._template_line_values("- Areas:"), set(ALLOWED_AREAS))
+
+    def test_template_type_list_matches_the_checker(self):
+        self.assertEqual(self._template_line_values("- Types:"), set(ALLOWED_TYPES))
+
+    def test_contributing_guide_area_list_matches_the_checker(self):
+        self.assertEqual(self._guide_block_values("Allowed areas:"), set(ALLOWED_AREAS))
+
+    def test_contributing_guide_type_list_matches_the_checker(self):
+        self.assertEqual(self._guide_block_values("Allowed types:"), set(ALLOWED_TYPES))
 
 
 if __name__ == "__main__":

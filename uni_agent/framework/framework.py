@@ -815,16 +815,18 @@ class OpenAICompatibleAgentFramework(AgentFramework):
     ) -> list[tuple[float, dict[str, object]]] | None:
         """Score from the reward the runner posted to the session, if any.
 
-        reward_score = the posted ``reward``; anything else posted (e.g. ``acc`` or
-        ``finished``) rides along as reward_extra_info. See
-        ``task_runner._post_reward_info`` for what's posted.
+        reward_score = the posted ``reward``; anything else posted (e.g. ``acc``)
+        rides along as reward_extra_info. ``finished`` is dropped instead: the
+        framework consumes it directly as a completion fact, so it is not a reward
+        metric. See ``task_runner._post_reward_info`` for what's posted.
         """
         reward_info = dict(session_trajectories[-1].reward_info or {})
         reward = reward_info.pop("reward", None)
         reward_info.pop("finished", None)
         if reward is None:
             return None
-        return [(float(reward), reward_info)] * len(session_trajectories)
+        # Each trajectory needs its own dict: downstream code merges into it.
+        return [(float(reward), dict(reward_info)) for _ in session_trajectories]
 
     async def _score_trajectories(
         self,
