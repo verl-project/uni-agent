@@ -109,8 +109,8 @@ class EncodedData:
             materialization.
         video_data: Video inputs carried into backend generation and trajectory
             materialization.
-        length_exhausted_trajectory: Materialized trajectory for a total-capacity
-            early return, or ``None`` on the normal path.
+        capacity_exhausted: Whether preparation determined that no generation
+            can fit within the total trajectory capacity.
         chain_id: Selected active chain id, or ``None`` when commit should append
             a new chain.
         incoming_message_prefix_hashes: Stable prefix hashes for the normalized
@@ -130,7 +130,7 @@ class EncodedData:
     tools: list[dict[str, Any]] | None
     image_data: list[Any] | None
     video_data: list[Any] | None
-    length_exhausted_trajectory: Trajectory | None
+    capacity_exhausted: bool
     chain_id: int | None
     incoming_message_prefix_hashes: list[str] = field(default_factory=list)
     last_assistant_start: LastAssistantStart | None = None
@@ -235,9 +235,10 @@ class GatewaySession:
                 # Prepare can touch codec and multimodal extractor state, so only
                 # backend generation runs outside the session lock.
                 encoded = await self._prepare_generation_inputs(request)
-                if encoded.length_exhausted_trajectory is not None:
+                if encoded.capacity_exhausted:
                     empty_msg = {"role": "assistant", "content": ""}
-                    self._close_length_exhausted_chain(encoded)
+                    if encoded.chain_id is not None:
+                        self._close_length_exhausted_chain(encoded)
                     self._touch()
                     return GenerationOutcome(
                         assistant_msg=empty_msg,
@@ -378,14 +379,14 @@ class GatewaySession:
         tools = request["tools"]
         sampling_params = dict(request["sampling_params"])
         incoming_message_prefix_hashes = self._extend_message_prefix_hashes([], messages)
-        selected_chain = self._select_chain(
+        selection = self._select_chain(
             tools=tools,
             incoming_message_prefix_hashes=incoming_message_prefix_hashes,
         )
         rollback_applied = False
         rollback_dropped_trainable_tokens = 0
 
-        if selected_chain is None:
+        if selection is None:
             image_data, video_data = await self._codec.extract_multi_modal_data(messages)
             prompt_ids = self._codec.encode_full(
                 messages,
@@ -393,25 +394,15 @@ class GatewaySession:
                 image_data=image_data,
                 video_data=video_data,
             )
-            if self._trajectory_capacity is not None and len(prompt_ids) >= self._trajectory_capacity:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        f"request context length {len(prompt_ids)} leaves no generation room "
-                        f"within trajectory capacity {self._trajectory_capacity}"
-                    ),
-                )
             buffer = TrajectoryBuffer(prompt_ids=prompt_ids)
             chain_id = None
+            capacity_exhausted = self._trajectory_capacity is not None and len(prompt_ids) >= self._trajectory_capacity
         else:
+            selected_chain, rollback_to_last_assistant = selection
             buffer = self._copy_trajectory_buffer(selected_chain.buffer)
             self._assert_response_logprob_alignment(buffer)
             image_data, video_data = self._copy_chain_media(selected_chain)
             chain_id = selected_chain.chain_id
-            rollback_to_last_assistant = not self._is_chain_prefix_hash_match(
-                chain=selected_chain,
-                incoming_message_prefix_hashes=incoming_message_prefix_hashes,
-            )
             if rollback_to_last_assistant:
                 last_assistant_start = selected_chain.last_assistant_start
                 assert last_assistant_start.response_ids_len <= len(buffer.response_ids)
@@ -423,107 +414,38 @@ class GatewaySession:
                 del buffer.response_logprobs[last_assistant_start.response_logprobs_len :]
                 self._assert_response_logprob_alignment(buffer)
 
-                stored_image_data = list(selected_chain.image_data or [])
-                stored_video_data = list(selected_chain.video_data or [])
-                assert last_assistant_start.image_data_len <= len(stored_image_data)
-                assert last_assistant_start.video_data_len <= len(stored_video_data)
-                image_data = stored_image_data[: last_assistant_start.image_data_len] or None
-                video_data = stored_video_data[: last_assistant_start.video_data_len] or None
-                suffix_messages = messages[last_assistant_start.message_history_len :]
-                suffix_ids: list[int] = []
-                new_image_data = None
-                new_video_data = None
-                if suffix_messages:
-                    new_image_data, new_video_data = await self._codec.extract_multi_modal_data(suffix_messages)
-                    suffix_ids = self._codec.encode_incremental(
-                        suffix_messages,
-                        image_data=new_image_data,
-                        video_data=new_video_data,
-                    )
-
-                buffer.response_ids.extend(suffix_ids)
-                buffer.response_mask.extend([0] * len(suffix_ids))
-                if sampling_params.get("logprobs", False):
-                    buffer.response_logprobs.extend([0.0] * len(suffix_ids))
-                self._assert_response_logprob_alignment(buffer)
-                if new_image_data:
-                    if image_data is None:
-                        image_data = []
-                    image_data.extend(new_image_data)
-                if new_video_data:
-                    if video_data is None:
-                        video_data = []
-                    video_data.extend(new_video_data)
+                if image_data is not None:
+                    assert last_assistant_start.image_data_len <= len(image_data)
+                    image_data = image_data[: last_assistant_start.image_data_len] or None
+                if video_data is not None:
+                    assert last_assistant_start.video_data_len <= len(video_data)
+                    video_data = video_data[: last_assistant_start.video_data_len] or None
+                incremental_start = last_assistant_start.message_history_len
                 rollback_applied = True
-
-                if (
-                    self._trajectory_capacity is not None
-                    and len(buffer.prompt_ids) + len(buffer.response_ids) >= self._trajectory_capacity
-                ):
-                    context_ids = buffer.prompt_ids + buffer.response_ids
-                    working_chain = replace(
-                        selected_chain,
-                        message_history=list(messages),
-                        message_tip_hash=incoming_message_prefix_hashes[-1],
-                        buffer=buffer,
-                        image_data=self._copy_media_list(image_data),
-                        video_data=self._copy_media_list(video_data),
-                    )
-                    return EncodedData(
-                        buffer=buffer,
-                        context_ids=context_ids,
-                        sampling_params={},
-                        messages=list(messages),
-                        tools=tools,
-                        image_data=image_data,
-                        video_data=video_data,
-                        length_exhausted_trajectory=self._build_materialized_trajectory(
-                            chain=working_chain,
-                            extra_fields={"materialization_reason": "max_trajectory_length"},
-                        ),
-                        chain_id=selected_chain.chain_id,
-                        incoming_message_prefix_hashes=list(incoming_message_prefix_hashes),
-                        rollback_applied=True,
-                        rollback_dropped_trainable_tokens=rollback_dropped_trainable_tokens,
-                    )
             else:
-                incremental_messages = messages[len(selected_chain.message_history) :]
-                new_image_data = None
-                new_video_data = None
-                incremental_ids = []
-                current_trajectory_length = len(buffer.prompt_ids) + len(buffer.response_ids)
-                already_exhausted = (
-                    self._trajectory_capacity is not None and current_trajectory_length >= self._trajectory_capacity
-                )
-                if incremental_messages and not already_exhausted:
-                    new_image_data, new_video_data = await self._codec.extract_multi_modal_data(incremental_messages)
-                    incremental_ids = self._codec.encode_incremental(
-                        incremental_messages,
-                        image_data=new_image_data,
-                        video_data=new_video_data,
-                    )
+                incremental_start = len(selected_chain.message_history)
 
-                if already_exhausted or (
+            incremental_messages = messages[incremental_start:]
+            new_image_data = None
+            new_video_data = None
+            incremental_ids = []
+            current_trajectory_length = len(buffer.prompt_ids) + len(buffer.response_ids)
+            capacity_exhausted = (
+                self._trajectory_capacity is not None and current_trajectory_length >= self._trajectory_capacity
+            )
+            if incremental_messages and not capacity_exhausted:
+                new_image_data, new_video_data = await self._codec.extract_multi_modal_data(incremental_messages)
+                incremental_ids = self._codec.encode_incremental(
+                    incremental_messages,
+                    image_data=new_image_data,
+                    video_data=new_video_data,
+                )
+                capacity_exhausted = (
                     self._trajectory_capacity is not None
                     and current_trajectory_length + len(incremental_ids) >= self._trajectory_capacity
-                ):
-                    context_ids = buffer.prompt_ids + buffer.response_ids
-                    return EncodedData(
-                        buffer=buffer,
-                        context_ids=context_ids,
-                        sampling_params={},
-                        messages=list(messages),
-                        tools=tools,
-                        image_data=image_data,
-                        video_data=video_data,
-                        length_exhausted_trajectory=self._build_materialized_trajectory(
-                            chain=selected_chain,
-                            extra_fields={"materialization_reason": "max_trajectory_length"},
-                        ),
-                        chain_id=selected_chain.chain_id,
-                        incoming_message_prefix_hashes=list(incoming_message_prefix_hashes),
-                    )
+                )
 
+            if not capacity_exhausted:
                 buffer.response_ids.extend(incremental_ids)
                 buffer.response_mask.extend([0] * len(incremental_ids))
                 if sampling_params.get("logprobs", False):
@@ -539,6 +461,22 @@ class GatewaySession:
                     video_data.extend(new_video_data)
 
         context_ids = buffer.prompt_ids + buffer.response_ids
+        if capacity_exhausted:
+            return EncodedData(
+                buffer=buffer,
+                context_ids=context_ids,
+                sampling_params={},
+                messages=list(messages),
+                tools=tools,
+                image_data=image_data,
+                video_data=video_data,
+                capacity_exhausted=True,
+                chain_id=chain_id,
+                incoming_message_prefix_hashes=list(incoming_message_prefix_hashes),
+                rollback_applied=rollback_applied,
+                rollback_dropped_trainable_tokens=rollback_dropped_trainable_tokens,
+            )
+
         remaining_trajectory_capacity = (
             self._trajectory_capacity - len(context_ids) if self._trajectory_capacity is not None else None
         )
@@ -562,7 +500,7 @@ class GatewaySession:
             tools=tools,
             image_data=image_data,
             video_data=video_data,
-            length_exhausted_trajectory=None,
+            capacity_exhausted=False,
             chain_id=chain_id,
             incoming_message_prefix_hashes=list(incoming_message_prefix_hashes),
             last_assistant_start=last_assistant_start,
@@ -575,7 +513,7 @@ class GatewaySession:
         *,
         tools: list[dict[str, Any]] | None,
         incoming_message_prefix_hashes: list[str],
-    ) -> ChainState | None:
+    ) -> tuple[ChainState, bool] | None:
         ranked_candidates = []
         deepest_rollback_candidates = []
         deepest_rollback_service_value = -1
@@ -613,7 +551,7 @@ class GatewaySession:
             return None
         if not ranked_candidates:
             return None
-        return max(
+        selected_chain, _, exact_prefix_match = max(
             ranked_candidates,
             key=lambda candidate: (
                 candidate[1],
@@ -621,7 +559,8 @@ class GatewaySession:
                 candidate[0].updated_seq,
                 candidate[0].chain_id,
             ),
-        )[0]
+        )
+        return selected_chain, not exact_prefix_match
 
     def _is_chain_prefix_hash_match(
         self,
@@ -755,13 +694,27 @@ class GatewaySession:
         )
 
     def _close_length_exhausted_chain(self, encoded: EncodedData) -> None:
-        if encoded.chain_id is None or encoded.length_exhausted_trajectory is None:
-            raise RuntimeError("length-exhausted chain metadata is missing")
+        if encoded.chain_id is None:
+            raise RuntimeError("length-exhausted chain id is missing")
         chain_index, chain = self._find_active_chain(encoded.chain_id)
+        chain_to_materialize = chain
+        if encoded.rollback_applied:
+            message_history_len = chain.last_assistant_start.message_history_len
+            chain_to_materialize = replace(
+                chain,
+                message_history=list(encoded.messages[:message_history_len]),
+                message_tip_hash=encoded.incoming_message_prefix_hashes[message_history_len - 1],
+                buffer=encoded.buffer,
+                image_data=self._copy_media_list(encoded.image_data),
+                video_data=self._copy_media_list(encoded.video_data),
+            )
         order_seq = self._next_order_seq()
         self.materialized_chains.append(
             MaterializedChain(
-                trajectory=encoded.length_exhausted_trajectory,
+                trajectory=self._build_materialized_trajectory(
+                    chain=chain_to_materialize,
+                    extra_fields={"materialization_reason": "max_trajectory_length"},
+                ),
                 order_seq=order_seq,
             )
         )

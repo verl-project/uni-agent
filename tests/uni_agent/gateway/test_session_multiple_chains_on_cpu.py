@@ -298,6 +298,36 @@ async def test_last_assistant_rollback_reencodes_replacement_suffix_as_masked_co
 
 
 @pytest.mark.asyncio
+async def test_last_assistant_rollback_does_not_materialize_suffix_beyond_total_capacity():
+    """Close the rolled-back prefix without storing an oversized replacement suffix."""
+    first_messages = [{"role": "user", "content": "run mini-swe"}]
+    rewrite_messages = [
+        *first_messages,
+        {"role": "user", "content": "user_error: missing import"},
+    ]
+    codec = MessageCodec(FakeTokenizer())
+    prompt_length = len(codec.encode_full(first_messages))
+    suffix_length = len(codec.encode_incremental(rewrite_messages[1:]))
+    session = _session(
+        "rollback-total-capacity",
+        prompt_length=prompt_length,
+        response_length=suffix_length - 1,
+        enable_last_assistant_rollback=True,
+    )
+    backend = SequencedBackend(["BAD", "SHOULD_NOT_RUN"])
+
+    await _run(session, backend, first_messages)
+    outcome = await _run(session, backend, rewrite_messages)
+    trajectories = await session.finalize()
+
+    assert outcome.finish_reason == "length"
+    assert len(backend.calls) == 1
+    assert trajectories[0].response_ids == []
+    assert len(trajectories[0].prompt_ids) + len(trajectories[0].response_ids) <= prompt_length + suffix_length - 1
+    assert trajectories[0].extra_fields == {"materialization_reason": "max_trajectory_length"}
+
+
+@pytest.mark.asyncio
 async def test_last_assistant_rollback_splits_when_history_changes_before_boundary():
     """Split when request drift starts before the latest assistant boundary."""
     session = _session("rollback-split-before-boundary", enable_last_assistant_rollback=True)
@@ -1005,8 +1035,8 @@ async def test_multiple_chains_closes_when_continuation_fills_total_trajectory_c
 
 
 @pytest.mark.asyncio
-async def test_multiple_chains_rejects_initial_context_that_fills_total_trajectory_capacity():
-    """Reject a fresh prompt when no capacity remains for a generated token."""
+async def test_multiple_chains_returns_length_when_initial_context_fills_total_trajectory_capacity():
+    """Return a normal length stop when a fresh prompt leaves no generation room."""
     messages = [{"role": "user", "content": "initial prompt"}]
     context_length = _prompt_length(messages)
     session = _session(
@@ -1016,12 +1046,14 @@ async def test_multiple_chains_rejects_initial_context_that_fills_total_trajecto
     )
     backend = SequencedBackend(["SHOULD_NOT_RUN"])
 
-    with pytest.raises(HTTPException, match="leaves no generation room") as exc_info:
-        await _run(session, backend, messages)
+    outcome = await _run(session, backend, messages)
 
-    assert exc_info.value.status_code == 400
+    assert outcome.assistant_msg == {"role": "assistant", "content": ""}
+    assert outcome.finish_reason == "length"
+    assert outcome.completion_tokens == 0
     assert backend.steps == ["SHOULD_NOT_RUN"]
     assert session.active_chains == []
+    assert await session.finalize() == []
 
 
 @pytest.mark.asyncio
@@ -1230,8 +1262,8 @@ async def test_multiple_chains_terminal_state_rejects_late_commit(terminal_actio
 
 
 @pytest.mark.asyncio
-async def test_multiple_chains_reserved_chain_is_not_closed_by_oversized_split_request():
-    """Reject an oversized split without closing the chain reserved by another request."""
+async def test_multiple_chains_oversized_split_returns_length_without_closing_reserved_chain():
+    """Return a length stop without closing the chain reserved by another request."""
     first_messages = [{"role": "user", "content": "base"}]
     session = _session(
         "reserved-length",
@@ -1245,17 +1277,18 @@ async def test_multiple_chains_reserved_chain_is_not_closed_by_oversized_split_r
     await pending_backend.wait_for_calls(1)
 
     split_backend = SequencedBackend(["SHOULD_NOT_RUN"])
-    with pytest.raises(HTTPException, match="leaves no generation room") as exc_info:
-        await _run(
-            session,
-            split_backend,
-            [
-                {"role": "user", "content": "base"},
-                {"role": "assistant", "content": "BASE"},
-                {"role": "user", "content": "this continuation is long enough to close the chain"},
-            ],
-        )
-    assert exc_info.value.status_code == 400
+    split_outcome = await _run(
+        session,
+        split_backend,
+        [
+            {"role": "user", "content": "base"},
+            {"role": "assistant", "content": "BASE"},
+            {"role": "user", "content": "this continuation is long enough to close the chain"},
+        ],
+    )
+    assert split_outcome.assistant_msg == {"role": "assistant", "content": ""}
+    assert split_outcome.finish_reason == "length"
+    assert split_outcome.completion_tokens == 0
     assert split_backend.steps == ["SHOULD_NOT_RUN"]
     assert session.snapshot_state()["active_chain_ids"] == [1]
     assert session.snapshot_state()["num_trajectories"] == 0
