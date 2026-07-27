@@ -23,14 +23,12 @@ class _FakeSandbox:
         install_exit_code: int = 0,
         install_stderr: str = "install failed",
         process_exit_code: int = 0,
-        process_stdout: str = '{"type":"result","subtype":"success","is_error":false,"result":"done"}',
     ):
         self.probe_results = list(probe_results)
         self.npm_available = npm_available
         self.install_exit_code = install_exit_code
         self.install_stderr = install_stderr
         self.process_exit_code = process_exit_code
-        self.process_stdout = process_stdout
         self.calls: list[dict] = []
         self.exec_calls: list[dict] = []
 
@@ -45,7 +43,7 @@ class _FakeSandbox:
 
     async def exec(self, argv, *, timeout=None, workdir=None, env=None) -> ExecResult:
         self.exec_calls.append({"argv": argv, "timeout": timeout, "workdir": workdir, "env": env})
-        return ExecResult(exit_code=self.process_exit_code, stdout=self.process_stdout, stderr="")
+        return ExecResult(exit_code=self.process_exit_code, stdout="done", stderr="")
 
 
 def _agent() -> ClaudeCodeAgent:
@@ -137,7 +135,6 @@ def test_run_uses_sandbox_default_workdir():
     assert sandbox.exec_calls[0]["workdir"] is None
     argv = sandbox.exec_calls[0]["argv"]
     assert argv[:2] == ["claude", "-p"]
-    assert argv[argv.index("--output-format") + 1] == "json"
     assert argv[argv.index("--model") + 1] == "policy"
     assert argv[argv.index("--permission-mode") + 1] == "bypassPermissions"
     assert "--bare" not in argv
@@ -170,68 +167,6 @@ def test_run_reports_nonzero_process_exit():
 
     assert result.finished is False
     assert result.info["exit_code"] == 2
-
-
-def test_run_reports_max_turns_as_unfinished_even_with_zero_exit():
-    config = ClaudeCodeConfig(
-        model=ModelConfig(base_url="http://gateway:8000/v1", model_name="policy"),
-    )
-    sandbox = _FakeSandbox(
-        probe_results=[0],
-        process_stdout='{"type":"result","subtype":"error_max_turns","is_error":true}',
-    )
-
-    result = asyncio.run(
-        ClaudeCodeAgent(config).run(
-            sandbox=sandbox,
-            messages=[{"role": "user", "content": "fix the bug"}],
-        )
-    )
-
-    assert result.finished is False
-    assert result.info["result_subtype"] == "error_max_turns"
-
-
-def test_run_fails_closed_on_malformed_zero_exit_output():
-    config = ClaudeCodeConfig(
-        model=ModelConfig(base_url="http://gateway:8000/v1", model_name="policy"),
-    )
-    sandbox = _FakeSandbox(probe_results=[0], process_stdout="not json")
-
-    result = asyncio.run(
-        ClaudeCodeAgent(config).run(
-            sandbox=sandbox,
-            messages=[{"role": "user", "content": "fix the bug"}],
-        )
-    )
-
-    assert result.finished is False
-    assert result.info["result_subtype"] is None
-
-
-@pytest.mark.parametrize(
-    "process_stdout",
-    [
-        '{"type":"result","subtype":"success","result":"done"}',
-        '{"type":"result","subtype":"success","is_error":0,"result":"done"}',
-        '{"type":"result","subtype":"success","is_error":false}',
-        '{"type":"result","subtype":"success","is_error":false,"result":"done"}\ntrailing garbage',
-    ],
-)
-def test_run_rejects_malformed_success_event(process_stdout):
-    config = ClaudeCodeConfig(
-        model=ModelConfig(base_url="http://gateway:8000/v1", model_name="policy"),
-    )
-    sandbox = _FakeSandbox(probe_results=[0], process_stdout=process_stdout)
-
-    result = asyncio.run(
-        ClaudeCodeAgent(config).run(
-            sandbox=sandbox,
-            messages=[{"role": "user", "content": "fix the bug"}],
-        )
-    )
-
-    assert result.finished is False
 
 
 def test_claude_env_uses_placeholders_for_session_gateway():

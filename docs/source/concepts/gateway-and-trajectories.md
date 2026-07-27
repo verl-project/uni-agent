@@ -106,7 +106,7 @@ decides how training consumes it. When the training configuration enables
 `mask_unfinished_trajectories`, a session with `finished=false` is still
 written and tagged as successful, but its TransferQueue `response_mask` and
 `loss_mask` are all zero so it does not contribute policy gradients,
-normalization counts, or auxiliary losses. The policy defaults to `false`.
+normalization counts, or auxiliary losses.
 
 If no Task reward is reported, an optional verl Reward Loop Worker can score the final trajectory. Without either source, `rm_scores` remains zero and the framework emits a warning.
 
@@ -158,8 +158,8 @@ Important knobs include:
 
 - `gateway_count`: Gateway actor pool size.
 - `mask_unfinished_trajectories`: zeroes training masks for sessions that report
-  `finished=false`. Defaults to `false` and requires completion metadata
-  when enabled.
+  `finished=false`. Sessions without completion metadata remain trainable.
+  Defaults to `false`.
 - `enable_last_assistant_rollback`: reuses a chain when only its latest Assistant
   message is rewritten. Defaults to `true`; set it to `false` to preserve the
   previous split-on-rewrite behavior.

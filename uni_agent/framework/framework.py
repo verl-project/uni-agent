@@ -909,6 +909,8 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         responses = torch.tensor(trajectory.response_ids, dtype=torch.long)
         source_response_mask = torch.tensor(trajectory.response_mask, dtype=torch.long)
         finished = trajectory.reward_info.get("finished")
+        if finished is not None and type(finished) is not bool:
+            raise ValueError("reward_info.finished must be a bool or null")
         response_mask = (
             torch.zeros_like(source_response_mask)
             if self._mask_unfinished_trajectories and finished is False
@@ -934,8 +936,6 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         field: dict[str, object] = {
             "prompts": prompts,
             "responses": responses,
-            "response_mask": response_mask,
-            "loss_mask": response_mask,
             "input_ids": input_ids,
             "attention_mask": attention_mask,
             "position_ids": position_ids,
@@ -955,6 +955,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         extra_fields = dict(trajectory.extra_fields)
         extra_fields.pop("materialization_reason", None)
         field.update(extra_fields)
+        # Framework-owned masks must win over same-named Gateway extra fields.
         field["response_mask"] = response_mask
         field["loss_mask"] = response_mask
         field.pop("multi_modal_data", None)

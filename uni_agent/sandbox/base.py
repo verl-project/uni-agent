@@ -353,9 +353,7 @@ class Sandbox(abc.ABC):
     # ----- directory transfer: tar one archive over the single-file seam -----
     async def _upload_tree(self, local_dir: Path, remote_dir: str) -> None:
         """Pack a host dir into one tar, ship via :meth:`upload_file`, unpack in the sandbox."""
-        remote_staging_dir = "/uni-agent-tmp/sandbox/transfers"
-        await self.exec(["mkdir", "-p", remote_staging_dir])
-        remote_archive = f"{remote_staging_dir}/upload-{uuid.uuid4().hex}.tar.gz"
+        remote_archive = f"/tmp/uni-agent-upload-{uuid.uuid4().hex}.tar.gz"
         with tempfile.TemporaryDirectory() as tmp:
             archive = Path(tmp) / "upload.tar.gz"
             pack_dir_to_file(local_dir, archive)
@@ -373,9 +371,7 @@ class Sandbox(abc.ABC):
         """Archive a sandbox dir, pull via :meth:`download_file`, extract locally."""
         dst = Path(local_dir)
         dst.mkdir(parents=True, exist_ok=True)
-        remote_staging_dir = "/uni-agent-tmp/sandbox/transfers"
-        await self.exec(["mkdir", "-p", remote_staging_dir])
-        remote_archive = f"{remote_staging_dir}/download-{uuid.uuid4().hex}.tar.gz"
+        remote_archive = f"/tmp/uni-agent-download-{uuid.uuid4().hex}.tar.gz"
         try:
             res = await self.exec_shell(remote_pack_command(remote_dir, remote_archive))
             if res.exit_code != 0:

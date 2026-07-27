@@ -650,6 +650,10 @@ async def test_generate_sequences_masks_unfinished_trajectory_without_dropping_i
                     response_ids=[20, 21, 22],
                     response_mask=[1, 0, 1],
                     reward_info={"reward": 0.5, "finished": False},
+                    extra_fields={
+                        "response_mask": torch.ones(3, dtype=torch.long),
+                        "loss_mask": torch.ones(3, dtype=torch.long),
+                    },
                 )
             ]
         }
@@ -707,17 +711,29 @@ async def test_unfinished_trajectory_remains_trainable_when_masking_is_disabled(
 
 
 @pytest.mark.asyncio
-async def test_masking_requires_agent_completion_metadata(fake_tq, caplog):
-    runtime = _FakeGatewayManager({"session-sample-0-rollout-0": [_trajectory(reward_info={"reward": 0.5})]})
+async def test_masking_keeps_trajectory_trainable_when_completion_metadata_is_missing(fake_tq):
+    runtime = _FakeGatewayManager(
+        {
+            "session-sample-0-rollout-0": [
+                _trajectory(
+                    response_ids=[20, 21],
+                    response_mask=[1, 0],
+                    reward_info={"reward": 0.5},
+                )
+            ]
+        }
+    )
     framework = await _build_framework_with_agent_runners(
         agent_runners={"runner": _inline_runner_config(_async_noop_runner)},
         gateway_manager=runtime,
         mask_unfinished_trajectories=True,
     )
 
-    with pytest.raises(RuntimeError, match="All rollouts failed"):
-        await framework.generate_sequences(_build_prompts(count=1, global_steps=7))
-    assert "did not report reward_info.finished" in caplog.text
+    await framework.generate_sequences(_build_prompts(count=1, global_steps=7))
+
+    batch = fake_tq.batch_puts[0]
+    assert batch["fields"]["response_mask"][0].tolist() == [1, 0]
+    assert batch["fields"]["loss_mask"][0].tolist() == [1, 0]
 
 
 @pytest.mark.asyncio

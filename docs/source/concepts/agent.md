@@ -91,7 +91,7 @@ The Claude Code Agent demonstrates the black-box pattern:
 3. Launch the harness through `sandbox.exec()`.
 4. Return process metadata while the Task evaluates the modified Sandbox.
 
-Claude Code sets `AgentResult.finished=true` only when the process exits with code `0` and its structured result event reports `subtype=success` without an error. Limit exits such as `error_max_turns` remain unfinished.
+Claude Code sets `AgentResult.finished=true` when the process exits with code `0`.
 
 ```yaml
 agent:
