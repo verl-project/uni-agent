@@ -602,7 +602,7 @@ async def test_generate_sequences_writes_tq_schema_for_each_session(monkeypatch,
         "uid": "uid-0",
         "materialization_reason": "max_response_length",
     }
-    assert tag["trainable"] is True
+    assert "trainable" not in tag
     assert "finished" not in tag
     assert "length_truncated" not in tag
     assert "traj_exit_reason" not in tag
@@ -669,8 +669,11 @@ async def test_generate_sequences_masks_unfinished_trajectory_without_dropping_i
     assert batch["fields"]["loss_mask"][0].tolist() == [0, 0, 0]
     assert batch["fields"]["rm_scores"][0].tolist() == [0.0, 0.0, 0.5]
     assert batch["tags"][0]["status"] == "success"
-    assert batch["tags"][0]["finished"] is False
-    assert batch["tags"][0]["trainable"] is False
+    assert "finished" not in batch["tags"][0]
+    assert "trainable" not in batch["tags"][0]
+    assert "finished" not in batch["fields"].keys()
+    assert "trainable" not in batch["fields"].keys()
+    assert tu.get(batch["fields"], "reward_extra_info") == [{}]
     assert fake_tq.puts == [{"key": "uid-0", "partition_id": "train", "tag": {"status": "finished"}}]
 
 
@@ -697,8 +700,10 @@ async def test_unfinished_trajectory_remains_trainable_when_masking_is_disabled(
     batch = fake_tq.batch_puts[0]
     assert batch["fields"]["response_mask"][0].tolist() == [1, 1]
     assert batch["fields"]["loss_mask"][0].tolist() == [1, 1]
-    assert batch["tags"][0]["finished"] is False
-    assert batch["tags"][0]["trainable"] is True
+    assert "finished" not in batch["tags"][0]
+    assert "trainable" not in batch["tags"][0]
+    assert "finished" not in batch["fields"].keys()
+    assert "trainable" not in batch["fields"].keys()
 
 
 @pytest.mark.asyncio

@@ -733,13 +733,12 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         lines = [f"session {session_id}: {len(trajectories)} trajectory(ies)"]
         for i, traj in enumerate(trajectories):
             model_tokens = sum(traj.response_mask) if traj.response_mask else 0
-            finished = self._get_finished(traj)
-            trainable = self._is_trajectory_trainable(traj)
+            finished = traj.reward_info.get("finished")
             reason = (traj.extra_fields or {}).get("materialization_reason")
             lines.append(
                 f"  [{i}] turns={traj.num_turns} prompt_tokens={len(traj.prompt_ids)} "
                 f"response_tokens={len(traj.response_ids)} model_tokens={model_tokens} "
-                f"finished={finished} trainable={trainable} "
+                f"finished={finished} "
                 f"logprobs={'yes' if traj.response_logprobs else 'no'} "
                 f"experts={'yes' if traj.routed_experts is not None else 'no'} "
                 f"reward_score={traj.reward_score} reward_info={traj.reward_info or {}}"
@@ -789,8 +788,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         extra = traj.extra_fields or {}
         return {
             "num_turns": traj.num_turns,
-            "finished": self._get_finished(traj),
-            "trainable": self._is_trajectory_trainable(traj),
+            "finished": traj.reward_info.get("finished"),
             "reward_score": traj.reward_score,
             "reward_info": traj.reward_info or {},
             "reward_extra_info": extra.get("reward_extra_info"),
@@ -813,27 +811,10 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         """
         reward_info = dict(session_trajectories[-1].reward_info or {})
         reward = reward_info.pop("reward", None)
+        reward_info.pop("finished", None)
         if reward is None:
             return None
         return [(float(reward), reward_info)] * len(session_trajectories)
-
-    @staticmethod
-    def _get_finished(trajectory: Trajectory) -> bool | None:
-        finished = trajectory.reward_info.get("finished")
-        if finished is not None and type(finished) is not bool:
-            raise ValueError("reward_info.finished must be a bool or null")
-        return finished
-
-    def _is_trajectory_trainable(self, trajectory: Trajectory) -> bool:
-        if not self._mask_unfinished_trajectories:
-            return True
-
-        finished = self._get_finished(trajectory)
-        if finished is None:
-            raise ValueError(
-                "mask_unfinished_trajectories is enabled, but the Agent Runner did not report reward_info.finished"
-            )
-        return finished
 
     async def _score_trajectories(
         self,
@@ -927,9 +908,18 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         prompts = torch.tensor(trajectory.prompt_ids, dtype=torch.long)
         responses = torch.tensor(trajectory.response_ids, dtype=torch.long)
         source_response_mask = torch.tensor(trajectory.response_mask, dtype=torch.long)
-        finished = self._get_finished(trajectory)
-        trainable = self._is_trajectory_trainable(trajectory)
-        response_mask = source_response_mask if trainable else torch.zeros_like(source_response_mask)
+        finished = trajectory.reward_info.get("finished")
+        if finished is not None and type(finished) is not bool:
+            raise ValueError("reward_info.finished must be a bool or null")
+        if self._mask_unfinished_trajectories and finished is None:
+            raise ValueError(
+                "mask_unfinished_trajectories is enabled, but the Agent Runner did not report reward_info.finished"
+            )
+        response_mask = (
+            torch.zeros_like(source_response_mask)
+            if self._mask_unfinished_trajectories and finished is False
+            else source_response_mask
+        )
         input_ids = torch.cat([prompts, responses], dim=0)
         attention_mask = torch.ones_like(input_ids, dtype=torch.long)
         multi_modal_inputs = compute_multi_modal_inputs(
@@ -995,10 +985,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
             "response_len": response_len,
             "seq_len": prompt_len + response_len,
             "uid": uid,
-            "trainable": trainable,
         }
-        if finished is not None:
-            tag["finished"] = finished
         materialization_reason = trajectory.extra_fields.get("materialization_reason")
         if materialization_reason is not None:
             tag["materialization_reason"] = materialization_reason
