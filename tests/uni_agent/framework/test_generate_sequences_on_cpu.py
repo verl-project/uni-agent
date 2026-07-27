@@ -547,7 +547,7 @@ async def test_generate_sequences_writes_tq_schema_for_each_session(monkeypatch,
                         ],
                         dtype=np.uint8,
                     ),
-                    extra_fields={"materialization_reason": "max_response_length"},
+                    extra_fields={"materialization_reason": "max_trajectory_length"},
                 )
             ],
             "session-sample-0-rollout-1": [_trajectory(response_logprobs=[-0.3, -0.4])],
@@ -596,7 +596,7 @@ async def test_generate_sequences_writes_tq_schema_for_each_session(monkeypatch,
         "response_len": 2,
         "seq_len": 4,
         "uid": "uid-0",
-        "materialization_reason": "max_response_length",
+        "materialization_reason": "max_trajectory_length",
     }
     assert "length_truncated" not in tag
     assert "traj_exit_reason" not in tag
@@ -651,7 +651,7 @@ async def test_generate_sequences_batches_length_trajectory_before_normal_trajec
             "session-sample-0-rollout-0": [
                 _trajectory(
                     response_ids=[20],
-                    extra_fields={"materialization_reason": "max_response_length"},
+                    extra_fields={"materialization_reason": "max_trajectory_length"},
                 ),
                 _trajectory(response_ids=[21]),
             ]
@@ -667,7 +667,7 @@ async def test_generate_sequences_batches_length_trajectory_before_normal_trajec
     assert len(fake_tq.batch_puts) == 1
     batch = fake_tq.batch_puts[0]
     assert batch["keys"] == ["uid-0_0_0", "uid-0_0_1"]
-    assert batch["tags"][0]["materialization_reason"] == "max_response_length"
+    assert batch["tags"][0]["materialization_reason"] == "max_trajectory_length"
     assert "materialization_reason" not in batch["tags"][1]
     assert "materialization_reason" not in batch["fields"].keys()
     assert batch["fields"]["responses"][0].tolist() == [20]

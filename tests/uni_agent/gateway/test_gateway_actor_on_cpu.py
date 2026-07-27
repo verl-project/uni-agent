@@ -49,6 +49,14 @@ def test_gateway_actor_config_rejects_non_positive_response_length(response_leng
         GatewayActorConfig(tokenizer=FakeTokenizer(), response_length=response_length)
 
 
+@pytest.mark.parametrize("prompt_length", [0, -1])
+def test_gateway_actor_config_rejects_non_positive_prompt_length(prompt_length):
+    from uni_agent.gateway.config import GatewayActorConfig
+
+    with pytest.raises(ValueError, match="prompt_length must be positive"):
+        GatewayActorConfig(tokenizer=FakeTokenizer(), prompt_length=prompt_length)
+
+
 @pytest.mark.parametrize("value", ["true", 1, None])
 def test_gateway_actor_config_rejects_non_bool_last_assistant_rollback(value):
     from uni_agent.gateway.config import GatewayActorConfig
@@ -87,8 +95,8 @@ async def test_gateway_actor_forwards_last_assistant_rollback_to_session():
 
 
 @pytest.mark.asyncio
-async def test_gateway_actor_max_tokens_clamped_to_remaining_response_budget():
-    """Continuation requests clamp ``max_tokens`` to the selected chain budget."""
+async def test_gateway_actor_max_tokens_clamped_to_remaining_trajectory_capacity():
+    """Clamp ``max_tokens`` to total capacity minus the selected chain context."""
     from uni_agent.gateway.config import GatewayActorConfig
     from uni_agent.gateway.gateway import _GatewayActor
 
@@ -107,40 +115,46 @@ async def test_gateway_actor_max_tokens_clamped_to_remaining_response_budget():
         await actor.create_session("s1", sampling_params={"top_p": 0.8})
         first_messages = [{"role": "user", "content": "hi"}]
         await actor._handle_openai_chat_completions("s1", {"messages": first_messages})
-        assert backend.calls[-1]["sampling_params"]["max_tokens"] == 100
+        total_capacity = 2048 + 100
+        assert backend.calls[-1]["sampling_params"]["max_tokens"] == total_capacity - len(
+            backend.calls[-1]["prompt_ids"]
+        )
 
         await actor._handle_openai_chat_completions(
             "s1",
             {
                 "messages": [*first_messages, {"role": "assistant", "content": "A" * 60}],
-                "max_tokens": 200,
+                "max_tokens": 5000,
             },
         )
 
-        assert backend.calls[-1]["sampling_params"]["max_tokens"] == 40
+        assert backend.calls[-1]["sampling_params"]["max_tokens"] == total_capacity - len(
+            backend.calls[-1]["prompt_ids"]
+        )
         assert backend.calls[-1]["sampling_params"]["top_p"] == 0.8
     finally:
         await actor.shutdown()
 
 
 @pytest.mark.asyncio
-async def test_gateway_actor_over_budget_closes_without_backend_call():
+async def test_gateway_actor_exhausted_trajectory_closes_without_backend_call():
     from uni_agent.gateway.config import GatewayActorConfig
     from uni_agent.gateway.gateway import _GatewayActor
 
+    first_messages = [{"role": "user", "content": "hi"}]
+    prompt_length = len(FakeTokenizer().apply_chat_template(first_messages))
     backend = SequencedBackend(["A" * 60, "B"])
     actor = _GatewayActor(
         GatewayActorConfig(
             tokenizer=FakeTokenizer(),
-            prompt_length=2048,
-            response_length=50,
+            prompt_length=prompt_length,
+            response_length=60,
         ),
         backend,
     )
     await actor.start()
     try:
         await actor.create_session("s1")
-        first_messages = [{"role": "user", "content": "hi"}]
         await actor._handle_openai_chat_completions("s1", {"messages": first_messages})
 
         response = await actor._handle_openai_chat_completions(
@@ -185,17 +199,20 @@ async def test_gateway_actor_rejects_invalid_session_max_tokens_before_backend_c
 
 @pytest.mark.asyncio
 async def test_gateway_actor_continuation_budget_exhausted_materializes_length_stop():
-    """When a continuation request exceeds the selected chain response budget,
+    """When a continuation request exceeds the selected chain trajectory capacity,
     the gateway skips the backend call, closes that chain with
-    ``materialization_reason="max_response_length"``, and returns an empty
+    ``materialization_reason="max_trajectory_length"``, and returns an empty
     assistant message with ``finish_reason="length"``."""
     from uni_agent.gateway.config import GatewayActorConfig
     from uni_agent.gateway.gateway import _GatewayActor
 
+    first_messages = [{"role": "user", "content": "search"}]
+    prompt_length = len(FakeTokenizer().apply_chat_template(first_messages))
     backend = SequencedBackend(["A" * 45, "SHOULD_NOT_RUN"])
     actor = _GatewayActor(
         GatewayActorConfig(
             tokenizer=FakeTokenizer(),
+            prompt_length=prompt_length,
             response_length=50,
         ),
         backend,
@@ -203,7 +220,6 @@ async def test_gateway_actor_continuation_budget_exhausted_materializes_length_s
     await actor.start()
     try:
         await actor.create_session("s1")
-        first_messages = [{"role": "user", "content": "search"}]
         await actor._handle_openai_chat_completions("s1", {"messages": first_messages})
         backend.calls.clear()
         payload = {
@@ -226,7 +242,7 @@ async def test_gateway_actor_continuation_budget_exhausted_materializes_length_s
         trajectories = await actor.finalize_session("s1")
         assert len(trajectories) == 1
         trajectory = trajectories[0]
-        assert trajectory.extra_fields["materialization_reason"] == "max_response_length"
+        assert trajectory.extra_fields["materialization_reason"] == "max_trajectory_length"
         assert "length_truncated" not in trajectory.extra_fields
         assert "traj_exit_reason" not in trajectory.extra_fields
     finally:
@@ -1048,7 +1064,6 @@ async def test_gateway_actor_session_sampling_defaults_are_isolated_and_request_
     actor = _GatewayActor(
         GatewayActorConfig(
             tokenizer=FakeTokenizer(),
-            response_length=64,
         ),
         backend,
     )
@@ -1100,7 +1115,7 @@ async def test_gateway_actor_session_sampling_defaults_are_isolated_and_request_
             "top_k": 1,
             "presence_penalty": 0.3,
             "logprobs": True,
-            "max_tokens": 64,
+            "max_tokens": 128,
         },
         {
             "temperature": 0,

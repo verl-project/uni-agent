@@ -26,8 +26,9 @@ class GatewayActorConfig:
             provider adapters when merging payload sampling params.
         vision_info_extractor: Optional async extractor for image/video inputs.
         vision_info_extractor_kwargs: Static kwargs forwarded to the extractor.
-        prompt_length: Optional prompt-token budget stored on gateway sessions.
-        response_length: Optional response-token budget stored on gateway sessions.
+        prompt_length: Optional prompt component of the total trajectory capacity.
+        response_length: Optional response component of the total trajectory capacity.
+            The gateway enforces their sum when both values are set.
         enable_last_assistant_rollback: Whether latest-assistant rewrites may
             rollback and reuse an existing chain. Enabled by default.
     """
@@ -49,5 +50,7 @@ class GatewayActorConfig:
                 "enable_last_assistant_rollback must be a bool, "
                 f"got {type(self.enable_last_assistant_rollback).__name__}"
             )
+        if self.prompt_length is not None and self.prompt_length <= 0:
+            raise ValueError(f"prompt_length must be positive when set, got {self.prompt_length}")
         if self.response_length is not None and self.response_length <= 0:
             raise ValueError(f"response_length must be positive when set, got {self.response_length}")

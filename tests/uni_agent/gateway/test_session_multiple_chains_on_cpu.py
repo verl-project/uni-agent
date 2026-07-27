@@ -29,9 +29,14 @@ def _decode_response_ids(response_ids: list[int]) -> str:
     return FakeTokenizer().decode(response_ids)
 
 
+def _prompt_length(messages: list[dict]) -> int:
+    return len(MessageCodec(FakeTokenizer()).encode_full(messages))
+
+
 def _session(
     session_id: str,
     *,
+    prompt_length: int | None = None,
     response_length: int | None = None,
     sampling_params: dict | None = None,
     enable_last_assistant_rollback: bool = False,
@@ -47,6 +52,7 @@ def _session(
             vision_info_extractor=vision_info_extractor,
             tool_parser_name=tool_parser_name,
         ),
+        prompt_length=prompt_length,
         response_length=response_length,
         sampling_params=sampling_params,
         enable_last_assistant_rollback=enable_last_assistant_rollback,
@@ -58,6 +64,13 @@ def test_gateway_session_rejects_non_positive_response_length(response_length):
     """Reject non-positive session response budgets during construction."""
     with pytest.raises(ValueError, match="response_length must be positive"):
         _session("invalid-response-length", response_length=response_length)
+
+
+@pytest.mark.parametrize("prompt_length", [0, -1])
+def test_gateway_session_rejects_non_positive_prompt_length(prompt_length):
+    """Reject non-positive session prompt capacity during construction."""
+    with pytest.raises(ValueError, match="prompt_length must be positive"):
+        _session("invalid-prompt-length", prompt_length=prompt_length)
 
 
 def test_gateway_session_enables_last_assistant_rollback_by_default():
@@ -807,11 +820,15 @@ async def test_multiple_chains_new_chain_backend_failure_does_not_leave_partial_
 
 @pytest.mark.asyncio
 async def test_multiple_chains_length_exhaustion_closes_selected_chain_and_orders_it_last():
-    """Close and order the selected chain when its response budget is exhausted."""
-    session = _session("length-close", response_length=len("MAIN1") + 1)
-    backend = SequencedBackend(["MAIN1", "SUB"])
+    """Close and order the selected chain when its trajectory capacity is exhausted."""
     main_first = [HELPFUL_SYS, {"role": "user", "content": "main"}]
     subagent = [SUBAGENT_SYS, {"role": "user", "content": "sub"}]
+    session = _session(
+        "length-close",
+        prompt_length=max(_prompt_length(main_first), _prompt_length(subagent)),
+        response_length=len("MAIN1") + 1,
+    )
+    backend = SequencedBackend(["MAIN1", "SUB"])
     main_too_long = [
         HELPFUL_SYS,
         {"role": "user", "content": "main"},
@@ -829,15 +846,19 @@ async def test_multiple_chains_length_exhaustion_closes_selected_chain_and_order
     assert len(trajectories) == 2
     assert _decode_response_ids(trajectories[0].response_ids) == "SUB"
     assert _decode_response_ids(trajectories[1].response_ids) == "MAIN1"
-    assert trajectories[1].extra_fields["materialization_reason"] == "max_response_length"
+    assert trajectories[1].extra_fields["materialization_reason"] == "max_trajectory_length"
 
 
 @pytest.mark.asyncio
 async def test_multiple_chains_exactly_exhausted_chain_closes_without_backend_call():
     """Close an exhausted chain even when the repeated request has no incremental tail."""
-    session = _session("chain-budget-exhausted", response_length=len("NORMAL"))
-    backend = SequencedBackend(["NORMAL", "SHOULD_NOT_RUN"])
     first_messages = [{"role": "user", "content": "fill the response budget"}]
+    session = _session(
+        "chain-budget-exhausted",
+        prompt_length=_prompt_length(first_messages),
+        response_length=len("NORMAL"),
+    )
+    backend = SequencedBackend(["NORMAL", "SHOULD_NOT_RUN"])
     repeated_history = [
         *first_messages,
         {"role": "assistant", "content": "NORMAL"},
@@ -851,15 +872,19 @@ async def test_multiple_chains_exactly_exhausted_chain_closes_without_backend_ca
     assert len(backend.calls) == 1
     assert backend.steps == ["SHOULD_NOT_RUN"]
     assert len(trajectories) == 1
-    assert trajectories[0].extra_fields["materialization_reason"] == "max_response_length"
+    assert trajectories[0].extra_fields["materialization_reason"] == "max_trajectory_length"
 
 
 @pytest.mark.asyncio
 async def test_multiple_chains_length_exhaustion_orders_before_later_fresh_chain():
     """Order a closed length trajectory before a later normal trajectory."""
-    session = _session("length-before-fresh", response_length=len("FULL"))
-    backend = SequencedBackend(["FULL", "NEW"])
     first_messages = [{"role": "user", "content": "fill the response budget"}]
+    session = _session(
+        "length-before-fresh",
+        prompt_length=_prompt_length(first_messages),
+        response_length=len("FULL"),
+    )
+    backend = SequencedBackend(["FULL", "NEW"])
     repeated_history = [
         *first_messages,
         {"role": "assistant", "content": "FULL"},
@@ -874,13 +899,13 @@ async def test_multiple_chains_length_exhaustion_orders_before_later_fresh_chain
     assert len(backend.calls) == 2
     assert backend.steps == []
     assert [_decode_response_ids(trajectory.response_ids) for trajectory in trajectories] == ["FULL", "NEW"]
-    assert trajectories[0].extra_fields == {"materialization_reason": "max_response_length"}
+    assert trajectories[0].extra_fields == {"materialization_reason": "max_trajectory_length"}
     assert trajectories[1].extra_fields == {}
 
 
 @pytest.mark.asyncio
 async def test_multiple_chains_exactly_exhausted_chain_skips_new_media_extraction():
-    """Do not parse unused incremental media after the response budget is full."""
+    """Do not parse unused incremental media after trajectory capacity is full."""
     extractor_calls = 0
 
     async def forbidden_extractor(*args, **kwargs):
@@ -888,14 +913,15 @@ async def test_multiple_chains_exactly_exhausted_chain_skips_new_media_extractio
         extractor_calls += 1
         raise AssertionError("media extractor must not run for an exhausted chain")
 
+    first_messages = [{"role": "user", "content": "fill the response budget"}]
     session = _session(
         "exhausted-skips-media",
+        prompt_length=_prompt_length(first_messages),
         response_length=len("FULL"),
         processor=FakeProcessor(),
         vision_info_extractor=forbidden_extractor,
     )
     backend = SequencedBackend(["FULL", "SHOULD_NOT_RUN"])
-    first_messages = [{"role": "user", "content": "fill the response budget"}]
     continuation = [
         *first_messages,
         {"role": "assistant", "content": "FULL"},
@@ -911,18 +937,91 @@ async def test_multiple_chains_exactly_exhausted_chain_skips_new_media_extractio
     assert len(backend.calls) == 1
     assert backend.steps == ["SHOULD_NOT_RUN"]
     assert trajectories[0].multi_modal_data is None
-    assert trajectories[0].extra_fields == {"materialization_reason": "max_response_length"}
+    assert trajectories[0].extra_fields == {"materialization_reason": "max_trajectory_length"}
 
 
 @pytest.mark.asyncio
-async def test_multiple_chains_sets_remaining_budget_when_request_omits_max_tokens():
-    """Use the remaining session budget when max_tokens is omitted."""
-    session = _session("default-max-tokens-budget", response_length=10)
+async def test_multiple_chains_does_not_enforce_response_length_without_prompt_length():
+    """Do not treat response_length alone as a response-only token budget."""
+    session = _session("response-length-only", response_length=10)
     backend = SequencedBackend(["A"])
 
     await _run(session, backend, [{"role": "user", "content": "use session budget"}])
 
-    assert backend.calls[0]["sampling_params"]["max_tokens"] == 10
+    assert "max_tokens" not in backend.calls[0]["sampling_params"]
+
+
+@pytest.mark.asyncio
+async def test_multiple_chains_uses_total_trajectory_capacity_instead_of_response_only_budget():
+    """Allow response tokens to use unused prompt capacity across turns."""
+    session = _session(
+        "total-capacity-allows-continuation",
+        prompt_length=256,
+        response_length=len("FIRST"),
+    )
+    backend = SequencedBackend(["FIRST", "SECOND"])
+    first_messages = [{"role": "user", "content": "first"}]
+    continuation = [
+        *first_messages,
+        {"role": "assistant", "content": "FIRST"},
+        {"role": "user", "content": "continue"},
+    ]
+
+    await _run(session, backend, first_messages)
+    outcome = await _run(session, backend, continuation)
+    trajectories = await session.finalize()
+
+    assert outcome.finish_reason == "stop"
+    assert len(backend.calls) == 2
+    assert _decode_response_ids(trajectories[0].response_ids).endswith("SECOND")
+
+
+@pytest.mark.asyncio
+async def test_multiple_chains_closes_when_continuation_fills_total_trajectory_capacity():
+    """Count prompt, generated, and continuation-context tokens against one capacity."""
+    first_messages = [{"role": "user", "content": "first"}]
+    continuation_messages = [
+        {"role": "assistant", "content": "FIRST"},
+        {"role": "user", "content": "continue"},
+    ]
+    codec = MessageCodec(FakeTokenizer())
+    prompt_length = len(codec.encode_full(first_messages))
+    incremental_length = len(codec.encode_incremental(continuation_messages[-1:]))
+    session = _session(
+        "total-capacity-exhausted",
+        prompt_length=prompt_length,
+        response_length=len("FIRST") + incremental_length,
+    )
+    backend = SequencedBackend(["FIRST", "SHOULD_NOT_RUN"])
+
+    await _run(session, backend, first_messages)
+    outcome = await _run(session, backend, [*first_messages, *continuation_messages])
+    trajectories = await session.finalize()
+
+    assert outcome.finish_reason == "length"
+    assert len(backend.calls) == 1
+    assert backend.steps == ["SHOULD_NOT_RUN"]
+    assert trajectories[0].extra_fields == {"materialization_reason": "max_trajectory_length"}
+
+
+@pytest.mark.asyncio
+async def test_multiple_chains_rejects_initial_context_that_fills_total_trajectory_capacity():
+    """Reject a fresh prompt when no capacity remains for a generated token."""
+    messages = [{"role": "user", "content": "initial prompt"}]
+    context_length = _prompt_length(messages)
+    session = _session(
+        "initial-context-exhausted",
+        prompt_length=context_length - 1,
+        response_length=1,
+    )
+    backend = SequencedBackend(["SHOULD_NOT_RUN"])
+
+    with pytest.raises(HTTPException, match="leaves no generation room") as exc_info:
+        await _run(session, backend, messages)
+
+    assert exc_info.value.status_code == 400
+    assert backend.steps == ["SHOULD_NOT_RUN"]
+    assert session.active_chains == []
 
 
 @pytest.mark.asyncio
@@ -1029,13 +1128,6 @@ async def test_multiple_chains_length_exhaustion_does_not_materialize_unsent_med
     media_kind, message_factory, extractor, sent_url, unsent_url, backend_field, trajectory_key
 ):
     """Exclude unsent media when length exhaustion skips backend generation."""
-    session = _session(
-        f"length-unsent-{media_kind}",
-        response_length=len("FIRST") + 1,
-        processor=FakeProcessor(),
-        vision_info_extractor=extractor,
-    )
-    backend = SequencedBackend(["FIRST", "SHOULD_NOT_RUN"])
     first_messages = [message_factory(sent_url, "describe first")]
     exhausted_messages = [
         *first_messages,
@@ -1043,6 +1135,21 @@ async def test_multiple_chains_length_exhaustion_does_not_materialize_unsent_med
         message_factory(unsent_url, "new media that exhausts length"),
     ]
     expected_sent = [sent_url] if media_kind == "image" else [(sent_url, {"url": sent_url})]
+    prompt_length = len(
+        MessageCodec(FakeTokenizer(), processor=FakeProcessor()).encode_full(
+            first_messages,
+            image_data=expected_sent if media_kind == "image" else None,
+            video_data=expected_sent if media_kind == "video" else None,
+        )
+    )
+    session = _session(
+        f"length-unsent-{media_kind}",
+        prompt_length=prompt_length,
+        response_length=len("FIRST") + 1,
+        processor=FakeProcessor(),
+        vision_info_extractor=extractor,
+    )
+    backend = SequencedBackend(["FIRST", "SHOULD_NOT_RUN"])
 
     await _run(session, backend, first_messages)
     outcome = await _run(session, backend, exhausted_messages)
@@ -1054,15 +1161,19 @@ async def test_multiple_chains_length_exhaustion_does_not_materialize_unsent_med
     assert backend.calls[0][backend_field] == expected_sent
     assert len(trajectories) == 1
     assert trajectories[0].multi_modal_data == {trajectory_key: expected_sent}
-    assert trajectories[0].extra_fields["materialization_reason"] == "max_response_length"
+    assert trajectories[0].extra_fields["materialization_reason"] == "max_trajectory_length"
 
 
 @pytest.mark.asyncio
 async def test_multiple_chains_abort_clears_length_materialized_trajectories():
     """Clear length-materialized trajectories when the session is aborted."""
-    session = _session("abort-clears-materialized", response_length=len("FIRST") + 1)
-    backend = SequencedBackend(["FIRST", "SHOULD_NOT_RUN"])
     first_messages = [{"role": "user", "content": "first turn"}]
+    session = _session(
+        "abort-clears-materialized",
+        prompt_length=_prompt_length(first_messages),
+        response_length=len("FIRST") + 1,
+    )
+    backend = SequencedBackend(["FIRST", "SHOULD_NOT_RUN"])
     exhausted_messages = [
         *first_messages,
         {"role": "assistant", "content": "FIRST"},
@@ -1119,41 +1230,45 @@ async def test_multiple_chains_terminal_state_rejects_late_commit(terminal_actio
 
 
 @pytest.mark.asyncio
-async def test_multiple_chains_reserved_chain_is_not_closed_by_concurrent_length_request():
-    """Split rather than length-close a matching chain reserved by another request."""
-    session = _session("reserved-length", response_length=len("BASE") + 1)
-    await _run(session, SequencedBackend(["BASE"]), [{"role": "user", "content": "base"}])
+async def test_multiple_chains_reserved_chain_is_not_closed_by_oversized_split_request():
+    """Reject an oversized split without closing the chain reserved by another request."""
+    first_messages = [{"role": "user", "content": "base"}]
+    session = _session(
+        "reserved-length",
+        prompt_length=_prompt_length(first_messages),
+        response_length=len("BASE") + 1,
+    )
+    await _run(session, SequencedBackend(["BASE"]), first_messages)
     pending_backend = _ControlledParallelBackend(["CONT"])
     pending_messages = list(session.active_chains[0].message_history)
     pending_task = asyncio.create_task(_run(session, pending_backend, pending_messages))
     await pending_backend.wait_for_calls(1)
 
-    split_outcome = await _run(
-        session,
-        SequencedBackend(["FRESH"]),
-        [
-            {"role": "user", "content": "base"},
-            {"role": "assistant", "content": "BASE"},
-            {"role": "user", "content": "this continuation is long enough to close the chain"},
-        ],
-    )
-    assert split_outcome.finish_reason == "stop"
-    assert session.snapshot_state()["active_chain_ids"] == [1, 2]
+    split_backend = SequencedBackend(["SHOULD_NOT_RUN"])
+    with pytest.raises(HTTPException, match="leaves no generation room") as exc_info:
+        await _run(
+            session,
+            split_backend,
+            [
+                {"role": "user", "content": "base"},
+                {"role": "assistant", "content": "BASE"},
+                {"role": "user", "content": "this continuation is long enough to close the chain"},
+            ],
+        )
+    assert exc_info.value.status_code == 400
+    assert split_backend.steps == ["SHOULD_NOT_RUN"]
+    assert session.snapshot_state()["active_chain_ids"] == [1]
     assert session.snapshot_state()["num_trajectories"] == 0
-    split_chain = next(chain for chain in session.active_chains if chain.chain_id == 2)
-    assert split_chain.buffer.response_ids == _ids("FRESH")
-    assert split_chain.buffer.response_mask == [1] * len("FRESH")
 
     pending_backend.release_call(0)
     await pending_task
-    assert session.snapshot_state()["active_chain_ids"] == [1, 2]
+    assert session.snapshot_state()["active_chain_ids"] == [1]
 
     trajectories = await session.finalize()
     decoded = [_decode_response_ids(trajectory.response_ids) for trajectory in trajectories]
-    assert len(trajectories) == 2
+    assert len(trajectories) == 1
     assert all("materialization_reason" not in trajectory.extra_fields for trajectory in trajectories)
-    assert any(text.endswith("CONT") for text in decoded)
-    assert "FRESH" in decoded
+    assert decoded[0].endswith("CONT")
 
 
 @pytest.mark.asyncio

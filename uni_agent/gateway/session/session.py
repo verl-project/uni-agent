@@ -109,7 +109,7 @@ class EncodedData:
             materialization.
         video_data: Video inputs carried into backend generation and trajectory
             materialization.
-        length_exhausted_trajectory: Materialized trajectory for a length-budget
+        length_exhausted_trajectory: Materialized trajectory for a total-capacity
             early return, or ``None`` on the normal path.
         chain_id: Selected active chain id, or ``None`` when commit should append
             a new chain.
@@ -179,15 +179,18 @@ class GatewaySession:
         enable_last_assistant_rollback: bool = True,
     ):
         """Create an active session bound to a handle and model codec."""
+        if prompt_length is not None and prompt_length <= 0:
+            raise ValueError(f"prompt_length must be positive when set, got {prompt_length}")
         if response_length is not None and response_length <= 0:
             raise ValueError(f"response_length must be positive when set, got {response_length}")
 
         self.handle = handle
         self._codec = codec
         # Provider adapters merge these trusted defaults before calling the
-        # session; the response budget is enforced here during preparation.
-        self._prompt_length = prompt_length
-        self._response_length = response_length
+        # session; the total trajectory capacity is enforced during preparation.
+        self._trajectory_capacity = (
+            prompt_length + response_length if prompt_length is not None and response_length is not None else None
+        )
         self._sampling_params = dict(sampling_params or {})
         self._enable_last_assistant_rollback = enable_last_assistant_rollback
         self.active_chains: list[ChainState] = []
@@ -390,6 +393,14 @@ class GatewaySession:
                 image_data=image_data,
                 video_data=video_data,
             )
+            if self._trajectory_capacity is not None and len(prompt_ids) >= self._trajectory_capacity:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"request context length {len(prompt_ids)} leaves no generation room "
+                        f"within trajectory capacity {self._trajectory_capacity}"
+                    ),
+                )
             buffer = TrajectoryBuffer(prompt_ids=prompt_ids)
             chain_id = None
         else:
@@ -445,7 +456,10 @@ class GatewaySession:
                     video_data.extend(new_video_data)
                 rollback_applied = True
 
-                if self._response_length is not None and len(buffer.response_mask) >= self._response_length:
+                if (
+                    self._trajectory_capacity is not None
+                    and len(buffer.prompt_ids) + len(buffer.response_ids) >= self._trajectory_capacity
+                ):
                     context_ids = buffer.prompt_ids + buffer.response_ids
                     working_chain = replace(
                         selected_chain,
@@ -465,7 +479,7 @@ class GatewaySession:
                         video_data=video_data,
                         length_exhausted_trajectory=self._build_materialized_trajectory(
                             chain=working_chain,
-                            extra_fields={"materialization_reason": "max_response_length"},
+                            extra_fields={"materialization_reason": "max_trajectory_length"},
                         ),
                         chain_id=selected_chain.chain_id,
                         incoming_message_prefix_hashes=list(incoming_message_prefix_hashes),
@@ -477,8 +491,9 @@ class GatewaySession:
                 new_image_data = None
                 new_video_data = None
                 incremental_ids = []
+                current_trajectory_length = len(buffer.prompt_ids) + len(buffer.response_ids)
                 already_exhausted = (
-                    self._response_length is not None and len(buffer.response_mask) >= self._response_length
+                    self._trajectory_capacity is not None and current_trajectory_length >= self._trajectory_capacity
                 )
                 if incremental_messages and not already_exhausted:
                     new_image_data, new_video_data = await self._codec.extract_multi_modal_data(incremental_messages)
@@ -489,8 +504,8 @@ class GatewaySession:
                     )
 
                 if already_exhausted or (
-                    self._response_length is not None
-                    and len(buffer.response_mask) + len(incremental_ids) >= self._response_length
+                    self._trajectory_capacity is not None
+                    and current_trajectory_length + len(incremental_ids) >= self._trajectory_capacity
                 ):
                     context_ids = buffer.prompt_ids + buffer.response_ids
                     return EncodedData(
@@ -503,7 +518,7 @@ class GatewaySession:
                         video_data=video_data,
                         length_exhausted_trajectory=self._build_materialized_trajectory(
                             chain=selected_chain,
-                            extra_fields={"materialization_reason": "max_response_length"},
+                            extra_fields={"materialization_reason": "max_trajectory_length"},
                         ),
                         chain_id=selected_chain.chain_id,
                         incoming_message_prefix_hashes=list(incoming_message_prefix_hashes),
@@ -524,13 +539,13 @@ class GatewaySession:
                     video_data.extend(new_video_data)
 
         context_ids = buffer.prompt_ids + buffer.response_ids
-        remaining_response_budget = (
-            self._response_length - len(buffer.response_mask) if self._response_length is not None else None
+        remaining_trajectory_capacity = (
+            self._trajectory_capacity - len(context_ids) if self._trajectory_capacity is not None else None
         )
-        if remaining_response_budget is not None:
+        if remaining_trajectory_capacity is not None:
             sampling_params["max_tokens"] = min(
-                sampling_params.get("max_tokens", remaining_response_budget),
-                remaining_response_budget,
+                sampling_params.get("max_tokens", remaining_trajectory_capacity),
+                remaining_trajectory_capacity,
             )
         last_assistant_start = self._snapshot_last_assistant_start(
             buffer=buffer,
