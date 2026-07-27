@@ -909,12 +909,6 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         responses = torch.tensor(trajectory.response_ids, dtype=torch.long)
         source_response_mask = torch.tensor(trajectory.response_mask, dtype=torch.long)
         finished = trajectory.reward_info.get("finished")
-        if finished is not None and type(finished) is not bool:
-            raise ValueError("reward_info.finished must be a bool or null")
-        if self._mask_unfinished_trajectories and finished is None:
-            raise ValueError(
-                "mask_unfinished_trajectories is enabled, but the Agent Runner did not report reward_info.finished"
-            )
         response_mask = (
             torch.zeros_like(source_response_mask)
             if self._mask_unfinished_trajectories and finished is False
