@@ -106,10 +106,7 @@ decides how training consumes it. When the training configuration enables
 `mask_unfinished_trajectories`, a session with `finished=false` is still
 written and tagged as successful, but its TransferQueue `response_mask` and
 `loss_mask` are all zero so it does not contribute policy gradients,
-normalization counts, or auxiliary losses. The policy defaults to `false`. When
-it is enabled, the Runner must report `finished`. Neither `finished` nor a
-derived `trainable` flag is written to TransferQueue; the effective masks are
-the training contract.
+normalization counts, or auxiliary losses. The policy defaults to `false`.
 
 If no Task reward is reported, an optional verl Reward Loop Worker can score the final trajectory. Without either source, `rm_scores` remains zero and the framework emits a warning.
 
