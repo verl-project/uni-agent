@@ -859,8 +859,9 @@ class OpenAICompatibleAgentFramework(AgentFramework):
                 f"RewardLoopWorker result missing 'reward_score' key or invalid for uid={sample_fields.get('uid')}"
             )
         score = float(result["reward_score"])
-        extra = dict(result.get("reward_extra_info") or {})
-        return [(score, extra)] * len(session_trajectories)
+        extra = result.get("reward_extra_info") or {}
+        # Each trajectory needs its own dict: downstream code merges into it.
+        return [(score, dict(extra)) for _ in session_trajectories]
 
     def _extract_sample_fields(self, *, prompts: TensorDict, sample_index: int) -> dict[str, object]:
         sample_fields = {}
