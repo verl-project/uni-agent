@@ -47,6 +47,11 @@ class TrajectoryBuffer:
             spanning ``prompt + response``. The backend re-prefills the full
             context each turn, so this is replaced (not accumulated) and the final
             value covers the whole sequence (mirrors verl's tool_agent_loop).
+        generation_versions: One ``(min_global_steps, max_global_steps)`` mark
+            per generation, in generation order. Rollback drops the last mark
+            with the tokens it describes, so a dropped assistant no longer
+            widens the trajectory's version span. Marks carry ``None`` when the
+            backend reports no version.
     """
 
     prompt_ids: list[int]
@@ -54,6 +59,7 @@ class TrajectoryBuffer:
     response_mask: list[int] = field(default_factory=list)
     response_logprobs: list[float] = field(default_factory=list)
     routed_experts: Any | None = None
+    generation_versions: list[tuple[int | None, int | None]] = field(default_factory=list)
 
 
 @dataclass
@@ -264,6 +270,12 @@ class GatewaySession:
                 raise HTTPException(status_code=500, detail=f"{e.__class__.__name__}: {e}") from e
 
             response_ids = list(output.token_ids)
+            encoded.buffer.generation_versions.append(
+                (
+                    output.extra_fields.get("min_global_steps"),
+                    output.extra_fields.get("max_global_steps"),
+                )
+            )
             encoded.buffer.response_ids.extend(response_ids)
             encoded.buffer.response_mask.extend([1] * len(response_ids))
             if encoded.sampling_params.get("logprobs", False):
@@ -412,6 +424,9 @@ class GatewaySession:
                 del buffer.response_ids[last_assistant_start.response_ids_len :]
                 del buffer.response_mask[last_assistant_start.response_mask_len :]
                 del buffer.response_logprobs[last_assistant_start.response_logprobs_len :]
+                # One generation appends exactly one mark, so the rewritten
+                # assistant is always the last one.
+                del buffer.generation_versions[-1:]
                 self._assert_response_logprob_alignment(buffer)
 
                 if image_data is not None:
@@ -608,6 +623,7 @@ class GatewaySession:
             response_mask=list(buffer.response_mask),
             response_logprobs=list(buffer.response_logprobs),
             routed_experts=buffer.routed_experts,
+            generation_versions=list(buffer.generation_versions),
         )
 
     def _copy_chain_media(self, chain: ChainState) -> tuple[list[Any] | None, list[Any] | None]:
@@ -760,6 +776,16 @@ class GatewaySession:
         response_logprobs = None
         if chain.buffer.response_logprobs:
             response_logprobs = list(chain.buffer.response_logprobs)
+        # Fold the surviving marks into the trajectory-level version span the trainer
+        # reads for staleness metrics. Omit the keys when no backend reported a
+        # version so the framework falls back instead of tagging None.
+        marks = [mark for mark in chain.buffer.generation_versions if mark[0] is not None]
+        trajectory_extra_fields: dict[str, Any] = {}
+        if marks:
+            trajectory_extra_fields["min_global_steps"] = min(mark[0] for mark in marks)
+            trajectory_extra_fields["max_global_steps"] = max(mark[1] for mark in marks)
+        if extra_fields:
+            trajectory_extra_fields.update(extra_fields)
         return Trajectory(
             prompt_ids=list(chain.buffer.prompt_ids),
             response_ids=list(chain.buffer.response_ids),
@@ -772,7 +798,7 @@ class GatewaySession:
                 chain.image_data,
                 chain.video_data,
             ),
-            extra_fields=dict(extra_fields) if extra_fields else {},
+            extra_fields=trajectory_extra_fields,
         )
 
     def _count_chat_turns(self, message_history: list[dict[str, Any]]) -> int:

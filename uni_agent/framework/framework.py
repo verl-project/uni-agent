@@ -980,6 +980,9 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         prompt_len = prompts.size(0)
         response_len = responses.size(0)
 
+        # The gateway reports the weight versions a trajectory spanned. Fall back to
+        # the dataloader step only when absent (backends that report no version):
+        # the trainer casts these tags with dtype=int, so None must not reach it.
         min_global_steps = trajectory.extra_fields.get("min_global_steps", global_steps)
         max_global_steps = trajectory.extra_fields.get("max_global_steps", global_steps)
         tag = {

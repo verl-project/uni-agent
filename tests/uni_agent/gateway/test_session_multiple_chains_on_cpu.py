@@ -105,6 +105,22 @@ class _LogprobBackend:
         return TokenOutput(token_ids=token_ids, log_probs=log_probs, stop_reason="completed")
 
 
+class _VersionedBackend:
+    def __init__(self, steps):
+        # steps: list of (text, min_global_steps, max_global_steps)
+        self.steps = list(steps)
+
+    async def generate(self, request_id, *, prompt_ids, sampling_params, image_data=None, video_data=None):
+        text, min_steps, max_steps = self.steps.pop(0)
+        token_ids = _ids(text)
+        return TokenOutput(
+            token_ids=token_ids,
+            log_probs=[-0.1] * len(token_ids),
+            stop_reason="completed",
+            extra_fields={"min_global_steps": min_steps, "max_global_steps": max_steps},
+        )
+
+
 class _ControlledParallelBackend:
     def __init__(self, steps):
         self.steps = list(steps)
@@ -1642,3 +1658,74 @@ async def test_multiple_chains_invalid_continuation_logprobs_release_chain_for_r
     assert "SECOND" not in _decode_response_ids(trajectory.response_ids)
     assert trajectory.response_logprobs is not None
     assert len(trajectory.response_logprobs) == len(trajectory.response_ids)
+
+
+@pytest.mark.asyncio
+async def test_weight_versions_span_every_generation_in_a_chain():
+    """Report the full weight-version span a multi-turn chain was generated across."""
+    session = _session("versions-multi-turn")
+    first_messages = [{"role": "user", "content": "first turn"}]
+    continuation = [
+        *first_messages,
+        {"role": "assistant", "content": "FIRST"},
+        {"role": "user", "content": "follow up"},
+    ]
+
+    # Second generation resumed across versions 4-5 (partial rollout).
+    await _run(session, _VersionedBackend([("FIRST", 3, 3)]), first_messages)
+    await _run(session, _VersionedBackend([("SECOND", 4, 5)]), continuation)
+    [trajectory] = await session.finalize()
+
+    assert trajectory.extra_fields["min_global_steps"] == 3
+    assert trajectory.extra_fields["max_global_steps"] == 5
+
+
+@pytest.mark.asyncio
+async def test_weight_versions_stay_independent_across_split_chains():
+    """Keep each chain's version span separate when a request splits a new chain."""
+    session = _session("versions-split")
+    first_messages = [{"role": "user", "content": "base"}]
+
+    await _run(session, _VersionedBackend([("BASE", 3, 3)]), first_messages)
+    await _run(session, _VersionedBackend([("FRESH", 7, 7)]), first_messages)
+    assert session.snapshot_state()["active_chain_ids"] == [1, 2]
+    trajectories = await session.finalize()
+
+    spans = {
+        _decode_response_ids(trajectory.response_ids): (
+            trajectory.extra_fields["min_global_steps"],
+            trajectory.extra_fields["max_global_steps"],
+        )
+        for trajectory in trajectories
+    }
+    assert spans == {"BASE": (3, 3), "FRESH": (7, 7)}
+
+
+@pytest.mark.asyncio
+async def test_weight_versions_drop_rolled_back_generations():
+    """Exclude a rolled-back assistant's version from the surviving trajectory's span."""
+    session = _session("versions-rollback", enable_last_assistant_rollback=True)
+    first_messages = [{"role": "user", "content": "run mini-swe"}]
+    rewrite_messages = [
+        *first_messages,
+        {"role": "user", "content": "user_error: missing import"},
+    ]
+
+    await _run(session, _VersionedBackend([("FORMAT_ERROR", 5, 5)]), first_messages)
+    await _run(session, _VersionedBackend([("FIXED", 7, 7)]), rewrite_messages)
+    [trajectory] = await session.finalize()
+
+    # Version 5 produced only the dropped assistant, so it must not widen the span.
+    assert trajectory.extra_fields["min_global_steps"] == 7
+    assert trajectory.extra_fields["max_global_steps"] == 7
+
+
+@pytest.mark.asyncio
+async def test_weight_versions_absent_when_backend_omits_them():
+    """Omit the version keys rather than materializing None for version-less backends."""
+    session = _session("versions-absent")
+
+    await _run(session, SequencedBackend(["ONLY"]), [{"role": "user", "content": "base"}])
+    [trajectory] = await session.finalize()
+
+    assert trajectory.extra_fields == {}
