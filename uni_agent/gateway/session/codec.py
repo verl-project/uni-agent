@@ -145,7 +145,33 @@ class MessageCodec:
             self._processor if self._processor is not None else tokenizer,
             **self._apply_chat_template_kwargs,
         )
+        processing_class = self._processor if self._processor is not None else tokenizer
+        empty_content = [{"type": "text", "text": ""}] if self._processor is not None else ""
+        without_generation_prompt = normalize_token_ids(
+            _apply_chat_template(
+                processing_class,
+                [{"role": "user", "content": empty_content}],
+                add_generation_prompt=False,
+                **self._apply_chat_template_kwargs,
+            )
+        )
+        with_generation_prompt = normalize_token_ids(
+            _apply_chat_template(
+                processing_class,
+                [{"role": "user", "content": empty_content}],
+                add_generation_prompt=True,
+                **self._apply_chat_template_kwargs,
+            )
+        )
+        if with_generation_prompt[: len(without_generation_prompt)] != without_generation_prompt:
+            raise ValueError("Generation prompt is not a stable token suffix")
+        self._generation_prompt = with_generation_prompt[len(without_generation_prompt) :]
         self._tool_parser_name = tool_parser_name
+
+    @property
+    def generation_prompt(self) -> list[int]:
+        """Return the configured chat template's generation-prompt token suffix."""
+        return list(self._generation_prompt)
 
     async def _default_vision_info_extractor(
         self,
