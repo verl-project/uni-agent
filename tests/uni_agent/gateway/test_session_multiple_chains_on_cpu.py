@@ -289,8 +289,8 @@ async def test_multiple_chains_context_compaction_starts_new_chain():
 
 
 @pytest.mark.asyncio
-async def test_first_assistant_rollback_rebuilds_full_prompt_without_stale_gp():
-    """Rebuild the first rolled-back prompt instead of retaining its stale GP."""
+async def test_first_assistant_rewrite_splits_without_rollback():
+    """Split a first-assistant rewrite because there are no trainable tokens to preserve."""
     session = _session(
         "rollback-token-truth",
         sampling_params={"logprobs": True},
@@ -308,23 +308,24 @@ async def test_first_assistant_rollback_rebuilds_full_prompt_without_stale_gp():
     await _run(session, backend, rewrite_messages)
 
     state = session.snapshot_state()
-    assert state["active_chain_ids"] == [1]
-    assert state["rollback_count"] == 1
-    assert state["rollback_dropped_trainable_tokens_total"] == len("FORMAT_ERROR")
-    [chain] = session.active_chains
-    assert [message["role"] for message in chain.message_history] == ["user", "user", "assistant"]
+    assert state["active_chain_ids"] == [1, 2]
+    assert state["rollback_count"] == 0
+    assert state["rollback_dropped_trainable_tokens_total"] == 0
+    chains_by_id = {chain.chain_id: chain for chain in session.active_chains}
+    assert [message["role"] for message in chains_by_id[1].message_history] == ["user", "assistant"]
+    assert _decode_response_ids(chains_by_id[1].buffer.response_ids) == "FORMAT_ERROR"
     expected_prompt_ids = codec.encode_full(rewrite_messages)
     assert backend.calls[1]["prompt_ids"] == expected_prompt_ids
-    assert chain.buffer.prompt_ids == expected_prompt_ids
-    assert _decode_response_ids(chain.buffer.response_ids) == "FIXED"
-    assert chain.buffer.response_mask == [1] * len("FIXED")
-    assert chain.buffer.response_logprobs == [-0.1] * len("FIXED")
-    assert len(chain.buffer.response_logprobs) == len(chain.buffer.response_ids)
+    assert chains_by_id[2].buffer.prompt_ids == expected_prompt_ids
+    assert _decode_response_ids(chains_by_id[2].buffer.response_ids) == "FIXED"
+    assert chains_by_id[2].buffer.response_mask == [1] * len("FIXED")
+    assert chains_by_id[2].buffer.response_logprobs == [-0.1] * len("FIXED")
+    assert len(chains_by_id[2].buffer.response_logprobs) == len(chains_by_id[2].buffer.response_ids)
 
 
 @pytest.mark.asyncio
-async def test_first_assistant_rollback_reencodes_assistant_tool_context_as_prompt():
-    """Treat a first-turn assistant/tool rewrite as one fresh full prompt."""
+async def test_first_assistant_rewrite_with_assistant_tool_context_splits():
+    """Split a first-turn assistant/tool rewrite as a fresh full prompt."""
     session = _session("rollback-first-assistant-tool", enable_last_assistant_rollback=True)
     first_messages = [{"role": "user", "content": "run task"}]
     rewrite_messages = [
@@ -337,16 +338,18 @@ async def test_first_assistant_rollback_reencodes_assistant_tool_context_as_prom
     await _run(session, backend, first_messages)
     await _run(session, backend, rewrite_messages)
 
-    [chain] = session.active_chains
+    assert [chain.chain_id for chain in session.active_chains] == [1, 2]
+    chains_by_id = {chain.chain_id: chain for chain in session.active_chains}
+    assert _decode_response_ids(chains_by_id[1].buffer.response_ids) == "BAD"
     assert backend.calls[1]["prompt_ids"] == session._codec.encode_full(rewrite_messages)
-    assert chain.buffer.prompt_ids == session._codec.encode_full(rewrite_messages)
-    assert chain.buffer.response_ids == _ids("FIXED")
-    assert chain.buffer.response_mask == [1] * len("FIXED")
+    assert chains_by_id[2].buffer.prompt_ids == session._codec.encode_full(rewrite_messages)
+    assert chains_by_id[2].buffer.response_ids == _ids("FIXED")
+    assert chains_by_id[2].buffer.response_mask == [1] * len("FIXED")
 
 
 @pytest.mark.asyncio
-async def test_last_assistant_rollback_does_not_materialize_suffix_beyond_total_capacity():
-    """Close the rolled-back prefix without storing an oversized replacement suffix."""
+async def test_first_assistant_split_does_not_materialize_suffix_beyond_total_capacity():
+    """Keep the old chain when a first-assistant split prompt exceeds capacity."""
     first_messages = [{"role": "user", "content": "run mini-swe"}]
     rewrite_messages = [
         *first_messages,
@@ -368,9 +371,9 @@ async def test_last_assistant_rollback_does_not_materialize_suffix_beyond_total_
 
     assert outcome.finish_reason == "length"
     assert len(backend.calls) == 1
-    assert trajectories[0].response_ids == []
+    assert trajectories[0].response_ids == _ids("BAD")
     assert len(trajectories[0].prompt_ids) + len(trajectories[0].response_ids) <= total_capacity
-    assert trajectories[0].extra_fields == {"materialization_reason": "max_trajectory_length"}
+    assert trajectories[0].extra_fields == {}
 
 
 @pytest.mark.asyncio
@@ -614,7 +617,7 @@ def test_chain_prefix_hash_match_accepts_empty_history_for_any_request():
 
 
 @pytest.mark.asyncio
-async def test_last_assistant_rollback_rejects_misaligned_stored_logprobs():
+async def test_later_assistant_rollback_rejects_misaligned_stored_logprobs():
     """Fail loudly instead of slicing a chain whose token truth is already corrupt."""
     session = _session(
         "rollback-logprob-assert",
@@ -622,18 +625,21 @@ async def test_last_assistant_rollback_rejects_misaligned_stored_logprobs():
         enable_last_assistant_rollback=True,
     )
     prompt = [{"role": "user", "content": "run"}]
-    rewrite_messages = [*prompt, {"role": "user", "content": "user_error"}]
+    continuation = [*prompt, {"role": "assistant", "content": "A1"}, {"role": "user", "content": "continue"}]
+    rewrite_messages = [*continuation, {"role": "user", "content": "user_error"}]
 
-    await _run(session, _LogprobBackend([("BAD", "full")]), prompt)
+    backend = _LogprobBackend([("A1", "full"), ("A2", "full"), ("FIXED", "full")])
+    await _run(session, backend, prompt)
+    await _run(session, backend, continuation)
     session.active_chains[0].buffer.response_logprobs.pop()
 
     with pytest.raises(AssertionError, match="response_logprobs must be empty or aligned"):
-        await _run(session, _LogprobBackend([("FIXED", "full")]), rewrite_messages)
+        await _run(session, backend, rewrite_messages)
 
 
 @pytest.mark.asyncio
-async def test_last_assistant_rollback_multimodal_suffix_reencodes_expanded_media_tokens():
-    """Rebuild first-rollback media and prompt tokens as one full context."""
+async def test_first_assistant_rewrite_splits_multimodal_context():
+    """Split a first-rollback multimodal rewrite without dropping the old chain."""
     session = _session(
         "rollback-multimodal",
         processor=_ExpandedImageTokenProcessor(),
@@ -653,17 +659,20 @@ async def test_last_assistant_rollback_multimodal_suffix_reencodes_expanded_medi
     await _run(session, backend, rewrite_messages)
 
     state = session.snapshot_state()
-    assert state["active_chain_ids"] == [1]
-    assert state["rollback_count"] == 1
-    assert state["rollback_dropped_trainable_tokens_total"] == len("BAD_IMAGE")
+    assert state["active_chain_ids"] == [1, 2]
+    assert state["rollback_count"] == 0
+    assert state["rollback_dropped_trainable_tokens_total"] == 0
     assert backend.calls[1]["image_data"] == ["image://old.png", "image://error.png"]
-    [chain] = session.active_chains
-    assert chain.image_data == ["image://old.png", "image://error.png"]
-    assert chain.video_data is None
+    chains_by_id = {chain.chain_id: chain for chain in session.active_chains}
+    assert chains_by_id[1].image_data == ["image://old.png"]
+    assert chains_by_id[1].video_data is None
+    assert _decode_response_ids(chains_by_id[1].buffer.response_ids) == "BAD_IMAGE"
+    assert chains_by_id[2].image_data == ["image://old.png", "image://error.png"]
+    assert chains_by_id[2].video_data is None
     assert backend.calls[1]["prompt_ids"] == expected_prompt_ids
-    assert chain.buffer.prompt_ids == expected_prompt_ids
-    assert chain.buffer.response_ids == _ids("FIXED_IMAGE")
-    assert chain.buffer.response_mask == [1] * len("FIXED_IMAGE")
+    assert chains_by_id[2].buffer.prompt_ids == expected_prompt_ids
+    assert chains_by_id[2].buffer.response_ids == _ids("FIXED_IMAGE")
+    assert chains_by_id[2].buffer.response_mask == [1] * len("FIXED_IMAGE")
 
 
 @pytest.mark.asyncio
@@ -1793,8 +1802,8 @@ async def test_weight_versions_stay_independent_across_split_chains():
 
 
 @pytest.mark.asyncio
-async def test_weight_versions_drop_rolled_back_generations():
-    """Exclude a rolled-back assistant's version from the surviving trajectory's span."""
+async def test_weight_versions_stay_independent_across_first_assistant_split():
+    """Keep abandoned and replacement versions on their separate first-turn chains."""
     session = _session("versions-rollback", enable_last_assistant_rollback=True)
     first_messages = [{"role": "user", "content": "run mini-swe"}]
     rewrite_messages = [
@@ -1804,11 +1813,16 @@ async def test_weight_versions_drop_rolled_back_generations():
 
     await _run(session, _VersionedBackend([("FORMAT_ERROR", 5, 5)]), first_messages)
     await _run(session, _VersionedBackend([("FIXED", 7, 7)]), rewrite_messages)
-    [trajectory] = await session.finalize()
+    trajectories = await session.finalize()
 
-    # Version 5 produced only the dropped assistant, so it must not widen the span.
-    assert trajectory.extra_fields["min_global_steps"] == 7
-    assert trajectory.extra_fields["max_global_steps"] == 7
+    spans = {
+        _decode_response_ids(trajectory.response_ids): (
+            trajectory.extra_fields["min_global_steps"],
+            trajectory.extra_fields["max_global_steps"],
+        )
+        for trajectory in trajectories
+    }
+    assert spans == {"FORMAT_ERROR": (5, 5), "FIXED": (7, 7)}
 
 
 @pytest.mark.asyncio

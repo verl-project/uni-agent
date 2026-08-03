@@ -415,7 +415,6 @@ class GatewaySession:
             self._assert_response_logprob_alignment(buffer)
             image_data, video_data = self._copy_chain_media(selected_chain)
             chain_id = selected_chain.chain_id
-            reencoded_full_prompt = False
             if rollback_to_last_assistant:
                 last_assistant_start = selected_chain.last_assistant_start
                 assert last_assistant_start.response_ids_len <= len(buffer.response_ids)
@@ -432,111 +431,78 @@ class GatewaySession:
                 if video_data is not None:
                     assert last_assistant_start.video_data_len <= len(video_data)
                     video_data = video_data[: last_assistant_start.video_data_len] or None
-                if last_assistant_start.response_ids_len == 0:
-                    # No response-side context predates the first assistant, so rebuild the
-                    # requested history as a fresh prompt instead of splicing its prompt GP.
-                    del buffer.response_ids[:]
-                    del buffer.response_mask[:]
-                    del buffer.response_logprobs[:]
-                    buffer.routed_experts = None
-                    incremental_messages = messages[last_assistant_start.message_history_len :]
-                    new_image_data, new_video_data = await self._codec.extract_multi_modal_data(incremental_messages)
-                    full_image_data = list(image_data or [])
-                    full_video_data = list(video_data or [])
-                    if new_image_data:
-                        full_image_data.extend(new_image_data)
-                    if new_video_data:
-                        full_video_data.extend(new_video_data)
-                    prompt_ids = self._codec.encode_full(
-                        messages,
-                        tools=tools,
-                        image_data=full_image_data or None,
-                        video_data=full_video_data or None,
-                    )
-                    capacity_exhausted = (
-                        self._trajectory_capacity is not None and len(prompt_ids) >= self._trajectory_capacity
-                    )
-                    if not capacity_exhausted:
-                        buffer = TrajectoryBuffer(prompt_ids=prompt_ids)
-                        image_data = full_image_data or None
-                        video_data = full_video_data or None
-                    reencoded_full_prompt = True
-                else:
-                    # Later rollbacks retain earlier trainable output; the snapshot was captured
-                    # after the prior incremental GP, so remove that verified suffix as well.
-                    rollback_response_ids_len = last_assistant_start.response_ids_len
-                    rollback_response_mask_len = last_assistant_start.response_mask_len
-                    rollback_response_logprobs_len = last_assistant_start.response_logprobs_len
-                    generation_prompt = self._codec.generation_prompt
-                    if generation_prompt:
-                        generation_prompt_len = len(generation_prompt)
-                        generation_prompt_start = rollback_response_ids_len - generation_prompt_len
-                        if (
-                            generation_prompt_start < 0
-                            or buffer.response_ids[generation_prompt_start:rollback_response_ids_len]
-                            != generation_prompt
+                assert last_assistant_start.response_ids_len > 0
+                # Later rollbacks retain earlier trainable output; the snapshot was captured
+                # after the prior incremental GP, so remove that verified suffix as well.
+                rollback_response_ids_len = last_assistant_start.response_ids_len
+                rollback_response_mask_len = last_assistant_start.response_mask_len
+                rollback_response_logprobs_len = last_assistant_start.response_logprobs_len
+                generation_prompt = self._codec.generation_prompt
+                if generation_prompt:
+                    generation_prompt_len = len(generation_prompt)
+                    generation_prompt_start = rollback_response_ids_len - generation_prompt_len
+                    if (
+                        generation_prompt_start < 0
+                        or buffer.response_ids[generation_prompt_start:rollback_response_ids_len] != generation_prompt
+                    ):
+                        raise ValueError("Stored response does not end its assistant prefix with the generation prompt")
+                    rollback_response_ids_len = generation_prompt_start
+                    rollback_response_mask_len -= generation_prompt_len
+                    if rollback_response_mask_len < 0 or any(
+                        buffer.response_mask[rollback_response_mask_len : last_assistant_start.response_mask_len]
+                    ):
+                        raise ValueError("Stored generation-prompt mask is not rollback-safe")
+                    if rollback_response_logprobs_len:
+                        rollback_response_logprobs_len -= generation_prompt_len
+                        if rollback_response_logprobs_len < 0 or any(
+                            buffer.response_logprobs[
+                                rollback_response_logprobs_len : last_assistant_start.response_logprobs_len
+                            ]
                         ):
-                            raise ValueError(
-                                "Stored response does not end its assistant prefix with the generation prompt"
-                            )
-                        rollback_response_ids_len = generation_prompt_start
-                        rollback_response_mask_len -= generation_prompt_len
-                        if rollback_response_mask_len < 0 or any(
-                            buffer.response_mask[rollback_response_mask_len : last_assistant_start.response_mask_len]
-                        ):
-                            raise ValueError("Stored generation-prompt mask is not rollback-safe")
-                        if rollback_response_logprobs_len:
-                            rollback_response_logprobs_len -= generation_prompt_len
-                            if rollback_response_logprobs_len < 0 or any(
-                                buffer.response_logprobs[
-                                    rollback_response_logprobs_len : last_assistant_start.response_logprobs_len
-                                ]
-                            ):
-                                raise ValueError("Stored generation-prompt logprobs are not rollback-safe")
-                    del buffer.response_ids[rollback_response_ids_len:]
-                    del buffer.response_mask[rollback_response_mask_len:]
-                    del buffer.response_logprobs[rollback_response_logprobs_len:]
-                    self._assert_response_logprob_alignment(buffer)
-                    incremental_start = last_assistant_start.message_history_len
+                            raise ValueError("Stored generation-prompt logprobs are not rollback-safe")
+                del buffer.response_ids[rollback_response_ids_len:]
+                del buffer.response_mask[rollback_response_mask_len:]
+                del buffer.response_logprobs[rollback_response_logprobs_len:]
+                self._assert_response_logprob_alignment(buffer)
+                incremental_start = last_assistant_start.message_history_len
                 rollback_applied = True
             else:
                 incremental_start = len(selected_chain.message_history)
 
-            if not reencoded_full_prompt:
-                incremental_messages = messages[incremental_start:]
-                new_image_data = None
-                new_video_data = None
-                incremental_ids = []
-                current_trajectory_length = len(buffer.prompt_ids) + len(buffer.response_ids)
-                capacity_exhausted = (
-                    self._trajectory_capacity is not None and current_trajectory_length >= self._trajectory_capacity
+            incremental_messages = messages[incremental_start:]
+            new_image_data = None
+            new_video_data = None
+            incremental_ids = []
+            current_trajectory_length = len(buffer.prompt_ids) + len(buffer.response_ids)
+            capacity_exhausted = (
+                self._trajectory_capacity is not None and current_trajectory_length >= self._trajectory_capacity
+            )
+            if incremental_messages and not capacity_exhausted:
+                new_image_data, new_video_data = await self._codec.extract_multi_modal_data(incremental_messages)
+                incremental_ids = self._codec.encode_incremental(
+                    incremental_messages,
+                    image_data=new_image_data,
+                    video_data=new_video_data,
                 )
-                if incremental_messages and not capacity_exhausted:
-                    new_image_data, new_video_data = await self._codec.extract_multi_modal_data(incremental_messages)
-                    incremental_ids = self._codec.encode_incremental(
-                        incremental_messages,
-                        image_data=new_image_data,
-                        video_data=new_video_data,
-                    )
-                    capacity_exhausted = (
-                        self._trajectory_capacity is not None
-                        and current_trajectory_length + len(incremental_ids) >= self._trajectory_capacity
-                    )
+                capacity_exhausted = (
+                    self._trajectory_capacity is not None
+                    and current_trajectory_length + len(incremental_ids) >= self._trajectory_capacity
+                )
 
-                if not capacity_exhausted:
-                    buffer.response_ids.extend(incremental_ids)
-                    buffer.response_mask.extend([0] * len(incremental_ids))
-                    if sampling_params.get("logprobs", False):
-                        buffer.response_logprobs.extend([0.0] * len(incremental_ids))
-                    self._assert_response_logprob_alignment(buffer)
-                    if new_image_data:
-                        if image_data is None:
-                            image_data = []
-                        image_data.extend(new_image_data)
-                    if new_video_data:
-                        if video_data is None:
-                            video_data = []
-                        video_data.extend(new_video_data)
+            if not capacity_exhausted:
+                buffer.response_ids.extend(incremental_ids)
+                buffer.response_mask.extend([0] * len(incremental_ids))
+                if sampling_params.get("logprobs", False):
+                    buffer.response_logprobs.extend([0.0] * len(incremental_ids))
+                self._assert_response_logprob_alignment(buffer)
+                if new_image_data:
+                    if image_data is None:
+                        image_data = []
+                    image_data.extend(new_image_data)
+                if new_video_data:
+                    if video_data is None:
+                        video_data = []
+                    video_data.extend(new_video_data)
 
         context_ids = buffer.prompt_ids + buffer.response_ids
         if capacity_exhausted:
@@ -613,6 +579,10 @@ class GatewaySession:
                 ranked_candidates.append((chain, len(chain.message_history), True))
                 continue
             if self._enable_last_assistant_rollback:
+                if assistant_start.response_ids_len == 0:
+                    # A first assistant rewrite has no trainable response tokens to preserve;
+                    # leave this candidate out so an exact or later rollback chain can still win.
+                    continue
                 if assistant_start_len > deepest_rollback_service_value:
                     deepest_rollback_candidates = [chain]
                     deepest_rollback_service_value = assistant_start_len
