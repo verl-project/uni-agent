@@ -43,35 +43,25 @@ _VLLM_TOOL_PARSER_ALIASES = {
 
 def initialize_generation_prompt(processing_class, **apply_chat_template_kwargs) -> list[int]:
     """Initialize the token suffix inserted by ``add_generation_prompt=True``."""
-    last_error: Exception | None = None
-    for empty_content in ("", [{"type": "text", "text": ""}]):
-        try:
-            without_generation_prompt = normalize_token_ids(
-                _apply_chat_template(
-                    processing_class,
-                    [{"role": "user", "content": empty_content}],
-                    add_generation_prompt=False,
-                    **apply_chat_template_kwargs,
-                )
-            )
-            with_generation_prompt = normalize_token_ids(
-                _apply_chat_template(
-                    processing_class,
-                    [{"role": "user", "content": empty_content}],
-                    add_generation_prompt=True,
-                    **apply_chat_template_kwargs,
-                )
-            )
-        except Exception as error:
-            last_error = error
-            continue
-
-        if with_generation_prompt[: len(without_generation_prompt)] != without_generation_prompt:
-            raise ValueError("Generation prompt is not a stable token suffix")
-        return with_generation_prompt[len(without_generation_prompt) :]
-
-    assert last_error is not None
-    raise last_error
+    without_generation_prompt = normalize_token_ids(
+        _apply_chat_template(
+            processing_class,
+            [{"role": "user", "content": ""}],
+            add_generation_prompt=False,
+            **apply_chat_template_kwargs,
+        )
+    )
+    with_generation_prompt = normalize_token_ids(
+        _apply_chat_template(
+            processing_class,
+            [{"role": "user", "content": ""}],
+            add_generation_prompt=True,
+            **apply_chat_template_kwargs,
+        )
+    )
+    if with_generation_prompt[: len(without_generation_prompt)] != without_generation_prompt:
+        raise ValueError("Generation prompt is not a stable token suffix")
+    return with_generation_prompt[len(without_generation_prompt) :]
 
 
 def _canonicalize_tool_arguments_for_comparison(arguments: Any) -> tuple[str, Any]:
@@ -174,11 +164,11 @@ class MessageCodec:
         self._vision_info_extractor = vision_info_extractor or self._default_vision_info_extractor
         self._vision_info_extractor_kwargs = dict(vision_info_extractor_kwargs or {})
         self._apply_chat_template_kwargs = dict(apply_chat_template_kwargs or {})
+        processing_class = self._processor if self._processor is not None else tokenizer
         self._system_prompt = initialize_system_prompt(
-            self._processor if self._processor is not None else tokenizer,
+            processing_class,
             **self._apply_chat_template_kwargs,
         )
-        processing_class = self._processor if self._processor is not None else tokenizer
         self._generation_prompt = initialize_generation_prompt(
             processing_class,
             **self._apply_chat_template_kwargs,

@@ -580,8 +580,8 @@ class GatewaySession:
                 continue
             if self._enable_last_assistant_rollback:
                 if assistant_start.response_ids_len == 0:
-                    # A first assistant rewrite has no trainable response tokens to preserve;
-                    # leave this candidate out so an exact or later rollback chain can still win.
+                    # No response-side tokens predate this assistant, so rollback has nothing
+                    # to preserve. Omit it while still allowing an exact or later chain to win.
                     continue
                 if assistant_start_len > deepest_rollback_service_value:
                     deepest_rollback_candidates = [chain]
