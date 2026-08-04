@@ -318,26 +318,7 @@ def test_incremental_user_encode_appends_qwen_turn(
     assert appended_text == expected_append
 
 
-@pytest.mark.parametrize(
-    ("messages", "error"),
-    [
-        (
-            [
-                {"role": "assistant", "content": "response"},
-                {"role": "user", "content": "follow-up"},
-            ],
-            "must have role 'tool'",
-        ),
-        (
-            [
-                {"role": "user", "content": "question"},
-                {"role": "assistant", "content": "response"},
-            ],
-            "may only appear first",
-        ),
-    ],
-)
-def test_incremental_encode_rejects_invalid_assistant_placement(messages, error):
+def test_incremental_encode_rejects_assistant_after_first_message():
     codec = MessageCodec(
         _QwenTemplateTokenizer(
             "Qwen/Qwen3.5-4B",
@@ -346,8 +327,44 @@ def test_incremental_encode_rejects_invalid_assistant_placement(messages, error)
         )
     )
 
-    with pytest.raises(ValueError, match=error):
-        codec.encode_incremental(messages)
+    with pytest.raises(ValueError, match="may only appear first"):
+        codec.encode_incremental(
+            [
+                {"role": "user", "content": "question"},
+                {"role": "assistant", "content": "response"},
+            ]
+        )
+
+
+def test_incremental_assistant_user_encode_matches_full_after_generation_prompt_rollback():
+    tokenizer = _QwenTemplateTokenizer(
+        "Qwen/Qwen3.5-4B",
+        requires_user=True,
+        thinking_prompt=True,
+    )
+    codec = MessageCodec(tokenizer)
+    first_user = {"role": "user", "content": "question"}
+    incremental_messages = [
+        {"role": "assistant", "content": "replacement response"},
+        {"role": "user", "content": "follow-up"},
+    ]
+    retained_ids = tokenizer.apply_chat_template(
+        [first_user],
+        tools=TOOLS,
+        tokenize=True,
+        add_generation_prompt=False,
+    )
+    retained_ids = retained_ids[: -len(codec.turn_separator)]
+    expected_ids = tokenizer.apply_chat_template(
+        [first_user, *incremental_messages],
+        tools=TOOLS,
+        tokenize=True,
+        add_generation_prompt=True,
+    )
+
+    result_ids = retained_ids + codec.encode_incremental(incremental_messages)
+
+    assert result_ids == expected_ids
 
 
 @pytest.mark.parametrize(
@@ -357,7 +374,7 @@ def test_incremental_encode_rejects_invalid_assistant_placement(messages, error)
         ("Qwen/Qwen3.5-4B", True, True),
     ],
 )
-def test_incremental_assistant_tool_encode_continues_generation_prompt(
+def test_incremental_assistant_tool_encode_matches_full_after_generation_prompt_rollback(
     model_name,
     requires_user,
     thinking_prompt,
@@ -373,8 +390,9 @@ def test_incremental_assistant_tool_encode_continues_generation_prompt(
         [user],
         tools=TOOLS,
         tokenize=True,
-        add_generation_prompt=True,
+        add_generation_prompt=False,
     )
+    runtime_ids = runtime_ids[: -len(codec.turn_separator)]
     expected_ids = tokenizer.apply_chat_template(
         [user, assistant, tool],
         tools=TOOLS,
@@ -392,13 +410,8 @@ def test_incremental_assistant_tool_encode_continues_generation_prompt(
     result_ids = runtime_ids + incremental_ids
 
     assert tokenizer.decode(result_ids) == expected_text
-    assert not tokenizer.decode(incremental_ids).startswith("\n<|im_start|>assistant")
-    if thinking_prompt:
-        newline_id = tokenizer.encode("\n", add_special_tokens=False)[0]
-        assert result_ids[len(runtime_ids) - 1 : len(runtime_ids) + 1] == [newline_id, newline_id]
-        assert result_ids != expected_ids
-    else:
-        assert result_ids == expected_ids
+    assert tokenizer.decode(incremental_ids).startswith("\n<|im_start|>assistant")
+    assert result_ids == expected_ids
 
 
 def test_qwen35_processor_incremental_encode_matches_full_template():
@@ -431,7 +444,7 @@ def test_qwen35_processor_incremental_encode_matches_full_template():
     assert runtime_ids + incremental_ids == expected_ids
 
 
-def test_qwen35_processor_assistant_tool_encode_continues_generation_prompt():
+def test_qwen35_processor_assistant_tool_encode_matches_full_after_generation_prompt_rollback():
     tokenizer = _QwenTemplateTokenizer(
         "Qwen/Qwen3.5-4B",
         requires_user=True,
@@ -443,15 +456,16 @@ def test_qwen35_processor_assistant_tool_encode_continues_generation_prompt():
         [user],
         tools=TOOLS,
         tokenize=True,
-        add_generation_prompt=True,
+        add_generation_prompt=False,
     )
-    expected_text = tokenizer.apply_chat_template(
+    runtime_ids = runtime_ids[: -len(codec.turn_separator)]
+    expected_ids = tokenizer.apply_chat_template(
         [user, assistant, tool],
         tools=TOOLS,
-        tokenize=False,
+        tokenize=True,
         add_generation_prompt=True,
     )
 
     incremental_ids = codec.encode_incremental([assistant, tool])
 
-    assert tokenizer.decode(runtime_ids + incremental_ids) == expected_text
+    assert runtime_ids + incremental_ids == expected_ids
