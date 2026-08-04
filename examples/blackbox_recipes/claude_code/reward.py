@@ -5,7 +5,6 @@ not depend on mini_swe_agent/.
 
 Contains:
 - build_reward_context: extract reward metadata + eval_timeout from tools_kwargs
-- compute_score: thin reward function that reads reward_score from extra_info
 - evaluate_in_env: run reward evaluation in the sandbox env
 """
 
@@ -27,14 +26,6 @@ def build_reward_context(tools_kwargs: dict) -> tuple[dict[str, Any], int]:
     }
     eval_timeout = int(os.environ.get("SWE_AGENT_EVAL_TIMEOUT", "600"))
     return metadata, eval_timeout
-
-
-def compute_score(data_source: str, solution_str: str, ground_truth: str, extra_info=None) -> dict:
-    """Read reward_score from extra_info, injected by the agent runner."""
-    score = 0.0
-    if extra_info and "reward_score" in extra_info:
-        score = float(extra_info["reward_score"])
-    return {"score": score}
 
 
 async def evaluate_in_env(

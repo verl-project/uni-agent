@@ -1,12 +1,13 @@
 """Standalone inference runner for the blackbox claude-code recipe.
 
-Spins up vLLM + gateway + a reward worker, runs agent sessions in parallel,
-and reports resolve rate. Does NOT start the Megatron trainer.
+Spins up vLLM + gateway, runs agent sessions in parallel, and reports resolve
+rate from the rewards returned by the managed runner. Does NOT start the
+Megatron trainer.
 
 Reuses the recipe's existing training config
 (config/claude_code_megatron_v1.yaml); its megatron/optimizer sections are
 inert here since this driver never builds the actor worker group — only the
-rollout, agent_framework, model, and reward sections are read.
+rollout, agent_framework, and model sections are read.
 
 Usage:
     python examples/blackbox_recipes/claude_code/parallel_infer.py \
@@ -28,7 +29,6 @@ import numpy as np
 import ray
 
 from uni_agent.framework.entry import build_agent_framework, build_gateway_manager
-from verl.experimental.reward_loop.reward_loop import RewardLoopWorker
 from verl.utils import tensordict_utils as tu
 from verl.utils.transferqueue_utils import tq
 from verl.workers.rollout.llm_server import LLMServerManager
@@ -79,14 +79,6 @@ def _remap_sample_images(sample: dict[str, Any]) -> dict[str, Any]:
     return sample
 
 
-def _inject_reward_fields(sample: dict[str, Any]) -> None:
-    extra_info = sample.get("extra_info", {})
-    tools_kwargs = extra_info.get("tools_kwargs", {})
-    reward_config = tools_kwargs.get("reward", {})
-    sample.setdefault("data_source", reward_config.get("name", "unknown"))
-    sample.setdefault("reward_model", {"ground_truth": {}})
-
-
 def load_swe_dataset(data_path: str, max_samples: int = -1) -> list[dict[str, Any]]:
     import pyarrow.parquet as pq
 
@@ -95,7 +87,6 @@ def load_swe_dataset(data_path: str, max_samples: int = -1) -> list[dict[str, An
     samples = pq.read_table(path).to_pylist()
     for i, sample in enumerate(samples):
         samples[i] = _remap_sample_images(sample)
-        _inject_reward_fields(samples[i])
     if max_samples > 0:
         samples = samples[:max_samples]
     logger.info("Loaded %d samples", len(samples))
@@ -184,8 +175,6 @@ def _build_prompts(samples: list[dict[str, Any]]) -> tuple[Any, list[str]]:
         tensor_dict={
             "raw_prompt": raw_prompts,
             "uid": uids,
-            "data_source": [sample["data_source"] for sample in samples],
-            "reward_model": [sample["reward_model"] for sample in samples],
             "tools_kwargs": tools_kwargs_list,
         },
         non_tensor_dict={"global_steps": 0},
@@ -299,11 +288,9 @@ def run_inference(
     llm_client = llm_server_manager.get_client()
 
     gateway_manager = build_gateway_manager(config=config, llm_client=llm_client)
-    reward_worker = ray.remote(RewardLoopWorker).remote(config, None)
     framework = build_agent_framework(
         config=config,
         gateway_manager=gateway_manager,
-        reward_loop_worker_handles=[reward_worker],
     )
 
     prompts, uids = _build_prompts(samples)

@@ -88,7 +88,7 @@ class _GatewayActor:
         self._register_routes()
 
     def _register_routes(self) -> None:
-        """Register provider HTTP handlers and reward metadata."""
+        """Register provider HTTP handlers."""
 
         def _error_body_for_path(path: str, status_code: int, message: str) -> dict[str, Any]:
             if path.endswith("/v1/messages"):
@@ -135,16 +135,6 @@ class _GatewayActor:
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
             return await self._handle_anthropic_messages(session_id=session_id, payload=payload)
-
-        @self._app.post("/sessions/{session_id}/reward_info")
-        async def _reward_info(session_id: str, request: Request):
-            payload = await request.json()
-            reward_info = payload.get("reward_info")
-            try:
-                await self.set_reward_info(session_id=session_id, reward_info=reward_info)
-            except KeyError as exc:
-                raise HTTPException(status_code=404, detail=str(exc)) from exc
-            return JSONResponse({"status": "ok"})
 
     def _require_started(self) -> None:
         """Raise if the HTTP server has not been started."""
@@ -245,7 +235,6 @@ class _GatewayActor:
         handle = SessionHandle(
             session_id=session_id,
             base_url=f"{self._server_base_url}/sessions/{session_id}/v1",
-            reward_info_url=f"{self._server_base_url}/sessions/{session_id}/reward_info",
         )
         self._sessions[session_id] = GatewaySession(
             handle=handle,
@@ -256,11 +245,6 @@ class _GatewayActor:
             enable_last_assistant_rollback=self._enable_last_assistant_rollback,
         )
         return handle
-
-    async def set_reward_info(self, session_id: str, reward_info: dict[str, Any] | None = None) -> None:
-        """Attach optional reward metadata to a live session."""
-        session = self._get_session(session_id)
-        await session.set_reward_info(reward_info)
 
     async def finalize_session(self, session_id: str) -> list[Trajectory]:
         """Finalize a session, remove it from the actor, and return its trajectories."""

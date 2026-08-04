@@ -57,6 +57,7 @@ actor_rollout_ref:
     custom:
       agent_framework:
         gateway_count: 1
+        use_reward_loop_worker: false
         agent_runners:
           claude_code:
             runner_fqn: examples.blackbox_recipes.claude_code.claude_code_runner.claude_code_runner
@@ -129,11 +130,6 @@ algorithm:
     kl_coef: 0.0
   rollout_correction:
     bypass_mode: true
-
-reward:
-  custom_reward_function:
-    path: pkg://examples.blackbox_recipes.claude_code.reward
-    name: compute_score
 
 trainer:
   nnodes: 1

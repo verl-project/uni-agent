@@ -20,8 +20,9 @@ def test_trajectory_to_record_is_json_serializable_and_preserves_fields():
         response_ids=[3, 4],
         response_mask=[1, 0],
         response_logprobs=[-0.1, 0.0],
-        reward_info={"ok": True},
+        episode_finished=True,
         reward_score=1.5,
+        reward_metrics={"acc": 1.0},
         num_turns=2,
         multi_modal_data={"images": ["image://one"]},
         extra_fields={"finish_reason": "completed"},
@@ -37,7 +38,7 @@ def test_trajectory_to_record_is_json_serializable_and_preserves_fields():
 
     assert json.loads(json.dumps(record)) == record
     assert record == {
-        "schema_version": 1,
+        "schema_version": 2,
         "session_id": "debug-session",
         "trajectory_index": 7,
         "created_at": "2026-06-24T00:00:00Z",
@@ -47,8 +48,9 @@ def test_trajectory_to_record_is_json_serializable_and_preserves_fields():
             "response_ids": [3, 4],
             "response_mask": [1, 0],
             "response_logprobs": [-0.1, 0.0],
-            "reward_info": {"ok": True},
+            "episode_finished": True,
             "reward_score": 1.5,
+            "reward_metrics": {"acc": 1.0},
             "num_turns": 2,
             "multi_modal_data": {"images": ["image://one"]},
             "extra_fields": {"finish_reason": "completed"},
@@ -169,13 +171,11 @@ def test_provider_urls_strips_v1_for_anthropic_and_keeps_openai_base_url():
     handle = SessionHandle(
         session_id="abc",
         base_url="http://127.0.0.1:8000/sessions/abc/v1",
-        reward_info_url="http://127.0.0.1:8000/sessions/abc/reward_info",
     )
 
     assert debug_launcher.provider_urls(handle) == {
         "anthropic_base_url": "http://127.0.0.1:8000/sessions/abc",
         "openai_base_url": "http://127.0.0.1:8000/sessions/abc/v1",
-        "reward_info_url": "http://127.0.0.1:8000/sessions/abc/reward_info",
     }
 
 

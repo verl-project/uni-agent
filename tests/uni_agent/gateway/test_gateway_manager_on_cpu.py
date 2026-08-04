@@ -132,9 +132,8 @@ async def test_gateway_manager_round_robins_actors_across_alive_nodes(ray_runtim
 @pytest.mark.asyncio
 async def test_gateway_manager_finalizes_each_session_on_its_owning_gateway(ray_runtime):
     """create/finalize must route every session back to the same owning gateway
-    across a multi-gateway pool. Two sessions land on different gateways; each is
-    tagged with its own reward_info, and finalize must return that session's own
-    trajectory -- a routing-table mix-up would surface as a swapped label.
+    across a multi-gateway pool. Two sessions land on different gateways and a
+    routing-table mix-up would try to finalize an unknown session on the wrong actor.
 
     Asserts the manager's ownership routing (not the selection policy): any
     placement policy must still finalize a session on the gateway that created it.
@@ -161,14 +160,12 @@ async def test_gateway_manager_finalizes_each_session_on_its_owning_gateway(ray_
                 json={"model": "m", "messages": [{"role": "user", "content": f"hi {label}"}]},
             )
             assert chat.status_code == 200
-            reward = await client.post(session.reward_info_url, json={"reward_info": {"label": label}})
-            assert reward.status_code == 200
 
     trajectories_a = await manager.finalize_session("session-a")
     trajectories_b = await manager.finalize_session("session-b")
 
-    assert [t.reward_info["label"] for t in trajectories_a] == ["a"]
-    assert [t.reward_info["label"] for t in trajectories_b] == ["b"]
+    assert len(trajectories_a) == 1
+    assert len(trajectories_b) == 1
 
     await manager.shutdown()
 
@@ -231,12 +228,6 @@ async def test_gateway_manager_default_chains_config_to_http_finalizes_subagent_
                 )
                 assert chat.status_code == 200
 
-            reward = await client.post(
-                session.reward_info_url,
-                json={"reward_info": {"label": "manager-multiple-chains"}},
-            )
-            assert reward.status_code == 200
-
         trajectories = await manager.finalize_session("session-manager-multiple-chains")
 
         assert len(trajectories) == 2
@@ -244,10 +235,7 @@ async def test_gateway_manager_default_chains_config_to_http_finalizes_subagent_
         assert decoded[0] == "Blue"
         assert decoded[1].startswith("Mango")
         assert decoded[1].endswith("Apple")
-        assert [trajectory.reward_info["label"] for trajectory in trajectories] == [
-            "manager-multiple-chains",
-            "manager-multiple-chains",
-        ]
+        assert all(trajectory.reward_metrics == {} for trajectory in trajectories)
     finally:
         await manager.shutdown()
 

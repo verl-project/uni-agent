@@ -218,7 +218,7 @@ def trajectory_to_record(
     created_at: str | None = None,
 ) -> dict[str, Any]:
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "session_id": session_id,
         "trajectory_index": trajectory_index,
         "created_at": created_at or utc_now(),
@@ -230,8 +230,9 @@ def trajectory_to_record(
             "response_logprobs": (
                 list(trajectory.response_logprobs) if trajectory.response_logprobs is not None else None
             ),
-            "reward_info": dict(trajectory.reward_info),
+            "episode_finished": trajectory.episode_finished,
             "reward_score": trajectory.reward_score,
+            "reward_metrics": dict(trajectory.reward_metrics),
             "num_turns": trajectory.num_turns,
             "multi_modal_data": trajectory.multi_modal_data,
             "extra_fields": dict(trajectory.extra_fields),
@@ -321,7 +322,6 @@ def provider_urls(handle: SessionHandle) -> dict[str, str]:
     return {
         "anthropic_base_url": anthropic_base_url,
         "openai_base_url": base_url,
-        "reward_info_url": handle.reward_info_url,
     }
 
 
@@ -565,7 +565,6 @@ def print_provider_urls(urls: dict[str, str], *, anthropic_api_key: str) -> None
     print(f"  export ANTHROPIC_API_KEY={api_key_display}")
     print("OpenAI-compatible:")
     print(f"  base_url={urls['openai_base_url']}")
-    print(f"Reward info: {urls['reward_info_url']}")
 
 
 async def run_debug_session_once(

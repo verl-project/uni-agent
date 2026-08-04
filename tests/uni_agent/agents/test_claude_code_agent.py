@@ -130,7 +130,7 @@ def test_run_uses_sandbox_default_workdir():
         )
     )
 
-    assert result.finished is True
+    assert result.episode_finished is True
     assert len(sandbox.exec_calls) == 1
     assert sandbox.exec_calls[0]["workdir"] is None
     argv = sandbox.exec_calls[0]["argv"]
@@ -165,7 +165,7 @@ def test_run_reports_nonzero_process_exit():
         )
     )
 
-    assert result.finished is False
+    assert result.episode_finished is False
     assert result.info["exit_code"] == 2
 
 

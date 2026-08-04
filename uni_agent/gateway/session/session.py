@@ -22,7 +22,7 @@ class SessionPhase(str, Enum):
     """Lifecycle state for a gateway session.
 
     Attributes:
-        ACTIVE: The session can accept generation and reward-info requests.
+        ACTIVE: The session can accept generation requests.
         FINALIZED: Final trajectories were returned and the session is closed.
         ABORTED: The session was cancelled and should not produce trajectories.
     """
@@ -204,7 +204,6 @@ class GatewaySession:
         self._order_seq = 0
         self._rollback_count = 0
         self._rollback_dropped_trainable_tokens_total = 0
-        self.reward_info: dict[str, Any] = {}
         self.phase = SessionPhase.ACTIVE
         self.created_at = time.time()
         self.updated_at = self.created_at
@@ -226,8 +225,8 @@ class GatewaySession:
         here.
         """
         # Same-session requests overlap backend generation and commit in backend
-        # completion order. The framework currently scores session_trajectories[-1]
-        # and broadcasts that reward, so concurrent siblings share one reward target.
+        # completion order. That order also determines which trajectory an optional
+        # RewardLoopWorker treats as the session's final scoring input.
         reserved_chain_id: int | None = None
         try:
             async with self.request_lock:
@@ -325,17 +324,8 @@ class GatewaySession:
             if reserved_chain_id is not None:
                 await asyncio.shield(self._release_chain_reservation(reserved_chain_id))
 
-    async def set_reward_info(self, reward_info: dict[str, Any] | None = None) -> None:
-        """Store session-level reward metadata without closing the session."""
-        async with self.request_lock:
-            if self.phase != SessionPhase.ACTIVE:
-                raise RuntimeError(f"Session {self.handle.session_id} is {self.phase.value.lower()}")
-            if reward_info is not None:
-                self.reward_info = dict(reward_info)
-            self._touch()
-
     async def finalize(self) -> list[Trajectory]:
-        """Close the session and return its materialized trajectories with rewards."""
+        """Close the session and return its materialized token trajectories."""
         async with self.request_lock:
             if self.phase == SessionPhase.ABORTED:
                 raise RuntimeError(f"Session {self.handle.session_id} is aborted")
@@ -350,7 +340,7 @@ class GatewaySession:
                 materialized.trajectory
                 for materialized in sorted(self.materialized_chains, key=lambda chain: chain.order_seq)
             ]
-            return [replace(trajectory, reward_info=dict(self.reward_info)) for trajectory in ordered_trajectories]
+            return ordered_trajectories
 
     async def abort(self) -> None:
         """Abort the session and prevent further generation."""
@@ -802,7 +792,6 @@ class GatewaySession:
             response_ids=list(chain.buffer.response_ids),
             response_mask=list(chain.buffer.response_mask),
             response_logprobs=response_logprobs,
-            reward_info={},
             num_turns=self._count_chat_turns(chain.message_history),
             routed_experts=chain.buffer.routed_experts,
             multi_modal_data=self._build_multi_modal_trajectory_data(
