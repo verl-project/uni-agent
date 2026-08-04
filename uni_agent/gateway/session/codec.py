@@ -14,7 +14,7 @@ from uuid import uuid4
 
 from verl.utils.tokenizer import normalize_token_ids
 from verl.utils.tokenizer.chat_template import apply_chat_template as _apply_chat_template
-from verl.utils.tokenizer.chat_template import initialize_system_prompt
+from verl.utils.tokenizer.chat_template import initialize_system_prompt, initialize_turn_separator
 
 logger = logging.getLogger("gateway")
 
@@ -173,12 +173,21 @@ class MessageCodec:
             processing_class,
             **self._apply_chat_template_kwargs,
         )
+        self._turn_separator = initialize_turn_separator(
+            processing_class,
+            **self._apply_chat_template_kwargs,
+        )
         self._tool_parser_name = tool_parser_name
 
     @property
     def generation_prompt(self) -> list[int]:
         """Return the configured chat template's generation-prompt token suffix."""
         return list(self._generation_prompt)
+
+    @property
+    def turn_separator(self) -> list[int]:
+        """Return the configured chat template's inter-turn separator tokens."""
+        return list(self._turn_separator)
 
     async def _default_vision_info_extractor(
         self,

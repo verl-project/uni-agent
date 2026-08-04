@@ -358,6 +358,45 @@ async def test_later_assistant_rollback_removes_only_the_response_side_gp():
 
 
 @pytest.mark.asyncio
+async def test_later_user_rollback_deduplicates_incremental_turn_separator():
+    """Keep one turn separator when incremental encoding restores the retained boundary."""
+
+    class _LeadingSeparatorCodec(MessageCodec):
+        def __init__(self):
+            super().__init__(FakeTokenizer())
+            self._turn_separator = _ids("\n")
+
+        def encode_incremental(self, messages, image_data=None, video_data=None):
+            incremental_ids = super().encode_incremental(messages, image_data, video_data)
+            if incremental_ids[: len(self.turn_separator)] == self.turn_separator:
+                return incremental_ids
+            return self.turn_separator + incremental_ids
+
+    codec = _LeadingSeparatorCodec()
+    session = GatewaySession(
+        SessionHandle(session_id="rollback-separator"),
+        codec,
+        enable_last_assistant_rollback=True,
+    )
+    backend = SequencedBackend(["A1", "A2", "FIXED"])
+    first_messages = [{"role": "user", "content": "start"}]
+    second_messages = [
+        *first_messages,
+        {"role": "assistant", "content": "A1"},
+        {"role": "user", "content": "second"},
+    ]
+    rewrite_messages = [*second_messages, {"role": "user", "content": "replacement"}]
+
+    await _run(session, backend, first_messages)
+    await _run(session, backend, second_messages)
+    await _run(session, backend, rewrite_messages)
+
+    assert _decode_response_ids(backend.calls[2]["prompt_ids"]) == (
+        "user:start\nassistant:A1\nuser:second\nuser:replacement\nassistant:"
+    )
+
+
+@pytest.mark.asyncio
 async def test_later_assistant_rollback_rejects_misaligned_generation_prompt():
     """Fail closed when a stored response-side GP no longer matches the codec."""
     session = _session("rollback-gp-assert", enable_last_assistant_rollback=True)
