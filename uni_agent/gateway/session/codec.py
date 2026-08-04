@@ -255,67 +255,38 @@ class MessageCodec:
         anchor_content = [{"type": "text", "text": ""}] if self._processor is not None else ""
         anchor = [{"role": "user", "content": anchor_content}]
 
-        first_role = messages[0].get("role")
         if any(message.get("role") == "assistant" for message in messages[1:]):
             raise ValueError("An incremental assistant message may only appear first")
 
-        # rollback message
-        # tokenizer([anchor_user, assistant, ..., tool / user]) - tokenizer([anchor_user])
-        if first_role == "assistant":
-            anchor_prompt = _apply_chat_template(
-                processing_class,
-                anchor,
-                add_generation_prompt=False,
-                tokenize=False,
-                **self._apply_chat_template_kwargs,
-            )
-            full_prompt = _apply_chat_template(
-                processing_class,
-                anchor + messages,
-                add_generation_prompt=True,
-                tokenize=False,
-                **self._apply_chat_template_kwargs,
-            )
-            if not full_prompt.startswith(anchor_prompt):
-                raise ValueError("Assistant incremental chat template is not prefix-stable")
-            # Tokenize only the new text so boundary tokens already in the runtime are not merged.
-            return self._encode_prompt_text(
-                full_prompt[len(anchor_prompt) :],
-                image_data,
-                video_data,
-            )
-        elif first_role in ["user", "tool"]:
-            # TODO: Replace this user/tool empty-user fallback with continuous-token merging.
-            # A user -> tool anchor is not valid for every chat template.
-            anchor_prompt = _apply_chat_template(
-                processing_class,
-                anchor,
-                add_generation_prompt=False,
-                tokenize=False,
-                **self._apply_chat_template_kwargs,
-            )
-            full_prompt = _apply_chat_template(
-                processing_class,
-                anchor + messages,
-                add_generation_prompt=True,
-                tokenize=False,
-                **self._apply_chat_template_kwargs,
-            )
-            prefix_prompt = anchor_prompt
-            if self._turn_separator:
-                separator_text = self._tokenizer.decode(self._turn_separator, skip_special_tokens=False)
-                if not separator_text or not anchor_prompt.endswith(separator_text):
-                    raise ValueError("Turn separator is not a stable text suffix")
-                prefix_prompt = anchor_prompt[: -len(separator_text)]
-            if not full_prompt.startswith(prefix_prompt):
-                raise ValueError("Incremental chat template is not prefix-stable")
-            return self._encode_prompt_text(
-                full_prompt[len(prefix_prompt) :],
-                image_data,
-                video_data,
-            )
-        else:
-            raise ValueError(f"Invalid first message role: {first_role!r}")
+        # TODO: Replace this user/tool empty-user fallback with continuous-token merging.
+        # A user -> tool anchor is not valid for every chat template.
+        anchor_prompt = _apply_chat_template(
+            processing_class,
+            anchor,
+            add_generation_prompt=False,
+            tokenize=False,
+            **self._apply_chat_template_kwargs,
+        )
+        full_prompt = _apply_chat_template(
+            processing_class,
+            anchor + messages,
+            add_generation_prompt=True,
+            tokenize=False,
+            **self._apply_chat_template_kwargs,
+        )
+        prefix_prompt = anchor_prompt
+        if self._turn_separator:
+            separator_text = self._tokenizer.decode(self._turn_separator, skip_special_tokens=False)
+            if not separator_text or not anchor_prompt.endswith(separator_text):
+                raise ValueError("Turn separator is not a stable text suffix")
+            prefix_prompt = anchor_prompt[: -len(separator_text)]
+        if not full_prompt.startswith(prefix_prompt):
+            raise ValueError("Incremental chat template is not prefix-stable")
+        return self._encode_prompt_text(
+            full_prompt[len(prefix_prompt) :],
+            image_data,
+            video_data,
+        )
 
     async def decode_response(
         self,
