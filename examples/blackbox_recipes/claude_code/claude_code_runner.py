@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_TOOL_IMAGE = "swr.cn-east-3.myhuaweicloud.com/openyuanrong/claude-code-tool:latest"
 TOOL_TARGET = "/opt/claude-code"
+DEFAULT_GATEWAY_PROXY_PORT = 38197
 
 
 def extract_upstream(gateway_url: str) -> str:
@@ -39,7 +40,7 @@ def extract_upstream(gateway_url: str) -> str:
 
 def rewrite_gateway_url(
     gateway_url: str,
-    proxy_port: int = 38197,
+    proxy_port: int = DEFAULT_GATEWAY_PROXY_PORT,
     *,
     strip_v1: bool = False,
 ) -> str:
@@ -209,6 +210,7 @@ async def _create_claude_sandbox(
     image: str,
     sidecar_image: str,
     gateway_url: str,
+    proxy_port: int,
 ) -> Sandbox:
     upstream = extract_upstream(gateway_url) if gateway_url else None
     config = SandboxConfig(
@@ -217,6 +219,7 @@ async def _create_claude_sandbox(
         sandbox_kwargs={
             "mounts": [{"target": TOOL_TARGET, "image_url": sidecar_image}],
             "upstream": upstream,
+            "proxy_port": proxy_port,
         },
     )
     sandbox = build_sandbox(config)
@@ -233,6 +236,7 @@ async def claude_code_runner(
     tool_image: str = DEFAULT_TOOL_IMAGE,
     run_timeout: int = 7200,
     conda_env: str = "testbed",
+    proxy_port: int = DEFAULT_GATEWAY_PROXY_PORT,
     **kwargs,
 ) -> None:
     """Run Claude Code inside a sandbox with sidecar tool mount.
@@ -260,6 +264,7 @@ async def claude_code_runner(
         image=image,
         sidecar_image=tool_image,
         gateway_url=gateway_url,
+        proxy_port=proxy_port,
     )
 
     try:
@@ -273,7 +278,7 @@ async def claude_code_runner(
                     setup_result.stdout + setup_result.stderr,
                 )
 
-        claude_base_url = rewrite_gateway_url(gateway_url, strip_v1=True)
+        claude_base_url = rewrite_gateway_url(gateway_url, proxy_port=proxy_port, strip_v1=True)
         max_turns = int(os.environ.get("AGENT_MAX_TURNS", "100"))
         agent_cmd = build_claude_command(
             task=task,

@@ -66,6 +66,7 @@ actor_rollout_ref:
               tool_image: swr.cn-east-3.myhuaweicloud.com/openyuanrong/claude-code-tool:latest
               run_timeout: 3600
               conda_env: testbed
+              proxy_port: 38197
 
   actor:
     use_dynamic_bsz: true

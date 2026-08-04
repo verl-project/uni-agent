@@ -116,6 +116,7 @@ agent_runner_fqn: examples.blackbox_recipes.claude_code.claude_code_runner.claud
 | `SWE_AGENT_EVAL_TIMEOUT` | `600` | Reward evaluation timeout (seconds) |
 | `SWE_AGENT_RUN_TIMEOUT` | `7200` | Max wall time for the claude process in the sandbox |
 | `CLAUDE_CODE_TOOL_IMAGE` | `swr.cn-east-3.myhuaweicloud.com/openyuanrong/claude-code-tool:latest` | Sidecar tool image |
+| `CLAUDE_CODE_PROXY_PORT` | `38197` | Sandbox-local reverse tunnel port shared by OpenYuanrong and `ANTHROPIC_BASE_URL` |
 | `CONDA_ENV` | `testbed` | Conda env activated inside the sandbox before running claude |
 
 `AGENT_MAX_TURNS` is the only knob that bounds the agent. The trainer's

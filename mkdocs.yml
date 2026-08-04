@@ -53,6 +53,7 @@ nav:
       - Launch a Sandbox: quickstart/launch-sandbox.md
       - Run Agent Inference: quickstart/agent-inference.md
       - Run Agent RL Training: quickstart/rl-training.md
+      - Run Training on NPU: quickstart/npu-training.md
   - Concepts:
       - Overview: concepts/index.md
       - Sandbox: concepts/sandbox.md

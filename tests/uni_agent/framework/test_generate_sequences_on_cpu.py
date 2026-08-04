@@ -607,6 +607,8 @@ async def test_generate_sequences_writes_tq_schema_for_each_session(monkeypatch,
     assert "length_truncated" not in tag
     assert "traj_exit_reason" not in tag
     assert "materialization_reason" not in fields
+    # No gateway-reported weight version, so both fall back to the dataloader step.
+    assert (tag["min_global_steps"], tag["max_global_steps"]) == (7, 7)
     assert fields["input_ids"].is_nested
     assert fields["response_mask"].is_nested
     assert fields["position_ids"].is_nested

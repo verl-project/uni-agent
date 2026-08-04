@@ -47,6 +47,11 @@ class TrajectoryBuffer:
             spanning ``prompt + response``. The backend re-prefills the full
             context each turn, so this is replaced (not accumulated) and the final
             value covers the whole sequence (mirrors verl's tool_agent_loop).
+        generation_versions: One ``(min_global_steps, max_global_steps)`` mark
+            per generation, in generation order. Rollback drops the last mark
+            with the tokens it describes, so a dropped assistant no longer
+            widens the trajectory's version span. Marks carry ``None`` when the
+            backend reports no version.
     """
 
     prompt_ids: list[int]
@@ -54,6 +59,7 @@ class TrajectoryBuffer:
     response_mask: list[int] = field(default_factory=list)
     response_logprobs: list[float] = field(default_factory=list)
     routed_experts: Any | None = None
+    generation_versions: list[tuple[int | None, int | None]] = field(default_factory=list)
 
 
 @dataclass
@@ -61,8 +67,6 @@ class LastAssistantStart:
     """Stable chain lengths captured immediately before its latest assistant."""
 
     response_ids_len: int
-    response_mask_len: int
-    response_logprobs_len: int
     message_history_len: int
     image_data_len: int
     video_data_len: int
@@ -264,6 +268,12 @@ class GatewaySession:
                 raise HTTPException(status_code=500, detail=f"{e.__class__.__name__}: {e}") from e
 
             response_ids = list(output.token_ids)
+            encoded.buffer.generation_versions.append(
+                (
+                    output.extra_fields.get("min_global_steps"),
+                    output.extra_fields.get("max_global_steps"),
+                )
+            )
             encoded.buffer.response_ids.extend(response_ids)
             encoded.buffer.response_mask.extend([1] * len(response_ids))
             if encoded.sampling_params.get("logprobs", False):
@@ -406,13 +416,10 @@ class GatewaySession:
             if rollback_to_last_assistant:
                 last_assistant_start = selected_chain.last_assistant_start
                 assert last_assistant_start.response_ids_len <= len(buffer.response_ids)
-                assert last_assistant_start.response_mask_len <= len(buffer.response_mask)
-                assert last_assistant_start.response_logprobs_len <= len(buffer.response_logprobs)
-                rollback_dropped_trainable_tokens = sum(buffer.response_mask[last_assistant_start.response_mask_len :])
-                del buffer.response_ids[last_assistant_start.response_ids_len :]
-                del buffer.response_mask[last_assistant_start.response_mask_len :]
-                del buffer.response_logprobs[last_assistant_start.response_logprobs_len :]
-                self._assert_response_logprob_alignment(buffer)
+                rollback_dropped_trainable_tokens = sum(buffer.response_mask[last_assistant_start.response_ids_len :])
+                # One generation appends exactly one mark, so the rewritten
+                # assistant is always the last one.
+                del buffer.generation_versions[-1:]
 
                 if image_data is not None:
                     assert last_assistant_start.image_data_len <= len(image_data)
@@ -420,6 +427,23 @@ class GatewaySession:
                 if video_data is not None:
                     assert last_assistant_start.video_data_len <= len(video_data)
                     video_data = video_data[: last_assistant_start.video_data_len] or None
+                assert last_assistant_start.response_ids_len > 0
+                # Later rollbacks retain earlier trainable output; the snapshot was captured
+                # after the prior incremental GP, so remove that verified suffix as well.
+                generation_prompt = self._codec.generation_prompt
+                rollback_response_len = last_assistant_start.response_ids_len - len(generation_prompt)
+                if (
+                    rollback_response_len < 0
+                    or buffer.response_ids[rollback_response_len : last_assistant_start.response_ids_len]
+                    != generation_prompt
+                ):
+                    raise ValueError("Stored response does not end its assistant prefix with the generation prompt")
+                # Incremental encoding restores the turn separator with the replacement suffix.
+                rollback_response_len -= len(self._codec.turn_separator)
+                del buffer.response_ids[rollback_response_len:]
+                del buffer.response_mask[rollback_response_len:]
+                del buffer.response_logprobs[rollback_response_len:]
+                self._assert_response_logprob_alignment(buffer)
                 incremental_start = last_assistant_start.message_history_len
                 rollback_applied = True
             else:
@@ -535,6 +559,10 @@ class GatewaySession:
                 ranked_candidates.append((chain, len(chain.message_history), True))
                 continue
             if self._enable_last_assistant_rollback:
+                if assistant_start.response_ids_len == 0:
+                    # No response-side tokens predate this assistant, so rollback has nothing
+                    # to preserve. Omit it while still allowing an exact or later chain to win.
+                    continue
                 if assistant_start_len > deepest_rollback_service_value:
                     deepest_rollback_candidates = [chain]
                     deepest_rollback_service_value = assistant_start_len
@@ -608,6 +636,7 @@ class GatewaySession:
             response_mask=list(buffer.response_mask),
             response_logprobs=list(buffer.response_logprobs),
             routed_experts=buffer.routed_experts,
+            generation_versions=list(buffer.generation_versions),
         )
 
     def _copy_chain_media(self, chain: ChainState) -> tuple[list[Any] | None, list[Any] | None]:
@@ -637,8 +666,6 @@ class GatewaySession:
     ) -> LastAssistantStart:
         return LastAssistantStart(
             response_ids_len=len(buffer.response_ids),
-            response_mask_len=len(buffer.response_mask),
-            response_logprobs_len=len(buffer.response_logprobs),
             message_history_len=message_history_len,
             image_data_len=len(image_data or []),
             video_data_len=len(video_data or []),
@@ -760,6 +787,16 @@ class GatewaySession:
         response_logprobs = None
         if chain.buffer.response_logprobs:
             response_logprobs = list(chain.buffer.response_logprobs)
+        # Fold the surviving marks into the trajectory-level version span the trainer
+        # reads for staleness metrics. Omit the keys when no backend reported a
+        # version so the framework falls back instead of tagging None.
+        marks = [mark for mark in chain.buffer.generation_versions if mark[0] is not None]
+        trajectory_extra_fields: dict[str, Any] = {}
+        if marks:
+            trajectory_extra_fields["min_global_steps"] = min(mark[0] for mark in marks)
+            trajectory_extra_fields["max_global_steps"] = max(mark[1] for mark in marks)
+        if extra_fields:
+            trajectory_extra_fields.update(extra_fields)
         return Trajectory(
             prompt_ids=list(chain.buffer.prompt_ids),
             response_ids=list(chain.buffer.response_ids),
@@ -772,7 +809,7 @@ class GatewaySession:
                 chain.image_data,
                 chain.video_data,
             ),
-            extra_fields=dict(extra_fields) if extra_fields else {},
+            extra_fields=trajectory_extra_fields,
         )
 
     def _count_chat_turns(self, message_history: list[dict[str, Any]]) -> int:

@@ -78,15 +78,21 @@ async def test_gateway_actor_forwards_last_assistant_rollback_to_session():
 
     actor = _GatewayActor(
         GatewayActorConfig(tokenizer=FakeTokenizer()),
-        SequencedBackend(["BAD", "FIXED"]),
+        SequencedBackend(["A1", "A2", "FIXED"]),
     )
     actor._server_base_url = "http://test"
     await actor.create_session("rollback-enabled")
     prompt = [{"role": "user", "content": "run"}]
+    continuation = [
+        *prompt,
+        {"role": "assistant", "content": "A1"},
+        {"role": "user", "content": "continue"},
+    ]
     await actor._handle_openai_chat_completions("rollback-enabled", {"messages": prompt})
+    await actor._handle_openai_chat_completions("rollback-enabled", {"messages": continuation})
     await actor._handle_openai_chat_completions(
         "rollback-enabled",
-        {"messages": [*prompt, {"role": "user", "content": "user_error"}]},
+        {"messages": [*continuation, {"role": "user", "content": "user_error"}]},
     )
 
     state = await actor.get_session_state("rollback-enabled")

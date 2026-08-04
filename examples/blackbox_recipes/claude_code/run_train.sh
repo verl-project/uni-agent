@@ -92,6 +92,7 @@ AGENT_MAX_TURNS="${AGENT_MAX_TURNS:-100}"
 if [[ "${RUNNER}" == "claude_code" ]]; then
     AGENT_RUNNER_FQN="examples.blackbox_recipes.claude_code.claude_code_runner.claude_code_runner"
     CLAUDE_CODE_TOOL_IMAGE="${CLAUDE_CODE_TOOL_IMAGE:-swr.cn-east-3.myhuaweicloud.com/openyuanrong/claude-code-tool:latest}"
+    CLAUDE_CODE_PROXY_PORT="${CLAUDE_CODE_PROXY_PORT:-38197}"
 else
     echo "Unknown RUNNER=${RUNNER}; this recipe currently supports claude_code only" >&2
     exit 1
@@ -110,6 +111,7 @@ RUNNER_ARGS=(
     "actor_rollout_ref.rollout.custom.agent_framework.agent_runners.claude_code.runner_kwargs.tool_image=${CLAUDE_CODE_TOOL_IMAGE}"
     "actor_rollout_ref.rollout.custom.agent_framework.agent_runners.claude_code.runner_kwargs.run_timeout=${SWE_AGENT_RUN_TIMEOUT}"
     "actor_rollout_ref.rollout.custom.agent_framework.agent_runners.claude_code.runner_kwargs.conda_env=${CONDA_ENV}"
+    "actor_rollout_ref.rollout.custom.agent_framework.agent_runners.claude_code.runner_kwargs.proxy_port=${CLAUDE_CODE_PROXY_PORT}"
 )
 
 # ── OpenYuanrong (remote sandbox) ───────────────────────────────────────
@@ -149,6 +151,7 @@ echo "Val data:    ${VAL_DATA}"
 echo "Engine:      ${ENGINE} (gen_tp=${GEN_TP}, train_tp=${TRAIN_TP})"
 echo "Runner:      ${RUNNER}"
 echo "Tool image:  ${CLAUDE_CODE_TOOL_IMAGE}"
+echo "Proxy port:  ${CLAUDE_CODE_PROXY_PORT}"
 echo "Turns:       agent_max_turns=${AGENT_MAX_TURNS}"
 echo "Batch:       n=${N}, mini_bsz=${PPO_MINI_BATCH_SIZE}"
 echo "Sequence:    prompt=${PROMPT_LENGTH}, response=${RESPONSE_LENGTH}"
