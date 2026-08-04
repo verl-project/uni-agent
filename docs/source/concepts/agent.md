@@ -47,7 +47,7 @@ The Task has already started the Sandbox. The Agent must not stop it.
 - `output`: final structured output.
 - `transcript`: messages and Tool observations produced by a white-box loop.
 - `info`: implementation-specific metadata such as token counts or process status.
-- `finished`: whether the episode completed normally. Defaults to `null`, meaning the Agent does not report a completion state; such episodes stay trainable.
+- `episode_finished`: whether the episode completed normally. Defaults to `null`, meaning the Agent does not report a completion state; such episodes stay trainable.
 
 The Task decides how the resulting Sandbox state and AgentResult are scored.
 
@@ -89,7 +89,7 @@ The Claude Code Agent demonstrates the black-box pattern:
 3. Launch the harness through `sandbox.exec()`.
 4. Return process metadata while the Task evaluates the modified Sandbox.
 
-Claude Code sets `AgentResult.finished=true` when the process exits with code `0`.
+Claude Code sets `AgentResult.episode_finished=true` when the process exits with code `0`.
 
 ```yaml
 agent:

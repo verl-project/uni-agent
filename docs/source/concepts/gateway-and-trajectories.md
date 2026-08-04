@@ -32,20 +32,19 @@ Use this path when inference must match training or when trajectories are needed
 For each rollout session, the Agent Framework:
 
 1. Chooses a Gateway actor and creates a session.
-2. Receives a session-scoped model `base_url` and reward endpoint.
+2. Receives a session-scoped model `base_url`.
 3. Launches the configured Agent Runner, such as `run_task`.
 4. The runner injects the session endpoint into `agent.model`.
 5. The Agent sends OpenAI Chat Completions or Anthropic Messages requests to the session URL.
 6. The Gateway forwards tokenized requests to the verl rollout engine.
-7. The Task posts its final reward to the session.
-8. The framework finalizes the session and writes trajectories to TransferQueue.
+7. The managed Runner returns an `EpisodeResult` to the Framework.
+8. The Framework finalizes the session, attaches reward/status/metrics, and writes trajectories to TransferQueue.
 
 The model-facing endpoints are:
 
 ```text
 POST /sessions/{session_id}/v1/chat/completions
 POST /sessions/{session_id}/v1/messages
-POST /sessions/{session_id}/reward_info
 ```
 
 Sessions are held in Gateway memory until they are finalized or aborted.
@@ -58,7 +57,8 @@ A finalized trajectory contains:
 - `response_ids`: generated tokens plus inter-turn continuation tokens.
 - `response_mask`: `1` for model-generated tokens and `0` for Tool results or other continuation context.
 - Optional rollout log probabilities.
-- Session metadata, reward information, and materialization reason.
+- Session and materialization metadata. The Agent Framework attaches reward
+  annotations only after the managed Runner returns.
 
 Before writing to TransferQueue, the Agent Framework derives the full training record, including `input_ids`, attention masks, position IDs, loss masks, and sparse `rm_scores`.
 
@@ -87,25 +87,81 @@ by default and can be disabled with
 
 ## Reward Flow
 
-The built-in Task Runner posts:
+The built-in Task Runner returns:
 
-```json
-{
-  "reward_info": {
-    "reward": 1.0,
-    "acc": 1.0,
-    "finished": true
-  }
-}
+```python
+EpisodeResult(
+    reward=1.0,
+    metrics={"acc": 1.0},
+    episode_finished=True,
+    reward_context={...},
+)
 ```
 
-The Agent Framework reads the session reward, applies it to finalized trajectories, and writes a sparse token-level `rm_scores` tensor with the reward on the final token.
+The Agent Framework applies the result to finalized trajectories and writes a sparse token-level `rm_scores` tensor with the reward on the final token. Validation metrics are serialized under `extra_fields["reward_extra_info"]`, matching the trainer's TQ contract.
 
-Agent completion is factual session metadata; the Framework, not the Task, decides how training consumes it. When the training configuration enables `mask_unfinished_episode`, a session with `finished=false` is still written and tagged as successful, but its TransferQueue `response_mask` and `loss_mask` are all zero so it does not contribute policy gradients, loss-normalization counts, or auxiliary losses.
+The result fields have separate contracts:
+
+- `reward` is the scalar outcome reward. `None` delegates scoring to an optional Reward Loop Worker.
+- `metrics` contains only scalar validation values (`int`, `float`, or `bool`), such as `acc`. The key `reward` is reserved for the outcome column and is rejected inside metrics.
+- `episode_finished` is a tri-state episode fact, not a validation metric.
+- `reward_context` may contain structured scorer input. It is passed to the Reward Loop Worker and is never aggregated as a validation metric.
+
+When both the Runner and Reward Loop Worker provide a metric with the same name,
+the worker value wins. Use distinct metric names when the sources have different
+semantics.
+
+Agent completion is factual episode metadata; the Framework, not the Task, decides how training consumes it. When the training configuration enables `mask_unfinished_episode`, an episode with `episode_finished=False` is still written and tagged as successful, but its TransferQueue `response_mask` and `loss_mask` are all zero so it does not contribute policy gradients, loss-normalization counts, or auxiliary losses.
 
 Masking stops at the loss. The trajectory keeps its reward in `rm_scores`, so a group-relative estimator such as GRPO or RLOO still folds that reward into the group mean and standard deviation, shifting the advantages of the sibling rollouts sharing its `uid`. The masked trajectory itself gets a zero advantage, and it still costs a full forward and backward pass. Treat unfinished episodes as evidence that keeps the baseline honest, not as samples removed from the batch.
 
-If no Task reward is reported, an optional verl Reward Loop Worker can score the final trajectory. Without either source, `rm_scores` remains zero and the framework emits a warning.
+If no Runner reward is returned, an optional verl Reward Loop Worker can score the final trajectory. Without either source, `rm_scores` remains zero and the framework emits a warning.
+
+Process rewards are not implemented by this interface. A future token-level
+reward channel must be a separate sibling of `reward_metrics`, because lists or
+token arrays are not valid validation metrics.
+
+### Migrating custom Runners
+
+The old Gateway reward endpoint and `report_reward` option were removed. A
+managed Runner must return its annotations directly:
+
+```python
+from uni_agent.framework import EpisodeResult
+
+
+async def my_runner(*, session, raw_prompt, sample_index, **kwargs):
+    # Run the Agent against session.base_url, then evaluate the episode.
+    return EpisodeResult(
+        reward=score,
+        metrics={"acc": accuracy},
+        episode_finished=completed_normally,
+        reward_context={"case_id": case_id},
+    )
+```
+
+Remove `reward_info_url`, HTTP posts to `/reward_info`, and
+`runner_kwargs.report_reward` from custom integrations. Runners that do not
+provide annotations may return `None`. Other return types fail the session
+instead of being interpreted as legacy reward dictionaries.
+
+The related type migrations are:
+
+- `AgentResult.finished` -> `AgentResult.episode_finished`.
+- `TaskResult.finished` -> `TaskResult.episode_finished`.
+- `Trajectory.reward_info["reward"]` -> `Trajectory.reward_score`.
+- `Trajectory.reward_info["finished"]` -> `Trajectory.episode_finished`.
+- Other scalar validation entries in `Trajectory.reward_info` ->
+  `Trajectory.reward_metrics`.
+
+Gateway-finalized trajectories start with these annotation fields unset. Code
+that calls the Gateway directly must not expect reward annotations until an
+Agent Framework or another explicit downstream owner attaches them.
+
+Uni-Agent does not currently expose a result endpoint for independently hosted
+online Agents. Such an integration should use an authenticated adapter that
+normalizes its response to `EpisodeResult`, rather than restoring the mixed
+Gateway reward dictionary.
 
 ## TransferQueue
 
@@ -139,7 +195,7 @@ The trainer's ReplayBuffer consumes completed records independently of rollout t
 - A prompt is marked `finished` when any of its sessions succeeds.
 - A prompt is marked `failure` when all sessions fail.
 - A batch raises only when every rollout fails.
-- Reward reporting is best-effort and logs failures.
+- An invalid Runner result fails that session and leaves sibling sessions isolated.
 
 This isolation is important for long-horizon workloads, where session latency and failure modes vary widely.
 
@@ -155,7 +211,7 @@ Important knobs include:
 
 - `gateway_count`: Gateway actor pool size.
 - `mask_unfinished_episode`: zeroes training masks for sessions that report
-  `finished=false`. Sessions without completion metadata remain trainable.
+  `episode_finished=False`. Sessions without completion metadata remain trainable.
   Defaults to `false`.
 - `enable_last_assistant_rollback`: reuses a chain when only its latest Assistant
   message is rewritten. Defaults to `true`; set it to `false` to preserve the
@@ -173,6 +229,7 @@ Important knobs include:
 Customize the layer that owns the behavior:
 
 - Implement an Agent Runner to launch a different workload against a Gateway session.
+- Return `EpisodeResult` from a managed Agent Runner; do not write reward data into Gateway routes.
 - Add a Gateway adapter for a new model API wire format.
 - Customize Task, Agent, Tool, and Sandbox behavior through their registries.
 - Customize reward scoring in the Task or a verl Reward Loop Worker.

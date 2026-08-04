@@ -49,7 +49,7 @@ config) lives in this directory and does not depend on `mini_swe_agent/`.
   |           commands run inside the SWE-bench sandbox /testbed
   |
   |-- SandboxEnvForReward(sandbox) -> evaluate_in_env()
-  `-- POST session.reward_info_url
+  `-- return EpisodeResult(reward, metrics, episode_finished, reward_context)
 ```
 
 ## Prerequisites
