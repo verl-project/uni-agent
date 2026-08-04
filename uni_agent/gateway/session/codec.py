@@ -256,9 +256,7 @@ class MessageCodec:
         anchor = [{"role": "user", "content": anchor_content}]
 
         first_role = messages[0].get("role")
-        if first_role == "assistant" and any(message.get("role") != "tool" for message in messages[1:]):
-            raise ValueError("Messages after an incremental assistant message must have role 'tool'")
-        if first_role != "assistant" and any(message.get("role") == "assistant" for message in messages[1:]):
+        if any(message.get("role") == "assistant" for message in messages[1:]):
             raise ValueError("An incremental assistant message may only appear first")
 
         # rollback message
@@ -267,7 +265,7 @@ class MessageCodec:
             anchor_prompt = _apply_chat_template(
                 processing_class,
                 anchor,
-                add_generation_prompt=True,
+                add_generation_prompt=False,
                 tokenize=False,
                 **self._apply_chat_template_kwargs,
             )
