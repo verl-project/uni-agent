@@ -367,10 +367,11 @@ async def test_later_user_rollback_deduplicates_incremental_turn_separator():
             self._turn_separator = _ids("\n")
 
         def encode_incremental(self, messages, image_data=None, video_data=None):
-            incremental_ids = super().encode_incremental(messages, image_data, video_data)
-            if incremental_ids[: len(self.turn_separator)] == self.turn_separator:
-                return incremental_ids
-            return self.turn_separator + incremental_ids
+            return self.turn_separator + self._tokenizer.apply_chat_template(
+                messages,
+                tokenize=True,
+                add_generation_prompt=True,
+            )
 
     codec = _LeadingSeparatorCodec()
     session = GatewaySession(

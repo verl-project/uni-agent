@@ -438,6 +438,8 @@ class GatewaySession:
                     != generation_prompt
                 ):
                     raise ValueError("Stored response does not end its assistant prefix with the generation prompt")
+                # Incremental encoding restores the turn separator with the replacement suffix.
+                rollback_response_len -= len(self._codec.turn_separator)
                 del buffer.response_ids[rollback_response_len:]
                 del buffer.response_mask[rollback_response_len:]
                 del buffer.response_logprobs[rollback_response_len:]
@@ -462,19 +464,6 @@ class GatewaySession:
                     image_data=new_image_data,
                     video_data=new_video_data,
                 )
-                turn_separator = self._codec.turn_separator
-                if (
-                    rollback_applied
-                    and turn_separator
-                    and buffer.response_ids[-len(turn_separator) :] == turn_separator
-                    and incremental_ids[: len(turn_separator)] == turn_separator
-                ):
-                    # Rollback retains the separator before the removed GP. Keep the
-                    # incremental encoder's copy when it restores the same boundary.
-                    del buffer.response_ids[-len(turn_separator) :]
-                    del buffer.response_mask[-len(turn_separator) :]
-                    del buffer.response_logprobs[-len(turn_separator) :]
-                    current_trajectory_length -= len(turn_separator)
                 capacity_exhausted = (
                     self._trajectory_capacity is not None
                     and current_trajectory_length + len(incremental_ids) >= self._trajectory_capacity
