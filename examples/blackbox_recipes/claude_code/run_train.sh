@@ -180,7 +180,6 @@ import os
 env_vars = {
     key: value
     for key in (
-        "PYTHONPATH",
         "OPENYUANRONG_SERVER_ADDRESS",
         "OPENYUANRONG_TOKEN",
         "OPENYUANRONG_TUNNEL_SSL_VERIFY",
@@ -219,6 +218,7 @@ fi
 WORKING_DIR="${WORKING_DIR:-$(pwd)}"
 
 MAIN_CMD=(
+    env "PYTHONPATH=${PYTHONPATH}"
     python3 -m verl.trainer.main_ppo
     --config-name="${CONFIG_NAME}" \
     --config-path="${REPO_ROOT}/examples/blackbox_recipes/claude_code/config" \

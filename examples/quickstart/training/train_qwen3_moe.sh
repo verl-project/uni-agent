@@ -110,8 +110,9 @@ rollout_rs_threshold=${ROLLOUT_RS_THRESHOLD:-null}
 router_replay_mode=${ROUTER_REPLAY_MODE:-disabled}                    # disabled | R2 | R3
 enable_rollout_routing_replay=${ENABLE_ROLLOUT_ROUTING_REPLAY:-False} # required only for R3
 
-ray job submit --no-wait --runtime-env $RUNTIME_ENV \
-    -- python3 -m verl.trainer.main_ppo \
+ray job submit --no-wait --runtime-env "$RUNTIME_ENV" \
+    -- env PYTHONPATH=verl \
+    python3 -m verl.trainer.main_ppo \
     --config-name=ppo_megatron_trainer \
     trainer.use_v1=True \
     trainer.v1.trainer_mode=colocate_async \
@@ -151,6 +152,7 @@ ray job submit --no-wait --runtime-env $RUNTIME_ENV \
     +actor_rollout_ref.actor.optim.override_optimizer_config.use_precision_aware_optimizer=True \
     +actor_rollout_ref.actor.optim.override_optimizer_config.optimizer_cpu_offload=True \
     actor_rollout_ref.actor.megatron.use_mbridge=$USE_MBRIDGE \
+    actor_rollout_ref.actor.megatron.vanilla_mbridge=$USE_MBRIDGE \
     actor_rollout_ref.actor.megatron.use_dist_checkpointing=$USE_DIST_CKPT \
     actor_rollout_ref.actor.megatron.param_offload=${offload} \
     actor_rollout_ref.actor.megatron.grad_offload=${offload} \

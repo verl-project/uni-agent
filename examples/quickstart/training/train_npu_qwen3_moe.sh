@@ -82,7 +82,8 @@ router_replay_mode=${ROUTER_REPLAY_MODE:-disabled}
 gpu_memory_utilization=${ROLLOUT_GPU_MEM_UTIL:-0.75}
 
 ray job submit --no-wait --runtime-env "$RUNTIME_ENV" \
-    -- python3 -m verl.trainer.main_ppo \
+    -- env PYTHONPATH=verl \
+    python3 -m verl.trainer.main_ppo \
     trainer.use_v1=True \
     trainer.v1.trainer_mode=colocate_async \
     trainer.v1.colocate_async.num_warmup_batches=${num_warmup_batches} \

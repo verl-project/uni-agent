@@ -133,7 +133,7 @@ The Quickstart provides separate configs for the two Agent types:
 
 ### Ray Runtime Environment
 
-Training runs as a Ray job. Use a Runtime Environment to distribute the repository, expose the bundled `verl` source, install lightweight Task and Sandbox dependencies, and pass credentials to every Agent runner.
+Training runs as a Ray job. Use a Runtime Environment to distribute the repository, install lightweight Task and Sandbox dependencies, and pass credentials to every Agent runner. The launch scripts expose the bundled `verl` source through the driver entrypoint; do not also set `PYTHONPATH` in the Runtime Environment because Ray rejects duplicate Job and Driver environment keys.
 
 === "veFaaS"
 
@@ -148,7 +148,6 @@ Training runs as a Ray job. Use a Runtime Environment to distribute the reposito
         - "swebench"
 
     env_vars:
-      PYTHONPATH: "verl"
       PYTHONNOUSERSITE: "1"
       TORCH_NCCL_AVOID_RECORD_STREAMS: "1"
       CUDA_DEVICE_MAX_CONNECTIONS: "1"
@@ -171,7 +170,6 @@ Training runs as a Ray job. Use a Runtime Environment to distribute the reposito
         - "swebench"
 
     env_vars:
-      PYTHONPATH: "verl"
       PYTHONNOUSERSITE: "1"
       TORCH_NCCL_AVOID_RECORD_STREAMS: "1"
       CUDA_DEVICE_MAX_CONNECTIONS: "1"
