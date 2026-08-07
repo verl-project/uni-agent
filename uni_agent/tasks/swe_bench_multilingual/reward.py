@@ -130,8 +130,7 @@ def _grade(test_spec, output: str) -> dict:
 
     if not report["resolved"]:
         logger.warning(
-            "SWE-bench Multilingual unresolved for %s: FAIL_TO_PASS failures=%s; "
-            "PASS_TO_PASS failures=%s",
+            "SWE-bench Multilingual unresolved for %s: FAIL_TO_PASS failures=%s; PASS_TO_PASS failures=%s",
             test_spec.instance_id,
             test_status["FAIL_TO_PASS"]["failure"][:25],
             test_status["PASS_TO_PASS"]["failure"][:25],
