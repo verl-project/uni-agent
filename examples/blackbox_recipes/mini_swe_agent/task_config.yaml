@@ -1,0 +1,31 @@
+- name: swe_bench
+  sandbox:
+    provider: akernel
+    runtime_timeout: 7200
+    sandbox_kwargs:
+      sidecar_target: /opt/mini-swe-agent-venv
+  agent:
+    name: mini_swe_agent
+    step_limit: 100
+    action_timeout: 600
+    run_timeout: 7200
+    model:
+      temperature: 1.0
+      top_p: 1.0
+      max_total_tokens: 131072
+
+- name: swe_rebench
+  sandbox:
+    provider: akernel
+    runtime_timeout: 7200
+    sandbox_kwargs:
+      sidecar_target: /opt/mini-swe-agent-venv
+  agent:
+    name: mini_swe_agent
+    step_limit: 100
+    action_timeout: 600
+    run_timeout: 7200
+    model:
+      temperature: 1.0
+      top_p: 1.0
+      max_total_tokens: 131072
