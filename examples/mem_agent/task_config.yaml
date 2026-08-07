@@ -1,0 +1,13 @@
+- name: hotpotqa
+  sandbox:
+    provider: local
+  agent:
+    name: mem_agent
+    max_memorization_length: 1024
+    max_chunks: 8
+    max_final_response_length: 1024
+    max_steps: 9
+    model:
+      temperature: 1.0
+      top_p: 0.7
+      top_k: -1
