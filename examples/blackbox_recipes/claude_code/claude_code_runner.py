@@ -15,6 +15,7 @@ import logging
 import os
 import shlex
 import time
+from collections.abc import Mapping
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -30,6 +31,13 @@ logger = logging.getLogger(__name__)
 DEFAULT_TOOL_IMAGE = "swr.cn-east-3.myhuaweicloud.com/openyuanrong/claude-code-tool:latest"
 TOOL_TARGET = "/opt/claude-code"
 DEFAULT_GATEWAY_PROXY_PORT = 38197
+_SWE_REBENCH_GIT_CLEAN_HISTORY = " && ".join(
+    [
+        "git tag -d $(git tag -l) || true",
+        "git reflog expire --expire=now --all || true",
+        "git gc --prune=now || true",
+    ]
+)
 
 
 def extract_upstream(gateway_url: str) -> str:
@@ -113,9 +121,28 @@ def _decode_metadata_list(value) -> list[str]:
 
 
 def build_claude_task(raw_prompt, tools_kwargs: dict | None = None) -> str:
-    tools_kwargs = tools_kwargs or {}
+    if tools_kwargs is None:
+        tools_kwargs = {}
+    elif not isinstance(tools_kwargs, Mapping):
+        raise TypeError(f"tools_kwargs must be a mapping, got {type(tools_kwargs).__name__}")
+
+    if "task" in tools_kwargs:
+        task_config = tools_kwargs["task"]
+        if not isinstance(task_config, Mapping):
+            raise TypeError(f"tools_kwargs.task must be a mapping, got {type(task_config).__name__}")
+        metadata = task_config.get("metadata", {})
+        metadata_path = "tools_kwargs.task.metadata"
+    else:
+        reward_config = tools_kwargs.get("reward", {})
+        if not isinstance(reward_config, Mapping):
+            raise TypeError(f"tools_kwargs.reward must be a mapping, got {type(reward_config).__name__}")
+        metadata = reward_config.get("metadata", {})
+        metadata_path = "tools_kwargs.reward.metadata"
+
+    if not isinstance(metadata, Mapping):
+        raise TypeError(f"{metadata_path} must be a mapping, got {type(metadata).__name__}")
+
     task = extract_task(raw_prompt)
-    metadata = (tools_kwargs.get("reward") or {}).get("metadata") or {}
     issue = metadata.get("problem_statement") or _extract_issue_text(task)
     tests = _decode_metadata_list(metadata.get("FAIL_TO_PASS"))
     if not tests:
@@ -247,14 +274,31 @@ async def claude_code_runner(
         3. Evaluate reward in the same sandbox
         4. Post reward_info for the framework reward path
     """
-    tools_kwargs = tools_kwargs or {}
+    if tools_kwargs is None:
+        tools_kwargs = {}
+    elif not isinstance(tools_kwargs, Mapping):
+        raise TypeError(f"tools_kwargs must be a mapping, got {type(tools_kwargs).__name__}")
     logger.info("claude_code_runner called, sample_index=%d", sample_index)
 
     task = build_claude_task(raw_prompt, tools_kwargs)
-    env_config = tools_kwargs.get("env", {})
+    if "task" in tools_kwargs:
+        task_config = tools_kwargs["task"]
+        if not isinstance(task_config, Mapping):
+            raise TypeError(f"tools_kwargs.task must be a mapping, got {type(task_config).__name__}")
+        task_name = task_config.get("name")
+        env_config = task_config.get("sandbox", {})
+        env_path = "tools_kwargs.task.sandbox"
+    else:
+        task_name = None
+        env_config = tools_kwargs.get("env", {})
+        env_path = "tools_kwargs.env"
+
+    if not isinstance(env_config, Mapping):
+        raise TypeError(f"{env_path} must be a mapping, got {type(env_config).__name__}")
+
     image = extract_image(env_config)
     if not image:
-        raise ValueError(f"No Docker image found in tools_kwargs.env for sample {sample_index}")
+        raise ValueError(f"No Docker image found in {env_path} for sample {sample_index}")
 
     gateway_url = session.base_url
     if not gateway_url:
@@ -268,6 +312,10 @@ async def claude_code_runner(
     )
 
     try:
+        if task_name == "swe_rebench":
+            # Match SWEREBenchTask.run(): remove future history before the agent reads the repo.
+            await sandbox.exec_shell(_SWE_REBENCH_GIT_CLEAN_HISTORY, workdir="/testbed")
+
         post_setup_cmd = env_config.get("post_setup_cmd", "")
         if post_setup_cmd:
             setup_result = await sandbox.exec_shell(post_setup_cmd, timeout=120)

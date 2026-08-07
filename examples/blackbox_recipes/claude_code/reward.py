@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Mapping
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -20,10 +21,30 @@ logger = logging.getLogger(__name__)
 
 def build_reward_context(tools_kwargs: dict) -> tuple[dict[str, Any], int]:
     """Extract reward metadata and eval_timeout from per-sample tools_kwargs."""
-    reward_config = tools_kwargs.get("reward", {})
+    if not isinstance(tools_kwargs, Mapping):
+        raise TypeError(f"tools_kwargs must be a mapping, got {type(tools_kwargs).__name__}")
+
+    if "task" in tools_kwargs:
+        task_config = tools_kwargs["task"]
+        if not isinstance(task_config, Mapping):
+            raise TypeError(f"tools_kwargs.task must be a mapping, got {type(task_config).__name__}")
+        evaluator_name = task_config.get("name")
+        reward_metadata = task_config.get("metadata", {})
+        metadata_path = "tools_kwargs.task.metadata"
+    else:
+        reward_config = tools_kwargs.get("reward", {})
+        if not isinstance(reward_config, Mapping):
+            raise TypeError(f"tools_kwargs.reward must be a mapping, got {type(reward_config).__name__}")
+        evaluator_name = reward_config.get("name")
+        reward_metadata = reward_config.get("metadata", {})
+        metadata_path = "tools_kwargs.reward.metadata"
+
+    if not isinstance(reward_metadata, Mapping):
+        raise TypeError(f"{metadata_path} must be a mapping, got {type(reward_metadata).__name__}")
+
     metadata = {
-        "data_source": reward_config.get("name", "unknown"),
-        "reward_model": reward_config.get("metadata", {}),
+        "evaluator": evaluator_name or "unknown",
+        "reward_model": reward_metadata,
     }
     eval_timeout = int(os.environ.get("SWE_AGENT_EVAL_TIMEOUT", "600"))
     return metadata, eval_timeout
@@ -47,13 +68,17 @@ async def evaluate_in_env(
     Returns (score, eval_result) where score is 1.0/0.0 and
     eval_result contains details (eval_completed, resolved, etc.).
     """
-    data_source = metadata.get("data_source", "unknown")
+    evaluator = metadata.get("evaluator", "unknown")
     reward_model = metadata.get("reward_model", {})
+    if not isinstance(reward_model, Mapping):
+        raise TypeError(f"reward metadata must be a mapping, got {type(reward_model).__name__}")
 
-    if data_source != "swe_bench":
-        raise ValueError(f"Unsupported reward data source: {data_source}")
-
-    from uni_agent.tasks.swe_bench.reward import compute_reward
+    if evaluator == "swe_bench":
+        from uni_agent.tasks.swe_bench.reward import compute_reward
+    elif evaluator == "swe_rebench":
+        from uni_agent.tasks.swe_rebench.reward import compute_reward
+    else:
+        raise ValueError(f"Unsupported reward evaluator: {evaluator}. Supported: swe_bench, swe_rebench")
 
     spec_metadata = reward_model.get("ground_truth", reward_model)
     result = await compute_reward(spec_metadata, env, eval_timeout=eval_timeout)
