@@ -30,7 +30,7 @@ class SWEBenchMultilingualTaskConfig(TaskConfig):
         description="Oracle mode: skip the agent and score the dataset's gold patch directly.",
     )
     eval_timeout: float = Field(
-        default=1800.0,
+        default=600.0,
         gt=0,
         description="Maximum number of seconds allowed for multilingual evaluation.",
     )
