@@ -102,9 +102,8 @@ rollout_is_batch_normalize=${ROLLOUT_IS_BATCH_NORMALIZE:-False}  # normalize IS 
 rollout_rs=${ROLLOUT_RS:-null}                                   # no rejection sampling
 rollout_rs_threshold=${ROLLOUT_RS_THRESHOLD:-null}
 
-ray job submit --no-wait --runtime-env "$RUNTIME_ENV" \
-    -- env PYTHONPATH=verl \
-    python3 -m verl.trainer.main_ppo \
+ray job submit --no-wait --runtime-env $RUNTIME_ENV \
+    -- python3 -m verl.trainer.main_ppo \
     --config-name=ppo_megatron_trainer \
     trainer.use_v1=True \
     trainer.v1.trainer_mode=colocate_async \

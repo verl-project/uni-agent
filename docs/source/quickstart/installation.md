@@ -74,17 +74,14 @@ pip:
     - "swe-rex"
     - "swebench"
 env_vars:
+  PYTHONPATH: "verl"
   # ......
 ```
 
-Pass the file when submitting the Ray job, and expose the bundled `verl`
-source on the driver entrypoint. Current `verl` forwards this `PYTHONPATH`
-to Ray workers:
+Pass the file when submitting the Ray job:
 
 ```bash
-ray job submit --runtime-env runtime_env.yaml \
-    -- env PYTHONPATH=verl \
-    python entrypoint.py
+ray job submit --runtime-env runtime_env.yaml -- python entrypoint.py
 ```
 
 Next, you can [launch a sandbox and run some code](launch-sandbox.md).
