@@ -70,7 +70,7 @@ class MyTask(Task):
         return TaskResult(
             reward=score,
             accuracy=score,
-            finished=agent_result.finished,
+            episode_finished=agent_result.episode_finished,
             extra_info={"score": score},
         )
 ```
@@ -105,16 +105,20 @@ The Task converts that payload into `TaskResult`:
 TaskResult(
     reward=float(result["resolved"]),
     accuracy=float(result["resolved"]),
-    finished=agent_result.finished,
+    episode_finished=agent_result.episode_finished,
     extra_info=result,
 )
 ```
 
-Custom Tasks may return scalar, dense, rubric-based, or multi-component rewards. The framework consumes
-`TaskResult.reward`; additional metrics belong in `accuracy` and `extra_info`.
+Custom Tasks may use any evaluation method, but the built-in Task Runner currently
+expects `TaskResult.reward` to be a scalar outcome reward. `TaskResult.accuracy`
+becomes the validation metric `acc`; `extra_info` becomes structured
+`reward_context` for an optional Reward Loop Worker and is not aggregated as a
+metric. Custom managed Runners that need additional scalar metrics can return an
+`EpisodeResult` directly.
 
-`TaskResult.finished` is factual episode metadata copied from
-`AgentResult.finished`; it does not decide whether the trajectory contributes to
+`TaskResult.episode_finished` is factual episode metadata copied from
+`AgentResult.episode_finished`; it does not decide whether the trajectory contributes to
 training. The Agent Framework owns that policy through
 `mask_unfinished_episode`, so the same Task Config can be reused for
 inference, evaluation, and different training runs without embedding optimizer
@@ -180,6 +184,8 @@ TASK_MODULES["my_task"] = "my_package.task"
 - Put sample-specific evaluation data in `metadata`.
 - Emit normal log records and let the invoking runtime bind their `LogContext`.
 - Return a `TaskResult` for every successful episode.
+- Use `episode_finished=False` only when the Agent is known not to have completed
+  normally; leave it as `None` when the Agent does not report completion.
 - Let infrastructure failures propagate instead of silently converting them to zero reward.
 - Keep reward implementation close to the Task; do not force unrelated tasks into one reward schema.
 - Add preprocessing, a runnable Task Config, and tests for both successful and failed evaluations.

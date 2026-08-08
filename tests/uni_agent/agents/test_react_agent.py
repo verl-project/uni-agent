@@ -85,7 +85,7 @@ def _agent() -> ReActAgent:
 
 
 def test_agent_result_defaults_to_unreported_completion():
-    assert AgentResult().finished is None
+    assert AgentResult().episode_finished is None
 
 
 @pytest.mark.asyncio
@@ -135,7 +135,7 @@ async def test_react_reports_completion(monkeypatch, termination_reason: str, ex
 
     result = await agent.run(sandbox=object(), messages=[])
 
-    assert result.finished is expected
+    assert result.episode_finished is expected
 
 
 @pytest.mark.asyncio

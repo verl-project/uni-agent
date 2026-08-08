@@ -11,8 +11,8 @@ framework adapter + TransferQueue (TQ):
     ->  per-trajectory records written to TransferQueue
 
 The per-sample score is the trainer's own ``rm_scores`` read back from TQ: ``run_task``
-(``report_reward=True``) posts the task reward to its session, and the framework writes
-it as ``reward_score`` -- no external reward model. Fan-out is ``rollout.n`` (``--n``),
+returns a typed episode result, and the framework writes its reward as ``reward_score`` --
+no external reward model. Fan-out is ``rollout.n`` (``--n``),
 with no resolved/wrong-answer/timeout bucketing (just mean ``rm_scores``).
 
 Example (single node, 4-way tensor parallel)::
@@ -137,7 +137,6 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
                 "runner_kwargs": {
                     "task_config_path": args.task_config,
                     "model_name": served_model_name,
-                    "report_reward": True,
                 },
             }
         },

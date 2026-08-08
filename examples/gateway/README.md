@@ -204,15 +204,16 @@ Files:
 - `claude.stderr`: captured Claude Code stderr in one-shot mode.
 - `claude-debug.log`: Claude Code debug log in one-shot mode.
 
-Each trajectory record has `schema_version: 1` and stores the finalized
+Each trajectory record has `schema_version: 2` and stores the finalized
 `Trajectory` fields:
 
 - `prompt_ids`
 - `response_ids`
 - `response_mask`
 - `response_logprobs`
-- `reward_info`
+- `episode_finished`
 - `reward_score`
+- `reward_metrics`
 - `num_turns`
 - `multi_modal_data`
 - `extra_fields`

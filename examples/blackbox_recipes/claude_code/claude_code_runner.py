@@ -3,8 +3,7 @@
 Claude Code runs inside a remote sandbox via a sidecar tool image mounted at
 ``/opt/claude-code``. The runner creates the sandbox, invokes the ``claude``
 binary pointed at the gateway, evaluates the reward in the same sandbox, and
-posts ``reward_info`` to the per-session endpoint (same contract as the
-mini-swe-agent runner).
+returns a typed episode result to the Agent Framework.
 """
 
 from __future__ import annotations
@@ -18,10 +17,9 @@ import time
 from pathlib import Path
 from urllib.parse import urlparse
 
-import httpx
-
 from examples.blackbox_recipes.claude_code.dataset import extract_image
 from examples.blackbox_recipes.claude_code.reward import build_reward_context, evaluate_in_env
+from uni_agent.framework import EpisodeResult
 from uni_agent.gateway.session import SessionHandle
 from uni_agent.sandbox import Sandbox, SandboxConfig, build_sandbox
 
@@ -238,14 +236,14 @@ async def claude_code_runner(
     conda_env: str = "testbed",
     proxy_port: int = DEFAULT_GATEWAY_PROXY_PORT,
     **kwargs,
-) -> None:
+) -> EpisodeResult:
     """Run Claude Code inside a sandbox with sidecar tool mount.
 
     Flow:
         1. Create remote sandbox with the claude-code sidecar
         2. Run the claude binary against the gateway tunnel
         3. Evaluate reward in the same sandbox
-        4. Post reward_info for the framework reward path
+        4. Return reward, metrics, and episode completion to the framework
     """
     tools_kwargs = tools_kwargs or {}
     logger.info("claude_code_runner called, sample_index=%d", sample_index)
@@ -303,15 +301,12 @@ async def claude_code_runner(
         score, eval_result = await evaluate_in_env(SandboxEnvForReward(sandbox), metadata, eval_timeout)
         logger.info("[sample %d] reward done score=%s resolved=%s", sample_index, score, eval_result.get("resolved"))
 
-        reward_info = {
-            "reward_score": score,
-            "claude_code_exit_code": result.exit_code,
-            **eval_result,
-        }
-        if not session.reward_info_url:
-            raise ValueError(f"reward_info_url is empty for session {session.session_id}")
-        async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(session.reward_info_url, json={"reward_info": reward_info})
-            response.raise_for_status()
+        episode_result = EpisodeResult(
+            reward=float(score),
+            metrics={"acc": float(eval_result.get("resolved", score))},
+            episode_finished=result.exit_code == 0,
+            reward_context={"claude_code_exit_code": result.exit_code, **eval_result},
+        )
     finally:
         await sandbox.stop()
+    return episode_result

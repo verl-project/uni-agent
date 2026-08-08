@@ -1,4 +1,4 @@
-"""Shared gateway-owned types passed across session boundaries."""
+"""Shared types passed across Gateway and Agent Framework boundaries."""
 
 from __future__ import annotations
 
@@ -31,14 +31,10 @@ class SessionHandle:
         session_id: Stable session identifier assigned by the caller.
         base_url: Per-session provider-compatible ``/v1`` API root, or ``None``
             when the handle only needs to identify the session.
-        reward_info_url: Per-session endpoint used by runners to attach reward
-            metadata; this is a sibling of the provider ``/v1`` root rather
-            than part of that API.
     """
 
     session_id: str
     base_url: str | None = None
-    reward_info_url: str | None = None
 
 
 @dataclass
@@ -53,9 +49,12 @@ class Trajectory:
             output and ``0`` marks interstitial context tokens.
         response_logprobs: Optional log probabilities aligned with
             ``response_ids``; continuation context tokens use ``0.0``.
-        reward_info: Reward metadata attached through the session reward-info
-            endpoint before finalization.
-        reward_score: Optional scalar reward assigned by downstream training.
+        episode_finished: Tri-state episode completion fact attached by the
+            Agent Framework after the managed runner returns.
+        reward_score: Optional scalar reward assigned by the Agent Framework
+            from a managed Runner or RewardLoopWorker.
+        reward_metrics: Scalar validation metrics assigned by the Agent
+            Framework or RewardLoopWorker.
         num_turns: Chat-turn count materialized with the trajectory.
         routed_experts: Optional expert-routing data captured by the backend.
         multi_modal_data: Optional image/video data associated with the prompt.
@@ -68,8 +67,9 @@ class Trajectory:
     response_ids: list[int]
     response_mask: list[int]
     response_logprobs: list[float] | None = None
-    reward_info: dict[str, Any] = field(default_factory=dict)
+    episode_finished: bool | None = None
     reward_score: float | None = None
+    reward_metrics: dict[str, int | float | bool] = field(default_factory=dict)
     num_turns: int = 0
     routed_experts: torch.Tensor | np.ndarray | None = None
     multi_modal_data: dict[str, Any] | None = None

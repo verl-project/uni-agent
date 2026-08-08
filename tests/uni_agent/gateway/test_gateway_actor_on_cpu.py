@@ -666,8 +666,8 @@ async def test_gateway_actor_forwards_image_data_on_initial_multimodal_request(r
 
 
 @pytest.mark.asyncio
-async def test_gateway_actor_reward_info_endpoint_attaches_metadata_on_finalize(ray_runtime):
-    """The per-session reward_info endpoint stores metadata returned on finalize."""
+async def test_gateway_actor_finalizes_unannotated_trajectories(ray_runtime):
+    """Gateway owns token trajectories, not runner reward annotations."""
     from uni_agent.gateway.config import GatewayActorConfig
     from uni_agent.gateway.gateway import GatewayActor
 
@@ -675,7 +675,7 @@ async def test_gateway_actor_reward_info_endpoint_attaches_metadata_on_finalize(
     ray.get(actor.start.remote())
 
     session = ray.get(actor.create_session.remote("session-0"))
-    assert session.reward_info_url.endswith("/reward_info")
+    assert not hasattr(session, "reward_info_url")
 
     async with httpx.AsyncClient(timeout=5.0, trust_env=False) as client:
         response = await client.post(
@@ -687,17 +687,13 @@ async def test_gateway_actor_reward_info_endpoint_attaches_metadata_on_finalize(
         )
         assert response.status_code == 200
 
-        reward_info = await client.post(
-            session.reward_info_url,
-            json={"reward_info": {"score": 1.0, "label": "A"}},
-        )
-        assert reward_info.status_code == 200
-
     trajectories = ray.get(actor.finalize_session.remote("session-0"))
     ray.get(actor.shutdown.remote())
 
     assert len(trajectories) == 1
-    assert trajectories[0].reward_info == {"score": 1.0, "label": "A"}
+    assert trajectories[0].episode_finished is None
+    assert trajectories[0].reward_score is None
+    assert trajectories[0].reward_metrics == {}
 
 
 @pytest.mark.asyncio

@@ -74,16 +74,15 @@ class AgentConfig(BaseModel):
 class AgentResult:
     """Artifacts one Agent produced for an episode.
 
-    ``finished`` is tri-state: ``True``/``False`` report a known completion
-    state, and ``None`` means the Agent does not track one. Agents that never
-    set it stay indistinguishable from Agents that finished normally, so
-    opting out never silently marks an episode untrainable.
+    ``episode_finished`` is tri-state: ``True``/``False`` report a known
+    completion state, and ``None`` means the Agent does not track one. Opting
+    out never silently marks an episode untrainable.
     """
 
     output: dict[str, Any] = dataclasses.field(default_factory=dict)
     transcript: list[dict[str, Any]] = dataclasses.field(default_factory=list)
     info: dict[str, Any] = dataclasses.field(default_factory=dict)
-    finished: bool | None = None
+    episode_finished: bool | None = None
 
 
 class Agent(ABC):

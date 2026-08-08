@@ -106,7 +106,11 @@ class ReActAgent(Agent):
             f"tool_calls={trajectory_info['num_tool_calls']} timeouts={trajectory_info['timeouts']} "
             f"errors={trajectory_info['errors']} total_tokens={trajectory_info['total_tokens']}"
         )
-        return AgentResult(transcript=transcript, info=trajectory_info, finished=termination_reason == "finished")
+        return AgentResult(
+            transcript=transcript,
+            info=trajectory_info,
+            episode_finished=termination_reason == "finished",
+        )
 
     async def step(
         self,

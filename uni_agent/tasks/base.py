@@ -71,7 +71,7 @@ class TaskResult:
 
     reward: Any
     accuracy: float | None = None
-    finished: bool | None = None
+    episode_finished: bool | None = None
     extra_info: dict[str, Any] | None = None
 
 
