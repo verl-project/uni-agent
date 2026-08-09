@@ -25,7 +25,7 @@ _GIT_CLEAN_HISTORY = "\n".join(
 
 class SWEBenchMultilingualTaskConfig(TaskConfig):
     name: str = "swe_bench_multilingual"
-    run_gold_patch: bool = Field(
+    run_oracle_solution: bool = Field(
         default=False,
         description="Oracle mode: skip the agent and score the dataset's gold patch directly.",
     )
@@ -48,7 +48,7 @@ class SWEBenchMultilingualTask(Task):
         task_config_dump = cfg.model_dump(mode="json", exclude={"metadata", "prompt"})
         logger.info(
             "starting swe_bench_multilingual task "
-            f"(instance_id={instance_id}, run_gold_patch={cfg.run_gold_patch})\n"
+            f"(instance_id={instance_id}, run_oracle_solution={cfg.run_oracle_solution})\n"
             f"task config: {json.dumps(task_config_dump, indent=2)}"
         )
 
@@ -57,7 +57,7 @@ class SWEBenchMultilingualTask(Task):
             # expose the upstream solution to the agent.
             await sandbox.exec_shell(_GIT_CLEAN_HISTORY, workdir="/testbed")
 
-            if cfg.run_gold_patch:
+            if cfg.run_oracle_solution:
                 logger.info("applying gold patch to /testbed")
                 patch_path = "/tmp/gold_patch.patch"
                 await sandbox.write_file(patch_path, sample["patch"])

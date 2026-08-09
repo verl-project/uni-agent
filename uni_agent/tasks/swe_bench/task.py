@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 class SWEBenchTaskConfig(TaskConfig):
     name: str = "swe_bench"
-    run_gold_patch: bool = Field(
+    run_oracle_solution: bool = Field(
         default=False,
         description="Oracle mode: skip the agent and score the dataset's gold patch directly.",
     )
@@ -33,11 +33,11 @@ class SWEBenchTask(Task):
         instance_id = sample.get("instance_id", "?") if isinstance(sample, dict) else "?"
         task_config_dump = cfg.model_dump(mode="json", exclude={"metadata", "prompt"})
         logger.info(
-            f"starting swe_bench task (instance_id={instance_id}, run_gold_patch={cfg.run_gold_patch})\n"
+            f"starting swe_bench task (instance_id={instance_id}, run_oracle_solution={cfg.run_oracle_solution})\n"
             f"task config: {json.dumps(task_config_dump, indent=2)}"
         )
         async with self.build_sandbox() as sandbox:
-            if cfg.run_gold_patch:
+            if cfg.run_oracle_solution:
                 logger.info("applying gold patch to /testbed")
                 await sandbox.write_file("/tmp/gold_patch.patch", sample["patch"])
                 await sandbox.exec(["git", "apply", "--whitespace=fix", "/tmp/gold_patch.patch"], workdir="/testbed")

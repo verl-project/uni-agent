@@ -1,6 +1,6 @@
 """Parallel gold-patch verification for SWE-bench.
 
-Runs each dataset row's SWE-bench task in oracle mode (``run_gold_patch=True``):
+Runs each dataset row's SWE-bench task in oracle mode (``run_oracle_solution=True``):
 apply the gold patch in the sandbox, run the tests, and score. Every instance
 should resolve -- it's the data-quality baseline you run before training. Results
 are bucketed as resolved (ok) / wrong-answer (wa) / timeout-or-error (tle) and
@@ -46,7 +46,7 @@ class TestEvalActor:
             log_path = str(Path(self.log_dir).expanduser() / log_id / "task.log") if self.log_dir else None
             async with sample_logging.from_context(LogContext(log_id, log_path)):
                 try:
-                    task_config["run_gold_patch"] = True
+                    task_config["run_oracle_solution"] = True
                     task_config["sandbox"]["provider"] = SANDBOX_PROVIDER
                     task_config["sandbox"]["runtime_timeout"] = RUNTIME_TIMEOUT
                     result = await get_task(task_config).run()

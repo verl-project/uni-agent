@@ -23,6 +23,7 @@ BASE_URL / MODEL / API_KEY) is layered onto agent.model last.
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 import time
@@ -59,15 +60,18 @@ class InferenceActor:
                     return {
                         "instance_id": instance_id,
                         "log_id": log_context.log_id,
+                        "reward": float(result.reward),
                         "resolved": resolved,
                         "eval_completed": bool(info.get("eval_completed", True)),
                         "eval_execution_time": info.get("eval_execution_time"),
+                        "eval_report": info.get("eval_report"),
                     }
                 except Exception as e:
                     logger.error(f"error running {instance_id}: {type(e).__name__}: {e}")
                     return {
                         "instance_id": instance_id,
                         "log_id": log_context.log_id,
+                        "reward": 0.0,
                         "resolved": False,
                         "eval_completed": False,
                         "eval_execution_time": None,
@@ -119,6 +123,7 @@ def main() -> None:
         default=os.getenv("UNI_AGENT_LOG_DIR", "/tmp/uni_agent_logs"),
         help="Root directory for per-rollout logs; use an empty value to disable file logging.",
     )
+    parser.add_argument("--result-path", default=None, help="Optional JSON path for aggregate and per-rollout results.")
     args = parser.parse_args()
     if args.concurrency <= 0:
         parser.error("--concurrency must be positive")
@@ -221,6 +226,7 @@ def main() -> None:
     exec_times = [r["eval_execution_time"] for r in results if r.get("eval_execution_time") is not None]
     avg_exec_time = sum(exec_times) / len(exec_times) if exec_times else 0.0
     pass_rate = success_num / all_num * 100 if all_num else 0.0
+    mean_reward = sum(float(r.get("reward", 0.0)) for r in results) / all_num if all_num else 0.0
 
     summary = "\n".join(
         [
@@ -230,11 +236,30 @@ def main() -> None:
             f"  wrong-ans   {fail_wa_num:>4}",
             f"  timeout/err {fail_tle_num:>4}",
             f"  total       {all_num:>4}",
-            _rule(f"avg {avg_exec_time:.1f}s | wall {wall:.1f}s | n={len(exec_times)}"),
+            _rule(f"reward {mean_reward:.4f} | avg {avg_exec_time:.1f}s | wall {wall:.1f}s"),
             "",
         ]
     )
     print(summary)
+
+    summary_data = {
+        "data_path": args.data_path,
+        "model": args.model,
+        "rollouts_per_instance": n,
+        "total_rollouts": all_num,
+        "resolved": success_num,
+        "wrong_answer": fail_wa_num,
+        "timeout_or_error": fail_tle_num,
+        "pass_rate": pass_rate / 100.0,
+        "mean_reward": mean_reward,
+        "average_eval_execution_time": avg_exec_time,
+        "wall_time": wall,
+    }
+    if args.result_path:
+        output_path = Path(args.result_path).expanduser()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps({"summary": summary_data, "results": results}, indent=2, default=str))
+        logger.info("wrote inference results to %s", output_path)
 
     logger.info(f"fail_wa instance names: {fail_wa_names}")
     logger.info(f"fail_tle instance names: {fail_tle_names}")
