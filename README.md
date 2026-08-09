@@ -38,10 +38,10 @@ We publish runnable [recipes](./examples/) with complete configurations, benchma
 
 Follow the end-to-end path:
 
-1. [Install Uni-Agent](https://uni-agent.readthedocs.io/en/latest/quickstart/installation.html)
-2. [Launch a sandbox and run code](https://uni-agent.readthedocs.io/en/latest/quickstart/launch-sandbox.html)
-3. [Run agent inference](https://uni-agent.readthedocs.io/en/latest/quickstart/agent-inference.html)
-4. [Train an agent with RL](https://uni-agent.readthedocs.io/en/latest/quickstart/rl-training.html)
+1. [Install Uni-Agent](https://uni-agent.readthedocs.io/en/latest/quickstart/installation.html) with support for the latest `verl` features like `colocate_async`.
+2. [Launch a sandbox and run code](https://uni-agent.readthedocs.io/en/latest/quickstart/launch-sandbox.html) locally or with cloud services.
+3. [Run agent inference](https://uni-agent.readthedocs.io/en/latest/quickstart/agent-inference.html) at scale for benchmarking and trajectory generation.
+4. [Train an agent with RL](https://uni-agent.readthedocs.io/en/latest/quickstart/rl-training.html) with reproducible scripts and verifiable results.
 
 ## Results 📊
 
