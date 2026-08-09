@@ -296,7 +296,8 @@ if [[ -n "${TOTAL_TRAINING_STEPS}" ]]; then
 fi
 
 if [[ "${RAY_SUBMIT_MODE}" == "job" ]]; then
-    ray job submit --no-wait --working-dir="${WORKING_DIR}" "${RUNTIME_ENV_ARGS[@]}" -- "${MAIN_CMD[@]}"
+    ray job submit --no-wait --working-dir="${WORKING_DIR}" "${RUNTIME_ENV_ARGS[@]}" -- \
+        env RAY_OVERRIDE_JOB_RUNTIME_ENV=1 "${MAIN_CMD[@]}"
 elif [[ "${RAY_SUBMIT_MODE}" == "local" ]]; then
     "${MAIN_CMD[@]}"
 else

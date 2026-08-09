@@ -111,7 +111,8 @@ router_replay_mode=${ROUTER_REPLAY_MODE:-disabled}                    # disabled
 enable_rollout_routing_replay=${ENABLE_ROLLOUT_ROUTING_REPLAY:-False} # required only for R3
 
 ray job submit --no-wait --runtime-env $RUNTIME_ENV \
-    -- python3 -m verl.trainer.main_ppo \
+    -- env RAY_OVERRIDE_JOB_RUNTIME_ENV=1 \
+    python3 -m verl.trainer.main_ppo \
     --config-name=ppo_megatron_trainer \
     trainer.use_v1=True \
     trainer.v1.trainer_mode=colocate_async \

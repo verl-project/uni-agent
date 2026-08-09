@@ -103,7 +103,8 @@ rollout_rs=${ROLLOUT_RS:-null}                                   # no rejection 
 rollout_rs_threshold=${ROLLOUT_RS_THRESHOLD:-null}
 
 ray job submit --no-wait --runtime-env $RUNTIME_ENV \
-    -- python3 -m verl.trainer.main_ppo \
+    -- env RAY_OVERRIDE_JOB_RUNTIME_ENV=1 \
+    python3 -m verl.trainer.main_ppo \
     --config-name=ppo_megatron_trainer \
     trainer.use_v1=True \
     trainer.v1.trainer_mode=colocate_async \
@@ -130,7 +131,7 @@ ray job submit --no-wait --runtime-env $RUNTIME_ENV \
     actor_rollout_ref.actor.clip_ratio_high=${clip_ratio_high} \
     actor_rollout_ref.actor.clip_ratio_c=${clip_ratio_c} \
     +actor_rollout_ref.model.override_config.model_config.max_position_embeddings=$((max_prompt_length + max_response_length)) \
-    actor_rollout_ref.model.use_fused_kernels=False \
+    actor_rollout_ref.model.use_fused_kernels=True \
     actor_rollout_ref.actor.use_dynamic_bsz=${use_dynamic_bsz} \
     actor_rollout_ref.actor.ppo_mini_batch_size=${train_prompt_mini_bsz} \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=${actor_ppo_max_token_len} \
