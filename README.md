@@ -52,7 +52,7 @@ For detailed guides and examples, we strongly recommend reading the [Uni-Agent d
 We compare Uni-Agent with existing agent systems on parallel inference and verification workloads.
 
 
-| Model            | Benchmark             | Uni-Agent | Setting |
+| Model            | Benchmark             | Resolved  | Setting |
 | ---------------- | --------------------- |:---------:| ------- |
 | Qwen3-Coder-30B  | SWE-Bench Verified    | **49.2**  | Avg@4, 100 turns, 128K |
 | Qwen3-Coder-480B | SWE-Bench Verified    | **64.2**  | Avg@4, 500 turns, 256K |
