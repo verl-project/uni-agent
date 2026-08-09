@@ -58,6 +58,23 @@ BENCHMARKS = {
 }
 
 
+
+SYSTEM_PROMPT = """
+You are a helpful assistant that can interact with a computer to solve tasks.
+""".strip()
+
+USER_PROMPT = """
+You are working in a Linux environment.
+
+Complete the task below using the available tools.
+Inspect the environment, create or modify files, run commands, and verify your work as needed.
+
+Task instruction:
+
+{instruction}
+""".strip()
+
+
 def _load_toml(path: Path) -> dict[str, Any]:
     if tomllib is None:
         raise RuntimeError("Python 3.10 requires `pip install tomli` to preprocess Terminal-Bench")
@@ -171,7 +188,10 @@ def build_task_row(
     }
 
     solution_dir = task_dir / "solution"
-    prompt = [{"role": "user", "content": instruction}]
+    prompt = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": USER_PROMPT.format(instruction=instruction)},
+    ]
     metadata = {
         "instance_id": task_name,
         "task_id": task_name,
@@ -219,7 +239,7 @@ def _download_benchmark(benchmark: BenchmarkSpec, output_dir: Path) -> Path:
         )
     except FileNotFoundError as exc:
         raise RuntimeError(
-            "Terminal-Bench preprocessing requires the Harbor CLI; install it with `uv tool install harbor`"
+            "Terminal-Bench preprocessing requires the Harbor CLI; install it with `pip install harbor`"
         ) from exc
     except subprocess.CalledProcessError as exc:
         raise RuntimeError(f"failed to download {ref}") from exc
