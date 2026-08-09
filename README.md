@@ -43,6 +43,8 @@ Follow the end-to-end path:
 3. [Run agent inference](https://uni-agent.readthedocs.io/en/latest/quickstart/agent-inference.html) at scale for benchmarking and trajectory generation.
 4. [Train an agent with RL](https://uni-agent.readthedocs.io/en/latest/quickstart/rl-training.html) with reproducible scripts and verifiable results.
 
+For detailed guides and examples, we strongly recommend reading the [Uni-Agent documentation](https://uni-agent.readthedocs.io/en/latest/).
+
 ## Results 📊
 
 ### Parallel Inference & Verification
