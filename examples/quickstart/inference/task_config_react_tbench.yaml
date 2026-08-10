@@ -1,0 +1,24 @@
+- name: terminal_bench
+  sandbox:
+    provider: modal
+  agent:
+    name: react
+    max_steps: 10000
+    tools:
+      - name: str_replace_editor
+      - name: stateful_shell
+        command_timeout: 600
+        env_vars:
+          PIP_PROGRESS_BAR: "off"
+          PAGER: "cat"
+          TQDM_DISABLE: "1"
+          GIT_PAGER: "cat"
+          MANPAGER: "cat"
+          DEBIAN_FRONTEND: "noninteractive"
+      - name: submit
+    model:
+      temperature: 1.0
+      top_p: 0.95
+      top_k: 20
+      max_total_tokens: 262144
+      max_tokens_per_turn: 81920
