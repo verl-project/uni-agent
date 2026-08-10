@@ -30,6 +30,8 @@ except ModuleNotFoundError:  # pragma: no cover - exercised only on Python 3.10
 
 TASK_NAME = "terminal_bench"
 DEFAULT_VERSION = "2.1"
+# Allow extra wall-clock time for model-serving contention during concurrent rollouts.
+AGENT_TIMEOUT_MULTIPLIER = 4.0
 
 
 @dataclass(frozen=True)
@@ -170,7 +172,7 @@ def build_task_row(
     solution = config.get("solution", {})
     workdir = environment.get("workdir") or parse_dockerfile_workdir(task_dir / "environment" / "Dockerfile")
 
-    agent_timeout = float(agent["timeout_sec"])
+    agent_timeout = float(agent["timeout_sec"]) * AGENT_TIMEOUT_MULTIPLIER
     verifier_timeout = float(verifier["timeout_sec"])
     runtime_timeout = agent_timeout + verifier_timeout + 600.0
     memory = environment["memory_mb"] if "memory_mb" in environment else environment["memory"]
