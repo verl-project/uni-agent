@@ -27,7 +27,8 @@ from tests.uni_agent.support import (
 ALLOWED_SAMPLING_KEYS = frozenset({"temperature", "top_p", "top_k", "max_tokens", "stop"})
 
 
-def fake_tool_call_dispatch(text, tools, parser_name, tokenizer):
+async def fake_tool_call_dispatch(response_ids, tools, parser_name, tokenizer):
+    text = tokenizer.decode(response_ids, skip_special_tokens=False)
     if "<tool_call>" not in text:
         return text, []
     arguments = '{"query":"crop"}' if "crop" in text else '{"query":"weather"}'
@@ -837,7 +838,7 @@ async def test_gateway_actor_continuation_with_tool_returned_image_appends_media
         initialize_turn_separator,
     )
 
-    monkeypatch.setattr(codec_mod, "_extract_tool_calls_with_sglang_or_vllm", fake_tool_call_dispatch)
+    monkeypatch.setattr(codec_mod, "_extract_tool_calls", fake_tool_call_dispatch)
     processor = FakeProcessor()
     tool_call_text = '<tool_call>\n{"name": "search", "arguments": {"query": "crop"}}\n</tool_call>'
     actor = _GatewayActor(
@@ -1369,7 +1370,7 @@ async def test_gateway_actor_tool_call_decode_returns_openai_format(monkeypatch)
     from uni_agent.gateway.config import GatewayActorConfig
     from uni_agent.gateway.gateway import _GatewayActor
 
-    monkeypatch.setattr(codec_mod, "_extract_tool_calls_with_sglang_or_vllm", fake_tool_call_dispatch)
+    monkeypatch.setattr(codec_mod, "_extract_tool_calls", fake_tool_call_dispatch)
     tool_call_text = '<tool_call>\n{"name": "search", "arguments": {"query": "weather"}}\n</tool_call>'
     actor = _GatewayActor(
         GatewayActorConfig(
@@ -1492,7 +1493,7 @@ async def test_anthropic_tool_turn_round_trip_extends_not_reencodes(monkeypatch)
     from uni_agent.gateway.config import GatewayActorConfig
     from uni_agent.gateway.gateway import _GatewayActor
 
-    monkeypatch.setattr(codec_mod, "_extract_tool_calls_with_sglang_or_vllm", fake_tool_call_dispatch)
+    monkeypatch.setattr(codec_mod, "_extract_tool_calls", fake_tool_call_dispatch)
     tool_call_text = '<tool_call>\n{"name": "search", "arguments": {"query": "weather"}}\n</tool_call>'
     actor = _GatewayActor(
         GatewayActorConfig(

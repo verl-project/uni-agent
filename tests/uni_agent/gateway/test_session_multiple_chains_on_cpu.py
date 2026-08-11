@@ -19,7 +19,8 @@ SUBAGENT_SYS = {"role": "system", "content": "You are a focused subagent."}
 ALLOWED_SAMPLING_KEYS = frozenset({"temperature", "top_p", "top_k", "max_tokens", "stop"})
 
 
-def _fake_tool_call_dispatch(text, tools, parser_name, tokenizer):
+async def _fake_tool_call_dispatch(response_ids, tools, parser_name, tokenizer):
+    text = tokenizer.decode(response_ids, skip_special_tokens=False)
     if "<tool_call>" not in text:
         return text, []
     return "", [SimpleNamespace(name="search", arguments='{"query":"weather"}')]
@@ -1515,7 +1516,7 @@ async def test_multiple_chains_tool_call_echo_reuses_chain_despite_fresh_tool_re
     """Match on the committed prefix; a fresh tool-result ID is outside that boundary."""
     import uni_agent.gateway.session.codec as codec_mod
 
-    monkeypatch.setattr(codec_mod, "_extract_tool_calls_with_sglang_or_vllm", _fake_tool_call_dispatch)
+    monkeypatch.setattr(codec_mod, "_extract_tool_calls", _fake_tool_call_dispatch)
     session = _session("tool-call-echo", tool_parser_name="hermes")
     tools = [{"type": "function", "function": {"name": "search", "parameters": {"type": "object"}}}]
     tool_call_text = '<tool_call>\n{"name": "search", "arguments": {"query": "weather"}}\n</tool_call>'
@@ -1565,7 +1566,7 @@ async def test_multiple_chains_tool_call_id_rewrite_reuses_chain(monkeypatch):
     """Reuse a chain when committed tool-call IDs are rewritten."""
     import uni_agent.gateway.session.codec as codec_mod
 
-    monkeypatch.setattr(codec_mod, "_extract_tool_calls_with_sglang_or_vllm", _fake_tool_call_dispatch)
+    monkeypatch.setattr(codec_mod, "_extract_tool_calls", _fake_tool_call_dispatch)
     session = _session("tool-call-id-rewrite", tool_parser_name="hermes")
     tools = [{"type": "function", "function": {"name": "search", "parameters": {"type": "object"}}}]
     tool_call_text = '<tool_call>\n{"name": "search", "arguments": {"query": "weather"}}\n</tool_call>'

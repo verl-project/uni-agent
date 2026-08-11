@@ -116,12 +116,30 @@ def _process_tool_calls_vllm(
     return parsed.content or "", [tool_call.function for tool_call in parsed.tool_calls]
 
 
-def _extract_tool_calls_with_sglang_or_vllm(
-    text: str,
+async def _process_tool_calls_verl(
+    response_ids: list[int],
     tools: list[dict[str, Any]],
     parser_name: str,
     tokenizer,
 ) -> tuple[str, list[Any]]:
+    """Parse tool calls with verl's built-in tool-parser registry."""
+    from verl.experimental.agent_loop.tool_parser import ToolParser
+    from verl.tools.schemas import OpenAIFunctionToolSchema
+
+    parser = ToolParser.get_tool_parser(parser_name, tokenizer)
+    tool_schemas = [OpenAIFunctionToolSchema.model_validate(tool) for tool in tools]
+    content, calls = await parser.extract_tool_calls(response_ids, tool_schemas)
+    return content, [SimpleNamespace(name=call.name, arguments=call.arguments) for call in calls]
+
+
+async def _extract_tool_calls(
+    response_ids: list[int],
+    tools: list[dict[str, Any]],
+    parser_name: str,
+    tokenizer,
+) -> tuple[str, list[Any]]:
+    text = tokenizer.decode(response_ids, skip_special_tokens=False)
+
     sglang_name = _SGLANG_TOOL_PARSER_ALIASES.get(parser_name, parser_name)
     try:
         return _process_tool_calls_sglang(text, tools, sglang_name)
@@ -136,8 +154,15 @@ def _extract_tool_calls_with_sglang_or_vllm(
     except ModuleNotFoundError:
         pass
     except Exception:
-        logger.warning("vLLM tool-call parsing failed; returning raw text", exc_info=True)
+        logger.warning("vLLM tool-call parsing failed; trying verl", exc_info=True)
 
+    try:
+        return await _process_tool_calls_verl(response_ids, tools, parser_name, tokenizer)
+    except ValueError:
+        # get_tool_parser raises ValueError for a parser name verl does not register.
+        logger.warning("verl does not provide tool parser %r; returning raw text", parser_name, exc_info=True)
+    except Exception:
+        logger.warning("verl tool-call parsing failed; returning raw text", exc_info=True)
     return text, []
 
 
@@ -334,9 +359,8 @@ class MessageCodec:
     ) -> tuple[dict[str, Any], str]:
         """Decode model output tokens into an assistant message and finish reason."""
         if self._tool_parser_name and tools:
-            response_text = self._tokenizer.decode(response_ids, skip_special_tokens=False)
-            content, function_calls = _extract_tool_calls_with_sglang_or_vllm(
-                response_text,
+            content, function_calls = await _extract_tool_calls(
+                response_ids,
                 tools,
                 self._tool_parser_name,
                 self._tokenizer,
