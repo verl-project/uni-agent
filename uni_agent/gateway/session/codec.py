@@ -106,9 +106,7 @@ def _process_tool_calls_vllm(
     parser_cls = ToolParserManager.get_tool_parser(parser_name)
     vllm_tools = [ChatCompletionToolsParam(**tool) if isinstance(tool, dict) else tool for tool in tools]
     parser_parameters = inspect.signature(parser_cls).parameters
-    if "tools" in parser_parameters or any(
-        parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parser_parameters.values()
-    ):
+    if "tools" in parser_parameters:
         parser = parser_cls(tokenizer, tools=vllm_tools)
     else:
         parser = parser_cls(tokenizer)
