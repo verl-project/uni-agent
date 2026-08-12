@@ -82,6 +82,40 @@ def test_vllm_parser_is_constructed_with_request_tools(monkeypatch):
     assert seen["request"].tools is seen["tools"]
 
 
+def test_vllm_parser_without_constructor_tools_uses_request_tools(monkeypatch):
+    from vllm.tool_parsers import ToolParserManager
+
+    import uni_agent.gateway.session.codec as codec_mod
+
+    seen = {}
+
+    class LegacyParser:
+        def __init__(self, tokenizer):
+            seen["tokenizer"] = tokenizer
+
+        def extract_tool_calls(self, text, request):
+            seen["request"] = request
+            return SimpleNamespace(
+                tools_called=True,
+                content="visible",
+                tool_calls=[SimpleNamespace(function=SimpleNamespace(name="search", arguments='{"query":"x"}'))],
+            )
+
+    monkeypatch.setattr(
+        ToolParserManager,
+        "get_tool_parser",
+        classmethod(lambda cls, name: LegacyParser),
+    )
+
+    tokenizer = FakeTokenizer()
+    content, calls = codec_mod._process_tool_calls_vllm("raw", TOOLS, "qwen3_coder", tokenizer)
+
+    assert content == "visible"
+    assert calls[0].name == "search"
+    assert seen["tokenizer"] is tokenizer
+    assert len(seen["request"].tools) == 1
+
+
 def test_tool_call_dispatch_prefers_sglang(monkeypatch):
     import uni_agent.gateway.session.codec as codec_mod
 
