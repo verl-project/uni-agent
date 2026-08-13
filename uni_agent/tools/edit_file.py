@@ -120,7 +120,11 @@ class EditFileTool(Tool):
     @staticmethod
     async def _read(sandbox: SandboxBackend, path: str) -> str:
         data = await sandbox.read_file(path)
-        return data.decode("utf-8", errors="replace")
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ToolError(f"The file `{path}` is not valid UTF-8 text.") from exc
+        return text.replace("\r\n", "\n").replace("\r", "\n")
 
     # ----- dispatch -----
     async def run(self, args: dict[str, Any], *, timeout: float | None = None) -> ToolResult:
@@ -164,6 +168,8 @@ class EditFileTool(Tool):
         )
 
     async def _validate_path(self, command: str, sandbox: SandboxBackend, path: str) -> str | None:
+        if command == "create" and path.endswith("/"):
+            return f"The path `{path}` ends with `/`. The `create` command requires a file path."
         exists = await self._exists(sandbox, path)
         is_dir = await self._is_dir(sandbox, path) if exists else False
         if not exists and command != "create":
@@ -222,7 +228,7 @@ class EditFileTool(Tool):
         if not await self._is_dir(sandbox, parent):
             return f"The parent directory {parent} does not exist. Please create it first."
         await sandbox.write_file(path, file_text)
-        self._history[path].append(file_text)
+        self._history[path].append("")
         return f"File created successfully at: {path}"
 
     async def _str_replace(
@@ -275,7 +281,6 @@ class EditFileTool(Tool):
         new_str = new_str.expandtabs()
         file_lines = file_text.split("\n")
         n_lines = len(file_lines)
-        insert_line -= 1  # convert to 0-based index
 
         if insert_line < 0 or insert_line > n_lines:
             return (
@@ -309,6 +314,7 @@ class EditFileTool(Tool):
     async def _undo_edit(self, sandbox: SandboxBackend, path: str) -> str:
         if not self._history.get(path):
             return f"No edit history found for {path}."
-        old_text = self._history[path].pop()
+        old_text = self._history[path][-1]
         await sandbox.write_file(path, old_text)
+        self._history[path].pop()
         return f"Last edit to {path} undone successfully. {_make_output(old_text, str(path))}"
