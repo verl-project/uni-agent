@@ -48,7 +48,12 @@ def test_qwen_vllm_parser_uses_tool_schema_for_argument_types():
     assert json.loads(calls[0].arguments) == {"query": "docs", "limit": 2}
 
 
-def test_vllm_parser_is_constructed_with_request_tools(monkeypatch):
+@pytest.mark.parametrize(
+    "constructor_accepts_tools",
+    [False, True],
+    ids=["tokenizer-only", "tokenizer-and-tools"],
+)
+def test_vllm_parser_supports_tool_schema_constructor_contracts(monkeypatch, constructor_accepts_tools):
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionToolsParam
     from vllm.tool_parsers import ToolParserManager
 
@@ -56,11 +61,7 @@ def test_vllm_parser_is_constructed_with_request_tools(monkeypatch):
 
     seen = {}
 
-    class FakeParser:
-        def __init__(self, tokenizer, *, tools):
-            seen["tokenizer"] = tokenizer
-            seen["tools"] = tools
-
+    class ParserBase:
         def extract_tool_calls(self, text, request):
             seen["request"] = request
             return SimpleNamespace(
@@ -69,10 +70,21 @@ def test_vllm_parser_is_constructed_with_request_tools(monkeypatch):
                 tool_calls=[SimpleNamespace(function=SimpleNamespace(name="search", arguments='{"query":"x"}'))],
             )
 
+    class ParserWithoutConstructorTools(ParserBase):
+        def __init__(self, tokenizer):
+            seen["tokenizer"] = tokenizer
+
+    class ParserWithConstructorTools(ParserBase):
+        def __init__(self, tokenizer, *, tools):
+            seen["tokenizer"] = tokenizer
+            seen["tools"] = tools
+
+    parser_cls = ParserWithConstructorTools if constructor_accepts_tools else ParserWithoutConstructorTools
+
     monkeypatch.setattr(
         ToolParserManager,
         "get_tool_parser",
-        classmethod(lambda cls, name: FakeParser),
+        classmethod(lambda cls, name: parser_cls),
     )
 
     tokenizer = FakeTokenizer()
@@ -81,9 +93,12 @@ def test_vllm_parser_is_constructed_with_request_tools(monkeypatch):
     assert content == "visible"
     assert calls[0].name == "search"
     assert seen["tokenizer"] is tokenizer
-    assert len(seen["tools"]) == 1
-    assert isinstance(seen["tools"][0], ChatCompletionToolsParam)
-    assert seen["request"].tools is seen["tools"]
+    assert len(seen["request"].tools) == 1
+    assert isinstance(seen["request"].tools[0], ChatCompletionToolsParam)
+    if constructor_accepts_tools:
+        assert seen["tools"] is seen["request"].tools
+    else:
+        assert "tools" not in seen
 
 
 @pytest.mark.asyncio

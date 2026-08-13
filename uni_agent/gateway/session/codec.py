@@ -6,6 +6,7 @@ processor-backed multimodal inputs, parses tools, and decodes backend outputs.
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 from types import SimpleNamespace
@@ -104,7 +105,11 @@ def _process_tool_calls_vllm(
 
     parser_cls = ToolParserManager.get_tool_parser(parser_name)
     vllm_tools = [ChatCompletionToolsParam(**tool) if isinstance(tool, dict) else tool for tool in tools]
-    parser = parser_cls(tokenizer, tools=vllm_tools)
+    parser_parameters = inspect.signature(parser_cls).parameters
+    if "tools" in parser_parameters:
+        parser = parser_cls(tokenizer, tools=vllm_tools)
+    else:
+        parser = parser_cls(tokenizer)
     request = SimpleNamespace(
         tools=vllm_tools,
         tool_choice="auto",
