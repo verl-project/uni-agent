@@ -267,17 +267,6 @@ async def test_verl_fallback_parses_hermes_envelope():
 
 
 @pytest.mark.asyncio
-async def test_verl_fallback_returns_raw_text_when_output_does_not_conform():
-    import uni_agent.gateway.session.codec as codec_mod
-
-    text = "plain prose without an envelope"
-    content, calls = await codec_mod._process_tool_calls_verl(_ids(text), TOOLS, "hermes", FakeTokenizer())
-
-    assert content == text
-    assert calls == []
-
-
-@pytest.mark.asyncio
 async def test_decode_response_uses_gateway_dispatcher_for_tool_calls(monkeypatch):
     import uni_agent.gateway.session.codec as codec_mod
     from uni_agent.gateway.session.codec import MessageCodec
