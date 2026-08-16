@@ -297,11 +297,14 @@ async def test_first_assistant_rewrite_reuses_chain_without_stale_response():
     assert state["rollback_count"] == 1
     assert state["rollback_dropped_trainable_tokens_total"] == len("FORMAT_ERROR")
     chain = session.active_chains[0]
-    expected_prompt_ids = codec.encode_full(rewrite_messages)
-    assert backend.calls[1]["prompt_ids"] == expected_prompt_ids
+    expected_prompt_ids = codec.encode_full(first_messages)
+    del expected_prompt_ids[-len(codec.turn_separator) - len(codec.generation_prompt) :]
+    incremental_ids = codec.encode_incremental(rewrite_messages[len(first_messages) :])
+    assert backend.calls[1]["prompt_ids"] == codec.encode_full(rewrite_messages)
     assert chain.buffer.prompt_ids == expected_prompt_ids
-    assert _decode_response_ids(chain.buffer.response_ids) == "FIXED"
-    assert chain.buffer.response_logprobs == [-0.1] * len("FIXED")
+    assert chain.buffer.response_ids == incremental_ids + _ids("FIXED")
+    assert chain.buffer.response_mask == [0] * len(incremental_ids) + [1] * len("FIXED")
+    assert chain.buffer.response_logprobs == [0.0] * len(incremental_ids) + [-0.1] * len("FIXED")
 
 
 @pytest.mark.asyncio
@@ -328,7 +331,7 @@ async def test_first_assistant_rollback_failure_preserves_chain_for_retry():
     state = session.snapshot_state()
     assert state["active_chain_ids"] == [1]
     assert state["rollback_count"] == 1
-    assert _decode_response_ids(session.active_chains[0].buffer.response_ids) == "FIXED"
+    assert session.active_chains[0].buffer.response_ids[-len("FIXED") :] == _ids("FIXED")
 
 
 @pytest.mark.asyncio
@@ -374,10 +377,9 @@ async def test_first_assistant_rewrite_with_assistant_tool_context_reuses_chain(
 
     assert [chain.chain_id for chain in session.active_chains] == [1]
     chain = session.active_chains[0]
-    expected_prompt_ids = session._codec.encode_full(rewrite_messages)
-    assert backend.calls[1]["prompt_ids"] == expected_prompt_ids
-    assert chain.buffer.prompt_ids == expected_prompt_ids
-    assert chain.buffer.response_ids == _ids("FIXED")
+    codec = session._codec
+    assert backend.calls[1]["prompt_ids"] == codec.encode_full(rewrite_messages)
+    assert chain.buffer.response_ids[-len("FIXED") :] == _ids("FIXED")
 
 
 @pytest.mark.asyncio
