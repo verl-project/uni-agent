@@ -395,7 +395,6 @@ class GatewaySession:
         )
         rollback_applied = False
         rollback_dropped_trainable_tokens = 0
-        first_assistant_rollback = False
 
         if selection is None:
             image_data, video_data = await self._codec.extract_multi_modal_data(messages)
@@ -418,7 +417,6 @@ class GatewaySession:
                 last_assistant_start = selected_chain.last_assistant_start
                 assert last_assistant_start.response_ids_len <= len(buffer.response_ids)
                 rollback_dropped_trainable_tokens = sum(buffer.response_mask[last_assistant_start.response_ids_len :])
-                first_assistant_rollback = last_assistant_start.response_ids_len == 0
                 # One generation appends exactly one mark, so the rewritten
                 # assistant is always the last one.
                 del buffer.generation_versions[-1:]
@@ -430,28 +428,20 @@ class GatewaySession:
                     assert last_assistant_start.video_data_len <= len(video_data)
                     video_data = video_data[: last_assistant_start.video_data_len] or None
 
-                generation_prompt = self._codec.generation_prompt
-                turn_separator = self._codec.turn_separator
                 rollback_response_len = last_assistant_start.response_ids_len
-                if first_assistant_rollback:
-                    # The first assistant prefix is prompt-side; incremental
-                    # encoding restores its boundary with the replacement suffix.
-                    rollback_prompt_len = len(buffer.prompt_ids) - len(generation_prompt) - len(turn_separator)
-                    del buffer.prompt_ids[rollback_prompt_len:]
-                else:
-                    # Later rollbacks retain earlier trainable output; the snapshot was captured
-                    # after the prior incremental GP, so remove that verified suffix as well.
-                    rollback_response_len -= len(generation_prompt)
-                    if (
-                        rollback_response_len < 0
-                        or buffer.response_ids[rollback_response_len : last_assistant_start.response_ids_len]
-                        != generation_prompt
-                    ):
-                        raise ValueError("Stored response does not end its assistant prefix with the generation prompt")
-                    rollback_response_len -= len(turn_separator)
                 del buffer.response_ids[rollback_response_len:]
                 del buffer.response_mask[rollback_response_len:]
                 del buffer.response_logprobs[rollback_response_len:]
+
+                assistant_prefix = self._codec.turn_separator + self._codec.generation_prompt
+                stored_ids = buffer.prompt_ids if rollback_response_len == 0 else buffer.response_ids
+                assistant_prefix_start = len(stored_ids) - len(assistant_prefix)
+                if stored_ids[assistant_prefix_start:] != assistant_prefix:
+                    raise ValueError("Stored trajectory does not end with the assistant prefix")
+                del stored_ids[assistant_prefix_start:]
+                if rollback_response_len:
+                    del buffer.response_mask[assistant_prefix_start:]
+                    del buffer.response_logprobs[assistant_prefix_start:]
                 self._assert_response_logprob_alignment(buffer)
                 incremental_messages = messages[last_assistant_start.message_history_len :]
                 rollback_applied = True
@@ -476,10 +466,6 @@ class GatewaySession:
                     self._trajectory_capacity is not None
                     and current_trajectory_length + len(incremental_ids) >= self._trajectory_capacity
                 )
-            if first_assistant_rollback and capacity_exhausted:
-                # A replacement that cannot fit must leave the old chain retryable.
-                chain_id = None
-
             if not capacity_exhausted:
                 buffer.response_ids.extend(incremental_ids)
                 buffer.response_mask.extend([0] * len(incremental_ids))
@@ -731,6 +717,11 @@ class GatewaySession:
         if encoded.chain_id is None:
             raise RuntimeError("length-exhausted chain id is missing")
         chain_index, chain = self._find_active_chain(encoded.chain_id)
+        if encoded.rollback_applied and chain.last_assistant_start.response_ids_len == 0:
+            # No trainable response prefix survives this rollback.
+            self._record_rollback_stats(encoded)
+            del self.active_chains[chain_index]
+            return
         chain_to_materialize = chain
         if encoded.rollback_applied:
             message_history_len = chain.last_assistant_start.message_history_len

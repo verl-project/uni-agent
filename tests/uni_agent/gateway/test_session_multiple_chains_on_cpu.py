@@ -308,7 +308,7 @@ async def test_first_assistant_rewrite_reuses_chain_without_stale_response():
 
 
 @pytest.mark.asyncio
-async def test_first_assistant_rollback_failure_preserves_chain_for_retry():
+async def test_first_assistant_rollback_failure_preserves_original_chain():
     """Keep the original first-turn chain when replacement generation fails."""
     session = _session("rollback-first-failure", enable_last_assistant_rollback=True)
     first_messages = [{"role": "user", "content": "run mini-swe"}]
@@ -316,7 +316,7 @@ async def test_first_assistant_rollback_failure_preserves_chain_for_retry():
         *first_messages,
         {"role": "user", "content": "user_error: missing import"},
     ]
-    backend = SequencedBackend(["FORMAT_ERROR", RuntimeError("boom"), "FIXED"])
+    backend = SequencedBackend(["FORMAT_ERROR", RuntimeError("boom")])
 
     await _run(session, backend, first_messages)
     with pytest.raises(HTTPException, match="RuntimeError: boom"):
@@ -327,16 +327,10 @@ async def test_first_assistant_rollback_failure_preserves_chain_for_retry():
     assert state["rollback_count"] == 0
     assert _decode_response_ids(session.active_chains[0].buffer.response_ids) == "FORMAT_ERROR"
 
-    await _run(session, backend, rewrite_messages)
-    state = session.snapshot_state()
-    assert state["active_chain_ids"] == [1]
-    assert state["rollback_count"] == 1
-    assert session.active_chains[0].buffer.response_ids[-len("FIXED") :] == _ids("FIXED")
-
 
 @pytest.mark.asyncio
-async def test_first_assistant_rollback_keeps_chain_when_replacement_exceeds_capacity():
-    """Leave the old chain untouched when the replacement prompt cannot fit."""
+async def test_first_assistant_rollback_drops_chain_when_replacement_exceeds_capacity():
+    """Drop the empty-prefix chain when the replacement prompt cannot fit."""
     first_messages = [{"role": "user", "content": "run mini-swe"}]
     rewrite_messages = [
         *first_messages,
@@ -356,8 +350,11 @@ async def test_first_assistant_rollback_keeps_chain_when_replacement_exceeds_cap
 
     assert outcome.finish_reason == "length"
     assert len(backend.calls) == 1
-    assert [chain.chain_id for chain in session.active_chains] == [1]
-    assert _decode_response_ids(session.active_chains[0].buffer.response_ids) == "FORMAT_ERROR"
+    state = session.snapshot_state()
+    assert state["active_chain_ids"] == []
+    assert state["rollback_count"] == 1
+    assert state["rollback_dropped_trainable_tokens_total"] == len("FORMAT_ERROR")
+    assert await session.finalize() == []
 
 
 @pytest.mark.asyncio
@@ -457,9 +454,11 @@ async def test_later_user_rollback_deduplicates_incremental_turn_separator():
 
 
 @pytest.mark.asyncio
-async def test_later_assistant_rollback_rejects_misaligned_generation_prompt():
-    """Fail closed when a stored response-side GP no longer matches the codec."""
-    session = _session("rollback-gp-assert", enable_last_assistant_rollback=True)
+async def test_later_assistant_rollback_rejects_misaligned_assistant_prefix():
+    """Fail closed when the stored turn separator no longer matches the codec."""
+    session = _session("rollback-prefix-assert", enable_last_assistant_rollback=True)
+    codec = session._codec
+    codec._turn_separator = _ids("\n")
     backend = SequencedBackend(["A1", "A2", "FIXED"])
     first_messages = [{"role": "user", "content": "start"}]
     continuation = [
@@ -473,9 +472,10 @@ async def test_later_assistant_rollback_rejects_misaligned_generation_prompt():
     await _run(session, backend, continuation)
     [chain] = session.active_chains
     snapshot = chain.last_assistant_start
-    chain.buffer.response_ids[snapshot.response_ids_len - 1] += 1
+    separator_end = snapshot.response_ids_len - len(codec.generation_prompt)
+    chain.buffer.response_ids[separator_end - 1] += 1
 
-    with pytest.raises(ValueError, match="generation prompt"):
+    with pytest.raises(ValueError, match="assistant prefix"):
         await _run(session, backend, rewrite_messages)
 
 
