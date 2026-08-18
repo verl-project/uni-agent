@@ -6,6 +6,7 @@ processor-backed multimodal inputs, parses tools, and decodes backend outputs.
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 import json
 import logging
@@ -42,6 +43,12 @@ _VLLM_TOOL_PARSER_ALIASES = {
 }
 
 
+def _canonical_tools_hash(tools: list[dict[str, Any]]) -> str:
+    """Return a stable hash for a tool schema independent of dict key order."""
+    canonical = json.dumps(tools, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 def initialize_generation_prompt(processing_class, **apply_chat_template_kwargs) -> list[int]:
     """Initialize the token suffix inserted by ``add_generation_prompt=True``."""
     without_generation_prompt = normalize_token_ids(
@@ -74,101 +81,6 @@ def _canonicalize_tool_arguments_for_comparison(arguments: Any) -> tuple[str, An
         except json.JSONDecodeError:
             return ("raw", arguments)
     return ("raw", arguments)
-
-
-def _process_tool_calls_sglang(
-    text: str,
-    tools: list[dict[str, Any]],
-    parser_name: str,
-) -> tuple[str, list[Any]]:
-    from sglang.srt.entrypoints.openai.protocol import Function as SglFunction
-    from sglang.srt.entrypoints.openai.protocol import Tool as SglTool
-    from sglang.srt.function_call.function_call_parser import FunctionCallParser
-
-    sglang_tools = [SglTool(type=tool["type"], function=SglFunction(**tool["function"])) for tool in tools]
-    parser = FunctionCallParser(sglang_tools, parser_name)
-    if not parser.has_tool_call(text):
-        return text, []
-
-    content, calls = parser.parse_non_stream(text)
-    return content, [SimpleNamespace(name=call.name, arguments=call.parameters) for call in calls]
-
-
-def _process_tool_calls_vllm(
-    text: str,
-    tools: list[dict[str, Any]],
-    parser_name: str,
-    tokenizer,
-) -> tuple[str, list[Any]]:
-    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionToolsParam
-    from vllm.tool_parsers import ToolParserManager
-
-    parser_cls = ToolParserManager.get_tool_parser(parser_name)
-    vllm_tools = [ChatCompletionToolsParam(**tool) if isinstance(tool, dict) else tool for tool in tools]
-    parser_parameters = inspect.signature(parser_cls).parameters
-    if "tools" in parser_parameters:
-        parser = parser_cls(tokenizer, tools=vllm_tools)
-    else:
-        parser = parser_cls(tokenizer)
-    request = SimpleNamespace(
-        tools=vllm_tools,
-        tool_choice="auto",
-        skip_special_tokens=True,
-    )
-    parsed = parser.extract_tool_calls(text, request)
-    if not parsed.tools_called:
-        return text, []
-    return parsed.content or "", [tool_call.function for tool_call in parsed.tool_calls]
-
-
-async def _process_tool_calls_verl(
-    response_ids: list[int],
-    tools: list[dict[str, Any]],
-    parser_name: str,
-    tokenizer,
-) -> tuple[str, list[Any]]:
-    """Parse tool calls with verl's built-in tool-parser registry."""
-    from verl.experimental.agent_loop.tool_parser import ToolParser
-    from verl.tools.schemas import OpenAIFunctionToolSchema
-
-    parser = ToolParser.get_tool_parser(parser_name, tokenizer)
-    tool_schemas = [OpenAIFunctionToolSchema.model_validate(tool) for tool in tools]
-    content, calls = await parser.extract_tool_calls(response_ids, tool_schemas)
-    return content, [SimpleNamespace(name=call.name, arguments=call.arguments) for call in calls]
-
-
-async def _extract_tool_calls(
-    response_ids: list[int],
-    tools: list[dict[str, Any]],
-    parser_name: str,
-    tokenizer,
-) -> tuple[str, list[Any]]:
-    text = tokenizer.decode(response_ids, skip_special_tokens=False)
-
-    sglang_name = _SGLANG_TOOL_PARSER_ALIASES.get(parser_name, parser_name)
-    try:
-        return _process_tool_calls_sglang(text, tools, sglang_name)
-    except ModuleNotFoundError:
-        pass
-    except Exception:
-        logger.warning("SGLang tool-call parsing failed; trying vLLM", exc_info=True)
-
-    vllm_name = _VLLM_TOOL_PARSER_ALIASES.get(parser_name, parser_name)
-    try:
-        return _process_tool_calls_vllm(text, tools, vllm_name, tokenizer)
-    except ModuleNotFoundError:
-        pass
-    except Exception:
-        logger.warning("vLLM tool-call parsing failed; trying verl", exc_info=True)
-
-    try:
-        return await _process_tool_calls_verl(response_ids, tools, parser_name, tokenizer)
-    except ValueError:
-        # get_tool_parser raises ValueError for a parser name verl does not register.
-        logger.warning("verl does not provide tool parser %r; returning raw text", parser_name, exc_info=True)
-    except Exception:
-        logger.warning("verl tool-call parsing failed; returning raw text", exc_info=True)
-    return text, []
 
 
 class MessageCodec:
@@ -205,6 +117,7 @@ class MessageCodec:
             **self._apply_chat_template_kwargs,
         )
         self._tool_parser_name = tool_parser_name
+        self._tool_parser_cache: dict[tuple[str, ...], Any] = {}
 
     @property
     def generation_prompt(self) -> list[int]:
@@ -355,6 +268,111 @@ class MessageCodec:
             video_data,
         )
 
+    def _process_tool_calls_sglang(
+        self,
+        text: str,
+        tools: list[dict[str, Any]],
+        parser_name: str,
+    ) -> tuple[str, list[Any]]:
+        cache_key = ("sglang", parser_name, _canonical_tools_hash(tools))
+        parser = self._tool_parser_cache.get(cache_key)
+        if parser is None:
+            from sglang.srt.entrypoints.openai.protocol import Function as SglFunction
+            from sglang.srt.entrypoints.openai.protocol import Tool as SglTool
+            from sglang.srt.function_call.function_call_parser import FunctionCallParser
+
+            logger.debug("Initializing tool parser backend=sglang name=%s", parser_name)
+            sglang_tools = [SglTool(type=tool["type"], function=SglFunction(**tool["function"])) for tool in tools]
+            parser = FunctionCallParser(sglang_tools, parser_name)
+            self._tool_parser_cache[cache_key] = parser
+
+        if not parser.has_tool_call(text):
+            return text, []
+        content, calls = parser.parse_non_stream(text)
+        return content, [SimpleNamespace(name=call.name, arguments=call.parameters) for call in calls]
+
+    def _process_tool_calls_vllm(
+        self,
+        text: str,
+        tools: list[dict[str, Any]],
+        parser_name: str,
+    ) -> tuple[str, list[Any]]:
+        from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionToolsParam
+
+        cache_key = ("vllm", parser_name, _canonical_tools_hash(tools))
+        parser = self._tool_parser_cache.get(cache_key)
+        vllm_tools = [ChatCompletionToolsParam(**tool) if isinstance(tool, dict) else tool for tool in tools]
+        if parser is None:
+            from vllm.tool_parsers import ToolParserManager
+
+            logger.debug("Initializing tool parser backend=vllm name=%s", parser_name)
+            parser_cls = ToolParserManager.get_tool_parser(parser_name)
+            parser_parameters = inspect.signature(parser_cls).parameters
+            if "tools" in parser_parameters:
+                parser = parser_cls(self._tokenizer, tools=vllm_tools)
+            else:
+                parser = parser_cls(self._tokenizer)
+            self._tool_parser_cache[cache_key] = parser
+
+        request = SimpleNamespace(tools=vllm_tools, tool_choice="auto", skip_special_tokens=True)
+        parsed = parser.extract_tool_calls(text, request)
+        if not parsed.tools_called:
+            return text, []
+        return parsed.content or "", [tool_call.function for tool_call in parsed.tool_calls]
+
+    async def _process_tool_calls_verl(
+        self,
+        response_ids: list[int],
+        tools: list[dict[str, Any]],
+        parser_name: str,
+    ) -> tuple[str, list[Any]]:
+        """Parse tool calls with verl's built-in tool-parser registry."""
+        from verl.experimental.agent_loop.tool_parser import ToolParser
+        from verl.tools.schemas import OpenAIFunctionToolSchema
+
+        cache_key = ("verl", parser_name)
+        parser = self._tool_parser_cache.get(cache_key)
+        if parser is None:
+            logger.debug("Initializing tool parser backend=verl name=%s", parser_name)
+            parser = ToolParser.get_tool_parser(parser_name, self._tokenizer)
+            self._tool_parser_cache[cache_key] = parser
+
+        tool_schemas = [OpenAIFunctionToolSchema.model_validate(tool) for tool in tools]
+        content, calls = await parser.extract_tool_calls(response_ids, tool_schemas)
+        return content, [SimpleNamespace(name=call.name, arguments=call.arguments) for call in calls]
+
+    async def _extract_tool_calls(
+        self,
+        response_ids: list[int],
+        tools: list[dict[str, Any]],
+        parser_name: str,
+    ) -> tuple[str, list[Any]]:
+        text = self._tokenizer.decode(response_ids, skip_special_tokens=False)
+
+        sglang_name = _SGLANG_TOOL_PARSER_ALIASES.get(parser_name, parser_name)
+        try:
+            return self._process_tool_calls_sglang(text, tools, sglang_name)
+        except ModuleNotFoundError:
+            pass
+        except Exception:
+            logger.warning("SGLang tool-call parsing failed; trying vLLM", exc_info=True)
+
+        vllm_name = _VLLM_TOOL_PARSER_ALIASES.get(parser_name, parser_name)
+        try:
+            return self._process_tool_calls_vllm(text, tools, vllm_name)
+        except ModuleNotFoundError:
+            pass
+        except Exception:
+            logger.warning("vLLM tool-call parsing failed; trying verl", exc_info=True)
+
+        try:
+            return await self._process_tool_calls_verl(response_ids, tools, parser_name)
+        except ValueError:
+            logger.warning("verl does not provide tool parser %r; returning raw text", parser_name, exc_info=True)
+        except Exception:
+            logger.warning("verl tool-call parsing failed; returning raw text", exc_info=True)
+        return text, []
+
     async def decode_response(
         self,
         response_ids: list[int],
@@ -364,11 +382,10 @@ class MessageCodec:
     ) -> tuple[dict[str, Any], str]:
         """Decode model output tokens into an assistant message and finish reason."""
         if self._tool_parser_name and tools:
-            content, function_calls = await _extract_tool_calls(
+            content, function_calls = await self._extract_tool_calls(
                 response_ids,
                 tools,
                 self._tool_parser_name,
-                self._tokenizer,
             )
             if function_calls:
                 tool_calls = [

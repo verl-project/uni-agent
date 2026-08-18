@@ -28,7 +28,7 @@ def _ids(text: str) -> list[int]:
 
 
 def test_qwen_vllm_parser_uses_tool_schema_for_argument_types():
-    import uni_agent.gateway.session.codec as codec_mod
+    from uni_agent.gateway.session.codec import MessageCodec
 
     class QwenTokenizer(FakeTokenizer):
         def get_vocab(self):
@@ -42,7 +42,7 @@ def test_qwen_vllm_parser_uses_tool_schema_for_argument_types():
         "</function>\n"
         "</tool_call>"
     )
-    content, calls = codec_mod._process_tool_calls_vllm(text, TOOLS, "qwen3_coder", QwenTokenizer())
+    content, calls = MessageCodec(QwenTokenizer())._process_tool_calls_vllm(text, TOOLS, "qwen3_coder")
 
     assert content == ""
     assert json.loads(calls[0].arguments) == {"query": "docs", "limit": 2}
@@ -57,7 +57,7 @@ def test_vllm_parser_supports_tool_schema_constructor_contracts(monkeypatch, con
     from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionToolsParam
     from vllm.tool_parsers import ToolParserManager
 
-    import uni_agent.gateway.session.codec as codec_mod
+    from uni_agent.gateway.session.codec import MessageCodec
 
     seen = {}
 
@@ -88,7 +88,7 @@ def test_vllm_parser_supports_tool_schema_constructor_contracts(monkeypatch, con
     )
 
     tokenizer = FakeTokenizer()
-    content, calls = codec_mod._process_tool_calls_vllm("raw", TOOLS, "qwen3_coder", tokenizer)
+    content, calls = MessageCodec(tokenizer)._process_tool_calls_vllm("raw", TOOLS, "qwen3_coder")
 
     assert content == "visible"
     assert calls[0].name == "search"
@@ -103,7 +103,7 @@ def test_vllm_parser_supports_tool_schema_constructor_contracts(monkeypatch, con
 
 @pytest.mark.asyncio
 async def test_tool_call_dispatch_prefers_sglang(monkeypatch):
-    import uni_agent.gateway.session.codec as codec_mod
+    from uni_agent.gateway.session.codec import MessageCodec
 
     seen = {}
 
@@ -117,11 +117,12 @@ async def test_tool_call_dispatch_prefers_sglang(monkeypatch):
     async def fail_verl(*args, **kwargs):
         raise AssertionError("verl should not run when an engine succeeds")
 
-    monkeypatch.setattr(codec_mod, "_process_tool_calls_sglang", fake_sglang, raising=False)
-    monkeypatch.setattr(codec_mod, "_process_tool_calls_vllm", fail_vllm, raising=False)
-    monkeypatch.setattr(codec_mod, "_process_tool_calls_verl", fail_verl, raising=False)
+    codec = MessageCodec(FakeTokenizer())
+    monkeypatch.setattr(codec, "_process_tool_calls_sglang", fake_sglang)
+    monkeypatch.setattr(codec, "_process_tool_calls_vllm", fail_vllm)
+    monkeypatch.setattr(codec, "_process_tool_calls_verl", fail_verl)
 
-    content, calls = await codec_mod._extract_tool_calls(_ids("raw"), TOOLS, "hermes", FakeTokenizer())
+    content, calls = await codec._extract_tool_calls(_ids("raw"), TOOLS, "hermes")
 
     assert content == "visible"
     assert calls[0].name == "search"
@@ -130,65 +131,65 @@ async def test_tool_call_dispatch_prefers_sglang(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_tool_call_dispatch_falls_back_to_vllm_with_name_mapping(monkeypatch):
-    import uni_agent.gateway.session.codec as codec_mod
+    from uni_agent.gateway.session.codec import MessageCodec
 
     seen = {}
 
     def missing_sglang(*args, **kwargs):
         raise ModuleNotFoundError("sglang")
 
-    def fake_vllm(text, tools, parser_name, tokenizer):
-        seen["vllm"] = (text, tools, parser_name, tokenizer)
+    def fake_vllm(text, tools, parser_name):
+        seen["vllm"] = (text, tools, parser_name)
         return "", [SimpleNamespace(name="search", arguments='{"query":"x"}')]
 
     async def fail_verl(*args, **kwargs):
         raise AssertionError("verl should not run when an engine succeeds")
 
-    monkeypatch.setattr(codec_mod, "_process_tool_calls_sglang", missing_sglang, raising=False)
-    monkeypatch.setattr(codec_mod, "_process_tool_calls_vllm", fake_vllm, raising=False)
-    monkeypatch.setattr(codec_mod, "_process_tool_calls_verl", fail_verl, raising=False)
+    codec = MessageCodec(FakeTokenizer())
+    monkeypatch.setattr(codec, "_process_tool_calls_sglang", missing_sglang)
+    monkeypatch.setattr(codec, "_process_tool_calls_vllm", fake_vllm)
+    monkeypatch.setattr(codec, "_process_tool_calls_verl", fail_verl)
 
-    tokenizer = FakeTokenizer()
-    content, calls = await codec_mod._extract_tool_calls(_ids("raw"), TOOLS, "qwen25", tokenizer)
+    content, calls = await codec._extract_tool_calls(_ids("raw"), TOOLS, "qwen25")
 
     assert content == ""
     assert calls[0].arguments == '{"query":"x"}'
-    assert seen["vllm"] == ("raw", TOOLS, "qwen3_xml", tokenizer)
+    assert seen["vllm"] == ("raw", TOOLS, "qwen3_xml")
 
 
 @pytest.mark.asyncio
 async def test_tool_call_dispatch_falls_back_to_verl_when_engines_unavailable(monkeypatch):
     """With neither SGLang nor vLLM importable, the dispatcher hands the response token ids
     to verl's tool-parser registry, which needs no inference engine."""
-    import uni_agent.gateway.session.codec as codec_mod
+    from uni_agent.gateway.session.codec import MessageCodec
 
     seen = {}
 
     def missing_engine(*args, **kwargs):
         raise ModuleNotFoundError("tool parser engine")
 
-    async def fake_verl(response_ids, tools, parser_name, tokenizer):
-        seen["verl"] = (response_ids, tools, parser_name, tokenizer)
+    async def fake_verl(response_ids, tools, parser_name):
+        seen["verl"] = (response_ids, tools, parser_name)
         return "thinking", [SimpleNamespace(name="search", arguments='{"query":"docs"}')]
 
-    monkeypatch.setattr(codec_mod, "_process_tool_calls_sglang", missing_engine, raising=False)
-    monkeypatch.setattr(codec_mod, "_process_tool_calls_vllm", missing_engine, raising=False)
-    monkeypatch.setattr(codec_mod, "_process_tool_calls_verl", fake_verl, raising=False)
+    codec = MessageCodec(FakeTokenizer())
+    monkeypatch.setattr(codec, "_process_tool_calls_sglang", missing_engine)
+    monkeypatch.setattr(codec, "_process_tool_calls_vllm", missing_engine)
+    monkeypatch.setattr(codec, "_process_tool_calls_verl", fake_verl)
 
     text = 'thinking\n<tool_call>\n{"name": "search", "arguments": {"query": "docs"}}\n</tool_call>'
-    tokenizer = FakeTokenizer()
-    content, calls = await codec_mod._extract_tool_calls(_ids(text), TOOLS, "hermes", tokenizer)
+    content, calls = await codec._extract_tool_calls(_ids(text), TOOLS, "hermes")
 
     assert content == "thinking"
     assert calls[0].name == "search"
-    assert seen["verl"] == (_ids(text), TOOLS, "hermes", tokenizer)
+    assert seen["verl"] == (_ids(text), TOOLS, "hermes")
 
 
 @pytest.mark.asyncio
 async def test_tool_call_dispatch_returns_text_when_verl_does_not_register_the_parser(monkeypatch):
     """verl's registry raises ValueError for a parser name it does not know; the dispatcher
     then returns the raw text unchanged."""
-    import uni_agent.gateway.session.codec as codec_mod
+    from uni_agent.gateway.session.codec import MessageCodec
 
     def missing_engine(*args, **kwargs):
         raise ModuleNotFoundError("tool parser engine")
@@ -196,12 +197,13 @@ async def test_tool_call_dispatch_returns_text_when_verl_does_not_register_the_p
     async def unknown_parser(*args, **kwargs):
         raise ValueError("Unknown tool parser: qwen3_xml")
 
-    monkeypatch.setattr(codec_mod, "_process_tool_calls_sglang", missing_engine, raising=False)
-    monkeypatch.setattr(codec_mod, "_process_tool_calls_vllm", missing_engine, raising=False)
-    monkeypatch.setattr(codec_mod, "_process_tool_calls_verl", unknown_parser, raising=False)
+    codec = MessageCodec(FakeTokenizer())
+    monkeypatch.setattr(codec, "_process_tool_calls_sglang", missing_engine)
+    monkeypatch.setattr(codec, "_process_tool_calls_vllm", missing_engine)
+    monkeypatch.setattr(codec, "_process_tool_calls_verl", unknown_parser)
 
     text = '<tool_call>\n{"name": "search", "arguments": {"query": "docs"}}\n</tool_call>'
-    content, calls = await codec_mod._extract_tool_calls(_ids(text), TOOLS, "qwen3_xml", FakeTokenizer())
+    content, calls = await codec._extract_tool_calls(_ids(text), TOOLS, "qwen3_xml")
 
     assert content == text
     assert calls == []
@@ -209,7 +211,7 @@ async def test_tool_call_dispatch_returns_text_when_verl_does_not_register_the_p
 
 @pytest.mark.asyncio
 async def test_tool_call_dispatch_returns_text_when_verl_parsing_fails(monkeypatch):
-    import uni_agent.gateway.session.codec as codec_mod
+    from uni_agent.gateway.session.codec import MessageCodec
 
     def missing_engine(*args, **kwargs):
         raise ModuleNotFoundError("tool parser engine")
@@ -217,11 +219,12 @@ async def test_tool_call_dispatch_returns_text_when_verl_parsing_fails(monkeypat
     async def broken_verl(*args, **kwargs):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(codec_mod, "_process_tool_calls_sglang", missing_engine, raising=False)
-    monkeypatch.setattr(codec_mod, "_process_tool_calls_vllm", missing_engine, raising=False)
-    monkeypatch.setattr(codec_mod, "_process_tool_calls_verl", broken_verl, raising=False)
+    codec = MessageCodec(FakeTokenizer())
+    monkeypatch.setattr(codec, "_process_tool_calls_sglang", missing_engine)
+    monkeypatch.setattr(codec, "_process_tool_calls_vllm", missing_engine)
+    monkeypatch.setattr(codec, "_process_tool_calls_verl", broken_verl)
 
-    content, calls = await codec_mod._extract_tool_calls(_ids("plain text"), TOOLS, "hermes", FakeTokenizer())
+    content, calls = await codec._extract_tool_calls(_ids("plain text"), TOOLS, "hermes")
 
     assert content == "plain text"
     assert calls == []
@@ -231,22 +234,22 @@ async def test_tool_call_dispatch_returns_text_when_verl_parsing_fails(monkeypat
 async def test_tool_call_dispatch_prefers_sglang_empty_result_over_fallback(monkeypatch):
     """An installed engine that reports no tool call is authoritative; the fallbacks exist for
     hosts where no engine can run at all, not to second-guess one that did."""
-    import uni_agent.gateway.session.codec as codec_mod
+    from uni_agent.gateway.session.codec import MessageCodec
 
+    codec = MessageCodec(FakeTokenizer())
     monkeypatch.setattr(
-        codec_mod,
+        codec,
         "_process_tool_calls_sglang",
         lambda text, tools, parser_name: (text, []),
-        raising=False,
     )
 
     async def fail_verl(*args, **kwargs):
         raise AssertionError("verl should not run when an engine already answered")
 
-    monkeypatch.setattr(codec_mod, "_process_tool_calls_verl", fail_verl, raising=False)
+    monkeypatch.setattr(codec, "_process_tool_calls_verl", fail_verl)
 
     text = '<tool_call>\n{"name": "search", "arguments": {"query": "docs"}}\n</tool_call>'
-    content, calls = await codec_mod._extract_tool_calls(_ids(text), TOOLS, "hermes", FakeTokenizer())
+    content, calls = await codec._extract_tool_calls(_ids(text), TOOLS, "hermes")
 
     assert content == text
     assert calls == []
@@ -256,10 +259,10 @@ async def test_tool_call_dispatch_prefers_sglang_empty_result_over_fallback(monk
 async def test_verl_fallback_parses_hermes_envelope():
     """The engine-less path uses verl's own registry, so a Hermes envelope is parsed even on
     a host with neither SGLang nor vLLM installed."""
-    import uni_agent.gateway.session.codec as codec_mod
+    from uni_agent.gateway.session.codec import MessageCodec
 
     text = 'thinking\n<tool_call>\n{"name": "search", "arguments": {"query": "docs", "limit": 2}}\n</tool_call>'
-    content, calls = await codec_mod._process_tool_calls_verl(_ids(text), TOOLS, "hermes", FakeTokenizer())
+    content, calls = await MessageCodec(FakeTokenizer())._process_tool_calls_verl(_ids(text), TOOLS, "hermes")
 
     assert content == "thinking\n"
     assert calls[0].name == "search"
@@ -268,19 +271,17 @@ async def test_verl_fallback_parses_hermes_envelope():
 
 @pytest.mark.asyncio
 async def test_decode_response_uses_gateway_dispatcher_for_tool_calls(monkeypatch):
-    import uni_agent.gateway.session.codec as codec_mod
     from uni_agent.gateway.session.codec import MessageCodec
 
     seen = {}
 
-    async def fake_dispatch(response_ids, tools, parser_name, tokenizer):
-        seen["dispatch"] = (response_ids, tools, parser_name, tokenizer)
+    async def fake_dispatch(response_ids, tools, parser_name):
+        seen["dispatch"] = (response_ids, tools, parser_name)
         return "", [SimpleNamespace(name="search", arguments='{"query":"weather"}')]
-
-    monkeypatch.setattr(codec_mod, "_extract_tool_calls", fake_dispatch, raising=False)
 
     tokenizer = FakeTokenizer()
     codec = MessageCodec(tokenizer, tool_parser_name="qwen3_xml")
+    monkeypatch.setattr(codec, "_extract_tool_calls", fake_dispatch)
     response_ids = [ord(char) for char in "<tool_call>ignored</tool_call>"]
     message, finish_reason = await codec.decode_response(
         response_ids,
