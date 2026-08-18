@@ -101,3 +101,9 @@ verl = [
   "trainer/config/*.yaml",
   "trainer/config/*/*.yaml",
 ]
+
+[tool.pytest.ini_options]
+markers = [
+    "cpu: mark cpu backedn",
+    "level0: mark level0 case",
+]
