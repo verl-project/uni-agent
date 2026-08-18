@@ -281,7 +281,6 @@ class MessageCodec:
             from sglang.srt.entrypoints.openai.protocol import Tool as SglTool
             from sglang.srt.function_call.function_call_parser import FunctionCallParser
 
-            logger.debug("Initializing tool parser backend=sglang name=%s", parser_name)
             sglang_tools = [SglTool(type=tool["type"], function=SglFunction(**tool["function"])) for tool in tools]
             parser = FunctionCallParser(sglang_tools, parser_name)
             self._tool_parser_cache[cache_key] = parser
@@ -305,7 +304,6 @@ class MessageCodec:
         if parser is None:
             from vllm.tool_parsers import ToolParserManager
 
-            logger.debug("Initializing tool parser backend=vllm name=%s", parser_name)
             parser_cls = ToolParserManager.get_tool_parser(parser_name)
             parser_parameters = inspect.signature(parser_cls).parameters
             if "tools" in parser_parameters:
@@ -333,7 +331,6 @@ class MessageCodec:
         cache_key = ("verl", parser_name)
         parser = self._tool_parser_cache.get(cache_key)
         if parser is None:
-            logger.debug("Initializing tool parser backend=verl name=%s", parser_name)
             parser = ToolParser.get_tool_parser(parser_name, self._tokenizer)
             self._tool_parser_cache[cache_key] = parser
 

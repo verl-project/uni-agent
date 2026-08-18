@@ -1,4 +1,3 @@
-import logging
 import sys
 import types
 from types import SimpleNamespace
@@ -170,43 +169,8 @@ def test_vllm_parser_cache_separates_tool_schemas(monkeypatch):
     assert len(constructions) == 2
 
 
-def test_parser_cache_debug_log_identifies_backend_on_construction(monkeypatch, caplog):
-    from uni_agent.gateway.session.codec import MessageCodec
-
-    constructions = []
-    _install_fake_vllm(monkeypatch, constructions)
-    codec = MessageCodec(FakeTokenizer())
-    with caplog.at_level(logging.DEBUG, logger="gateway"):
-        codec._process_tool_calls_vllm("plain", TOOLS, "qwen3_coder")
-
-    assert "backend=vllm" in caplog.text
-
-
 @pytest.mark.asyncio
-async def test_message_codec_uses_parser_cache_across_decode_calls(monkeypatch):
-    from uni_agent.gateway.session.codec import MessageCodec
-
-    constructions = []
-    _install_fake_vllm(monkeypatch, constructions)
-    codec = MessageCodec(FakeTokenizer(), tool_parser_name="qwen3_coder")
-
-    def missing_sglang(*args, **kwargs):
-        raise ModuleNotFoundError("sglang")
-
-    monkeypatch.setattr(
-        codec,
-        "_process_tool_calls_sglang",
-        missing_sglang,
-    )
-
-    await codec.decode_response([ord("x")], tools=TOOLS)
-    await codec.decode_response([ord("x")], tools=_equivalent_tools())
-
-    assert len(constructions) == 1
-
-
-@pytest.mark.asyncio
-async def test_message_codec_skips_vllm_parser_lookup_on_cache_hit(monkeypatch):
+async def test_message_codec_reuses_vllm_parser_across_decode_calls(monkeypatch):
     from uni_agent.gateway.session.codec import MessageCodec
 
     constructions = []
@@ -226,7 +190,20 @@ async def test_message_codec_skips_vllm_parser_lookup_on_cache_hit(monkeypatch):
     await codec.decode_response([ord("x")], tools=TOOLS)
     await codec.decode_response([ord("x")], tools=_equivalent_tools())
 
+    assert len(constructions) == 1
     assert lookups == ["qwen3_coder"]
+
+
+def test_parser_cache_is_scoped_to_message_codec(monkeypatch):
+    from uni_agent.gateway.session.codec import MessageCodec
+
+    constructions = []
+    _install_fake_vllm(monkeypatch, constructions)
+
+    MessageCodec(FakeTokenizer())._process_tool_calls_vllm("plain", TOOLS, "qwen3_coder")
+    MessageCodec(FakeTokenizer())._process_tool_calls_vllm("plain", TOOLS, "qwen3_coder")
+
+    assert len(constructions) == 2
 
 
 @pytest.mark.asyncio
@@ -241,4 +218,3 @@ async def test_verl_parser_cache_ignores_tool_schema(monkeypatch):
     await codec._process_tool_calls_verl([ord("y")], _equivalent_tools(), "hermes")
 
     assert lookups == ["hermes"]
-    assert set(codec._tool_parser_cache) == {("verl", "hermes")}

@@ -246,6 +246,10 @@ async def test_tool_call_dispatch_prefers_sglang_empty_result_over_fallback(monk
     async def fail_verl(*args, **kwargs):
         raise AssertionError("verl should not run when an engine already answered")
 
+    def fail_vllm(*args, **kwargs):
+        raise AssertionError("vLLM should not run when SGLang already answered")
+
+    monkeypatch.setattr(codec, "_process_tool_calls_vllm", fail_vllm)
     monkeypatch.setattr(codec, "_process_tool_calls_verl", fail_verl)
 
     text = '<tool_call>\n{"name": "search", "arguments": {"query": "docs"}}\n</tool_call>'
