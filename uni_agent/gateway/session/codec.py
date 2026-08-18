@@ -117,6 +117,12 @@ class MessageCodec:
             **self._apply_chat_template_kwargs,
         )
         self._tool_parser_name = tool_parser_name
+        # Backend parser construction performs expensive setup, so reuse parsers
+        # within this actor-scoped codec. SGLang/vLLM bind tool schemas at
+        # construction, while verl receives schemas per extraction call; this is
+        # why their cache keys differ. Keep the cache codec-scoped because parser
+        # instances may retain mutable request state and dynamic schemas can grow
+        # the mapping over the codec lifetime.
         self._tool_parser_cache: dict[tuple[str, ...], Any] = {}
 
     @property
