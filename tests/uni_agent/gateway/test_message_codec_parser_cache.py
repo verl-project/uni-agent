@@ -176,15 +176,10 @@ async def test_message_codec_reuses_vllm_parser_across_decode_calls(monkeypatch)
     constructions = []
     lookups = []
     _install_fake_vllm(monkeypatch, constructions, lookups)
-    codec = MessageCodec(FakeTokenizer(), tool_parser_name="qwen3_coder")
-
-    def missing_sglang(*args, **kwargs):
-        raise ModuleNotFoundError("sglang")
-
-    monkeypatch.setattr(
-        codec,
-        "_process_tool_calls_sglang",
-        missing_sglang,
+    codec = MessageCodec(
+        FakeTokenizer(),
+        tool_parser_name="qwen3_coder",
+        rollout_backend="vllm",
     )
 
     await codec.decode_response([ord("x")], tools=TOOLS)

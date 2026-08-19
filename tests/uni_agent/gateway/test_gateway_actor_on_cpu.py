@@ -1370,12 +1370,28 @@ async def test_gateway_actor_tool_call_decode_returns_openai_format(monkeypatch)
     from uni_agent.gateway.config import GatewayActorConfig
     from uni_agent.gateway.gateway import _GatewayActor
 
-    monkeypatch.setattr(codec_mod.MessageCodec, "_extract_tool_calls", fake_tool_call_dispatch)
+    def fake_vllm_parser(self, text, tools, parser_name):
+        assert tools
+        assert parser_name == "hermes"
+        if "<tool_call>" not in text:
+            return text, []
+        return "", [SimpleNamespace(name="search", arguments='{"query":"weather"}')]
+
+    def fail_sync_parser(*args, **kwargs):
+        raise AssertionError("rollout backend should select the vLLM parser")
+
+    async def fail_async_parser(*args, **kwargs):
+        raise AssertionError("rollout backend should select the vLLM parser")
+
+    monkeypatch.setattr(codec_mod.MessageCodec, "_process_tool_calls_sglang", fail_sync_parser)
+    monkeypatch.setattr(codec_mod.MessageCodec, "_process_tool_calls_vllm", fake_vllm_parser)
+    monkeypatch.setattr(codec_mod.MessageCodec, "_process_tool_calls_verl", fail_async_parser)
     tool_call_text = '<tool_call>\n{"name": "search", "arguments": {"query": "weather"}}\n</tool_call>'
     actor = _GatewayActor(
         GatewayActorConfig(
             tokenizer=FakeTokenizer(),
             tool_parser_name="hermes",
+            rollout_backend="vllm",
         ),
         QueuedBackend([tool_call_text, "sunny today"]),
     )

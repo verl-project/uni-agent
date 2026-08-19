@@ -9,7 +9,6 @@ from __future__ import annotations
 import hashlib
 import inspect
 import json
-import logging
 from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
@@ -17,8 +16,6 @@ from uuid import uuid4
 from verl.utils.tokenizer import normalize_token_ids
 from verl.utils.tokenizer.chat_template import apply_chat_template as _apply_chat_template
 from verl.utils.tokenizer.chat_template import initialize_turn_separator
-
-logger = logging.getLogger("gateway")
 
 # Map backend stop_reason values into the gateway's internal finish_reason vocabulary.
 _FINISH_REASON_MAP = {
@@ -100,6 +97,7 @@ class MessageCodec:
         vision_info_extractor=None,
         vision_info_extractor_kwargs: dict[str, Any] | None = None,
         tool_parser_name: str | None = None,
+        rollout_backend: str | None = None,
         apply_chat_template_kwargs: dict[str, Any] | None = None,
     ):
         self._tokenizer = tokenizer
@@ -117,6 +115,7 @@ class MessageCodec:
             **self._apply_chat_template_kwargs,
         )
         self._tool_parser_name = tool_parser_name
+        self._rollout_backend = rollout_backend
         # Backend parser construction performs expensive setup, so reuse parsers
         # within this actor-scoped codec. SGLang/vLLM bind tool schemas at
         # construction, while verl receives schemas per extraction call; this is
@@ -352,29 +351,17 @@ class MessageCodec:
     ) -> tuple[str, list[Any]]:
         text = self._tokenizer.decode(response_ids, skip_special_tokens=False)
 
-        sglang_name = _SGLANG_TOOL_PARSER_ALIASES.get(parser_name, parser_name)
         try:
-            return self._process_tool_calls_sglang(text, tools, sglang_name)
-        except ModuleNotFoundError:
-            pass
-        except Exception:
-            logger.warning("SGLang tool-call parsing failed; trying vLLM", exc_info=True)
-
-        vllm_name = _VLLM_TOOL_PARSER_ALIASES.get(parser_name, parser_name)
-        try:
-            return self._process_tool_calls_vllm(text, tools, vllm_name)
-        except ModuleNotFoundError:
-            pass
-        except Exception:
-            logger.warning("vLLM tool-call parsing failed; trying verl", exc_info=True)
-
-        try:
+            if self._rollout_backend == "sglang":
+                sglang_name = _SGLANG_TOOL_PARSER_ALIASES.get(parser_name, parser_name)
+                return self._process_tool_calls_sglang(text, tools, sglang_name)
+            if self._rollout_backend == "vllm":
+                vllm_name = _VLLM_TOOL_PARSER_ALIASES.get(parser_name, parser_name)
+                return self._process_tool_calls_vllm(text, tools, vllm_name)
             return await self._process_tool_calls_verl(response_ids, tools, parser_name)
-        except ValueError:
-            logger.warning("verl does not provide tool parser %r; returning raw text", parser_name, exc_info=True)
-        except Exception:
-            logger.warning("verl tool-call parsing failed; returning raw text", exc_info=True)
-        return text, []
+        except Exception as exc:
+            parser_backend = {"sglang": "SGLang", "vllm": "vLLM"}.get(self._rollout_backend, "verl")
+            raise RuntimeError(f"{parser_backend} tool parser {parser_name!r} failed") from exc
 
     async def decode_response(
         self,

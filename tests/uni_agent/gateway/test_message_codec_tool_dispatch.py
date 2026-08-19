@@ -102,7 +102,7 @@ def test_vllm_parser_supports_tool_schema_constructor_contracts(monkeypatch, con
 
 
 @pytest.mark.asyncio
-async def test_tool_call_dispatch_prefers_sglang(monkeypatch):
+async def test_tool_call_dispatch_uses_sglang_for_sglang_rollout(monkeypatch):
     from uni_agent.gateway.session.codec import MessageCodec
 
     seen = {}
@@ -117,7 +117,7 @@ async def test_tool_call_dispatch_prefers_sglang(monkeypatch):
     async def fail_verl(*args, **kwargs):
         raise AssertionError("verl should not run when an engine succeeds")
 
-    codec = MessageCodec(FakeTokenizer())
+    codec = MessageCodec(FakeTokenizer(), rollout_backend="sglang")
     monkeypatch.setattr(codec, "_process_tool_calls_sglang", fake_sglang)
     monkeypatch.setattr(codec, "_process_tool_calls_vllm", fail_vllm)
     monkeypatch.setattr(codec, "_process_tool_calls_verl", fail_verl)
@@ -130,13 +130,13 @@ async def test_tool_call_dispatch_prefers_sglang(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_tool_call_dispatch_falls_back_to_vllm_with_name_mapping(monkeypatch):
+async def test_tool_call_dispatch_uses_vllm_for_vllm_rollout_with_name_mapping(monkeypatch):
     from uni_agent.gateway.session.codec import MessageCodec
 
     seen = {}
 
-    def missing_sglang(*args, **kwargs):
-        raise ModuleNotFoundError("sglang")
+    def fail_sglang(*args, **kwargs):
+        raise AssertionError("SGLang should not run for a vLLM rollout")
 
     def fake_vllm(text, tools, parser_name):
         seen["vllm"] = (text, tools, parser_name)
@@ -145,8 +145,8 @@ async def test_tool_call_dispatch_falls_back_to_vllm_with_name_mapping(monkeypat
     async def fail_verl(*args, **kwargs):
         raise AssertionError("verl should not run when an engine succeeds")
 
-    codec = MessageCodec(FakeTokenizer())
-    monkeypatch.setattr(codec, "_process_tool_calls_sglang", missing_sglang)
+    codec = MessageCodec(FakeTokenizer(), rollout_backend="vllm")
+    monkeypatch.setattr(codec, "_process_tool_calls_sglang", fail_sglang)
     monkeypatch.setattr(codec, "_process_tool_calls_vllm", fake_vllm)
     monkeypatch.setattr(codec, "_process_tool_calls_verl", fail_verl)
 
@@ -158,23 +158,21 @@ async def test_tool_call_dispatch_falls_back_to_vllm_with_name_mapping(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_tool_call_dispatch_falls_back_to_verl_when_engines_unavailable(monkeypatch):
-    """With neither SGLang nor vLLM importable, the dispatcher hands the response token ids
-    to verl's tool-parser registry, which needs no inference engine."""
+async def test_tool_call_dispatch_uses_verl_for_other_rollout_backends(monkeypatch):
     from uni_agent.gateway.session.codec import MessageCodec
 
     seen = {}
 
-    def missing_engine(*args, **kwargs):
-        raise ModuleNotFoundError("tool parser engine")
+    def fail_engine(*args, **kwargs):
+        raise AssertionError("engine parser should not run for another rollout backend")
 
     async def fake_verl(response_ids, tools, parser_name):
         seen["verl"] = (response_ids, tools, parser_name)
         return "thinking", [SimpleNamespace(name="search", arguments='{"query":"docs"}')]
 
-    codec = MessageCodec(FakeTokenizer())
-    monkeypatch.setattr(codec, "_process_tool_calls_sglang", missing_engine)
-    monkeypatch.setattr(codec, "_process_tool_calls_vllm", missing_engine)
+    codec = MessageCodec(FakeTokenizer(), rollout_backend="hf")
+    monkeypatch.setattr(codec, "_process_tool_calls_sglang", fail_engine)
+    monkeypatch.setattr(codec, "_process_tool_calls_vllm", fail_engine)
     monkeypatch.setattr(codec, "_process_tool_calls_verl", fake_verl)
 
     text = 'thinking\n<tool_call>\n{"name": "search", "arguments": {"query": "docs"}}\n</tool_call>'
@@ -186,57 +184,30 @@ async def test_tool_call_dispatch_falls_back_to_verl_when_engines_unavailable(mo
 
 
 @pytest.mark.asyncio
-async def test_tool_call_dispatch_returns_text_when_verl_does_not_register_the_parser(monkeypatch):
-    """verl's registry raises ValueError for a parser name it does not know; the dispatcher
-    then returns the raw text unchanged."""
+async def test_tool_call_dispatch_surfaces_selected_parser_failure_without_fallback(monkeypatch):
     from uni_agent.gateway.session.codec import MessageCodec
 
-    def missing_engine(*args, **kwargs):
-        raise ModuleNotFoundError("tool parser engine")
+    def broken_vllm(*args, **kwargs):
+        raise ModuleNotFoundError("vllm")
 
-    async def unknown_parser(*args, **kwargs):
-        raise ValueError("Unknown tool parser: qwen3_xml")
+    async def fail_verl(*args, **kwargs):
+        raise AssertionError("verl must not hide a selected vLLM parser failure")
 
-    codec = MessageCodec(FakeTokenizer())
-    monkeypatch.setattr(codec, "_process_tool_calls_sglang", missing_engine)
-    monkeypatch.setattr(codec, "_process_tool_calls_vllm", missing_engine)
-    monkeypatch.setattr(codec, "_process_tool_calls_verl", unknown_parser)
+    codec = MessageCodec(FakeTokenizer(), rollout_backend="vllm")
+    monkeypatch.setattr(codec, "_process_tool_calls_vllm", broken_vllm)
+    monkeypatch.setattr(codec, "_process_tool_calls_verl", fail_verl)
 
-    text = '<tool_call>\n{"name": "search", "arguments": {"query": "docs"}}\n</tool_call>'
-    content, calls = await codec._extract_tool_calls(_ids(text), TOOLS, "qwen3_xml")
+    with pytest.raises(RuntimeError, match="vLLM tool parser 'hermes' failed") as exc_info:
+        await codec._extract_tool_calls(_ids("plain text"), TOOLS, "hermes")
 
-    assert content == text
-    assert calls == []
+    assert isinstance(exc_info.value.__cause__, ModuleNotFoundError)
 
 
 @pytest.mark.asyncio
-async def test_tool_call_dispatch_returns_text_when_verl_parsing_fails(monkeypatch):
+async def test_selected_parser_empty_result_is_not_an_error(monkeypatch):
     from uni_agent.gateway.session.codec import MessageCodec
 
-    def missing_engine(*args, **kwargs):
-        raise ModuleNotFoundError("tool parser engine")
-
-    async def broken_verl(*args, **kwargs):
-        raise RuntimeError("boom")
-
-    codec = MessageCodec(FakeTokenizer())
-    monkeypatch.setattr(codec, "_process_tool_calls_sglang", missing_engine)
-    monkeypatch.setattr(codec, "_process_tool_calls_vllm", missing_engine)
-    monkeypatch.setattr(codec, "_process_tool_calls_verl", broken_verl)
-
-    content, calls = await codec._extract_tool_calls(_ids("plain text"), TOOLS, "hermes")
-
-    assert content == "plain text"
-    assert calls == []
-
-
-@pytest.mark.asyncio
-async def test_tool_call_dispatch_prefers_sglang_empty_result_over_fallback(monkeypatch):
-    """An installed engine that reports no tool call is authoritative; the fallbacks exist for
-    hosts where no engine can run at all, not to second-guess one that did."""
-    from uni_agent.gateway.session.codec import MessageCodec
-
-    codec = MessageCodec(FakeTokenizer())
+    codec = MessageCodec(FakeTokenizer(), rollout_backend="sglang")
     monkeypatch.setattr(
         codec,
         "_process_tool_calls_sglang",
@@ -260,9 +231,7 @@ async def test_tool_call_dispatch_prefers_sglang_empty_result_over_fallback(monk
 
 
 @pytest.mark.asyncio
-async def test_verl_fallback_parses_hermes_envelope():
-    """The engine-less path uses verl's own registry, so a Hermes envelope is parsed even on
-    a host with neither SGLang nor vLLM installed."""
+async def test_verl_parser_parses_hermes_envelope():
     from uni_agent.gateway.session.codec import MessageCodec
 
     text = 'thinking\n<tool_call>\n{"name": "search", "arguments": {"query": "docs", "limit": 2}}\n</tool_call>'
