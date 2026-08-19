@@ -350,17 +350,17 @@ class MessageCodec:
         parser_name: str,
     ) -> tuple[str, list[Any]]:
         text = self._tokenizer.decode(response_ids, skip_special_tokens=False)
+        parser_backend = self._rollout_backend if self._rollout_backend in {"sglang", "vllm"} else "verl"
 
         try:
-            if self._rollout_backend == "sglang":
+            if parser_backend == "sglang":
                 sglang_name = _SGLANG_TOOL_PARSER_ALIASES.get(parser_name, parser_name)
                 return self._process_tool_calls_sglang(text, tools, sglang_name)
-            if self._rollout_backend == "vllm":
+            if parser_backend == "vllm":
                 vllm_name = _VLLM_TOOL_PARSER_ALIASES.get(parser_name, parser_name)
                 return self._process_tool_calls_vllm(text, tools, vllm_name)
             return await self._process_tool_calls_verl(response_ids, tools, parser_name)
         except Exception as exc:
-            parser_backend = {"sglang": "SGLang", "vllm": "vLLM"}.get(self._rollout_backend, "verl")
             raise RuntimeError(f"{parser_backend} tool parser {parser_name!r} failed") from exc
 
     async def decode_response(

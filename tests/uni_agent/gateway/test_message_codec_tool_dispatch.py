@@ -197,7 +197,7 @@ async def test_tool_call_dispatch_surfaces_selected_parser_failure_without_fallb
     monkeypatch.setattr(codec, "_process_tool_calls_vllm", broken_vllm)
     monkeypatch.setattr(codec, "_process_tool_calls_verl", fail_verl)
 
-    with pytest.raises(RuntimeError, match="vLLM tool parser 'hermes' failed") as exc_info:
+    with pytest.raises(RuntimeError, match="vllm tool parser 'hermes' failed") as exc_info:
         await codec._extract_tool_calls(_ids("plain text"), TOOLS, "hermes")
 
     assert isinstance(exc_info.value.__cause__, ModuleNotFoundError)
