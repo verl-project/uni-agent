@@ -19,7 +19,8 @@ SUBAGENT_SYS = {"role": "system", "content": "You are a focused subagent."}
 ALLOWED_SAMPLING_KEYS = frozenset({"temperature", "top_p", "top_k", "max_tokens", "stop"})
 
 
-def _fake_tool_call_dispatch(text, tools, parser_name, tokenizer):
+async def _fake_tool_call_dispatch(self, response_ids, tools, parser_name):
+    text = self._tokenizer.decode(response_ids, skip_special_tokens=False)
     if "<tool_call>" not in text:
         return text, []
     return "", [SimpleNamespace(name="search", arguments='{"query":"weather"}')]
@@ -274,9 +275,13 @@ async def test_multiple_chains_context_compaction_starts_new_chain():
 
 
 @pytest.mark.asyncio
-async def test_first_assistant_rewrite_splits_without_rollback():
-    """Split a first-assistant rewrite because there are no trainable tokens to preserve."""
-    session = _session("rollback-token-truth", enable_last_assistant_rollback=True)
+async def test_first_assistant_rewrite_reuses_chain_without_stale_response():
+    """Replace a first assistant in place when no earlier response tokens exist."""
+    session = _session(
+        "rollback-token-truth",
+        sampling_params={"logprobs": True},
+        enable_last_assistant_rollback=True,
+    )
     first_messages = [{"role": "user", "content": "run mini-swe"}]
     rewrite_messages = [
         *first_messages,
@@ -289,19 +294,73 @@ async def test_first_assistant_rewrite_splits_without_rollback():
     await _run(session, backend, rewrite_messages)
 
     state = session.snapshot_state()
-    assert state["active_chain_ids"] == [1, 2]
-    assert state["rollback_count"] == 0
-    chains_by_id = {chain.chain_id: chain for chain in session.active_chains}
-    assert _decode_response_ids(chains_by_id[1].buffer.response_ids) == "FORMAT_ERROR"
-    expected_prompt_ids = codec.encode_full(rewrite_messages)
-    assert backend.calls[1]["prompt_ids"] == expected_prompt_ids
-    assert chains_by_id[2].buffer.prompt_ids == expected_prompt_ids
-    assert _decode_response_ids(chains_by_id[2].buffer.response_ids) == "FIXED"
+    assert state["active_chain_ids"] == [1]
+    assert state["rollback_count"] == 1
+    assert state["rollback_dropped_trainable_tokens_total"] == len("FORMAT_ERROR")
+    chain = session.active_chains[0]
+    expected_prompt_ids = codec.encode_full(first_messages)
+    del expected_prompt_ids[-len(codec.turn_separator) - len(codec.generation_prompt) :]
+    incremental_ids = codec.encode_incremental(rewrite_messages[len(first_messages) :])
+    assert backend.calls[1]["prompt_ids"] == codec.encode_full(rewrite_messages)
+    assert chain.buffer.prompt_ids == expected_prompt_ids
+    assert chain.buffer.response_ids == incremental_ids + _ids("FIXED")
+    assert chain.buffer.response_mask == [0] * len(incremental_ids) + [1] * len("FIXED")
+    assert chain.buffer.response_logprobs == [0.0] * len(incremental_ids) + [-0.1] * len("FIXED")
 
 
 @pytest.mark.asyncio
-async def test_first_assistant_rewrite_with_assistant_tool_context_splits():
-    """Split a first-turn assistant/tool rewrite as a fresh full prompt."""
+async def test_first_assistant_rollback_failure_preserves_original_chain():
+    """Keep the original first-turn chain when replacement generation fails."""
+    session = _session("rollback-first-failure", enable_last_assistant_rollback=True)
+    first_messages = [{"role": "user", "content": "run mini-swe"}]
+    rewrite_messages = [
+        *first_messages,
+        {"role": "user", "content": "user_error: missing import"},
+    ]
+    backend = SequencedBackend(["FORMAT_ERROR", RuntimeError("boom")])
+
+    await _run(session, backend, first_messages)
+    with pytest.raises(HTTPException, match="RuntimeError: boom"):
+        await _run(session, backend, rewrite_messages)
+
+    state = session.snapshot_state()
+    assert state["active_chain_ids"] == [1]
+    assert state["rollback_count"] == 0
+    assert _decode_response_ids(session.active_chains[0].buffer.response_ids) == "FORMAT_ERROR"
+
+
+@pytest.mark.asyncio
+async def test_first_assistant_rollback_drops_chain_when_replacement_exceeds_capacity():
+    """Drop the empty-prefix chain when the replacement prompt cannot fit."""
+    first_messages = [{"role": "user", "content": "run mini-swe"}]
+    rewrite_messages = [
+        *first_messages,
+        {"role": "user", "content": "user_error: missing import"},
+    ]
+    total_capacity = _prompt_length(rewrite_messages) - 1
+    session = _session(
+        "rollback-first-capacity",
+        prompt_length=1,
+        response_length=total_capacity - 1,
+        enable_last_assistant_rollback=True,
+    )
+    backend = SequencedBackend(["FORMAT_ERROR", "SHOULD_NOT_RUN"])
+
+    await _run(session, backend, first_messages)
+    outcome = await _run(session, backend, rewrite_messages)
+
+    assert outcome.finish_reason == "length"
+    assert len(backend.calls) == 1
+    state = session.snapshot_state()
+    assert state["active_chain_ids"] == []
+    assert state["rollback_count"] == 1
+    assert state["rollback_dropped_trainable_tokens_total"] == len("FORMAT_ERROR")
+    assert await session.finalize() == []
+
+
+@pytest.mark.asyncio
+async def test_first_assistant_rewrite_with_assistant_tool_context_reuses_chain():
+    """Replace a first-turn assistant/tool context in the existing chain."""
     session = _session("rollback-first-assistant-tool", enable_last_assistant_rollback=True)
     first_messages = [{"role": "user", "content": "run task"}]
     rewrite_messages = [
@@ -314,13 +373,11 @@ async def test_first_assistant_rewrite_with_assistant_tool_context_splits():
     await _run(session, backend, first_messages)
     await _run(session, backend, rewrite_messages)
 
-    assert [chain.chain_id for chain in session.active_chains] == [1, 2]
-    chains_by_id = {chain.chain_id: chain for chain in session.active_chains}
-    assert _decode_response_ids(chains_by_id[1].buffer.response_ids) == "BAD"
-    expected_prompt_ids = session._codec.encode_full(rewrite_messages)
-    assert backend.calls[1]["prompt_ids"] == expected_prompt_ids
-    assert chains_by_id[2].buffer.prompt_ids == expected_prompt_ids
-    assert chains_by_id[2].buffer.response_ids == _ids("FIXED")
+    assert [chain.chain_id for chain in session.active_chains] == [1]
+    chain = session.active_chains[0]
+    codec = session._codec
+    assert backend.calls[1]["prompt_ids"] == codec.encode_full(rewrite_messages)
+    assert chain.buffer.response_ids[-len("FIXED") :] == _ids("FIXED")
 
 
 @pytest.mark.asyncio
@@ -398,9 +455,11 @@ async def test_later_user_rollback_deduplicates_incremental_turn_separator():
 
 
 @pytest.mark.asyncio
-async def test_later_assistant_rollback_rejects_misaligned_generation_prompt():
-    """Fail closed when a stored response-side GP no longer matches the codec."""
-    session = _session("rollback-gp-assert", enable_last_assistant_rollback=True)
+async def test_later_assistant_rollback_rejects_misaligned_assistant_prefix():
+    """Fail closed when the stored turn separator no longer matches the codec."""
+    session = _session("rollback-prefix-assert", enable_last_assistant_rollback=True)
+    codec = session._codec
+    codec._turn_separator = _ids("\n")
     backend = SequencedBackend(["A1", "A2", "FIXED"])
     first_messages = [{"role": "user", "content": "start"}]
     continuation = [
@@ -414,9 +473,10 @@ async def test_later_assistant_rollback_rejects_misaligned_generation_prompt():
     await _run(session, backend, continuation)
     [chain] = session.active_chains
     snapshot = chain.last_assistant_start
-    chain.buffer.response_ids[snapshot.response_ids_len - 1] += 1
+    separator_end = snapshot.response_ids_len - len(codec.generation_prompt)
+    chain.buffer.response_ids[separator_end - 1] += 1
 
-    with pytest.raises(ValueError, match="generation prompt"):
+    with pytest.raises(ValueError, match="assistant prefix"):
         await _run(session, backend, rewrite_messages)
 
 
@@ -1515,7 +1575,7 @@ async def test_multiple_chains_tool_call_echo_reuses_chain_despite_fresh_tool_re
     """Match on the committed prefix; a fresh tool-result ID is outside that boundary."""
     import uni_agent.gateway.session.codec as codec_mod
 
-    monkeypatch.setattr(codec_mod, "_extract_tool_calls_with_sglang_or_vllm", _fake_tool_call_dispatch)
+    monkeypatch.setattr(codec_mod.MessageCodec, "_extract_tool_calls", _fake_tool_call_dispatch)
     session = _session("tool-call-echo", tool_parser_name="hermes")
     tools = [{"type": "function", "function": {"name": "search", "parameters": {"type": "object"}}}]
     tool_call_text = '<tool_call>\n{"name": "search", "arguments": {"query": "weather"}}\n</tool_call>'
@@ -1565,7 +1625,7 @@ async def test_multiple_chains_tool_call_id_rewrite_reuses_chain(monkeypatch):
     """Reuse a chain when committed tool-call IDs are rewritten."""
     import uni_agent.gateway.session.codec as codec_mod
 
-    monkeypatch.setattr(codec_mod, "_extract_tool_calls_with_sglang_or_vllm", _fake_tool_call_dispatch)
+    monkeypatch.setattr(codec_mod.MessageCodec, "_extract_tool_calls", _fake_tool_call_dispatch)
     session = _session("tool-call-id-rewrite", tool_parser_name="hermes")
     tools = [{"type": "function", "function": {"name": "search", "parameters": {"type": "object"}}}]
     tool_call_text = '<tool_call>\n{"name": "search", "arguments": {"query": "weather"}}\n</tool_call>'

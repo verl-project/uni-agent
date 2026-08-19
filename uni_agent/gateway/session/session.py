@@ -427,29 +427,27 @@ class GatewaySession:
                 if video_data is not None:
                     assert last_assistant_start.video_data_len <= len(video_data)
                     video_data = video_data[: last_assistant_start.video_data_len] or None
-                assert last_assistant_start.response_ids_len > 0
-                # Later rollbacks retain earlier trainable output; the snapshot was captured
-                # after the prior incremental GP, so remove that verified suffix as well.
-                generation_prompt = self._codec.generation_prompt
-                rollback_response_len = last_assistant_start.response_ids_len - len(generation_prompt)
-                if (
-                    rollback_response_len < 0
-                    or buffer.response_ids[rollback_response_len : last_assistant_start.response_ids_len]
-                    != generation_prompt
-                ):
-                    raise ValueError("Stored response does not end its assistant prefix with the generation prompt")
-                # Incremental encoding restores the turn separator with the replacement suffix.
-                rollback_response_len -= len(self._codec.turn_separator)
+
+                rollback_response_len = last_assistant_start.response_ids_len
                 del buffer.response_ids[rollback_response_len:]
                 del buffer.response_mask[rollback_response_len:]
                 del buffer.response_logprobs[rollback_response_len:]
+
+                assistant_prefix = self._codec.turn_separator + self._codec.generation_prompt
+                stored_ids = buffer.prompt_ids if rollback_response_len == 0 else buffer.response_ids
+                assistant_prefix_start = len(stored_ids) - len(assistant_prefix)
+                if stored_ids[assistant_prefix_start:] != assistant_prefix:
+                    raise ValueError("Stored trajectory does not end with the assistant prefix")
+                del stored_ids[assistant_prefix_start:]
+                if rollback_response_len:
+                    del buffer.response_mask[assistant_prefix_start:]
+                    del buffer.response_logprobs[assistant_prefix_start:]
                 self._assert_response_logprob_alignment(buffer)
-                incremental_start = last_assistant_start.message_history_len
+                incremental_messages = messages[last_assistant_start.message_history_len :]
                 rollback_applied = True
             else:
-                incremental_start = len(selected_chain.message_history)
+                incremental_messages = messages[len(selected_chain.message_history) :]
 
-            incremental_messages = messages[incremental_start:]
             new_image_data = None
             new_video_data = None
             incremental_ids = []
@@ -468,7 +466,6 @@ class GatewaySession:
                     self._trajectory_capacity is not None
                     and current_trajectory_length + len(incremental_ids) >= self._trajectory_capacity
                 )
-
             if not capacity_exhausted:
                 buffer.response_ids.extend(incremental_ids)
                 buffer.response_mask.extend([0] * len(incremental_ids))
@@ -559,10 +556,6 @@ class GatewaySession:
                 ranked_candidates.append((chain, len(chain.message_history), True))
                 continue
             if self._enable_last_assistant_rollback:
-                if assistant_start.response_ids_len == 0:
-                    # No response-side tokens predate this assistant, so rollback has nothing
-                    # to preserve. Omit it while still allowing an exact or later chain to win.
-                    continue
                 if assistant_start_len > deepest_rollback_service_value:
                     deepest_rollback_candidates = [chain]
                     deepest_rollback_service_value = assistant_start_len
@@ -724,6 +717,11 @@ class GatewaySession:
         if encoded.chain_id is None:
             raise RuntimeError("length-exhausted chain id is missing")
         chain_index, chain = self._find_active_chain(encoded.chain_id)
+        if encoded.rollback_applied and chain.last_assistant_start.response_ids_len == 0:
+            # No trainable response prefix survives this rollback.
+            self._record_rollback_stats(encoded)
+            del self.active_chains[chain_index]
+            return
         chain_to_materialize = chain
         if encoded.rollback_applied:
             message_history_len = chain.last_assistant_start.message_history_len
