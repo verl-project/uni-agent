@@ -40,13 +40,18 @@ python3 -m uni_agent.tasks.swe_bench.preprocess --local-save-dir ~/data/uni_agen
 
 The command writes: `~/data/uni_agent/swe_bench_verified.parquet`
 
-The processed rows remain independent of the runtime Sandbox provider. Each row contains the rendered prompt, task metadata, canonical image reference, and per-sample Task Config.
+The processed rows remain independent of the runtime Sandbox provider and Agent protocol. Each row contains one source user message with the problem statement, task metadata, a canonical image reference, and a per-sample Task Config. The selected ReAct or Claude Code recipe owns the complete `prompt_template` and renders the effective Agent messages at Task runtime.
+
+!!! warning "Prompt length filtering"
+    The standard verl dataset filters by the source prompt before the runtime Task template is expanded. A source message can therefore pass the configured prompt-length check even when its effective Agent prompt is longer. Size prompt limits with the selected recipe template in mind.
 
 ## Configuration
 
 ### Task Configuration
 
 The Quickstart provides separate configs for the two Agent types:
+
+Both files define a complete `prompt_template` for each task. ReAct owns its `submit` protocol in the ReAct recipe; the Claude Code recipe contains no generated submit instruction. To customize the workflow, replace the recipe template as a whole while keeping exactly one `{prompt}` field.
 
 === "ReAct"
 

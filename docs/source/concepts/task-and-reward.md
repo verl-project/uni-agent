@@ -20,7 +20,8 @@ Every Task configuration inherits from `TaskConfig`:
 - `name`: registered Task family.
 - `sandbox`: `SandboxConfig`.
 - `agent`: concrete Agent configuration.
-- `prompt`: OpenAI-style messages.
+- `prompt`: source OpenAI-style messages supplied by the dataset or caller.
+- `prompt_template`: optional recipe-owned messages rendered before the Agent starts.
 - `metadata`: sample-specific data used by execution and scoring.
 
 Task-specific configs can add validated fields:
@@ -37,6 +38,39 @@ class MyTaskConfig(TaskConfig):
 ```
 
 Unknown fields are rejected. Agent mappings are resolved through the Agent registry into the correct AgentConfig subclass.
+
+### Source and Effective Prompts
+
+Datasets should keep `prompt` agent-neutral. SWE preprocessors, for example, emit one user message containing the issue text. A Task recipe can turn that source into the complete Agent-specific input with `prompt_template`:
+
+```yaml
+- name: swe_bench
+  prompt_template:
+    - role: system
+      content: You are a software engineer working in an existing repository.
+    - role: user
+      content: |-
+        Resolve this issue in /testbed:
+
+        {prompt}
+  agent:
+    name: claude_code
+```
+
+The runtime binds the top-level source `prompt` before Task Config resolution. A recipe-file `prompt_template` owns the complete template and cannot be replaced by a same-named value serialized in a dataset row. Other Task Config fields retain their normal merge behavior.
+
+The first template contract is intentionally strict:
+
+- The source must be exactly one user message.
+- Template output is a list of messages with string `role` and string `content`.
+- Exactly one `{prompt}` field is required. Other fields, conversions, and format specifications are rejected.
+- Content equal to `{prompt}` preserves the source content object, including structured multimedia blocks.
+- Embedding `{prompt}` in surrounding text requires string source content.
+- Use standard Python formatting escapes, `{{` and `}}`, for literal braces.
+
+Without `prompt_template`, messages pass through unchanged, so existing already-rendered datasets remain compatible with template-free recipes. Combining a template with legacy multi-message rendered input fails validation instead of rendering a prompt twice.
+
+After rendering, `TaskConfig.prompt` is the effective message list passed to the Agent. `prompt_template` is an input-only rendering directive: serialized Task configs contain the effective prompt and omit the template body, preventing a later config round-trip from rendering it again. Framework-managed execution keeps the dataset value as `source_prompt` and exposes the effective messages as downstream `raw_prompt` to RewardLoop and TransferQueue consumers. This provenance copy is local to each rollout session; concurrent sessions never mutate the shared sample mapping. Reward-info telemetry remains limited to reward, accuracy, and completion state.
 
 ## Episode Implementation
 

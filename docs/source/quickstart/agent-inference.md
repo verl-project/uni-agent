@@ -125,6 +125,8 @@ For an authenticated endpoint, also set `API_KEY` or pass `--api-key`. The scrip
 
 Each rollout writes `<log_dir>/<log_id>/task.log`. Set `--log-dir` to a shared-storage path when Ray workers may run on different nodes.
 
+The dataset's top-level `prompt` is the canonical source input in this mode. Before resolving the selected Task recipe, `parallel_infer_api.py` binds that value over any legacy nested Task prompt. If the recipe defines `prompt_template`, the Task renders the complete Agent-specific messages at runtime; otherwise the source messages pass through unchanged.
+
 Useful controls:
 
 - `--concurrency`: maximum number of in-flight tasks across all workers; defaults to `GLOBAL_CONCURRENCY`.
@@ -174,6 +176,11 @@ Important controls:
 - `--log-dir`: runtime root for Framework logs, Task logs, and trajectory artifacts.
 
 Task/Agent/Tool events go to `task.log`; Framework events go to `framework.log`.
+
+In Framework-managed mode, each rollout session preserves the dataset prompt as `source_prompt` and uses the messages actually sent to the Agent as downstream `raw_prompt`. RewardLoop scoring and TransferQueue materialization therefore observe the effective prompt without changing the original batch sample.
+
+!!! note "Current scope"
+    Runtime prompt templates do not change the sandbox working directory or environment. Claude Code multimodal CLI input and multimodal reward-judge support are also separate capabilities.
 
 For a Ray cluster, you can submit your job via a pre-defined Runtime Environment, for example:
 
