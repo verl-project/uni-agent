@@ -13,20 +13,90 @@ import logging
 
 from pydantic import Field
 
+from ...sandbox import SandboxBackend
 from ..base import Task, TaskConfig, TaskResult
 from ..registry import register_task
 
 logger = logging.getLogger(__name__)
 
-# Remove the repo's own tags + unreachable history so a later "future" tag/commit
-# can't leak the fix to the agent. Best-effort (`|| true`); runs once in /testbed.
-_GIT_CLEAN_HISTORY = " && ".join(
-    [
-        "git tag -d $(git tag -l) || true",
-        "git reflog expire --expire=now --all || true",
-        "git gc --prune=now || true",
-    ]
-)
+
+_GIT_CLEAN_HISTORY = """
+set -euo pipefail
+
+test -n "${BASE_COMMIT:-}"
+base_commit="$(git rev-parse --verify "${BASE_COMMIT}^{commit}")"
+
+git reset --hard "$base_commit"
+git clean -ffd
+git checkout --detach "$base_commit"
+
+for remote in $(git remote); do
+    git remote remove "$remote"
+done
+git for-each-ref --format='delete %(refname)' | git update-ref --stdin
+
+git reflog expire --expire=now --expire-unreachable=now --all
+git gc --prune=now
+git prune --expire=now
+
+test "$(git rev-parse HEAD)" = "$base_commit"
+test -z "$(git remote)"
+test -z "$(git for-each-ref --format='%(refname)')"
+test "$(git rev-list --count --all --reflog --not HEAD)" = "0"
+test -z "$(git status --porcelain --untracked-files=all)"
+""".strip()
+
+_GIT_CLEAN_TIMEOUT_SECONDS = 600
+
+
+async def _git_stdout(sandbox: SandboxBackend, *args: str) -> str:
+    result = await sandbox.exec(["git", *args], workdir="/testbed", timeout=120)
+    if result.exit_code != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or f"exit code {result.exit_code}"
+        raise RuntimeError(f"git {' '.join(args)} failed: {detail}")
+    return result.stdout.strip()
+
+
+async def _warn_if_git_history_is_unsanitized(
+    sandbox: SandboxBackend,
+    *,
+    base_commit: str,
+    instance_id: str,
+) -> None:
+    head_commit = await _git_stdout(sandbox, "rev-parse", "HEAD")
+    future_commit_count = int(
+        await _git_stdout(
+            sandbox,
+            "rev-list",
+            "--count",
+            "HEAD",
+            "--all",
+            "--reflog",
+            "--not",
+            base_commit,
+        )
+    )
+    head_is_base_commit = head_commit == base_commit
+    if not head_is_base_commit or future_commit_count:
+        logger.warning(
+            f"git-check after-cleanup instance_id={instance_id} "
+            f"head_is_base_commit={str(head_is_base_commit).lower()} "
+            f"future_commits_visible={str(future_commit_count > 0).lower()} "
+            f"future_commit_count={future_commit_count} "
+            f"head={head_commit} base={base_commit}"
+        )
+
+
+async def _clean_git_history(sandbox: SandboxBackend, base_commit: str) -> None:
+    result = await sandbox.exec_shell(
+        _GIT_CLEAN_HISTORY,
+        workdir="/testbed",
+        env={"BASE_COMMIT": base_commit},
+        timeout=_GIT_CLEAN_TIMEOUT_SECONDS,
+    )
+    if result.exit_code != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or f"exit code {result.exit_code}"
+        raise RuntimeError(f"failed to sanitize git history at base_commit={base_commit}: {detail}")
 
 
 class SWEREBenchTaskConfig(TaskConfig):
@@ -52,9 +122,18 @@ class SWEREBenchTask(Task):
             f"starting swe_rebench task (instance_id={instance_id}, run_oracle_solution={cfg.run_oracle_solution})\n"
             f"task config: {json.dumps(task_config_dump, indent=2)}"
         )
+        base_commit = sample.get("base_commit") if isinstance(sample, dict) else None
+        if not isinstance(base_commit, str) or not base_commit.strip():
+            raise ValueError(f"missing base_commit for swe_rebench instance_id={instance_id}")
+
         async with self.build_sandbox() as sandbox:
-            # Clean future history before anything reads the repo.
-            await sandbox.exec_shell(_GIT_CLEAN_HISTORY, workdir="/testbed")
+            # Reset first, then remove every other local path to future commits.
+            await _clean_git_history(sandbox, base_commit.strip())
+            await _warn_if_git_history_is_unsanitized(
+                sandbox,
+                base_commit=base_commit.strip(),
+                instance_id=str(instance_id),
+            )
 
             if cfg.run_oracle_solution:
                 logger.info("applying gold patch to /testbed")
