@@ -170,38 +170,30 @@ def test_vllm_parser_cache_separates_tool_schemas(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_message_codec_reuses_vllm_parser_across_decode_calls(monkeypatch):
+@pytest.mark.parametrize(
+    ("enable_tool_parser_cache", "expected_constructions"),
+    [(True, 1), (False, 2)],
+)
+async def test_message_codec_applies_parser_cache_policy_across_decode_calls(
+    monkeypatch,
+    enable_tool_parser_cache,
+    expected_constructions,
+):
     from uni_agent.gateway.session.codec import MessageCodec
 
     constructions = []
-    lookups = []
-    _install_fake_vllm(monkeypatch, constructions, lookups)
+    _install_fake_vllm(monkeypatch, constructions)
     codec = MessageCodec(
         FakeTokenizer(),
         tool_parser_name="qwen3_coder",
         rollout_backend="vllm",
+        enable_tool_parser_cache=enable_tool_parser_cache,
     )
 
     await codec.decode_response([ord("x")], tools=TOOLS)
     await codec.decode_response([ord("x")], tools=_equivalent_tools())
 
-    assert len(constructions) == 1
-    assert lookups == ["qwen3_coder"]
-
-
-def test_message_codec_can_disable_parser_cache(monkeypatch):
-    from uni_agent.gateway.session.codec import MessageCodec
-
-    constructions = []
-    lookups = []
-    _install_fake_vllm(monkeypatch, constructions, lookups)
-    codec = MessageCodec(FakeTokenizer(), enable_tool_parser_cache=False)
-
-    codec._process_tool_calls_vllm("plain", TOOLS, "qwen3_coder")
-    codec._process_tool_calls_vllm("plain", TOOLS, "qwen3_coder")
-
-    assert len(constructions) == 2
-    assert lookups == ["qwen3_coder", "qwen3_coder"]
+    assert len(constructions) == expected_constructions
 
 
 def test_parser_cache_is_scoped_to_message_codec(monkeypatch):
