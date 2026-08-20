@@ -95,19 +95,21 @@ def test_swe_preprocess_emits_source_prompt_without_nested_rendered_prompt(monke
 
 
 @pytest.mark.parametrize(
-    ("recipe_path", "expects_submit"),
+    ("recipe_path", "task_name", "expects_submit"),
     [
-        ("examples/quickstart/inference/task_config_react.yaml", True),
-        ("examples/quickstart/inference/task_config_claude_code.yaml", False),
-        ("examples/quickstart/training/task_config_react.yaml", True),
-        ("examples/quickstart/training/task_config_claude_code.yaml", False),
+        ("examples/quickstart/inference/task_config_react.yaml", "swe_bench", True),
+        ("examples/quickstart/inference/task_config_claude_code.yaml", "swe_bench", False),
+        ("examples/quickstart/training/task_config_react.yaml", "swe_bench", True),
+        ("examples/quickstart/training/task_config_react.yaml", "swe_rebench", True),
+        ("examples/quickstart/training/task_config_claude_code.yaml", "swe_bench", False),
+        ("examples/quickstart/training/task_config_claude_code.yaml", "swe_rebench", False),
     ],
 )
-def test_swe_recipe_renders_complete_agent_specific_prompt(recipe_path, expects_submit):
+def test_swe_recipe_renders_complete_agent_specific_prompt(recipe_path, task_name, expects_submit):
     source_problem = "Canonical source problem"
     resolved = TaskConfigResolver.from_file(recipe_path).resolve(
         {
-            "name": "swe_bench",
+            "name": task_name,
             "prompt": [{"role": "user", "content": source_problem}],
             "prompt_template": [{"role": "user", "content": "STALE {prompt}"}],
             "metadata": {"patch": "SECRET GOLD PATCH", "test_patch": "SECRET TEST PATCH"},

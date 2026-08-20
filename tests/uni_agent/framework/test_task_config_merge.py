@@ -163,6 +163,41 @@ def test_exact_prompt_substitution_preserves_structured_content():
     assert isinstance(config.prompt[0]["content"], list)
 
 
+def test_structured_prompt_allows_escaped_prompt_literal_in_another_message():
+    structured_content = [
+        {"type": "text", "text": "Inspect this image"},
+        {"type": "image", "image": {"bytes": b"image-bytes"}},
+    ]
+
+    config = TaskConfig(
+        sandbox=_LOCAL_SANDBOX,
+        prompt=[{"role": "user", "content": structured_content}],
+        prompt_template=[
+            {"role": "system", "content": "Keep the literal {{prompt}} marker."},
+            {"role": "user", "content": "{prompt}"},
+        ],
+    )
+
+    assert config.prompt == [
+        {"role": "system", "content": "Keep the literal {prompt} marker."},
+        {"role": "user", "content": structured_content},
+    ]
+
+
+def test_rendered_task_config_round_trip_does_not_serialize_template():
+    config = TaskConfig(
+        sandbox=_LOCAL_SANDBOX,
+        agent={"name": "react"},
+        prompt=[{"role": "user", "content": "Fix the parser"}],
+        prompt_template=[{"role": "user", "content": "Issue: {prompt}"}],
+    )
+
+    dumped = config.model_dump()
+
+    assert "prompt_template" not in dumped
+    assert TaskConfig.model_validate(dumped).prompt == config.prompt
+
+
 @pytest.mark.parametrize(
     ("prompt_template", "error"),
     [
@@ -181,9 +216,9 @@ def test_exact_prompt_substitution_preserves_structured_content():
 )
 def test_task_prompt_template_rejects_invalid_fields(prompt_template, error):
     with pytest.raises(ValueError, match=error):
-            TaskConfig(
-                sandbox=_LOCAL_SANDBOX,
-                prompt=[{"role": "user", "content": "Fix the parser"}],
+        TaskConfig(
+            sandbox=_LOCAL_SANDBOX,
+            prompt=[{"role": "user", "content": "Fix the parser"}],
             prompt_template=prompt_template,
         )
 
@@ -205,9 +240,9 @@ def test_task_prompt_template_rejects_invalid_fields(prompt_template, error):
 )
 def test_task_prompt_template_rejects_incompatible_source_messages(source_prompt, error):
     with pytest.raises(ValueError, match=error):
-            TaskConfig(
-                sandbox=_LOCAL_SANDBOX,
-                prompt=source_prompt,
+        TaskConfig(
+            sandbox=_LOCAL_SANDBOX,
+            prompt=source_prompt,
             prompt_template=[{"role": "user", "content": "{prompt}"}],
         )
 
@@ -223,9 +258,9 @@ def test_task_prompt_template_rejects_incompatible_source_messages(source_prompt
 )
 def test_task_prompt_template_rejects_incompatible_template_messages(prompt_template, error):
     with pytest.raises(ValueError, match=error):
-            TaskConfig(
-                sandbox=_LOCAL_SANDBOX,
-                prompt=[{"role": "user", "content": "Fix the parser"}],
+        TaskConfig(
+            sandbox=_LOCAL_SANDBOX,
+            prompt=[{"role": "user", "content": "Fix the parser"}],
             prompt_template=prompt_template,
         )
 

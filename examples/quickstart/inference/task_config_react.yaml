@@ -50,7 +50,10 @@
         - Find and run the relevant unit tests relevant to the performed fix.
         - You should run the unit tests to ensure your solution is correct and does not cause any regressions.
         - In cases where the unit tests are do not pass, you should consider whether the unit tests does not reflect the *new* expected behavior of the code. If so, you can test it by writing additional edge test cases.
-        - Use the existing test runner to run the unit tests you identify as relevant to the changes you made.
+        - Use the existing test runner to run the unit tests you identify as relevant to the changes you made. For example:
+            - `python -m pytest -xvs sympy/physics/units/tests/test_dimensions_transcendental.py`
+            - `python -m pytest tests/test_domain_py.py::test_pymethod_options`
+            - `./tests/runtests.py constraints.tests.CheckConstraintTests -v 2`
         - RUN ALL relevant unit tests to ensure your solution is correct and does not cause any regressions.
         - DO NOT MODIFY any of the existing unit tests. You can add new edge test cases in a separate file if needed BUT DO NOT MODIFY THE EXISTING TESTS.
 
@@ -58,7 +61,10 @@
         - Identify potential edge cases that might challenge your solution.
         - Create additional test cases in a separate file '/testbed/edge_case_tests.py'.
         - Execute these tests to verify your solution's robustness.
-        - You should run multiple rounds of edge cases.
+        - You should run multiple rounds of edge cases. When creating edge cases:
+            - Consider complex scenarios beyond the original issue description
+            - Test for regressions to ensure existing functionality remains intact
+            - At each round you should write multiple edge test cases in the same file to be efficient
 
         8. Refine if necessary:
         - If edge case testing reveals issues, refine your solution accordingly.

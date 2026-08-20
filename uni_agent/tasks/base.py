@@ -46,6 +46,7 @@ class TaskConfig(BaseModel):
     prompt_template: list[dict[str, Any]] | None = Field(
         default=None,
         description="Optional recipe-owned messages containing exactly one {prompt} field.",
+        exclude=True,
     )
     metadata: dict[str, Any] = Field(default_factory=dict)
 

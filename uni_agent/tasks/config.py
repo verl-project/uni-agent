@@ -75,12 +75,13 @@ def render_prompt_template(
         raise ValueError(f"prompt_template must contain exactly one 'prompt' field; found {prompt_fields}")
 
     rendered: list[dict[str, Any]] = []
-    for message, _ in parsed_messages:
+    for message, parsed in parsed_messages:
         content = message["content"]
-        if content == "{prompt}":
+        if parsed == [("", "prompt", "", None)]:
             message["content"] = source_content
         else:
-            if "{prompt}" in content and not isinstance(source_content, str):
+            has_prompt_field = any(field_name == "prompt" for _, field_name, _, _ in parsed)
+            if has_prompt_field and not isinstance(source_content, str):
                 raise ValueError("embedded prompt substitution requires source content to be a string")
             message["content"] = formatter.vformat(content, (), {"prompt": source_content})
         rendered.append(message)

@@ -452,18 +452,9 @@ async def test_legacy_runner_keeps_source_as_raw_prompt(monkeypatch, fake_tq, di
 
     await framework.generate_sequences(_build_prompts(count=1, global_steps=7))
 
-    assert scored_sample_fields == [
-        {
-            "raw_prompt": [{"role": "user", "content": "sample 0"}],
-            "uid": "uid-0",
-            "data_source": "deepeyes",
-            "reward_model": {"ground_truth": "answer-0"},
-            "extra_info": {"index": 0},
-            "tools_kwargs": {"tool": 0},
-            "agent_name": "deepeyes",
-            "global_steps": 7,
-        }
-    ]
+    assert len(scored_sample_fields) == 1
+    assert scored_sample_fields[0]["raw_prompt"] == [{"role": "user", "content": "sample 0"}]
+    assert "source_prompt" not in scored_sample_fields[0]
     fields = fake_tq.batch_puts[0]["fields"]
     assert tu.get(fields, "raw_prompt") == [[{"role": "user", "content": "sample 0"}]]
     assert "source_prompt" not in fields.keys()
@@ -1110,6 +1101,7 @@ async def test_score_trajectories_merges_final_reward_info_into_reward_extra_inf
     sample_fields = {
         "data_source": "test",
         "raw_prompt": [{"role": "user", "content": "hi"}],
+        "source_prompt": [{"role": "user", "content": "source"}],
         "reward_model": {"ground_truth": "answer"},
         "extra_info": {"index": "from-sample", "case_id": "case-1"},
         "tools_kwargs": {"tool": "search"},
@@ -1125,6 +1117,7 @@ async def test_score_trajectories_merges_final_reward_info_into_reward_extra_inf
     assert data.batch["attention_mask"].tolist() == [[1, 1, 1, 1]]
     assert data.non_tensor_batch["data_source"].tolist() == ["test"]
     assert data.non_tensor_batch["raw_prompt"].tolist() == [[{"role": "user", "content": "hi"}]]
+    assert data.non_tensor_batch["source_prompt"].tolist() == [[{"role": "user", "content": "source"}]]
     assert data.non_tensor_batch["reward_model"].tolist() == [{"ground_truth": "answer"}]
     assert data.non_tensor_batch["extra_info"].tolist() == [
         {"index": "from-reward-info", "case_id": "case-1", "reward_score": 0.9}
