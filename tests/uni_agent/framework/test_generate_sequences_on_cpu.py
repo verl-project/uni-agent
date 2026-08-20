@@ -166,6 +166,7 @@ def test_build_gateway_manager_wires_gateway_config_defaults(
             "actor_rollout_ref": {
                 "model": {},
                 "rollout": {
+                    "name": "vllm",
                     "prompt_length": 128,
                     "response_length": 64,
                     "multi_turn": {"format": "hermes"},
@@ -188,6 +189,7 @@ def test_build_gateway_manager_wires_gateway_config_defaults(
     assert captured["gateway_actor_config"].prompt_length == 128
     assert captured["gateway_actor_config"].response_length == 64
     assert captured["gateway_actor_config"].tool_parser_name == "hermes"
+    assert captured["gateway_actor_config"].rollout_backend == "vllm"
     assert captured["gateway_actor_config"].enable_last_assistant_rollback is expected_rollback
     assert isinstance(captured["gateway_actor_config"].apply_chat_template_kwargs, dict)
     assert captured["gateway_actor_config"].apply_chat_template_kwargs == expected_chat_template_kwargs

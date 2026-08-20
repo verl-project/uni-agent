@@ -70,6 +70,7 @@ class _GatewayActor:
             vision_info_extractor=config.vision_info_extractor,
             vision_info_extractor_kwargs=config.vision_info_extractor_kwargs,
             tool_parser_name=config.tool_parser_name,
+            rollout_backend=config.rollout_backend,
             apply_chat_template_kwargs=config.apply_chat_template_kwargs,
         )
         self._allowed_request_sampling_param_keys = (
