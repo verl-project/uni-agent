@@ -4,11 +4,19 @@ import logging
 
 import torch
 
+from uni_agent.tasks import TaskResult
 from verl.workers.rollout.replica import TokenOutput
 
 
 async def logging_runner(**kwargs):
     logging.getLogger("test.runner").info("runner task log")
+
+
+async def effective_prompt_runner(*, session, **kwargs):
+    return TaskResult(
+        reward=0.0,
+        effective_messages=[{"role": "user", "content": f"effective:{session.session_id}"}],
+    )
 
 
 class FakeTokenizer:

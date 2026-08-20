@@ -381,6 +381,96 @@ async def test_agent_runners_registry_materializes_runners_and_selects_by_agent_
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("dispatch_mode", ["inline_async", "ray_task"])
+async def test_effective_prompt_is_session_local_for_scoring_and_tq(monkeypatch, fake_tq, dispatch_mode):
+    runtime = _FakeGatewayManager(
+        {
+            "session-sample-0-rollout-0": [_trajectory()],
+            "session-sample-0-rollout-1": [_trajectory()],
+        }
+    )
+    scored_sample_fields = []
+
+    async def fake_score(self, trajectories, sample_fields):
+        scored_sample_fields.append(sample_fields)
+        return [(1.0, {})] * len(trajectories)
+
+    monkeypatch.setattr(OpenAICompatibleAgentFramework, "_score_trajectories", fake_score)
+    framework = await _build_framework_with_agent_runners(
+        agent_runners={
+            "runner": {
+                "runner_fqn": "tests.uni_agent.support.effective_prompt_runner",
+                "dispatch_mode": dispatch_mode,
+            }
+        },
+        gateway_manager=runtime,
+        reward_loop_worker_handles=["sentinel"],
+        n=2,
+    )
+    prompts = _build_prompts(count=1, global_steps=7)
+    source_prompt = [{"role": "user", "content": "sample 0"}]
+
+    await framework.generate_sequences(prompts)
+
+    assert tu.get(prompts, "raw_prompt") == [source_prompt]
+    assert "source_prompt" not in prompts.keys()
+    assert len(scored_sample_fields) == 2
+    assert scored_sample_fields[0] is not scored_sample_fields[1]
+    assert [fields["source_prompt"] for fields in scored_sample_fields] == [source_prompt, source_prompt]
+    effective_prompts = [fields["raw_prompt"] for fields in scored_sample_fields]
+    assert effective_prompts[0] != effective_prompts[1]
+    assert all(prompt[0]["content"].startswith("effective:session-sample-0-rollout-") for prompt in effective_prompts)
+
+    tq_effective_prompts = [tu.get(batch["fields"], "raw_prompt")[0] for batch in fake_tq.batch_puts]
+    assert sorted(tq_effective_prompts, key=str) == sorted(effective_prompts, key=str)
+    assert [tu.get(batch["fields"], "source_prompt") for batch in fake_tq.batch_puts] == [
+        [source_prompt],
+        [source_prompt],
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dispatch_mode", ["inline_async", "ray_task"])
+async def test_legacy_runner_keeps_source_as_raw_prompt(monkeypatch, fake_tq, dispatch_mode):
+    runtime = _FakeGatewayManager({"session-sample-0-rollout-0": [_trajectory()]})
+    scored_sample_fields = []
+
+    async def fake_score(self, trajectories, sample_fields):
+        scored_sample_fields.append(sample_fields)
+        return [(1.0, {})] * len(trajectories)
+
+    monkeypatch.setattr(OpenAICompatibleAgentFramework, "_score_trajectories", fake_score)
+    framework = await _build_framework_with_agent_runners(
+        agent_runners={
+            "runner": {
+                "runner_fqn": "tests.uni_agent.support.logging_runner",
+                "dispatch_mode": dispatch_mode,
+            }
+        },
+        gateway_manager=runtime,
+        reward_loop_worker_handles=["sentinel"],
+    )
+
+    await framework.generate_sequences(_build_prompts(count=1, global_steps=7))
+
+    assert scored_sample_fields == [
+        {
+            "raw_prompt": [{"role": "user", "content": "sample 0"}],
+            "uid": "uid-0",
+            "data_source": "deepeyes",
+            "reward_model": {"ground_truth": "answer-0"},
+            "extra_info": {"index": 0},
+            "tools_kwargs": {"tool": 0},
+            "agent_name": "deepeyes",
+            "global_steps": 7,
+        }
+    ]
+    fields = fake_tq.batch_puts[0]["fields"]
+    assert tu.get(fields, "raw_prompt") == [[{"role": "user", "content": "sample 0"}]]
+    assert "source_prompt" not in fields.keys()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dispatch_mode", ["inline_async", "ray_task"])
 async def test_framework_and_runner_logs_share_one_session_directory(tmp_path, fake_tq, dispatch_mode):
     runtime = _FakeGatewayManager({"session-sample-0-rollout-0": [_trajectory()]})
     runner_config = (
