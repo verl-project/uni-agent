@@ -189,6 +189,21 @@ async def test_message_codec_reuses_vllm_parser_across_decode_calls(monkeypatch)
     assert lookups == ["qwen3_coder"]
 
 
+def test_message_codec_can_disable_parser_cache(monkeypatch):
+    from uni_agent.gateway.session.codec import MessageCodec
+
+    constructions = []
+    lookups = []
+    _install_fake_vllm(monkeypatch, constructions, lookups)
+    codec = MessageCodec(FakeTokenizer(), enable_tool_parser_cache=False)
+
+    codec._process_tool_calls_vllm("plain", TOOLS, "qwen3_coder")
+    codec._process_tool_calls_vllm("plain", TOOLS, "qwen3_coder")
+
+    assert len(constructions) == 2
+    assert lookups == ["qwen3_coder", "qwen3_coder"]
+
+
 def test_parser_cache_is_scoped_to_message_codec(monkeypatch):
     from uni_agent.gateway.session.codec import MessageCodec
 

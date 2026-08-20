@@ -66,6 +66,14 @@ def test_gateway_actor_config_rejects_non_bool_last_assistant_rollback(value):
         GatewayActorConfig(tokenizer=FakeTokenizer(), enable_last_assistant_rollback=value)
 
 
+@pytest.mark.parametrize("value", ["true", 1, None])
+def test_gateway_actor_config_rejects_non_bool_tool_parser_cache(value):
+    from uni_agent.gateway.config import GatewayActorConfig
+
+    with pytest.raises(ValueError, match="enable_tool_parser_cache must be a bool"):
+        GatewayActorConfig(tokenizer=FakeTokenizer(), enable_tool_parser_cache=value)
+
+
 def test_gateway_actor_config_enables_last_assistant_rollback_by_default():
     from uni_agent.gateway.config import GatewayActorConfig
 
