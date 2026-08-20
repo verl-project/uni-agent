@@ -1,4 +1,49 @@
 - name: swe_bench
+  prompt_template: &swe_react_prompt
+    - role: system
+      content: You are a helpful assistant that can interact with a computer to solve tasks.
+    - role: user
+      content: |-
+        <uploaded_files>
+        /testbed
+        </uploaded_files>
+        I have uploaded a python code repository in the /testbed directory. You can explore and modify files using the available tools. Consider the following issue description:
+
+        <issue_description>
+        {prompt}
+        </issue_description>
+
+        Can you help me implement the necessary changes to the repository to fix the <issue_description>?
+        I have already taken care of all changes to any of the test files described in the <issue_description>. This means you DON'T have to modify the testing logic or any of the tests in any way!
+        Also the development Python environment is already set up for you (i.e., all dependencies already installed), so you don't need to install other packages.
+        Your task is to make the minimal changes to non-test files in the /testbed directory to ensure the <issue_description> is satisfied.
+
+        Follow these steps to resolve the issue:
+        1. First, explore the codebase to locate and understand the code relevant to the <issue_description>.
+        - Use efficient search commands to identify key files and functions.
+        - You should err on the side of caution and look at various relevant files and build your understanding of how the code works, expected behaviors and edge cases, and potential root causes.
+
+        2. Assess whether you can reproduce the issue:
+        - Create a script at '/testbed/reproduce_issue.py' that demonstrates the error.
+        - Execute this script to confirm the error behavior before fixing it.
+        - Your reproduction script should also assert the expected behavior for the fixed code.
+
+        3. Analyze the root cause:
+        - Identify the underlying problem based on your code exploration and reproduction results.
+        - Reason about multiple approaches and select the most effective solution considering correctness, generality, and side effects.
+        - Look at the relevant unit tests to understand expected behavior.
+
+        4. Implement your solution:
+        - Make targeted changes to the necessary files following idiomatic code patterns.
+
+        5. Verify your solution:
+        - Rerun your reproduction script and relevant unit tests, iterating until successful.
+        - Do not modify existing tests. You may add separate edge tests if needed.
+
+        6. Submit your solution:
+        - Once verified, submit your solution using the `submit` tool.
+
+        A successful resolution means the issue no longer occurs, compatibility is maintained, and relevant edge cases are handled.
   sandbox:
     provider: vefaas
     runtime_timeout: 7200
@@ -22,6 +67,7 @@
       max_total_tokens: 131072
 
 - name: swe_rebench
+  prompt_template: *swe_react_prompt
   sandbox:
     provider: vefaas
     runtime_timeout: 7200

@@ -1,4 +1,19 @@
 - name: swe_bench
+  prompt_template:
+    - role: system
+      content: You are a software engineer working in an existing repository.
+    - role: user
+      content: |-
+        <uploaded_files>
+        /testbed
+        </uploaded_files>
+        Inspect the repository in /testbed and resolve the following issue:
+
+        <issue_description>
+        {prompt}
+        </issue_description>
+
+        Understand the relevant code and expected behavior before editing. Implement the smallest correct change in non-test files, preserve existing behavior outside the issue, and follow the repository's established patterns. Do not modify existing tests. Validate the change with focused reproduction steps and the relevant test suite before finishing.
   sandbox:
     provider: modal
     runtime_timeout: 7200
