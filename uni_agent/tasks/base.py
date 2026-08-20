@@ -16,7 +16,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, ClassVar
 
-from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny, field_validator
+from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny, field_validator, model_validator
 
 from uni_agent.agents import AgentConfig
 from uni_agent.sandbox import SandboxConfig
@@ -43,9 +43,27 @@ class TaskConfig(BaseModel):
         description="A concrete AgentConfig subclass, or a {name, ...} mapping resolved via the agent registry.",
     )
     prompt: list[dict[str, Any]] = Field(default_factory=list, description="The task prompt.")
+    prompt_template: list[dict[str, Any]] | None = Field(
+        default=None,
+        description="Optional recipe-owned messages containing exactly one {prompt} field.",
+    )
     metadata: dict[str, Any] = Field(default_factory=dict)
 
     model_config = ConfigDict(extra="forbid", protected_namespaces=())
+
+    @model_validator(mode="before")
+    @classmethod
+    def _render_prompt_template(cls, values: Any) -> Any:
+        if not isinstance(values, Mapping) or values.get("prompt_template") is None:
+            return values
+        from .config import render_prompt_template
+
+        rendered_values = dict(values)
+        rendered_values["prompt"] = render_prompt_template(
+            rendered_values.get("prompt", []),
+            rendered_values["prompt_template"],
+        )
+        return rendered_values
 
     @field_validator("agent", mode="before")
     @classmethod
@@ -73,6 +91,7 @@ class TaskResult:
     accuracy: float | None = None
     finished: bool | None = None
     extra_info: dict[str, Any] | None = None
+    effective_messages: list[dict[str, Any]] | None = None
 
 
 class Task(ABC):

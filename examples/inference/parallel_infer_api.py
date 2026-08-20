@@ -148,7 +148,8 @@ def main() -> None:
     resolved_tasks: list[dict] = []
     try:
         for sample in samples:
-            sample_config = sample["extra_info"]["tools_kwargs"]["task"]
+            sample_config = dict(sample["extra_info"]["tools_kwargs"]["task"])
+            sample_config["prompt"] = sample["prompt"]
             resolved = resolver.resolve(sample_config, runtime_model=runtime_model)
             task_name = resolved["name"]
             if not resolved.get("agent", {}).get("model", {}).get("base_url"):
