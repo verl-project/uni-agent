@@ -11,6 +11,13 @@ from uni_agent.tasks.swe_bench import preprocess as swe_bench_preprocess
 from uni_agent.tasks.swe_bench_multilingual import preprocess as multilingual_preprocess
 from uni_agent.tasks.swe_rebench import preprocess as swe_rebench_preprocess
 
+_QUICKSTART_TASK_CONFIGS = [
+    "examples/quickstart/inference/task_config_react.yaml",
+    "examples/quickstart/inference/task_config_claude_code.yaml",
+    "examples/quickstart/training/task_config_react.yaml",
+    "examples/quickstart/training/task_config_claude_code.yaml",
+]
+
 
 class _FakeDataset:
     def __init__(self, rows):
@@ -139,6 +146,40 @@ def test_swe_recipe_renders_complete_metadata_prompt(recipe_path, task_name, exp
     assert ("submit" in effective_text.lower()) is expects_submit
     assert ("primary language: C" in effective_text) is expects_language
     assert "There is no submit tool; exit after validation." not in effective_text
+
+
+@pytest.mark.parametrize("recipe_path", _QUICKSTART_TASK_CONFIGS)
+def test_quickstart_recipe_places_prompt_template_last(recipe_path):
+    entries = yaml.safe_load(Path(recipe_path).read_text())
+
+    assert entries
+    assert all(list(entry)[-1] == "prompt_template" for entry in entries)
+
+
+@pytest.mark.parametrize(
+    ("recipe_path", "style"),
+    [
+        ("examples/quickstart/inference/task_config_react.yaml", "react"),
+        ("examples/quickstart/training/task_config_react.yaml", "react"),
+        ("examples/quickstart/inference/task_config_claude_code.yaml", "claude"),
+        ("examples/quickstart/training/task_config_claude_code.yaml", "claude"),
+    ],
+)
+def test_multilingual_recipe_keeps_agent_specific_swe_prompt(recipe_path, style):
+    entries = yaml.safe_load(Path(recipe_path).read_text())
+    multilingual = next(entry for entry in entries if entry["name"] == "swe_bench_multilingual")
+    prompt_text = "\n".join(message["content"] for message in multilingual["prompt_template"])
+
+    if style == "react":
+        assert "the project is already built" in prompt_text
+        assert "using the repository's own language/runtime" in prompt_text
+        assert "submit it using the `submit` tool" in prompt_text
+        assert "You are a software engineer working in an existing repository." not in prompt_text
+    else:
+        assert "You are a software engineer working in an existing repository." in prompt_text
+        assert "focused reproduction steps" in prompt_text
+        assert "the project is already built" not in prompt_text
+        assert "`submit` tool" not in prompt_text
 
 
 def test_user_recipe_can_replace_complete_prompt_template(tmp_path):

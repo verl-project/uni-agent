@@ -1,4 +1,15 @@
 - name: swe_bench
+  sandbox:
+    provider: vefaas
+    runtime_timeout: 7200
+  agent:
+    name: claude_code
+    max_turns: 200
+    run_timeout: 4800
+    model:
+      temperature: 1.0
+      top_p: 1.0
+      max_total_tokens: 131072
   prompt_template: &swe_claude_prompt
     - role: system
       content: You are a software engineer working in an existing repository.
@@ -14,20 +25,8 @@
         </issue_description>
 
         Understand the relevant code and expected behavior before editing. Implement the smallest correct change in non-test files, preserve existing behavior outside the issue, and follow the repository's established patterns. Do not modify existing tests. Validate the change with focused reproduction steps and the relevant test suite before finishing.
-  sandbox:
-    provider: vefaas
-    runtime_timeout: 7200
-  agent:
-    name: claude_code
-    max_turns: 200
-    run_timeout: 4800
-    model:
-      temperature: 1.0
-      top_p: 1.0
-      max_total_tokens: 131072
 
 - name: swe_rebench
-  prompt_template: *swe_claude_prompt
   sandbox:
     provider: vefaas
     runtime_timeout: 7200
@@ -39,8 +38,20 @@
       temperature: 1.0
       top_p: 1.0
       max_total_tokens: 131072
+  prompt_template: *swe_claude_prompt
 
 - name: swe_bench_multilingual
+  sandbox:
+    provider: vefaas
+    runtime_timeout: 7200
+  agent:
+    name: claude_code
+    max_turns: 200
+    run_timeout: 4800
+    model:
+      temperature: 1.0
+      top_p: 1.0
+      max_total_tokens: 131072
   prompt_template:
     - role: system
       content: You are a software engineer working in an existing repository.
@@ -56,14 +67,3 @@
         </issue_description>
 
         Understand the relevant code and expected behavior before editing. Implement the smallest correct change in non-test files, preserve existing behavior outside the issue, and follow the repository's established patterns. Do not modify existing tests. Validate the change with focused reproduction steps and the relevant test suite before finishing.
-  sandbox:
-    provider: vefaas
-    runtime_timeout: 7200
-  agent:
-    name: claude_code
-    max_turns: 200
-    run_timeout: 4800
-    model:
-      temperature: 1.0
-      top_p: 1.0
-      max_total_tokens: 131072

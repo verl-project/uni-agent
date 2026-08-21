@@ -29,8 +29,8 @@ async def run_task(
     """Resolve the sample's task, run it against ``session``, and return its result.
 
     Satisfies the framework's ``AgentRunner`` contract (``session`` / ``raw_prompt``
-    / ``sample_index`` / ``tools_kwargs``). The framework's ``raw_prompt`` is the
-    canonical runtime source and overrides any serialized sample prompt.
+    / ``sample_index`` / ``tools_kwargs``). The framework's ``raw_prompt`` contains
+    the authoritative dataset/source messages and overrides any serialized Task prompt.
 
     Run-level defaults come from the per-task-name YAML file selected by
     ``task_config_path``. ``TaskConfigResolver`` applies that Task Config, the

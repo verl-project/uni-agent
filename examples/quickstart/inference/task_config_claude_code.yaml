@@ -1,4 +1,16 @@
 - name: swe_bench
+  sandbox:
+    provider: modal
+    runtime_timeout: 7200
+  agent:
+    name: claude_code
+    max_turns: 200
+    run_timeout: 4800
+    verbose: true
+    model:
+      temperature: 1.0
+      top_p: 0.95
+      max_total_tokens: 131072
   prompt_template:
     - role: system
       content: You are a software engineer working in an existing repository.
@@ -14,6 +26,8 @@
         </issue_description>
 
         Understand the relevant code and expected behavior before editing. Implement the smallest correct change in non-test files, preserve existing behavior outside the issue, and follow the repository's established patterns. Do not modify existing tests. Validate the change with focused reproduction steps and the relevant test suite before finishing.
+
+- name: swe_bench_multilingual
   sandbox:
     provider: modal
     runtime_timeout: 7200
@@ -26,8 +40,6 @@
       temperature: 1.0
       top_p: 0.95
       max_total_tokens: 131072
-
-- name: swe_bench_multilingual
   prompt_template:
     - role: system
       content: You are a software engineer working in an existing repository.
@@ -43,15 +55,3 @@
         </issue_description>
 
         Understand the relevant code and expected behavior before editing. Implement the smallest correct change in non-test files, preserve existing behavior outside the issue, and follow the repository's established patterns. Do not modify existing tests. Validate the change with focused reproduction steps and the relevant test suite before finishing.
-  sandbox:
-    provider: modal
-    runtime_timeout: 7200
-  agent:
-    name: claude_code
-    max_turns: 200
-    run_timeout: 4800
-    verbose: true
-    model:
-      temperature: 1.0
-      top_p: 0.95
-      max_total_tokens: 131072
