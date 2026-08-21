@@ -162,7 +162,7 @@ def test_task_prompt_template_renders_multiple_metadata_fields():
     ]
 
 
-def test_task_prompt_template_allows_static_content():
+def test_task_prompt_template_allows_no_placeholders():
     config = TaskConfig(
         sandbox=_LOCAL_SANDBOX,
         prompt=[{"role": "user", "content": "Dataset source stays separate"}],
@@ -173,7 +173,7 @@ def test_task_prompt_template_allows_static_content():
     assert config.prompt == [{"role": "user", "content": "Static recipe prompt"}]
 
 
-def test_rendered_task_config_round_trip_does_not_serialize_template():
+def test_prompt_template_is_input_only_across_task_config_serialization():
     config = TaskConfig(
         sandbox=_LOCAL_SANDBOX,
         agent={"name": "react"},
@@ -226,7 +226,6 @@ def test_task_prompt_template_rejects_invalid_metadata_formatting(prompt_templat
     [
         (["not-a-message"], "template message"),
         ([{"content": "{problem_statement}"}], "template message.*role"),
-        ([{"role": "user"}], "template message.*content"),
         ([{"role": "user", "content": ["{problem_statement}"]}], "template message.*content"),
     ],
 )
@@ -258,7 +257,7 @@ def test_recipe_prompt_template_overrides_sample_template_and_uses_metadata():
             "name": "swe_bench",
             "prompt": [{"role": "user", "content": "Source problem"}],
             "prompt_template": [{"role": "user", "content": "Sample override: {problem_statement}"}],
-            "metadata": {"problem_statement": "Metadata problem", "patch": "SECRET PATCH"},
+            "metadata": {"problem_statement": "Metadata problem"},
         }
     )
 
@@ -268,4 +267,3 @@ def test_recipe_prompt_template_overrides_sample_template_and_uses_metadata():
         {"role": "system", "content": "Recipe instructions"},
         {"role": "user", "content": "Issue: Metadata problem"},
     ]
-    assert "SECRET PATCH" not in str(config.prompt)

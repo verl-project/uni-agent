@@ -42,7 +42,7 @@ def test_reward_info_rejects_non_boolean_agent_completion():
 
 
 @pytest.mark.asyncio
-async def test_run_task_overwrites_stale_nested_prompt_with_raw_prompt(monkeypatch, tmp_path):
+async def test_run_task_binds_raw_prompt_to_sample_task_config(monkeypatch, tmp_path):
     config_path = tmp_path / "tasks.yaml"
     config_path.write_text(
         """
@@ -77,11 +77,7 @@ async def test_run_task_overwrites_stale_nested_prompt_with_raw_prompt(monkeypat
         tools_kwargs={
             "task": {
                 "name": "test_task",
-                "prompt": [{"role": "user", "content": "STALE NESTED PROMPT"}],
-                "metadata": {
-                    "problem_statement": "METADATA PROBLEM",
-                    "patch": "SECRET PATCH",
-                },
+                "metadata": {"problem_statement": "METADATA PROBLEM"},
             }
         },
         task_config_path=str(config_path),

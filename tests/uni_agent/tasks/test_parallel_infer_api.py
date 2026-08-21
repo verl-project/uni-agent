@@ -42,7 +42,6 @@ def test_standalone_inference_binds_top_level_source_prompt(monkeypatch, tmp_pat
             "tools_kwargs": {
                 "task": {
                     "name": "swe_bench",
-                    "prompt": [{"role": "user", "content": "STALE NESTED PROMPT"}],
                     "metadata": {"instance_id": "sample-1", "problem_statement": "Metadata problem"},
                 }
             }

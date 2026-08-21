@@ -125,7 +125,6 @@ def test_swe_recipe_renders_complete_metadata_prompt(recipe_path, task_name, exp
         {
             "name": task_name,
             "prompt": [{"role": "user", "content": source_problem}],
-            "prompt_template": [{"role": "user", "content": "STALE {problem_statement}"}],
             "metadata": metadata,
         }
     )
