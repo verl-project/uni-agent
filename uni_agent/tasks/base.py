@@ -45,7 +45,7 @@ class TaskConfig(BaseModel):
     prompt: list[dict[str, Any]] = Field(default_factory=list, description="The task prompt.")
     prompt_template: list[dict[str, Any]] | None = Field(
         default=None,
-        description="Optional recipe-owned text messages formatted from task metadata.",
+        description="Optional recipe-owned text messages with direct task metadata placeholders.",
         exclude=True,
     )
     metadata: dict[str, Any] = Field(default_factory=dict)

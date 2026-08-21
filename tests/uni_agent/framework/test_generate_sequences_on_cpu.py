@@ -2,18 +2,23 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from typing import get_type_hints
 
 import numpy as np
 import pytest
 import torch
 
 from tests.uni_agent.support import logging_runner
-from uni_agent.framework.framework import OpenAICompatibleAgentFramework, _align_routed_experts
+from uni_agent.framework.framework import AgentRunner, OpenAICompatibleAgentFramework, _align_routed_experts
 from uni_agent.gateway.session import SessionHandle, Trajectory
 from verl.utils import tensordict_utils as tu
 
 _RUNNER_CALLS = []
 _TEST_INLINE_RUNNERS = {}
+
+
+def test_agent_runner_allows_results_that_the_framework_ignores():
+    assert get_type_hints(AgentRunner.__call__)["return"] is object
 
 
 async def _config_recording_runner(*, raw_prompt, session, sample_index, marker=None, **kwargs):
@@ -403,7 +408,7 @@ async def test_runner_result_does_not_replace_source_prompt_for_scoring_or_tq(mo
     framework = await _build_framework_with_agent_runners(
         agent_runners={
             "runner": {
-                "runner_fqn": "tests.uni_agent.support.runner_with_legacy_messages",
+                "runner_fqn": "tests.uni_agent.support.task_result_runner",
                 "dispatch_mode": dispatch_mode,
             }
         },

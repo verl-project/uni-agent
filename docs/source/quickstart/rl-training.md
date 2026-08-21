@@ -51,7 +51,7 @@ The processed rows remain independent of the runtime Sandbox provider and Agent 
 
 The Quickstart provides separate configs for the two Agent types:
 
-Both files define a complete metadata-based `prompt_template` for each task. ReAct owns its `submit` protocol in the ReAct recipe; the Claude Code recipe contains no generated submit instruction. Templates may use fields such as `{problem_statement}` and multilingual `{language}` wherever needed. Missing fields, malformed templates, non-text values, and structured message content are rejected; multimodal template support is deferred.
+Both files define a complete metadata-based `prompt_template` for each task. ReAct owns its `submit` protocol in the ReAct recipe; the Claude Code recipe contains no generated submit instruction. Templates may use direct fields such as `{problem_statement}` and multilingual `{language}` wherever needed. Attribute or index access, conversions, format specifications, missing fields, non-text values, malformed templates, and structured message content are rejected; multimodal template support is deferred.
 
 Framework and RewardLoop `raw_prompt` remains the dataset/source prompt, so SWE reward code can read the problem statement from its user content. A template-free self-rendering Agent such as mini-swe-agent receives that source message and applies its own template inside the Sandbox. The current Task Runner cannot observe that Agent's final internal messages and does not replace downstream `raw_prompt` with an approximation.
 

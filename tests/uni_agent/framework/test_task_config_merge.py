@@ -193,9 +193,19 @@ def test_rendered_task_config_round_trip_does_not_serialize_template():
         ([{"role": "user", "content": "{patch}"}], {"patch": {"diff": "secret"}}, "text.*patch"),
         ([{"role": "user", "content": "{tests}"}], {"tests": ["case"]}, "text.*tests"),
         (
-            [{"role": "user", "content": "{problem_statement:{width}}"}],
-            {"problem_statement": "issue", "width": 10},
-            "text.*width",
+            [{"role": "user", "content": "{problem_statement[0]}"}],
+            {"problem_statement": "issue"},
+            "direct metadata field",
+        ),
+        (
+            [{"role": "user", "content": "{problem_statement!r}"}],
+            {"problem_statement": "issue"},
+            "conversion",
+        ),
+        (
+            [{"role": "user", "content": "{problem_statement:>10}"}],
+            {"problem_statement": "issue"},
+            "format spec",
         ),
     ],
 )

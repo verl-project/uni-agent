@@ -64,7 +64,8 @@ The runtime binds the top-level dataset/source `prompt` before Task Config resol
 Runtime templates are intentionally text-only:
 
 - Template output is a list of messages with a non-empty string `role` and string `content`.
-- Each content string uses Python standard-library formatting directly against Task `metadata`. Any metadata field may be referenced, repeated, or omitted from the template.
+- Each content string uses Python standard-library brace parsing to replace direct Task `metadata` fields such as `{problem_statement}`. Fields may be repeated or omitted from the template.
+- Placeholder names must be simple identifiers. Attribute or index access, conversions such as `!r`, and format specifications such as `:>10` are rejected.
 - Missing fields, malformed templates, non-text replacement values, and non-string template content fail validation before the Agent starts.
 - Use standard Python formatting escapes, `{{` and `}}`, for literal braces.
 - Image, video, audio, and other structured message content are not supported by runtime templates. Multimodal template support is deferred.

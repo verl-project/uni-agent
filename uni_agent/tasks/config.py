@@ -30,7 +30,7 @@ def render_prompt_template(
     metadata: object,
     prompt_template: object,
 ) -> list[dict[str, Any]]:
-    """Render text-only chat messages from Task metadata."""
+    """Render text-only chat messages from direct Task metadata fields."""
     if not isinstance(prompt_template, list):
         raise ValueError("prompt_template must be a list of template messages")
     if not isinstance(metadata, Mapping):
@@ -47,32 +47,36 @@ def render_prompt_template(
         content = message.get("content")
         if not isinstance(content, str):
             raise ValueError(f"prompt_template message {index} must contain string 'content'")
-        format_strings = [content]
-        while format_strings:
-            try:
-                parsed = list(formatter.parse(format_strings.pop()))
-            except ValueError as exc:
-                raise ValueError(f"prompt_template message {index} has invalid content: {exc}") from exc
-            for _, field_name, format_spec, _ in parsed:
-                if field_name is None:
-                    continue
-                try:
-                    value, _ = formatter.get_field(field_name, (), metadata)
-                except (KeyError, AttributeError, IndexError) as exc:
-                    raise ValueError(
-                        f"prompt_template message {index} references missing metadata field {field_name!r}"
-                    ) from exc
-                if not isinstance(value, str):
-                    raise ValueError(
-                        f"prompt_template message {index} requires text metadata field {field_name!r}; "
-                        f"got {type(value).__name__}"
-                    )
-                if format_spec:
-                    format_strings.append(format_spec)
         try:
-            rendered_content = formatter.vformat(content, (), metadata)
-        except (ValueError, KeyError, AttributeError, IndexError) as exc:
+            parsed = list(formatter.parse(content))
+        except ValueError as exc:
             raise ValueError(f"prompt_template message {index} has invalid content: {exc}") from exc
+        rendered_parts: list[str] = []
+        for literal_text, field_name, format_spec, conversion in parsed:
+            rendered_parts.append(literal_text)
+            if field_name is None:
+                continue
+            if not field_name.isidentifier():
+                raise ValueError(
+                    f"prompt_template message {index} must reference a direct metadata field; got {field_name!r}"
+                )
+            if conversion is not None:
+                raise ValueError(f"prompt_template message {index} field {field_name!r} does not support conversion")
+            if format_spec:
+                raise ValueError(f"prompt_template message {index} field {field_name!r} does not support a format spec")
+            try:
+                value = metadata[field_name]
+            except KeyError as exc:
+                raise ValueError(
+                    f"prompt_template message {index} references missing metadata field {field_name!r}"
+                ) from exc
+            if not isinstance(value, str):
+                raise ValueError(
+                    f"prompt_template message {index} requires text metadata field {field_name!r}; "
+                    f"got {type(value).__name__}"
+                )
+            rendered_parts.append(value)
+        rendered_content = "".join(rendered_parts)
         rendered.append({**message, "content": rendered_content})
     return rendered
 

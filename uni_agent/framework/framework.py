@@ -44,7 +44,7 @@ class AgentRunner(Protocol):
         raw_prompt: object,
         sample_index: int,
         **sample_runner_kwargs: object,
-    ) -> None: ...
+    ) -> object: ...
 
 
 @dataclass
