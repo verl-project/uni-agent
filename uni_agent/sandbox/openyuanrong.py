@@ -205,45 +205,7 @@ class OpenyuanrongSandbox(Sandbox):
         shell = await sb.shells.create(cwd=cwd, envs=env)
         return _OpenyuanrongShell(shell)
 
-    # ----- public: data plane (commands / files / ports) -----
-    async def exec(
-        self,
-        argv: list[str],
-        *,
-        timeout: float | None = None,
-        workdir: str | None = None,
-        env: dict[str, str] | None = None,
-    ) -> ExecResult:
-        """Fully overrides base ``exec``; does not use the base error-policy wrapper.
-
-        Joins ``argv`` and delegates to :meth:`exec_shell` (Yuanrong
-        ``commands.run``). Does not call ``super().exec`` or base ``_exec``.
-        """
-        return await self.exec_shell(shlex.join(argv), timeout=timeout, workdir=workdir, env=env)
-
-    async def exec_shell(
-        self,
-        script: str,
-        *,
-        timeout: float | None = None,
-        workdir: str | None = None,
-        env: dict[str, str] | None = None,
-    ) -> ExecResult:
-        """Fully overrides base ``exec_shell``; does not use ``bash -lc`` via base.
-
-        Runs ``script`` directly through Yuanrong ``commands.run``. Does not call
-        ``super().exec_shell`` / ``exec(["bash", "-lc", script])``. Owns its own
-        timeout / alive error policy (mirrors base ``exec``, not base ``exec_shell``).
-        """
-        try:
-            return await self._run_command(script, timeout=timeout, workdir=workdir, env=env)
-        except Exception as exc:
-            if self._is_timeout_error(exc):
-                return ExecResult(exit_code=-1, stdout="", stderr=f"exec timed out after {timeout}s: {exc}")
-            if not await self.is_alive():
-                raise
-            return ExecResult(exit_code=127, stdout="", stderr=str(exc))
-
+    # ----- public: data plane (files / ports) -----
     async def read_file(self, path: str) -> bytes:
         """Read via SDK ``files.read(..., format='bytes')``."""
         data = await asyncio.to_thread(lambda: self._require().files.read(path, format="bytes"))
@@ -286,25 +248,7 @@ class OpenyuanrongSandbox(Sandbox):
         return m
 
     def _is_timeout_error(self, exc: BaseException) -> bool:
-        return type(exc).__name__ == "CommandTimeoutError" or super()._is_timeout_error(exc)
-
-    async def _run_command(
-        self,
-        cmd: str,
-        *,
-        timeout: float | None = None,
-        workdir: str | None = None,
-        env: dict[str, str] | None = None,
-    ) -> ExecResult:
-        """Run a shell command string once via ``commands.run``."""
-        sb = self._require()
-        timeout_i = int(timeout) if timeout else 60
-        result = await asyncio.to_thread(lambda: sb.commands.run(cmd, envs=env, cwd=workdir, timeout=timeout_i))
-        return ExecResult(
-            exit_code=int(getattr(result, "exit_code", -99)),
-            stdout=_to_str(getattr(result, "stdout", "")),
-            stderr=_to_str(getattr(result, "stderr", "")),
-        )
+        return "Command timed out after" in str(exc) or super()._is_timeout_error(exc)
 
     async def _exec(
         self,
@@ -314,10 +258,14 @@ class OpenyuanrongSandbox(Sandbox):
         workdir: str | None = None,
         env: dict[str, str] | None = None,
     ) -> ExecResult:
-        """Intentionally unimplemented.
-
-        Base marks ``_exec`` abstract, so this stub exists only to instantiate the
-        class. Public :meth:`exec` is fully overridden and never calls this (or
-        ``super().exec``).
-        """
-        raise NotImplementedError("OpenyuanrongSandbox overrides exec(); _exec is unused")
+        """Run ``argv`` once via akernel ``Commands.run``."""
+        sb = self._require()
+        timeout_i = int(timeout) if timeout else 60
+        # commands.run is a blocking SDK poll; run it off the event loop.
+        result = await asyncio.to_thread(sb.commands.run, shlex.join(argv), envs=env, cwd=workdir, timeout=timeout_i)
+        exit_code = int(result.exit_code)
+        stdout = _to_str(getattr(result, "stdout", ""))
+        stderr = _to_str(getattr(result, "stderr", ""))
+        if exit_code != 0:
+            raise RuntimeError(stderr or f"command exited with {exit_code}")
+        return ExecResult(exit_code=0, stdout=stdout, stderr=stderr)

@@ -146,7 +146,7 @@ def test_is_timeout_error_override_is_honored_by_exec():
 
 # --------------------------- provider wiring ---------------------------
 
-_PROVIDERS = ["local", "docker", "modal", "vefaas", "seed"]
+_PROVIDERS = ["local", "docker", "modal", "vefaas", "seed", "openyuanrong"]
 
 
 @pytest.mark.parametrize("name", _PROVIDERS)
@@ -219,6 +219,15 @@ def test_modal_inherits_base_timeout_check():
     assert sb._is_timeout_error(RuntimeError("other")) is False
 
 
+def test_openyuanrong_recognizes_its_timeout():
+    from uni_agent.sandbox.openyuanrong import OpenyuanrongSandbox
+
+    sb = OpenyuanrongSandbox(image="python:3.12")
+    assert sb._is_timeout_error(RuntimeError("Command timed out after 60 seconds")) is True
+    assert sb._is_timeout_error(TimeoutError()) is True
+    assert sb._is_timeout_error(RuntimeError("other")) is False
+
+
 # --------------------------- provider is_alive() liveness ---------------------------
 
 
@@ -246,6 +255,12 @@ def test_vefaas_is_alive_false_before_start(monkeypatch):
     from uni_agent.sandbox.vefaas import VefaasSandbox
 
     assert asyncio.run(VefaasSandbox().is_alive()) is False
+
+
+def test_openyuanrong_is_alive_false_before_start():
+    from uni_agent.sandbox.openyuanrong import OpenyuanrongSandbox
+
+    assert asyncio.run(OpenyuanrongSandbox(image="python:3.12").is_alive()) is False
 
 
 def _fake_modal_sandbox(*, poll_returns=None, poll_raises: BaseException | None = None):
