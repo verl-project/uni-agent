@@ -42,7 +42,10 @@ class TaskConfig(BaseModel):
         default_factory=AgentConfig,
         description="A concrete AgentConfig subclass, or a {name, ...} mapping resolved via the agent registry.",
     )
-    prompt: list[dict[str, Any]] = Field(default_factory=list, description="The task prompt.")
+    prompt: list[dict[str, Any]] = Field(
+        default_factory=list,
+        description="Dataset-owned source messages on input; Agent-facing messages after Task resolution.",
+    )
     prompt_template: list[dict[str, Any]] | None = Field(
         default=None,
         description="Optional recipe-owned text messages with direct task metadata placeholders.",

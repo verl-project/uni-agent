@@ -125,7 +125,7 @@ For an authenticated endpoint, also set `API_KEY` or pass `--api-key`. The scrip
 
 Each rollout writes `<log_dir>/<log_id>/task.log`. Set `--log-dir` to a shared-storage path when Ray workers may run on different nodes.
 
-The dataset's top-level `prompt` is the canonical source input in this mode. Before resolving the selected Task recipe, `parallel_infer_api.py` binds that value over any legacy nested Task prompt. If the recipe defines `prompt_template`, the Task formats its text messages from Task `metadata`; otherwise the source messages pass through unchanged.
+`parallel_infer_api.py` treats the dataset's top-level `prompt` as the authoritative source message list and binds it over any nested Task prompt. Without `prompt_template`, those messages are passed to the Agent unchanged. With `prompt_template`, the Task instead builds the Agent-facing messages from metadata.
 
 Useful controls:
 
@@ -177,12 +177,12 @@ Important controls:
 
 Task/Agent/Tool events go to `task.log`; Framework events go to `framework.log`.
 
-In Framework-managed mode, `raw_prompt` always means the dataset/source prompt. Task-rendered messages do not replace it for RewardLoop scoring or TransferQueue materialization. For SWE rows, RewardLoop can read the problem statement from the source user content.
+In Framework-managed mode, `raw_prompt` always means the dataset/source prompt. verl uses it for loader-time token-length checks when overlong-prompt filtering is enabled, passes it to RewardLoop, and preserves it as TransferQueue metadata. Task-rendered messages do not replace it. The Gateway captures the Agent's actual model requests to build the trajectory token tensors.
 
 Self-rendering Agents such as mini-swe-agent receive that source message unchanged and apply their own template inside the Sandbox. Their final internal messages are not observable through the current Task Runner, so Task-rendered messages and an Agent's true effective prompt are not necessarily identical.
 
 !!! note "Current scope"
-    Runtime prompt templates accept string message content only. Image, video, audio, and other structured content are not supported; multimodal template support is deferred. Templates do not change the sandbox working directory or environment.
+    Runtime prompt templates accept string message content only; multimodal template rendering is deferred. Without a template, pre-rendered structured messages can pass through in `prompt`, although end-to-end image, video, or audio support still depends on the selected Agent, API adapter, and model processor. Templates do not change the sandbox working directory or environment.
 
 For a Ray cluster, you can submit your job via a pre-defined Runtime Environment, for example:
 
