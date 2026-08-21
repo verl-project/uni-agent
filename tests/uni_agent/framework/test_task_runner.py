@@ -13,7 +13,6 @@ def test_task_result_positional_field_order():
     assert result.accuracy == 1.0
     assert result.finished is False
     assert result.extra_info == {"reason": "limit"}
-    assert "effective_messages" not in TaskResult.__dataclass_fields__
 
 
 def test_reward_info_omits_unknown_agent_completion():

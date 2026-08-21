@@ -20,7 +20,7 @@ Every Task configuration inherits from `TaskConfig`:
 - `name`: registered Task family.
 - `sandbox`: `SandboxConfig`.
 - `agent`: concrete Agent configuration.
-- `prompt`: dataset-owned source messages on input; after optional template rendering, the Agent-facing messages held by the resolved Task Config.
+- `prompt`: an Agent-neutral dataset/source message list on input; after optional template rendering, the Agent-facing messages held by the resolved Task Config.
 - `prompt_template`: optional recipe-owned messages rendered before the Agent starts.
 - `metadata`: sample-specific data used by execution and scoring.
 
@@ -72,11 +72,11 @@ Runtime templates are intentionally text-only:
 - Use standard Python formatting escapes, `{{` and `}}`, for literal braces.
 - Image, video, audio, and other structured message content are not supported by runtime templates. Multimodal template rendering is deferred.
 
-Without `prompt_template`, the dataset/source messages pass through unchanged. They may therefore already contain complete Agent instructions or structured multimodal content; end-to-end support for that content still depends on the selected Agent, API adapter, and model processor. Template-free pass-through is also the intended path for self-rendering Agents such as mini-swe-agent: it reads the source user content as the problem statement and applies its own template inside the Sandbox. The Task still calls every Agent through the uniform `Agent.run(sandbox, messages)` interface and does not pass metadata or branch on Agent name.
+Without `prompt_template`, the dataset/source messages pass through unchanged. They may therefore already contain complete Agent instructions or structured multimodal content; end-to-end support for that content still depends on the selected Agent, API adapter, and model processor. Template-free pass-through is also the intended path for self-rendering Agents. For example, the planned mini-swe-agent integration will read the source user content as the problem statement and apply its own template inside the Sandbox. The Task still calls every Agent through the uniform `Agent.run(sandbox, messages)` interface and does not pass metadata or branch on Agent name.
 
-After Task rendering, `TaskConfig.prompt` is the message list passed to `Agent.run()`. `prompt_template` is an input-only rendering directive and is omitted when Task configs are serialized. In Framework-managed execution, verl uses the source prompt for loader-time token-length checks when overlong-prompt filtering is enabled, passes it to RewardLoop as `raw_prompt`, and preserves it as metadata in records written to TransferQueue. Task-rendered messages do not replace that source value. The trajectory token tensors are instead built from the Agent's actual model requests captured by the Gateway.
+After Task rendering, `TaskConfig.prompt` is the message list passed to `Agent.run()`. `prompt_template` is an input-only rendering directive and is omitted when Task configs are serialized. In Framework-managed execution, verl uses the source prompt for loader-time token-length checks when overlong-prompt filtering is enabled, makes it available as `raw_prompt` when a configured RewardLoop or judge scoring path is used, and preserves it as metadata in records written to TransferQueue. Task-rendered messages do not replace that source value. The trajectory token tensors are instead built from the Agent's actual model requests captured by the Gateway. Built-in SWE Tasks evaluate from `TaskConfig.metadata`, independently of `raw_prompt`.
 
-Task-rendered messages are not guaranteed to equal a self-rendering Agent's final internal prompt. mini-swe-agent applies its own Sandbox-side template, and the current Task Runner cannot observe those true effective messages. `TaskResult` consequently reports episode results only and does not attempt to carry prompt provenance.
+Task-rendered messages are not guaranteed to equal a self-rendering Agent's final internal prompt. Such an Agent may apply its own Sandbox-side template, and the current Task Runner cannot observe its final internal messages. `TaskResult` consequently reports episode results only and does not attempt to carry prompt provenance.
 
 ## Episode Implementation
 
@@ -189,9 +189,9 @@ Keep datasets provider-agnostic when possible. For example, SWE-Bench rows store
 Task configuration has two user-defined layers:
 
 1. Run-level Task Config provides shared defaults.
-2. The sample's serialized `tools_kwargs.task` is merged on top and wins on conflicts.
+2. The sample's serialized `tools_kwargs.task` is merged on top and normally wins on conflicts.
 
-Nested dictionaries are deep-merged. Lists and scalar values from the Sample Config replace Task Config defaults.
+Nested dictionaries are deep-merged. Lists and scalar values from the Sample Config replace Task Config defaults. The exception is a recipe-file `prompt_template`, which remains authoritative so a serialized sample cannot replace the selected Agent recipe.
 
 The runtime injects `agent.model.base_url`, API key, and served model name after the two layers. Endpoint information is not sample-overridable because it belongs to the live policy service.
 

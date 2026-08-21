@@ -44,7 +44,7 @@ class TaskConfig(BaseModel):
     )
     prompt: list[dict[str, Any]] = Field(
         default_factory=list,
-        description="Dataset-owned source messages on input; Agent-facing messages after Task resolution.",
+        description="Agent-neutral dataset/source messages on input; Agent-facing messages after Task resolution.",
     )
     prompt_template: list[dict[str, Any]] | None = Field(
         default=None,

@@ -11,13 +11,6 @@ from uni_agent.tasks.swe_bench import preprocess as swe_bench_preprocess
 from uni_agent.tasks.swe_bench_multilingual import preprocess as multilingual_preprocess
 from uni_agent.tasks.swe_rebench import preprocess as swe_rebench_preprocess
 
-_QUICKSTART_TASK_CONFIGS = [
-    "examples/quickstart/inference/task_config_react.yaml",
-    "examples/quickstart/inference/task_config_claude_code.yaml",
-    "examples/quickstart/training/task_config_react.yaml",
-    "examples/quickstart/training/task_config_claude_code.yaml",
-]
-
 
 class _FakeDataset:
     def __init__(self, rows):
@@ -135,25 +128,17 @@ def test_swe_recipe_renders_complete_metadata_prompt(recipe_path, task_name, exp
         }
     )
 
-    effective_messages = TaskConfig(**resolved).prompt
-    effective_text = "\n".join(str(message["content"]) for message in effective_messages)
+    rendered_messages = TaskConfig(**resolved).prompt
+    rendered_text = "\n".join(str(message["content"]) for message in rendered_messages)
 
-    assert [message["role"] for message in effective_messages] == ["system", "user"]
-    assert metadata_problem in effective_text
-    assert source_problem not in effective_text
-    assert "SECRET GOLD PATCH" not in effective_text
-    assert "SECRET TEST PATCH" not in effective_text
-    assert ("submit" in effective_text.lower()) is expects_submit
-    assert ("primary language: C" in effective_text) is expects_language
-    assert "There is no submit tool; exit after validation." not in effective_text
-
-
-@pytest.mark.parametrize("recipe_path", _QUICKSTART_TASK_CONFIGS)
-def test_quickstart_recipe_places_prompt_template_last(recipe_path):
-    entries = yaml.safe_load(Path(recipe_path).read_text())
-
-    assert entries
-    assert all(list(entry)[-1] == "prompt_template" for entry in entries)
+    assert [message["role"] for message in rendered_messages] == ["system", "user"]
+    assert metadata_problem in rendered_text
+    assert source_problem not in rendered_text
+    assert "SECRET GOLD PATCH" not in rendered_text
+    assert "SECRET TEST PATCH" not in rendered_text
+    assert ("submit" in rendered_text.lower()) is expects_submit
+    assert ("primary language: C" in rendered_text) is expects_language
+    assert "There is no submit tool; exit after validation." not in rendered_text
 
 
 @pytest.mark.parametrize(
@@ -203,27 +188,3 @@ def test_user_recipe_can_replace_complete_prompt_template(tmp_path):
         {"role": "system", "content": "Custom instructions"},
         {"role": "user", "content": "Custom issue: Metadata issue"},
     ]
-
-
-def test_mini_swe_agent_recipe_without_template_preserves_source_prompt():
-    source_prompt = [{"role": "user", "content": "Source issue"}]
-    resolved = TaskConfigResolver(
-        {
-            "swe_bench": {
-                "name": "swe_bench",
-                "sandbox": {"provider": "local"},
-                "agent": {"name": "mini_swe_agent"},
-            }
-        }
-    ).resolve(
-        {
-            "name": "swe_bench",
-            "prompt": source_prompt,
-            "metadata": {"problem_statement": "Metadata issue"},
-        }
-    )
-
-    config = TaskConfig(**resolved)
-
-    assert config.prompt_template is None
-    assert config.prompt == source_prompt

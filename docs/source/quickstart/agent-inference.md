@@ -177,9 +177,9 @@ Important controls:
 
 Task/Agent/Tool events go to `task.log`; Framework events go to `framework.log`.
 
-In Framework-managed mode, `raw_prompt` always means the dataset/source prompt. verl uses it for loader-time token-length checks when overlong-prompt filtering is enabled, passes it to RewardLoop, and preserves it as TransferQueue metadata. Task-rendered messages do not replace it. The Gateway captures the Agent's actual model requests to build the trajectory token tensors.
+In Framework-managed mode, `raw_prompt` always means the Agent-neutral dataset/source prompt. verl uses it for loader-time token-length checks when overlong-prompt filtering is enabled, makes it available when a configured RewardLoop or judge scoring path is used, and preserves it as TransferQueue metadata. Task-rendered messages may replace it on the Agent side but do not overwrite the source value used by verl. The Gateway captures the Agent's actual model requests to build the trajectory token tensors.
 
-Self-rendering Agents such as mini-swe-agent receive that source message unchanged and apply their own template inside the Sandbox. Their final internal messages are not observable through the current Task Runner, so Task-rendered messages and an Agent's true effective prompt are not necessarily identical.
+Self-rendering Agents receive that source message unchanged and may apply their own template inside the Sandbox. Their final internal messages are not observable through the current Task Runner, so Task-rendered messages and an Agent's final internal prompt are not necessarily identical. This is the intended path for the planned mini-swe-agent integration.
 
 !!! note "Current scope"
     Runtime prompt templates accept string message content only; multimodal template rendering is deferred. Without a template, pre-rendered structured messages can pass through in `prompt`, although end-to-end image, video, or audio support still depends on the selected Agent, API adapter, and model processor. Templates do not change the sandbox working directory or environment.

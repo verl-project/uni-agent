@@ -123,7 +123,13 @@ def test_model_fallbacks_do_not_override_task_config_defaults():
 def test_task_prompt_without_template_passes_through_unchanged():
     messages = [
         {"role": "system", "content": "Existing instructions"},
-        {"role": "user", "content": "Existing rendered problem"},
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Inspect this image"},
+                {"type": "image_url", "image_url": {"url": "https://example.com/input.png"}},
+            ],
+        },
     ]
 
     config = TaskConfig(sandbox=_LOCAL_SANDBOX, prompt=messages)
@@ -156,13 +162,10 @@ def test_task_prompt_template_renders_multiple_metadata_fields():
     ]
 
 
-def test_task_prompt_template_allows_no_fields_and_ignores_source_shape():
+def test_task_prompt_template_allows_static_content():
     config = TaskConfig(
         sandbox=_LOCAL_SANDBOX,
-        prompt=[
-            {"role": "system", "content": "Legacy instructions"},
-            {"role": "assistant", "content": "legacy"},
-        ],
+        prompt=[{"role": "user", "content": "Dataset source stays separate"}],
         prompt_template=[{"role": "user", "content": "Static recipe prompt"}],
         metadata={"problem_statement": "Unused"},
     )
