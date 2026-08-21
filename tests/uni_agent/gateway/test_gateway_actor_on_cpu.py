@@ -58,12 +58,13 @@ def test_gateway_actor_config_rejects_non_positive_prompt_length(prompt_length):
         GatewayActorConfig(tokenizer=FakeTokenizer(), prompt_length=prompt_length)
 
 
+@pytest.mark.parametrize("field", ["enable_last_assistant_rollback", "enable_tool_parser_cache"])
 @pytest.mark.parametrize("value", ["true", 1, None])
-def test_gateway_actor_config_rejects_non_bool_last_assistant_rollback(value):
+def test_gateway_actor_config_rejects_non_bool_options(field, value):
     from uni_agent.gateway.config import GatewayActorConfig
 
-    with pytest.raises(ValueError, match="enable_last_assistant_rollback must be a bool"):
-        GatewayActorConfig(tokenizer=FakeTokenizer(), enable_last_assistant_rollback=value)
+    with pytest.raises(ValueError, match=rf"{field} must be a bool"):
+        GatewayActorConfig(tokenizer=FakeTokenizer(), **{field: value})
 
 
 def test_gateway_actor_config_enables_last_assistant_rollback_by_default():

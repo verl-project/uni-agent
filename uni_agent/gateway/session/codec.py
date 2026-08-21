@@ -98,6 +98,7 @@ class MessageCodec:
         vision_info_extractor_kwargs: dict[str, Any] | None = None,
         tool_parser_name: str | None = None,
         rollout_backend: str | None = None,
+        enable_tool_parser_cache: bool = True,
         apply_chat_template_kwargs: dict[str, Any] | None = None,
     ):
         self._tokenizer = tokenizer
@@ -116,12 +117,15 @@ class MessageCodec:
         )
         self._tool_parser_name = tool_parser_name
         self._rollout_backend = rollout_backend
+        self._enable_tool_parser_cache = enable_tool_parser_cache
         # Backend parser construction performs expensive setup, so reuse parsers
         # within this actor-scoped codec. SGLang/vLLM bind tool schemas at
         # construction, while verl receives schemas per extraction call; this is
         # why their cache keys differ. Keep the cache codec-scoped because parser
         # instances may retain mutable request state and dynamic schemas can grow
-        # the mapping over the codec lifetime.
+        # the mapping over the codec lifetime. Callers can disable this
+        # optimization for parser implementations that require request-scoped
+        # instances.
         self._tool_parser_cache: dict[tuple[str, ...], Any] = {}
 
     @property
@@ -280,7 +284,7 @@ class MessageCodec:
         parser_name: str,
     ) -> tuple[str, list[Any]]:
         cache_key = ("sglang", parser_name, _canonical_tools_hash(tools))
-        parser = self._tool_parser_cache.get(cache_key)
+        parser = self._tool_parser_cache.get(cache_key) if self._enable_tool_parser_cache else None
         if parser is None:
             from sglang.srt.entrypoints.openai.protocol import Function as SglFunction
             from sglang.srt.entrypoints.openai.protocol import Tool as SglTool
@@ -288,7 +292,8 @@ class MessageCodec:
 
             sglang_tools = [SglTool(type=tool["type"], function=SglFunction(**tool["function"])) for tool in tools]
             parser = FunctionCallParser(sglang_tools, parser_name)
-            self._tool_parser_cache[cache_key] = parser
+            if self._enable_tool_parser_cache:
+                self._tool_parser_cache[cache_key] = parser
 
         if not parser.has_tool_call(text):
             return text, []
@@ -304,7 +309,7 @@ class MessageCodec:
         from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionToolsParam
 
         cache_key = ("vllm", parser_name, _canonical_tools_hash(tools))
-        parser = self._tool_parser_cache.get(cache_key)
+        parser = self._tool_parser_cache.get(cache_key) if self._enable_tool_parser_cache else None
         vllm_tools = [ChatCompletionToolsParam(**tool) if isinstance(tool, dict) else tool for tool in tools]
         if parser is None:
             from vllm.tool_parsers import ToolParserManager
@@ -315,7 +320,8 @@ class MessageCodec:
                 parser = parser_cls(self._tokenizer, tools=vllm_tools)
             else:
                 parser = parser_cls(self._tokenizer)
-            self._tool_parser_cache[cache_key] = parser
+            if self._enable_tool_parser_cache:
+                self._tool_parser_cache[cache_key] = parser
 
         request = SimpleNamespace(tools=vllm_tools, tool_choice="auto", skip_special_tokens=True)
         parsed = parser.extract_tool_calls(text, request)
@@ -334,10 +340,11 @@ class MessageCodec:
         from verl.tools.schemas import OpenAIFunctionToolSchema
 
         cache_key = ("verl", parser_name)
-        parser = self._tool_parser_cache.get(cache_key)
+        parser = self._tool_parser_cache.get(cache_key) if self._enable_tool_parser_cache else None
         if parser is None:
             parser = ToolParser.get_tool_parser(parser_name, self._tokenizer)
-            self._tool_parser_cache[cache_key] = parser
+            if self._enable_tool_parser_cache:
+                self._tool_parser_cache[cache_key] = parser
 
         tool_schemas = [OpenAIFunctionToolSchema.model_validate(tool) for tool in tools]
         content, calls = await parser.extract_tool_calls(response_ids, tool_schemas)
