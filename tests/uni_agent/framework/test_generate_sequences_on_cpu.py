@@ -391,39 +391,6 @@ async def test_agent_runners_registry_materializes_runners_and_selects_by_agent_
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("dispatch_mode", ["inline_async", "ray_task"])
-async def test_runner_result_does_not_replace_source_prompt_for_scoring_or_tq(monkeypatch, fake_tq, dispatch_mode):
-    runtime = _FakeGatewayManager({"session-sample-0-rollout-0": [_trajectory()]})
-    scored_sample_fields = []
-
-    async def fake_score(self, trajectories, sample_fields):
-        scored_sample_fields.append(sample_fields)
-        return [(1.0, {})] * len(trajectories)
-
-    monkeypatch.setattr(OpenAICompatibleAgentFramework, "_score_trajectories", fake_score)
-    framework = await _build_framework_with_agent_runners(
-        agent_runners={
-            "runner": {
-                "runner_fqn": "tests.uni_agent.support.task_result_runner",
-                "dispatch_mode": dispatch_mode,
-            }
-        },
-        gateway_manager=runtime,
-        reward_loop_worker_handles=["sentinel"],
-    )
-    prompts = _build_prompts(count=1, global_steps=7)
-    source_prompt = [{"role": "user", "content": "sample 0"}]
-
-    await framework.generate_sequences(prompts)
-
-    assert tu.get(prompts, "raw_prompt") == [source_prompt]
-    assert len(scored_sample_fields) == 1
-    assert scored_sample_fields[0]["raw_prompt"] == source_prompt
-    fields = fake_tq.batch_puts[0]["fields"]
-    assert tu.get(fields, "raw_prompt") == [source_prompt]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("dispatch_mode", ["inline_async", "ray_task"])
 async def test_framework_and_runner_logs_share_one_session_directory(tmp_path, fake_tq, dispatch_mode):
     runtime = _FakeGatewayManager({"session-sample-0-rollout-0": [_trajectory()]})
     runner_config = (

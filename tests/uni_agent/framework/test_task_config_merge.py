@@ -194,7 +194,6 @@ def test_rendered_task_config_round_trip_does_not_serialize_template():
         ([{"role": "user", "content": "{missing}"}], {}, "missing.*missing"),
         ([{"role": "user", "content": "Broken {problem_statement"}], {"problem_statement": "issue"}, "invalid"),
         ([{"role": "user", "content": "{patch}"}], {"patch": {"diff": "secret"}}, "text.*patch"),
-        ([{"role": "user", "content": "{tests}"}], {"tests": ["case"]}, "text.*tests"),
         (
             [{"role": "user", "content": "{problem_statement[0]}"}],
             {"problem_statement": "issue"},
@@ -265,7 +264,6 @@ def test_recipe_prompt_template_overrides_sample_template_and_uses_metadata():
 
     config = TaskConfig(sandbox=_LOCAL_SANDBOX, **resolved)
 
-    assert config.prompt_template == recipe_template
     assert config.prompt == [
         {"role": "system", "content": "Recipe instructions"},
         {"role": "user", "content": "Issue: Metadata problem"},

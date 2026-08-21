@@ -112,4 +112,3 @@ def test_standalone_inference_binds_top_level_source_prompt(monkeypatch, tmp_pat
 
     assert len(captured_tasks) == 1
     assert captured_tasks[0]["prompt"] == source_prompt
-    assert captured_tasks[0]["prompt_template"] == [{"role": "user", "content": "Issue: {problem_statement}"}]

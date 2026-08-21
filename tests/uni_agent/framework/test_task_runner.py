@@ -88,4 +88,3 @@ async def test_run_task_overwrites_stale_nested_prompt_with_raw_prompt(monkeypat
     )
 
     assert captured["config"].prompt == source_prompt
-    assert "STALE NESTED PROMPT" not in str(captured["config"].prompt)

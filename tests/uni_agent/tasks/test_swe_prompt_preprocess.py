@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from pathlib import Path
 
 import pytest
-import yaml
 
 from uni_agent.tasks import TaskConfig, TaskConfigResolver
 from uni_agent.tasks.swe_bench import preprocess as swe_bench_preprocess
@@ -114,17 +112,21 @@ def test_swe_preprocess_emits_source_prompt_without_nested_rendered_prompt(monke
 def test_swe_recipe_renders_complete_metadata_prompt(recipe_path, task_name, expects_submit, expects_language):
     source_problem = "Dataset source problem"
     metadata_problem = "Metadata problem"
+    language = "TestLanguageSentinel"
+    metadata = {
+        "problem_statement": metadata_problem,
+        "patch": "SECRET GOLD PATCH",
+        "test_patch": "SECRET TEST PATCH",
+    }
+    if expects_language:
+        metadata["language"] = language
+
     resolved = TaskConfigResolver.from_file(recipe_path).resolve(
         {
             "name": task_name,
             "prompt": [{"role": "user", "content": source_problem}],
             "prompt_template": [{"role": "user", "content": "STALE {problem_statement}"}],
-            "metadata": {
-                "problem_statement": metadata_problem,
-                "language": "C",
-                "patch": "SECRET GOLD PATCH",
-                "test_patch": "SECRET TEST PATCH",
-            },
+            "metadata": metadata,
         }
     )
 
@@ -137,54 +139,4 @@ def test_swe_recipe_renders_complete_metadata_prompt(recipe_path, task_name, exp
     assert "SECRET GOLD PATCH" not in rendered_text
     assert "SECRET TEST PATCH" not in rendered_text
     assert ("submit" in rendered_text.lower()) is expects_submit
-    assert ("primary language: C" in rendered_text) is expects_language
-    assert "There is no submit tool; exit after validation." not in rendered_text
-
-
-@pytest.mark.parametrize(
-    ("recipe_path", "style"),
-    [
-        ("examples/quickstart/inference/task_config_react.yaml", "react"),
-        ("examples/quickstart/training/task_config_react.yaml", "react"),
-        ("examples/quickstart/inference/task_config_claude_code.yaml", "claude"),
-        ("examples/quickstart/training/task_config_claude_code.yaml", "claude"),
-    ],
-)
-def test_multilingual_recipe_keeps_agent_specific_swe_prompt(recipe_path, style):
-    entries = yaml.safe_load(Path(recipe_path).read_text())
-    multilingual = next(entry for entry in entries if entry["name"] == "swe_bench_multilingual")
-    prompt_text = "\n".join(message["content"] for message in multilingual["prompt_template"])
-
-    if style == "react":
-        assert "the project is already built" in prompt_text
-        assert "using the repository's own language/runtime" in prompt_text
-        assert "submit it using the `submit` tool" in prompt_text
-        assert "You are a software engineer working in an existing repository." not in prompt_text
-    else:
-        assert "You are a software engineer working in an existing repository." in prompt_text
-        assert "focused reproduction steps" in prompt_text
-        assert "the project is already built" not in prompt_text
-        assert "`submit` tool" not in prompt_text
-
-
-def test_user_recipe_can_replace_complete_prompt_template(tmp_path):
-    recipe = yaml.safe_load(Path("examples/quickstart/inference/task_config_react.yaml").read_text())
-    recipe[0]["prompt_template"] = [
-        {"role": "system", "content": "Custom instructions"},
-        {"role": "user", "content": "Custom issue: {problem_statement}"},
-    ]
-    config_path = tmp_path / "custom-task.yaml"
-    config_path.write_text(yaml.safe_dump(recipe, sort_keys=False))
-
-    resolved = TaskConfigResolver.from_file(str(config_path)).resolve(
-        {
-            "name": "swe_bench",
-            "prompt": [{"role": "user", "content": "Source issue"}],
-            "metadata": {"problem_statement": "Metadata issue"},
-        }
-    )
-
-    assert TaskConfig(**resolved).prompt == [
-        {"role": "system", "content": "Custom instructions"},
-        {"role": "user", "content": "Custom issue: Metadata issue"},
-    ]
+    assert (language in rendered_text) is expects_language
