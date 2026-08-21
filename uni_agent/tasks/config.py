@@ -27,64 +27,53 @@ def _deep_merge(base: dict, overrides: dict) -> dict:
 
 
 def render_prompt_template(
-    source_messages: object,
+    metadata: object,
     prompt_template: object,
 ) -> list[dict[str, Any]]:
-    """Render one source user message into a validated chat-message template."""
-    if not isinstance(source_messages, list) or len(source_messages) != 1:
-        raise ValueError("prompt_template requires exactly one source user message")
-    source_message = source_messages[0]
-    if not isinstance(source_message, Mapping) or source_message.get("role") != "user":
-        raise ValueError("prompt_template source user message must be a mapping with role='user'")
-    if "content" not in source_message:
-        raise ValueError("prompt_template source user message must contain 'content'")
-    source_content = source_message["content"]
-
+    """Render text-only chat messages from Task metadata."""
     if not isinstance(prompt_template, list):
         raise ValueError("prompt_template must be a list of template messages")
+    if not isinstance(metadata, Mapping):
+        raise ValueError("prompt_template metadata must be a mapping")
 
     formatter = string.Formatter()
-    parsed_messages: list[tuple[dict[str, Any], list[tuple[str, str | None, str | None, str | None]]]] = []
-    prompt_fields = 0
+    rendered: list[dict[str, Any]] = []
     for index, message in enumerate(prompt_template):
         if not isinstance(message, Mapping):
-            raise ValueError(f"prompt_template message {index} must be a mapping")
+            raise ValueError(f"prompt_template message {index} must be a template message mapping")
         role = message.get("role")
         if not isinstance(role, str) or not role:
             raise ValueError(f"prompt_template message {index} must contain a non-empty string 'role'")
         content = message.get("content")
         if not isinstance(content, str):
             raise ValueError(f"prompt_template message {index} must contain string 'content'")
+        format_strings = [content]
+        while format_strings:
+            try:
+                parsed = list(formatter.parse(format_strings.pop()))
+            except ValueError as exc:
+                raise ValueError(f"prompt_template message {index} has invalid content: {exc}") from exc
+            for _, field_name, format_spec, _ in parsed:
+                if field_name is None:
+                    continue
+                try:
+                    value, _ = formatter.get_field(field_name, (), metadata)
+                except (KeyError, AttributeError, IndexError) as exc:
+                    raise ValueError(
+                        f"prompt_template message {index} references missing metadata field {field_name!r}"
+                    ) from exc
+                if not isinstance(value, str):
+                    raise ValueError(
+                        f"prompt_template message {index} requires text metadata field {field_name!r}; "
+                        f"got {type(value).__name__}"
+                    )
+                if format_spec:
+                    format_strings.append(format_spec)
         try:
-            parsed = list(formatter.parse(content))
-        except ValueError as exc:
+            rendered_content = formatter.vformat(content, (), metadata)
+        except (ValueError, KeyError, AttributeError, IndexError) as exc:
             raise ValueError(f"prompt_template message {index} has invalid content: {exc}") from exc
-        for _, field_name, format_spec, conversion in parsed:
-            if field_name is None:
-                continue
-            if field_name != "prompt":
-                raise ValueError(f"prompt_template contains unknown field {field_name!r}; only 'prompt' is allowed")
-            if conversion is not None:
-                raise ValueError("prompt_template field 'prompt' does not support conversion")
-            if format_spec:
-                raise ValueError("prompt_template field 'prompt' does not support a format spec")
-            prompt_fields += 1
-        parsed_messages.append((dict(message), parsed))
-
-    if prompt_fields != 1:
-        raise ValueError(f"prompt_template must contain exactly one 'prompt' field; found {prompt_fields}")
-
-    rendered: list[dict[str, Any]] = []
-    for message, parsed in parsed_messages:
-        content = message["content"]
-        if parsed == [("", "prompt", "", None)]:
-            message["content"] = source_content
-        else:
-            has_prompt_field = any(field_name == "prompt" for _, field_name, _, _ in parsed)
-            if has_prompt_field and not isinstance(source_content, str):
-                raise ValueError("embedded prompt substitution requires source content to be a string")
-            message["content"] = formatter.vformat(content, (), {"prompt": source_content})
-        rendered.append(message)
+        rendered.append({**message, "content": rendered_content})
     return rendered
 
 

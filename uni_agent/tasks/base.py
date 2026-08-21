@@ -45,7 +45,7 @@ class TaskConfig(BaseModel):
     prompt: list[dict[str, Any]] = Field(default_factory=list, description="The task prompt.")
     prompt_template: list[dict[str, Any]] | None = Field(
         default=None,
-        description="Optional recipe-owned messages containing exactly one {prompt} field.",
+        description="Optional recipe-owned text messages formatted from task metadata.",
         exclude=True,
     )
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -61,7 +61,7 @@ class TaskConfig(BaseModel):
 
         rendered_values = dict(values)
         rendered_values["prompt"] = render_prompt_template(
-            rendered_values.get("prompt", []),
+            rendered_values.get("metadata", {}),
             rendered_values["prompt_template"],
         )
         return rendered_values
@@ -92,7 +92,6 @@ class TaskResult:
     accuracy: float | None = None
     finished: bool | None = None
     extra_info: dict[str, Any] | None = None
-    effective_messages: list[dict[str, Any]] | None = None
 
 
 class Task(ABC):

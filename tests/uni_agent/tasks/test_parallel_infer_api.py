@@ -30,7 +30,7 @@ def test_standalone_inference_binds_top_level_source_prompt(monkeypatch, tmp_pat
     provider: local
   prompt_template:
     - role: user
-      content: "Issue: {prompt}"
+      content: "Issue: {problem_statement}"
   agent:
     name: react
 """.strip()
@@ -43,7 +43,7 @@ def test_standalone_inference_binds_top_level_source_prompt(monkeypatch, tmp_pat
                 "task": {
                     "name": "swe_bench",
                     "prompt": [{"role": "user", "content": "STALE NESTED PROMPT"}],
-                    "metadata": {"instance_id": "sample-1"},
+                    "metadata": {"instance_id": "sample-1", "problem_statement": "Metadata problem"},
                 }
             }
         },
@@ -112,4 +112,4 @@ def test_standalone_inference_binds_top_level_source_prompt(monkeypatch, tmp_pat
 
     assert len(captured_tasks) == 1
     assert captured_tasks[0]["prompt"] == source_prompt
-    assert captured_tasks[0]["prompt_template"] == [{"role": "user", "content": "Issue: {prompt}"}]
+    assert captured_tasks[0]["prompt_template"] == [{"role": "user", "content": "Issue: {problem_statement}"}]

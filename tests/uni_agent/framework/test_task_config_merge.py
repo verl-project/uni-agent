@@ -131,57 +131,43 @@ def test_task_prompt_without_template_passes_through_unchanged():
     assert config.prompt == messages
 
 
-def test_task_prompt_template_renders_source_user_message():
+def test_task_prompt_template_renders_multiple_metadata_fields():
     config = TaskConfig(
         sandbox=_LOCAL_SANDBOX,
-        prompt=[{"role": "user", "content": "Fix the parser"}],
+        prompt=[{"role": "user", "content": "Dataset source stays separate"}],
         prompt_template=[
             {"role": "system", "content": "Work carefully."},
-            {"role": "user", "content": "Issue:\n{prompt}\nUse {{literal braces}}."},
+            {
+                "role": "user",
+                "content": (
+                    "Language: {language}\nIssue: {problem_statement}\nAgain: {language}\nUse {{literal braces}}."
+                ),
+            },
         ],
+        metadata={"problem_statement": "Fix the parser", "language": "Python"},
     )
 
     assert config.prompt == [
         {"role": "system", "content": "Work carefully."},
-        {"role": "user", "content": "Issue:\nFix the parser\nUse {literal braces}."},
+        {
+            "role": "user",
+            "content": "Language: Python\nIssue: Fix the parser\nAgain: Python\nUse {literal braces}.",
+        },
     ]
 
 
-def test_exact_prompt_substitution_preserves_structured_content():
-    structured_content = [
-        {"type": "text", "text": "Inspect this image"},
-        {"type": "image", "image": {"bytes": b"image-bytes"}},
-    ]
-
+def test_task_prompt_template_allows_no_fields_and_ignores_source_shape():
     config = TaskConfig(
         sandbox=_LOCAL_SANDBOX,
-        prompt=[{"role": "user", "content": structured_content}],
-        prompt_template=[{"role": "user", "content": "{prompt}"}],
-    )
-
-    assert config.prompt == [{"role": "user", "content": structured_content}]
-    assert isinstance(config.prompt[0]["content"], list)
-
-
-def test_structured_prompt_allows_escaped_prompt_literal_in_another_message():
-    structured_content = [
-        {"type": "text", "text": "Inspect this image"},
-        {"type": "image", "image": {"bytes": b"image-bytes"}},
-    ]
-
-    config = TaskConfig(
-        sandbox=_LOCAL_SANDBOX,
-        prompt=[{"role": "user", "content": structured_content}],
-        prompt_template=[
-            {"role": "system", "content": "Keep the literal {{prompt}} marker."},
-            {"role": "user", "content": "{prompt}"},
+        prompt=[
+            {"role": "system", "content": "Legacy instructions"},
+            {"role": "assistant", "content": "legacy"},
         ],
+        prompt_template=[{"role": "user", "content": "Static recipe prompt"}],
+        metadata={"problem_statement": "Unused"},
     )
 
-    assert config.prompt == [
-        {"role": "system", "content": "Keep the literal {prompt} marker."},
-        {"role": "user", "content": structured_content},
-    ]
+    assert config.prompt == [{"role": "user", "content": "Static recipe prompt"}]
 
 
 def test_rendered_task_config_round_trip_does_not_serialize_template():
@@ -189,7 +175,8 @@ def test_rendered_task_config_round_trip_does_not_serialize_template():
         sandbox=_LOCAL_SANDBOX,
         agent={"name": "react"},
         prompt=[{"role": "user", "content": "Fix the parser"}],
-        prompt_template=[{"role": "user", "content": "Issue: {prompt}"}],
+        prompt_template=[{"role": "user", "content": "Issue: {problem_statement}"}],
+        metadata={"problem_statement": "Fix the parser"},
     )
 
     dumped = config.model_dump()
@@ -199,51 +186,26 @@ def test_rendered_task_config_round_trip_does_not_serialize_template():
 
 
 @pytest.mark.parametrize(
-    ("prompt_template", "error"),
+    ("prompt_template", "metadata", "error"),
     [
-        ([{"role": "user", "content": "No field"}], "exactly one.*prompt"),
+        ([{"role": "user", "content": "{missing}"}], {}, "missing.*missing"),
+        ([{"role": "user", "content": "Broken {problem_statement"}], {"problem_statement": "issue"}, "invalid"),
+        ([{"role": "user", "content": "{patch}"}], {"patch": {"diff": "secret"}}, "text.*patch"),
+        ([{"role": "user", "content": "{tests}"}], {"tests": ["case"]}, "text.*tests"),
         (
-            [
-                {"role": "system", "content": "{prompt}"},
-                {"role": "user", "content": "{prompt}"},
-            ],
-            "exactly one.*prompt",
+            [{"role": "user", "content": "{problem_statement:{width}}"}],
+            {"problem_statement": "issue", "width": 10},
+            "text.*width",
         ),
-        ([{"role": "user", "content": "{metadata}"}], "unknown.*metadata"),
-        ([{"role": "user", "content": "{prompt!r}"}], "conversion"),
-        ([{"role": "user", "content": "{prompt:>20}"}], "format spec"),
     ],
 )
-def test_task_prompt_template_rejects_invalid_fields(prompt_template, error):
+def test_task_prompt_template_rejects_invalid_metadata_formatting(prompt_template, metadata, error):
     with pytest.raises(ValueError, match=error):
         TaskConfig(
             sandbox=_LOCAL_SANDBOX,
             prompt=[{"role": "user", "content": "Fix the parser"}],
             prompt_template=prompt_template,
-        )
-
-
-@pytest.mark.parametrize(
-    ("source_prompt", "error"),
-    [
-        ([], "exactly one source user message"),
-        (
-            [
-                {"role": "system", "content": "Legacy instructions"},
-                {"role": "user", "content": "Legacy problem"},
-            ],
-            "exactly one source user message",
-        ),
-        ([{"role": "assistant", "content": "Wrong role"}], "source user message"),
-        ([{"role": "user"}], "source user message.*content"),
-    ],
-)
-def test_task_prompt_template_rejects_incompatible_source_messages(source_prompt, error):
-    with pytest.raises(ValueError, match=error):
-        TaskConfig(
-            sandbox=_LOCAL_SANDBOX,
-            prompt=source_prompt,
-            prompt_template=[{"role": "user", "content": "{prompt}"}],
+            metadata=metadata,
         )
 
 
@@ -251,9 +213,9 @@ def test_task_prompt_template_rejects_incompatible_source_messages(source_prompt
     ("prompt_template", "error"),
     [
         (["not-a-message"], "template message"),
-        ([{"content": "{prompt}"}], "template message.*role"),
+        ([{"content": "{problem_statement}"}], "template message.*role"),
         ([{"role": "user"}], "template message.*content"),
-        ([{"role": "user", "content": ["{prompt}"]}], "template message.*content"),
+        ([{"role": "user", "content": ["{problem_statement}"]}], "template message.*content"),
     ],
 )
 def test_task_prompt_template_rejects_incompatible_template_messages(prompt_template, error):
@@ -262,22 +224,14 @@ def test_task_prompt_template_rejects_incompatible_template_messages(prompt_temp
             sandbox=_LOCAL_SANDBOX,
             prompt=[{"role": "user", "content": "Fix the parser"}],
             prompt_template=prompt_template,
+            metadata={"problem_statement": "Fix the parser"},
         )
 
 
-def test_embedded_prompt_substitution_requires_text_source_content():
-    with pytest.raises(ValueError, match="embedded.*string"):
-        TaskConfig(
-            sandbox=_LOCAL_SANDBOX,
-            prompt=[{"role": "user", "content": [{"type": "image", "image": "example.png"}]}],
-            prompt_template=[{"role": "user", "content": "Issue: {prompt}"}],
-        )
-
-
-def test_recipe_prompt_template_overrides_sample_template_without_metadata_context():
+def test_recipe_prompt_template_overrides_sample_template_and_uses_metadata():
     recipe_template = [
         {"role": "system", "content": "Recipe instructions"},
-        {"role": "user", "content": "Issue: {prompt}"},
+        {"role": "user", "content": "Issue: {problem_statement}"},
     ]
     resolver = TaskConfigResolver(
         {
@@ -291,8 +245,8 @@ def test_recipe_prompt_template_overrides_sample_template_without_metadata_conte
         {
             "name": "swe_bench",
             "prompt": [{"role": "user", "content": "Source problem"}],
-            "prompt_template": [{"role": "user", "content": "Sample override: {prompt}"}],
-            "metadata": {"problem_statement": "LEAKED METADATA", "patch": "SECRET PATCH"},
+            "prompt_template": [{"role": "user", "content": "Sample override: {problem_statement}"}],
+            "metadata": {"problem_statement": "Metadata problem", "patch": "SECRET PATCH"},
         }
     )
 
@@ -301,7 +255,6 @@ def test_recipe_prompt_template_overrides_sample_template_without_metadata_conte
     assert config.prompt_template == recipe_template
     assert config.prompt == [
         {"role": "system", "content": "Recipe instructions"},
-        {"role": "user", "content": "Issue: Source problem"},
+        {"role": "user", "content": "Issue: Metadata problem"},
     ]
-    assert "LEAKED METADATA" not in str(config.prompt)
     assert "SECRET PATCH" not in str(config.prompt)

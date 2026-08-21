@@ -12,11 +12,10 @@ async def logging_runner(**kwargs):
     logging.getLogger("test.runner").info("runner task log")
 
 
-async def effective_prompt_runner(*, session, **kwargs):
-    return TaskResult(
-        reward=0.0,
-        effective_messages=[{"role": "user", "content": f"effective:{session.session_id}"}],
-    )
+async def runner_with_legacy_messages(*, session, **kwargs):
+    result = TaskResult(reward=0.0)
+    result.effective_messages = [{"role": "user", "content": f"legacy:{session.session_id}"}]
+    return result
 
 
 class FakeTokenizer:

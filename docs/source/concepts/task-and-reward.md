@@ -20,7 +20,7 @@ Every Task configuration inherits from `TaskConfig`:
 - `name`: registered Task family.
 - `sandbox`: `SandboxConfig`.
 - `agent`: concrete Agent configuration.
-- `prompt`: source OpenAI-style messages supplied by the dataset or caller.
+- `prompt`: dataset/source OpenAI-style messages supplied by the runtime.
 - `prompt_template`: optional recipe-owned messages rendered before the Agent starts.
 - `metadata`: sample-specific data used by execution and scoring.
 
@@ -39,9 +39,9 @@ class MyTaskConfig(TaskConfig):
 
 Unknown fields are rejected. Agent mappings are resolved through the Agent registry into the correct AgentConfig subclass.
 
-### Source and Effective Prompts
+### Source Prompts and Runtime Templates
 
-Datasets should keep `prompt` agent-neutral. SWE preprocessors, for example, emit one user message containing the issue text. A Task recipe can turn that source into the complete Agent-specific input with `prompt_template`:
+Datasets should keep `prompt` agent-neutral. SWE preprocessors, for example, emit one user message whose content is the problem statement and retain `problem_statement` plus evaluator fields in Task `metadata`. A Task recipe can build complete Agent-specific messages by formatting metadata fields:
 
 ```yaml
 - name: swe_bench
@@ -52,25 +52,28 @@ Datasets should keep `prompt` agent-neutral. SWE preprocessors, for example, emi
       content: |-
         Resolve this issue in /testbed:
 
-        {prompt}
+        Language: {language}
+
+        {problem_statement}
   agent:
     name: claude_code
 ```
 
-The runtime binds the top-level source `prompt` before Task Config resolution. A recipe-file `prompt_template` owns the complete template and cannot be replaced by a same-named value serialized in a dataset row. Other Task Config fields retain their normal merge behavior.
+The runtime binds the top-level dataset/source `prompt` before Task Config resolution, overwriting any stale nested `task.prompt`. A recipe-file `prompt_template` owns the complete template and cannot be replaced by a same-named value serialized in a dataset row. Other Task Config fields retain their normal merge behavior.
 
-The first template contract is intentionally strict:
+Runtime templates are intentionally text-only:
 
-- The source must be exactly one user message.
-- Template output is a list of messages with string `role` and string `content`.
-- Exactly one `{prompt}` field is required. Other fields, conversions, and format specifications are rejected.
-- Content equal to `{prompt}` preserves the source content object, including structured multimedia blocks.
-- Embedding `{prompt}` in surrounding text requires string source content.
+- Template output is a list of messages with a non-empty string `role` and string `content`.
+- Each content string uses Python standard-library formatting directly against Task `metadata`. Any metadata field may be referenced, repeated, or omitted from the template.
+- Missing fields, malformed templates, non-text replacement values, and non-string template content fail validation before the Agent starts.
 - Use standard Python formatting escapes, `{{` and `}}`, for literal braces.
+- Image, video, audio, and other structured message content are not supported by runtime templates. Multimodal template support is deferred.
 
-Without `prompt_template`, messages pass through unchanged, so existing already-rendered datasets remain compatible with template-free recipes. Combining a template with legacy multi-message rendered input fails validation instead of rendering a prompt twice.
+Without `prompt_template`, the dataset/source messages pass through unchanged. This is the intended path for self-rendering Agents such as mini-swe-agent: it reads the source user content as the problem statement and applies its own template inside the Sandbox. The Task still calls every Agent through the uniform `Agent.run(sandbox, messages)` interface and does not pass metadata or branch on Agent name.
 
-After rendering, `TaskConfig.prompt` is the effective message list passed to the Agent. `prompt_template` is an input-only rendering directive: serialized Task configs contain the effective prompt and omit the template body, preventing a later config round-trip from rendering it again. Framework-managed execution keeps the dataset value as `source_prompt` and exposes the effective messages as downstream `raw_prompt` to RewardLoop and TransferQueue consumers. This provenance copy is local to each rollout session; concurrent sessions never mutate the shared sample mapping. Reward-info telemetry remains limited to reward, accuracy, and completion state.
+After Task rendering, `TaskConfig.prompt` is the message list passed to `Agent.run()`. `prompt_template` is an input-only rendering directive and is omitted when Task configs are serialized. Framework, RewardLoop, and TransferQueue `raw_prompt` continue to mean the dataset/source prompt; they are not replaced with Task-rendered messages. RewardLoop can therefore obtain the SWE problem statement from the source user message.
+
+Task-rendered messages are not guaranteed to equal a self-rendering Agent's final internal prompt. mini-swe-agent applies its own Sandbox-side template, and the current Task Runner cannot observe those true effective messages. `TaskResult` consequently reports episode results only and does not attempt to carry prompt provenance.
 
 ## Episode Implementation
 
@@ -160,14 +163,16 @@ Preprocessing should serialize the sample-specific Task configuration into each 
 
 ```python
 {
-    "prompt": prompt,
+    "prompt": [{"role": "user", "content": problem_statement}],
     "extra_info": {
         "tools_kwargs": {
             "task": {
                 "name": "my_task",
                 "sandbox": {"image": "..."},
-                "prompt": prompt,
-                "metadata": {...},
+                "metadata": {
+                    "problem_statement": problem_statement,
+                    ...,
+                },
             }
         }
     },

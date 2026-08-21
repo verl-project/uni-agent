@@ -59,7 +59,6 @@ async def run_task(
 
     task_instance = get_task(task)
     result = await task_instance.run()
-    result.effective_messages = task_instance.config.prompt
 
     reward_posted = False
     if report_reward and session.reward_info_url:

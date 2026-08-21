@@ -15,6 +15,17 @@ import argparse
 import os
 
 from datasets import load_dataset
+from swebench.harness.constants import MAP_REPO_TO_EXT
+
+EXT_TO_LANGUAGE = {
+    "c": "C",
+    "go": "Go",
+    "java": "Java",
+    "js": "JavaScript",
+    "php": "PHP",
+    "rb": "Ruby",
+    "rs": "Rust",
+}
 
 
 def get_image_name(instance_id: str) -> str:
@@ -25,15 +36,17 @@ def get_image_name(instance_id: str) -> str:
 def build_swe_bench_multilingual(max_instances: int | None = None):
     def process(example):
         instance_id = example["instance_id"]
+        repo = example["repo"]
 
         metadata = {
             "instance_id": instance_id,
-            "repo": example["repo"],
+            "repo": repo,
             "version": str(example["version"]),
             "base_commit": example["base_commit"],
             "patch": example["patch"],
             "test_patch": example["test_patch"],
             "problem_statement": example["problem_statement"],
+            "language": EXT_TO_LANGUAGE.get(MAP_REPO_TO_EXT[repo], "the project's"),
             "FAIL_TO_PASS": example["FAIL_TO_PASS"],
             "PASS_TO_PASS": example["PASS_TO_PASS"],
         }

@@ -10,7 +10,7 @@
         I have uploaded a python code repository in the /testbed directory. You can explore and modify files using the available tools. Consider the following issue description:
 
         <issue_description>
-        {prompt}
+        {problem_statement}
         </issue_description>
 
         Can you help me implement the necessary changes to the repository to fix the <issue_description>?
@@ -78,6 +78,42 @@
         - The specific error/issue described no longer occurs
         - Your changes maintain compatibility with existing functionality
         - Edge cases are properly handled
+  sandbox:
+    provider: modal
+  agent:
+    name: react
+    max_steps: 100
+    tools:
+      - name: str_replace_editor
+      - name: stateful_shell
+        command_timeout: 180
+        env_vars:
+          PIP_PROGRESS_BAR: "off"
+          PAGER: "cat"
+          TQDM_DISABLE: "1"
+          GIT_PAGER: "cat"
+      - name: submit
+    model:
+      temperature: 0.8
+      top_p: 0.9
+      max_total_tokens: 65536
+
+- name: swe_bench_multilingual
+  prompt_template:
+    - role: system
+      content: You are a helpful assistant that can interact with a computer to solve tasks.
+    - role: user
+      content: |-
+        <uploaded_files>
+        /testbed
+        </uploaded_files>
+        I have uploaded a code repository in the /testbed directory (primary language: {language}). Explore and modify files using the available tools to resolve this issue:
+
+        <issue_description>
+        {problem_statement}
+        </issue_description>
+
+        Understand the relevant code and reproduce the issue before editing. Implement the smallest correct change in non-test files, preserve behavior outside the issue, and follow the repository's established patterns. Do not modify existing tests. Validate the change with the relevant test suite, then submit the solution using the `submit` tool.
   sandbox:
     provider: modal
   agent:

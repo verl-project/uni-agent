@@ -125,7 +125,7 @@ For an authenticated endpoint, also set `API_KEY` or pass `--api-key`. The scrip
 
 Each rollout writes `<log_dir>/<log_id>/task.log`. Set `--log-dir` to a shared-storage path when Ray workers may run on different nodes.
 
-The dataset's top-level `prompt` is the canonical source input in this mode. Before resolving the selected Task recipe, `parallel_infer_api.py` binds that value over any legacy nested Task prompt. If the recipe defines `prompt_template`, the Task renders the complete Agent-specific messages at runtime; otherwise the source messages pass through unchanged.
+The dataset's top-level `prompt` is the canonical source input in this mode. Before resolving the selected Task recipe, `parallel_infer_api.py` binds that value over any legacy nested Task prompt. If the recipe defines `prompt_template`, the Task formats its text messages from Task `metadata`; otherwise the source messages pass through unchanged.
 
 Useful controls:
 
@@ -177,10 +177,12 @@ Important controls:
 
 Task/Agent/Tool events go to `task.log`; Framework events go to `framework.log`.
 
-In Framework-managed mode, each rollout session preserves the dataset prompt as `source_prompt` and uses the messages actually sent to the Agent as downstream `raw_prompt`. RewardLoop scoring and TransferQueue materialization therefore observe the effective prompt without changing the original batch sample.
+In Framework-managed mode, `raw_prompt` always means the dataset/source prompt. Task-rendered messages do not replace it for RewardLoop scoring or TransferQueue materialization. For SWE rows, RewardLoop can read the problem statement from the source user content.
+
+Self-rendering Agents such as mini-swe-agent receive that source message unchanged and apply their own template inside the Sandbox. Their final internal messages are not observable through the current Task Runner, so Task-rendered messages and an Agent's true effective prompt are not necessarily identical.
 
 !!! note "Current scope"
-    Runtime prompt templates do not change the sandbox working directory or environment. Claude Code multimodal CLI input and multimodal reward-judge support are also separate capabilities.
+    Runtime prompt templates accept string message content only. Image, video, audio, and other structured content are not supported; multimodal template support is deferred. Templates do not change the sandbox working directory or environment.
 
 For a Ray cluster, you can submit your job via a pre-defined Runtime Environment, for example:
 

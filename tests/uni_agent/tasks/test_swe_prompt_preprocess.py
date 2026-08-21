@@ -92,27 +92,39 @@ def test_swe_preprocess_emits_source_prompt_without_nested_rendered_prompt(monke
     task_config = output["extra_info"]["tools_kwargs"]["task"]
     assert "prompt" not in task_config
     assert task_config["metadata"]["problem_statement"] == "Canonical source problem"
+    if module is multilingual_preprocess:
+        assert task_config["metadata"]["language"] == "C"
 
 
 @pytest.mark.parametrize(
-    ("recipe_path", "task_name", "expects_submit"),
+    ("recipe_path", "task_name", "expects_submit", "expects_language"),
     [
-        ("examples/quickstart/inference/task_config_react.yaml", "swe_bench", True),
-        ("examples/quickstart/inference/task_config_claude_code.yaml", "swe_bench", False),
-        ("examples/quickstart/training/task_config_react.yaml", "swe_bench", True),
-        ("examples/quickstart/training/task_config_react.yaml", "swe_rebench", True),
-        ("examples/quickstart/training/task_config_claude_code.yaml", "swe_bench", False),
-        ("examples/quickstart/training/task_config_claude_code.yaml", "swe_rebench", False),
+        ("examples/quickstart/inference/task_config_react.yaml", "swe_bench", True, False),
+        ("examples/quickstart/inference/task_config_react.yaml", "swe_bench_multilingual", True, True),
+        ("examples/quickstart/inference/task_config_claude_code.yaml", "swe_bench", False, False),
+        ("examples/quickstart/inference/task_config_claude_code.yaml", "swe_bench_multilingual", False, True),
+        ("examples/quickstart/training/task_config_react.yaml", "swe_bench", True, False),
+        ("examples/quickstart/training/task_config_react.yaml", "swe_rebench", True, False),
+        ("examples/quickstart/training/task_config_react.yaml", "swe_bench_multilingual", True, True),
+        ("examples/quickstart/training/task_config_claude_code.yaml", "swe_bench", False, False),
+        ("examples/quickstart/training/task_config_claude_code.yaml", "swe_rebench", False, False),
+        ("examples/quickstart/training/task_config_claude_code.yaml", "swe_bench_multilingual", False, True),
     ],
 )
-def test_swe_recipe_renders_complete_agent_specific_prompt(recipe_path, task_name, expects_submit):
-    source_problem = "Canonical source problem"
+def test_swe_recipe_renders_complete_metadata_prompt(recipe_path, task_name, expects_submit, expects_language):
+    source_problem = "Dataset source problem"
+    metadata_problem = "Metadata problem"
     resolved = TaskConfigResolver.from_file(recipe_path).resolve(
         {
             "name": task_name,
             "prompt": [{"role": "user", "content": source_problem}],
-            "prompt_template": [{"role": "user", "content": "STALE {prompt}"}],
-            "metadata": {"patch": "SECRET GOLD PATCH", "test_patch": "SECRET TEST PATCH"},
+            "prompt_template": [{"role": "user", "content": "STALE {problem_statement}"}],
+            "metadata": {
+                "problem_statement": metadata_problem,
+                "language": "C",
+                "patch": "SECRET GOLD PATCH",
+                "test_patch": "SECRET TEST PATCH",
+            },
         }
     )
 
@@ -120,11 +132,12 @@ def test_swe_recipe_renders_complete_agent_specific_prompt(recipe_path, task_nam
     effective_text = "\n".join(str(message["content"]) for message in effective_messages)
 
     assert [message["role"] for message in effective_messages] == ["system", "user"]
-    assert source_problem in effective_text
-    assert effective_text.count(source_problem) == 1
+    assert metadata_problem in effective_text
+    assert source_problem not in effective_text
     assert "SECRET GOLD PATCH" not in effective_text
     assert "SECRET TEST PATCH" not in effective_text
     assert ("submit" in effective_text.lower()) is expects_submit
+    assert ("primary language: C" in effective_text) is expects_language
     assert "There is no submit tool; exit after validation." not in effective_text
 
 
@@ -132,16 +145,44 @@ def test_user_recipe_can_replace_complete_prompt_template(tmp_path):
     recipe = yaml.safe_load(Path("examples/quickstart/inference/task_config_react.yaml").read_text())
     recipe[0]["prompt_template"] = [
         {"role": "system", "content": "Custom instructions"},
-        {"role": "user", "content": "Custom issue: {prompt}"},
+        {"role": "user", "content": "Custom issue: {problem_statement}"},
     ]
     config_path = tmp_path / "custom-task.yaml"
     config_path.write_text(yaml.safe_dump(recipe, sort_keys=False))
 
     resolved = TaskConfigResolver.from_file(str(config_path)).resolve(
-        {"name": "swe_bench", "prompt": [{"role": "user", "content": "Source issue"}]}
+        {
+            "name": "swe_bench",
+            "prompt": [{"role": "user", "content": "Source issue"}],
+            "metadata": {"problem_statement": "Metadata issue"},
+        }
     )
 
     assert TaskConfig(**resolved).prompt == [
         {"role": "system", "content": "Custom instructions"},
-        {"role": "user", "content": "Custom issue: Source issue"},
+        {"role": "user", "content": "Custom issue: Metadata issue"},
     ]
+
+
+def test_mini_swe_agent_recipe_without_template_preserves_source_prompt():
+    source_prompt = [{"role": "user", "content": "Source issue"}]
+    resolved = TaskConfigResolver(
+        {
+            "swe_bench": {
+                "name": "swe_bench",
+                "sandbox": {"provider": "local"},
+                "agent": {"name": "mini_swe_agent"},
+            }
+        }
+    ).resolve(
+        {
+            "name": "swe_bench",
+            "prompt": source_prompt,
+            "metadata": {"problem_statement": "Metadata issue"},
+        }
+    )
+
+    config = TaskConfig(**resolved)
+
+    assert config.prompt_template is None
+    assert config.prompt == source_prompt

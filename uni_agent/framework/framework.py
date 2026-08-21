@@ -22,7 +22,6 @@ from tensordict.tensorclass import NonTensorData, NonTensorStack
 
 from uni_agent.gateway.session import SessionHandle, Trajectory
 from uni_agent.logging import LogContext, sample_logging
-from uni_agent.tasks import TaskResult
 from verl.tools.tool_registry import initialize_tools_from_config
 from verl.utils import tensordict_utils as tu
 from verl.utils.import_utils import load_class_from_fqn
@@ -45,7 +44,7 @@ class AgentRunner(Protocol):
         raw_prompt: object,
         sample_index: int,
         **sample_runner_kwargs: object,
-    ) -> object: ...
+    ) -> None: ...
 
 
 @dataclass
@@ -120,11 +119,11 @@ def _run_agent_runner_ray_task(
     sample_index: int,
     tools_kwargs: object | None,
     log_context: LogContext | None,
-) -> object:
+) -> None:
     """Run only the user runner in Ray; parent owns session lifecycle outputs."""
     runner = _materialize_runner(runner_fqn, runner_kwargs)
     with _log_scope(log_context):
-        return asyncio.run(
+        asyncio.run(
             runner(
                 raw_prompt=raw_prompt,
                 session=session,
@@ -268,7 +267,6 @@ def _trajectory_to_reward_dataproto(trajectory, sample_fields):
     non_tensor_batch: dict[str, object] = {}
     for key in (
         "raw_prompt",
-        "source_prompt",
         "data_source",
         "reward_model",
         "extra_info",
@@ -694,20 +692,15 @@ class OpenAICompatibleAgentFramework(AgentFramework):
                         tools_kwargs=tools_kwargs,
                         log_context=task_log,
                     )
-                    runner_result = await object_ref
+                    await object_ref
                 else:
                     runner = self._inline_runners[runner_name]
-                    runner_result = await runner(
+                    await runner(
                         raw_prompt=raw_prompt,
                         session=session,
                         sample_index=sample_index,
                         **({"tools_kwargs": tools_kwargs} if tools_kwargs is not None else {}),
                     )
-                session_sample_fields = sample_fields
-                if isinstance(runner_result, TaskResult) and runner_result.effective_messages is not None:
-                    session_sample_fields = dict(sample_fields)
-                    session_sample_fields["source_prompt"] = raw_prompt
-                    session_sample_fields["raw_prompt"] = runner_result.effective_messages
                 session_trajectories = await self.gateway_manager.finalize_session(session_id)
                 session_trajectories = _select_session_trajectories(
                     session_id,
@@ -720,14 +713,14 @@ class OpenAICompatibleAgentFramework(AgentFramework):
                 raise
 
             if not session_trajectories:
-                return session_trajectories, session_sample_fields
+                return session_trajectories, sample_fields
 
             # Prefer the reward the runner posted to the session (report_reward=True);
             # otherwise defer to the RewardLoopWorker (if any), else rm_scores stays 0.
             annotations = self._score_from_reward_info(session_trajectories)
             reward_source = "reward_info" if annotations is not None else None
             if annotations is None and self.reward_loop_worker_handles:
-                annotations = await self._score_trajectories(session_trajectories, session_sample_fields)
+                annotations = await self._score_trajectories(session_trajectories, sample_fields)
                 reward_source = "reward_loop_worker"
 
             if annotations is None:
@@ -747,7 +740,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
             self._log_trajectory_summary(session_id, result_trajectories)
             if run_dir is not None:
                 await asyncio.to_thread(self._dump_trajectories, run_dir, session_id, result_trajectories)
-            return result_trajectories, session_sample_fields
+            return result_trajectories, sample_fields
 
     def _log_trajectory_summary(self, session_id: str, trajectories: list[Trajectory]) -> None:
         """Log a per-session trajectory summary -- the info the task layer can't emit,
@@ -987,7 +980,6 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         for key in (
             "uid",
             "raw_prompt",
-            "source_prompt",
             "data_source",
             "reward_model",
             "extra_info",

@@ -40,7 +40,7 @@ python3 -m uni_agent.tasks.swe_bench.preprocess --local-save-dir ~/data/uni_agen
 
 The command writes: `~/data/uni_agent/swe_bench_verified.parquet`
 
-The processed rows remain independent of the runtime Sandbox provider and Agent protocol. Each row contains one source user message with the problem statement, task metadata, a canonical image reference, and a per-sample Task Config. The selected ReAct or Claude Code recipe owns the complete `prompt_template` and renders the effective Agent messages at Task runtime.
+The processed rows remain independent of the runtime Sandbox provider and Agent protocol. Each row contains one dataset/source user message with the problem statement, task metadata, a canonical image reference, and a per-sample Task Config. The selected ReAct or Claude Code recipe owns the complete `prompt_template` and formats its Task messages from metadata at runtime.
 
 !!! warning "Prompt length filtering"
     The standard verl dataset filters by the source prompt before the runtime Task template is expanded. A source message can therefore pass the configured prompt-length check even when its effective Agent prompt is longer. Size prompt limits with the selected recipe template in mind.
@@ -51,7 +51,9 @@ The processed rows remain independent of the runtime Sandbox provider and Agent 
 
 The Quickstart provides separate configs for the two Agent types:
 
-Both files define a complete `prompt_template` for each task. ReAct owns its `submit` protocol in the ReAct recipe; the Claude Code recipe contains no generated submit instruction. To customize the workflow, replace the recipe template as a whole while keeping exactly one `{prompt}` field.
+Both files define a complete metadata-based `prompt_template` for each task. ReAct owns its `submit` protocol in the ReAct recipe; the Claude Code recipe contains no generated submit instruction. Templates may use fields such as `{problem_statement}` and multilingual `{language}` wherever needed. Missing fields, malformed templates, non-text values, and structured message content are rejected; multimodal template support is deferred.
+
+Framework and RewardLoop `raw_prompt` remains the dataset/source prompt, so SWE reward code can read the problem statement from its user content. A template-free self-rendering Agent such as mini-swe-agent receives that source message and applies its own template inside the Sandbox. The current Task Runner cannot observe that Agent's final internal messages and does not replace downstream `raw_prompt` with an approximation.
 
 === "ReAct"
 
