@@ -1,13 +1,8 @@
-"""Parallel gold-patch verification for SWE-bench.
+"""Parallel oracle-solution verification.
 
-Runs each dataset row's SWE-bench task in oracle mode (``run_oracle_solution=True``):
-apply the gold patch in the sandbox, run the tests, and score. Every instance
-should resolve -- it's the data-quality baseline you run before training. Results
-are bucketed as resolved (ok) / wrong-answer (wa) / timeout-or-error (tle) and
-streamed to a live progress bar.
-
-Pass ``--task-config`` (same YAML as ``parallel_infer_api.py``) so run-level
-``sandbox.image_map`` is merged before ``SandboxConfig`` is built.
+Runs each dataset row task in oracle mode (``run_oracle_solution=True``):
+Results are bucketed as resolved (ok) / wrong-answer (wa) / timeout-or-error (tle)
+and streamed to a live progress bar.
 """
 
 import argparse
@@ -34,12 +29,10 @@ SANDBOX_PROVIDER = os.getenv("SANDBOX_PROVIDER", "modal")
 RUNTIME_TIMEOUT = float(os.getenv("RUNTIME_TIMEOUT", 3600))
 
 
-@ray.remote
 class TestEvalActor:
-    _semaphore = asyncio.Semaphore(max(1, GLOBAL_CONCURRENCY // NUM_WORKERS))
-
-    def __init__(self, log_dir: str | None):
+    def __init__(self, log_dir: str | None, max_concurrency: int):
         self.log_dir = log_dir
+        self._semaphore = asyncio.Semaphore(max_concurrency)
 
     async def run_single(self, task_config: dict) -> dict:
         async with self._semaphore:
@@ -74,10 +67,8 @@ def _prepare_task(sample: dict, resolver: TaskConfigResolver) -> dict:
     """Merge run-level Task Config (including ``sandbox.image_map``) onto the sample, then pin oracle eval."""
     sample_config = sample["extra_info"]["tools_kwargs"]["task"]
     resolved = resolver.resolve(sample_config)
-    sandbox = dict(resolved.get("sandbox") or {})
-    sandbox["provider"] = SANDBOX_PROVIDER
-    sandbox["runtime_timeout"] = RUNTIME_TIMEOUT
-    resolved["sandbox"] = sandbox
+    resolved["sandbox"]["provider"] = SANDBOX_PROVIDER
+    resolved["sandbox"]["runtime_timeout"] = RUNTIME_TIMEOUT
     resolved["run_oracle_solution"] = True
     return resolved
 
@@ -90,18 +81,29 @@ def _rule(text: str = "", width: int = 50, ch: str = "-") -> str:
     return f"{ch * (pad // 2)} {text} {ch * (pad - pad // 2)}"
 
 
+def _allocate_worker_concurrency(total_concurrency: int, num_workers: int) -> list[int]:
+    """Split a global concurrency budget across Ray actors without exceeding it."""
+    per_worker, remainder = divmod(total_concurrency, num_workers)
+    return [per_worker + (worker_index < remainder) for worker_index in range(num_workers)]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--data-path",
-        default=os.getenv("DATA_PATH", os.path.expanduser("~/data/swe_agent/swe_bench_verified.parquet")),
+        required=True,
     )
     parser.add_argument("--num-workers", type=int, default=NUM_WORKERS)
     parser.add_argument(
+        "--concurrency",
+        type=int,
+        default=GLOBAL_CONCURRENCY,
+        help="Maximum in-flight oracle tasks across all Ray actors (env GLOBAL_CONCURRENCY).",
+    )
+    parser.add_argument(
         "--task-config",
         default=None,
-        help="Run-level Task Config YAML (same shape as parallel_infer_api). "
-        "Carries sandbox.image_map; omit to use the parquet sandbox fields as-is.",
+        help="Run-level Task Config YAML.",
     )
     parser.add_argument("--limit", type=int, default=None, help="Only verify the first N samples (smoke testing).")
     parser.add_argument(
@@ -110,6 +112,10 @@ def main() -> None:
         help="Root directory for per-sample logs; use an empty value to disable file logging.",
     )
     args = parser.parse_args()
+    if args.concurrency <= 0:
+        parser.error("--concurrency must be positive")
+    if args.num_workers <= 0:
+        parser.error("--num-workers must be positive")
 
     ray.init()
 
@@ -128,17 +134,22 @@ def main() -> None:
         logger.error("failed to resolve Task Config: %s", exc)
         return
 
+    num_workers = min(args.num_workers, len(tasks), args.concurrency)
+    worker_concurrency = _allocate_worker_concurrency(args.concurrency, num_workers)
+
     logger.info(f"loaded {len(tasks)} samples from {args.data_path}")
     logger.info(
-        "provider=%s workers=%s concurrency=%s config=%s",
+        "provider=%s workers=%s concurrency=%s worker_concurrency=%s config=%s",
         SANDBOX_PROVIDER,
-        args.num_workers,
-        GLOBAL_CONCURRENCY,
+        num_workers,
+        args.concurrency,
+        worker_concurrency,
         args.task_config or "parquet",
     )
 
-    num_workers = min(args.num_workers, len(tasks))
-    workers = [TestEvalActor.remote(args.log_dir) for _ in range(num_workers)]
+    workers = [
+        ray.remote(TestEvalActor).remote(args.log_dir, max_concurrency) for max_concurrency in worker_concurrency
+    ]
     # One future per sample (round-robin across workers) so we can stream
     # per-sample progress; the actor semaphore still bounds real concurrency.
     futures = [workers[i % num_workers].run_single.remote(task) for i, task in enumerate(tasks)]

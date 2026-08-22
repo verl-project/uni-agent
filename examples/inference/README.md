@@ -10,7 +10,6 @@ For the full setup guide, see the documentation:
 
 - `parallel_infer_api.py`: run tasks against an existing model API.
 - `parallel_infer_verl.py`: let verl launch the rollout engine and use the training rollout path.
-- `parallel_verify_swe.py`: verify generated SWE patches.
 - `task_config.yaml`: ReAct SWE-Bench task config.
 - `task_config_claude_code.yaml`: Claude Code SWE-Bench task config.
 - `runtime_env.yaml`: Ray runtime env example.
