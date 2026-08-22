@@ -71,7 +71,11 @@ class SWEBenchMultilingualTask(Task):
                 finished = True
             else:
                 agent = self.build_agent()
-                agent_result = await agent.run(sandbox=sandbox, messages=cfg.prompt)
+                agent_result = await agent.run(
+                    sandbox=sandbox,
+                    messages=cfg.prompt,
+                    workdir="/testbed",
+                )
                 finished = agent_result.finished
 
             try:

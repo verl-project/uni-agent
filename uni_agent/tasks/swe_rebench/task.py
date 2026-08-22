@@ -65,7 +65,11 @@ class SWEREBenchTask(Task):
                 agent = self.build_agent()
                 messages = cfg.prompt
                 # The endpoint the agent calls lives on cfg.agent.model (the agent validates it).
-                agent_result = await agent.run(sandbox=sandbox, messages=messages)
+                agent_result = await agent.run(
+                    sandbox=sandbox,
+                    messages=messages,
+                    workdir="/testbed",
+                )
                 finished = agent_result.finished
 
             try:

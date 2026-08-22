@@ -112,6 +112,8 @@ class TerminalBenchTask(Task):
         dataset_version = metadata["dataset_version"]
         agent_timeout = float(metadata["agent_timeout"])
         verifier_timeout = float(metadata["verifier_timeout"])
+        environment = parse_json_mapping(metadata.get("environment_json"), field="environment_json")
+        workdir = str(environment["workdir"]) if environment.get("workdir") else None
         sandbox_config = build_terminal_bench_sandbox_config(cfg.sandbox, metadata)
         task_config_dump = cfg.model_dump(mode="json", exclude={"metadata", "prompt"})
         logger.info(
@@ -147,7 +149,11 @@ class TerminalBenchTask(Task):
                 agent = self.build_agent()
                 try:
                     agent_result = await asyncio.wait_for(
-                        agent.run(sandbox=sandbox, messages=cfg.prompt),
+                        agent.run(
+                            sandbox=sandbox,
+                            messages=cfg.prompt,
+                            workdir=workdir,
+                        ),
                         timeout=agent_timeout,
                     )
                 except TimeoutError:

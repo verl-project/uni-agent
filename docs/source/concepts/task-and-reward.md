@@ -59,6 +59,7 @@ class MyTask(Task):
             agent_result = await agent.run(
                 sandbox=sandbox,
                 messages=config.prompt,
+                workdir=None,
             )
 
             score = await compute_reward(

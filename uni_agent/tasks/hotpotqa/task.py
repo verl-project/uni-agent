@@ -34,6 +34,7 @@ class HotpotQATask(Task):
             agent_result = await agent.run(
                 sandbox=sandbox,
                 messages=cfg.prompt,
+                workdir=None,
                 raw_data=raw_data,
             )
 
