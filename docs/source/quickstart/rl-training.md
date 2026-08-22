@@ -167,7 +167,7 @@ Training runs as a Ray job. Use a Runtime Environment to distribute the reposito
       packages:
         - "volcengine-python-sdk"
         - "swe-rex"
-        - "swebench"
+        - "swebench==4.1.0"
 
     env_vars:
       PYTHONPATH: "verl"
@@ -190,7 +190,7 @@ Training runs as a Ray job. Use a Runtime Environment to distribute the reposito
     pip:
       packages:
         - "modal"
-        - "swebench"
+        - "swebench==4.1.0"
 
     env_vars:
       PYTHONPATH: "verl"
