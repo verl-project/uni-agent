@@ -41,21 +41,6 @@ async def test_start_command_keeps_large_payload_out_of_tmux_argv():
 
 
 @pytest.mark.asyncio
-async def test_start_uses_workdir_for_tmux_session():
-    backend = RecordingBackend()
-    channel = TmuxShell(  # type: ignore[arg-type]
-        backend,
-        session_id="test-session",
-        cwd="/testbed",
-    )
-
-    await channel.start()
-
-    new_session = next(call for call in backend.exec_calls if "new-session" in call)
-    assert new_session[new_session.index("-c") + 1] == "/testbed"
-
-
-@pytest.mark.asyncio
 async def test_interrupt_returns_when_ctrl_c_finishes_command(monkeypatch: pytest.MonkeyPatch):
     backend = RecordingBackend()
     channel = TmuxShell(backend, session_id="test-session")  # type: ignore[arg-type]

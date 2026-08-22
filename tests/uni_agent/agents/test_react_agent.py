@@ -10,8 +10,18 @@ from uni_agent.tools import ToolResult
 
 
 class _FakeToolbox:
+    def __init__(self):
+        self.calls: list[tuple[str, object]] = []
+
     def schemas(self) -> list[dict]:
         return []
+
+    def names(self) -> list[str]:
+        return ["shell"]
+
+    async def call(self, name, args, *, timeout=None):
+        self.calls.append((name, args))
+        return ToolResult(text="ok")
 
     def entered(self, *, retry: int, timeout: float):
         return self
@@ -123,13 +133,8 @@ async def test_model_forwards_finish_reason(monkeypatch):
 )
 @pytest.mark.asyncio
 async def test_react_reports_completion(monkeypatch, termination_reason: str, expected: bool):
-    workdirs: list[str | None] = []
-
-    def fake_from_specs(specs, *, sandbox, workdir=None):
-        workdirs.append(workdir)
-        return _FakeToolbox()
-
-    monkeypatch.setattr(react_module.Toolbox, "from_specs", fake_from_specs)
+    toolbox = _FakeToolbox()
+    monkeypatch.setattr(react_module.Toolbox, "from_specs", lambda specs, *, sandbox: toolbox)
     monkeypatch.setattr(react_module, "OpenAICompatibleChatModel", _FakeModel)
 
     agent = _agent()
@@ -142,7 +147,7 @@ async def test_react_reports_completion(monkeypatch, termination_reason: str, ex
     result = await agent.run(sandbox=object(), messages=[], workdir="/testbed")
 
     assert result.finished is expected
-    assert workdirs == ["/testbed"]
+    assert toolbox.calls == [("shell", {"command": "cd -- /testbed"})]
 
 
 @pytest.mark.asyncio
