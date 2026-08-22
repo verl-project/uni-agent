@@ -27,9 +27,19 @@ def _indent(text, prefix: str = "    | ") -> str:
 
 
 def build_sandbox_config() -> SandboxConfig:
+    provider = os.getenv("SANDBOX_PROVIDER", "modal")
+    image = os.getenv("IMAGE")
+
+    if provider == "local":
+        if image is not None:
+            logger.warning("Ignoring IMAGE=%r because SANDBOX_PROVIDER=local does not use container images", image)
+        image = None
+    elif image is None:
+        image = "python:3.12"
+
     return SandboxConfig(
-        provider=os.getenv("SANDBOX_PROVIDER", "modal"),
-        image=os.getenv("IMAGE", "python:3.12"),
+        provider=provider,
+        image=image,
         runtime_timeout=3600,
     )
 
