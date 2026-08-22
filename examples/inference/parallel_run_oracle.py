@@ -1,12 +1,12 @@
 """Parallel oracle-solution verification.
 
 Runs each dataset row task in oracle mode (``run_oracle_solution=True``):
-Results are bucketed as resolved (ok) / wrong-answer (wa) / timeout-or-error (tle)
-and streamed to a live progress bar.
+results are counted by status and streamed to a live progress bar.
 """
 
 import argparse
 import asyncio
+import json
 import logging
 import os
 import time
@@ -25,11 +25,9 @@ logger = logging.getLogger(__name__)
 
 GLOBAL_CONCURRENCY = int(os.getenv("GLOBAL_CONCURRENCY", 512))
 NUM_WORKERS = int(os.getenv("NUM_WORKERS", 8))
-SANDBOX_PROVIDER = os.getenv("SANDBOX_PROVIDER", "modal")
-RUNTIME_TIMEOUT = float(os.getenv("RUNTIME_TIMEOUT", 3600))
 
 
-class TestEvalActor:
+class OracleEvalActor:
     def __init__(self, log_dir: str | None, max_concurrency: int):
         self.log_dir = log_dir
         self._semaphore = asyncio.Semaphore(max_concurrency)
@@ -43,22 +41,23 @@ class TestEvalActor:
                 try:
                     result = await get_task(task_config).run()
                     info = result.extra_info or {}
-                    resolved = bool(info.get("resolved", result.reward))
-                    return {
+                    solved = bool(info.get("resolved", result.reward))
+                    task_result = {
                         "instance_id": instance_id,
                         "log_id": log_id,
-                        "resolved": resolved,
-                        "eval_completed": bool(info.get("eval_completed", True)),
+                        "solved": solved,
                         "eval_execution_time": info.get("eval_execution_time"),
+                        "status": "completed",
                     }
+                    return task_result
                 except Exception as e:
                     logger.error(f"error verifying {instance_id}: {type(e).__name__}: {e}")
                     return {
                         "instance_id": instance_id,
                         "log_id": log_id,
-                        "resolved": False,
-                        "eval_completed": False,
+                        "solved": False,
                         "eval_execution_time": None,
+                        "status": "error",
                         "error": f"{type(e).__name__}: {e}",
                     }
 
@@ -66,11 +65,12 @@ class TestEvalActor:
 def _prepare_task(sample: dict, resolver: TaskConfigResolver) -> dict:
     """Merge run-level Task Config (including ``sandbox.image_map``) onto the sample, then pin oracle eval."""
     sample_config = sample["extra_info"]["tools_kwargs"]["task"]
-    resolved = resolver.resolve(sample_config)
-    resolved["sandbox"]["provider"] = SANDBOX_PROVIDER
-    resolved["sandbox"]["runtime_timeout"] = RUNTIME_TIMEOUT
-    resolved["run_oracle_solution"] = True
-    return resolved
+    task_config = resolver.resolve(sample_config)
+    sandbox_provider = os.getenv("SANDBOX_PROVIDER")
+    if sandbox_provider:
+        task_config["sandbox"]["provider"] = sandbox_provider
+    task_config["run_oracle_solution"] = True
+    return task_config
 
 
 def _rule(text: str = "", width: int = 50, ch: str = "-") -> str:
@@ -111,6 +111,7 @@ def main() -> None:
         default=os.getenv("UNI_AGENT_LOG_DIR", "/tmp/eval_gold_patch"),
         help="Root directory for per-sample logs; use an empty value to disable file logging.",
     )
+    parser.add_argument("--result-path", default=None, help="Optional JSON path for summary and per-sample results.")
     args = parser.parse_args()
     if args.concurrency <= 0:
         parser.error("--concurrency must be positive")
@@ -136,11 +137,12 @@ def main() -> None:
 
     num_workers = min(args.num_workers, len(tasks), args.concurrency)
     worker_concurrency = _allocate_worker_concurrency(args.concurrency, num_workers)
+    sandbox_providers = sorted({task["sandbox"]["provider"] for task in tasks})
 
     logger.info(f"loaded {len(tasks)} samples from {args.data_path}")
     logger.info(
-        "provider=%s workers=%s concurrency=%s worker_concurrency=%s config=%s",
-        SANDBOX_PROVIDER,
+        "providers=%s workers=%s concurrency=%s worker_concurrency=%s config=%s",
+        sandbox_providers,
         num_workers,
         args.concurrency,
         worker_concurrency,
@@ -148,7 +150,7 @@ def main() -> None:
     )
 
     workers = [
-        ray.remote(TestEvalActor).remote(args.log_dir, max_concurrency) for max_concurrency in worker_concurrency
+        ray.remote(OracleEvalActor).remote(args.log_dir, max_concurrency) for max_concurrency in worker_concurrency
     ]
     # One future per sample (round-robin across workers) so we can stream
     # per-sample progress; the actor semaphore still bounds real concurrency.
@@ -157,12 +159,17 @@ def main() -> None:
 
     begin_time = time.time()
     results: list = [None] * len(futures)
-    ok = wa = tle = 0
+    status_counts = {
+        "completed": 0,
+        "error": 0,
+    }
+    solved_count = 0
+    unsolved_count = 0
     remaining = list(futures)
     with tqdm(
         total=len(futures),
-        desc="eval",
-        unit="inst",
+        desc="oracle verification",
+        unit="sample",
         dynamic_ncols=True,
         bar_format="{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]{postfix}",
     ) as pbar:
@@ -171,51 +178,55 @@ def main() -> None:
             for d in done:
                 res = ray.get(d)
                 results[fut_to_idx[d]] = res
-                if res.get("resolved"):
-                    ok += 1
-                elif res.get("eval_completed"):
-                    wa += 1
-                else:
-                    tle += 1
-                rate = ok / (pbar.n + 1) * 100
-                pbar.set_postfix_str(f"resolved={ok} WA={wa} TLE={tle} | {rate:.0f}% pass")
+                status_counts[res["status"]] += 1
+                solved_count += int(res["solved"])
+                unsolved_count += int(not res["solved"])
+                pbar.set_postfix_str(f"solved={solved_count} unsolved={unsolved_count}")
                 pbar.update(1)
     wall = time.time() - begin_time
 
     all_num = len(results)
-    success_num = sum(1 for r in results if r.get("resolved"))
-    fail_wa_num = sum(1 for r in results if not r.get("resolved") and r.get("eval_completed"))
-    fail_tle_num = sum(1 for r in results if not r.get("resolved") and not r.get("eval_completed"))
-
-    fail_wa_names = [r["instance_id"] for r in results if not r.get("resolved") and r.get("eval_completed")]
-    fail_tle_names = [r["instance_id"] for r in results if not r.get("resolved") and not r.get("eval_completed")]
-
-    exec_times = [r["eval_execution_time"] for r in results if r.get("eval_execution_time") is not None]
+    solved_rate = solved_count / all_num * 100 if all_num else 0.0
+    exec_times = [result["eval_execution_time"] for result in results if result["eval_execution_time"] is not None]
     avg_exec_time = sum(exec_times) / len(exec_times) if exec_times else 0.0
-    pass_rate = success_num / all_num * 100 if all_num else 0.0
 
     summary = "\n".join(
         [
             "",
-            _rule("eval summary"),
-            f"  resolved    {success_num:>4}   ({pass_rate:.1f}%)",
-            f"  wrong-ans   {fail_wa_num:>4}",
-            f"  timeout/err {fail_tle_num:>4}",
-            f"  total       {all_num:>4}",
-            _rule(f"avg {avg_exec_time:.1f}s | wall {wall:.1f}s | n={len(exec_times)}"),
+            _rule("oracle summary"),
+            f"  solved     {solved_count:>4}   ({solved_rate:.1f}%)",
+            f"  completed  {status_counts['completed']:>4}",
+            f"  error      {status_counts['error']:>4}",
+            f"  total      {all_num:>4}",
+            _rule(f"avg {avg_exec_time:.1f}s | wall {wall:.1f}s"),
             "",
         ]
     )
     print(summary)
 
-    logger.info(f"fail_wa instance names: {fail_wa_names}")
-    logger.info(f"fail_tle instance names: {fail_tle_names}")
+    unsolved_instance_ids = [result["instance_id"] for result in results if not result["solved"]]
+    logger.info("unsolved instance ids: %s", unsolved_instance_ids)
 
-    errored = [(r["instance_id"], r["error"]) for r in results if r.get("error")]
+    errored = [(result["instance_id"], result["error"]) for result in results if result.get("error")]
     if errored:
         logger.warning(f"{len(errored)} samples raised exceptions (showing up to 10):")
         for name, err in errored[:10]:
             logger.warning(f"  {name}: {err}")
+
+    summary_data = {
+        "data_path": args.data_path,
+        "total": all_num,
+        "status_counts": status_counts,
+        "solved": solved_count,
+        "solved_rate": solved_rate / 100.0,
+        "average_eval_execution_time": avg_exec_time,
+        "wall_time": wall,
+    }
+    if args.result_path:
+        output_path = Path(args.result_path).expanduser()
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(json.dumps({"summary": summary_data, "results": results}, indent=2, default=str))
+        logger.info("wrote oracle results to %s", output_path)
 
 
 if __name__ == "__main__":

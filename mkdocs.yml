@@ -51,6 +51,7 @@ nav:
   - Quickstart:
       - Installation: quickstart/installation.md
       - Launch a Sandbox: quickstart/launch-sandbox.md
+      - Verify Oracle Solutions: quickstart/oracle-verification.md
       - Run Agent Inference: quickstart/agent-inference.md
       - Run Agent RL Training: quickstart/rl-training.md
       - Run Training on NPU: quickstart/npu-training.md
