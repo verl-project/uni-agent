@@ -36,11 +36,12 @@ async def run(
     *,
     sandbox: Sandbox,
     messages: list[dict],
+    workdir: str | None = None,
 ) -> AgentResult:
     ...
 ```
 
-The Task has already started the Sandbox. The Agent must not stop it.
+The Task has already started the Sandbox. The Agent must not stop it. `workdir` optionally selects the Agent's working directory inside the Sandbox.
 
 `AgentResult` can carry:
 
@@ -95,7 +96,7 @@ Claude Code sets `AgentResult.finished=true` when the process exits with code `0
 agent:
   name: claude_code
   max_turns: 200
-  agent_timeout: 4800
+  run_timeout: 4800
   model:
     temperature: 1.0
     top_p: 0.95
@@ -133,11 +134,13 @@ class MyAgent(Agent):
         *,
         sandbox,
         messages: list[dict[str, Any]],
+        workdir: str | None = None,
     ) -> AgentResult:
         config: MyAgentConfig = self.config
         result = await sandbox.exec(
             ["my-agent", "--endpoint", config.model.base_url],
             timeout=config.run_timeout,
+            workdir=workdir,
         )
         return AgentResult(
             info={

@@ -108,7 +108,7 @@ The Quickstart provides separate configs for the two Agent types:
       agent:
         name: claude_code
         max_turns: 100
-        agent_timeout: 4800
+        run_timeout: 4800
         model:
           temperature: 1.0
           top_p: 1.0
@@ -121,7 +121,7 @@ The Quickstart provides separate configs for the two Agent types:
       agent:
         name: claude_code
         max_turns: 100
-        agent_timeout: 4800
+        run_timeout: 4800
         model:
           temperature: 1.0
           top_p: 1.0

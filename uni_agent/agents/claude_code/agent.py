@@ -102,7 +102,7 @@ class ClaudeCodeConfig(AgentConfig):
         description="Disable Claude Code skills and slash commands for deterministic rollouts.",
     )
     verbose: bool = Field(default=False, description="Pass --verbose (streams per-turn detail; noisy at scale).")
-    agent_timeout: float = Field(
+    run_timeout: float = Field(
         default=1800.0,
         description="Maximum wall-clock time (s) for Claude Code execution.",
     )
@@ -116,7 +116,13 @@ class ClaudeCodeAgent(Agent):
 
     config_model = ClaudeCodeConfig
 
-    async def run(self, *, sandbox: Sandbox, messages: list[dict[str, Any]]) -> AgentResult:
+    async def run(
+        self,
+        *,
+        sandbox: Sandbox,
+        messages: list[dict[str, Any]],
+        workdir: str | None = None,
+    ) -> AgentResult:
         cfg: ClaudeCodeConfig = self.config  # type: ignore[assignment]
         base_url = cfg.model.base_url
         if not base_url:
@@ -135,7 +141,7 @@ class ClaudeCodeAgent(Agent):
         argv = self._claude_argv(_build_claude_prompt(problem_statement))
         env = self._claude_env(endpoint)
         logger.info("claude_code: launch (endpoint=%s)", endpoint)
-        proc = await sandbox.exec(argv, env=env, timeout=cfg.agent_timeout)
+        proc = await sandbox.exec(argv, env=env, timeout=cfg.run_timeout, workdir=workdir)
 
         out_tail = (proc.stdout or "").strip()[-2000:]
         err_tail = (proc.stderr or "").strip()[-2000:]

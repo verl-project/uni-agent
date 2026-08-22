@@ -108,11 +108,13 @@ class Agent(ABC):
         *,
         sandbox: Sandbox,
         messages: list[dict[str, Any]],
+        workdir: str | None = None,
     ) -> AgentResult:
         """Solve the task described by ``messages`` inside the live ``sandbox``.
 
         ``sandbox`` is already started/provisioned (the task stops it afterwards);
         ``messages`` is the prompt in OpenAI chat form. Talks to the agent's own
-        :attr:`config.model` and returns the artifacts the task scores.
+        :attr:`config.model` and returns the artifacts the task scores. ``workdir``
+        optionally selects the Agent's working directory inside the Sandbox.
         """
         ...

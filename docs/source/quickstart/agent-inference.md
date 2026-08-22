@@ -48,7 +48,7 @@ The Quickstart includes two ready-to-use configs:
       agent:
         name: claude_code
         max_turns: 200
-        agent_timeout: 4800
+        run_timeout: 4800
         verbose: true
         model:
           temperature: 1.0

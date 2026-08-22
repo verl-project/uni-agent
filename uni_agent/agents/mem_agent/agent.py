@@ -294,6 +294,7 @@ class MemAgent(Agent):
         *,
         sandbox: Sandbox,
         messages: list[dict[str, Any]],
+        workdir: str | None = None,
         raw_data: dict[str, Any] | None = None,
     ) -> AgentResult:
         """Run the MemAgent policy using explicit context-management calls."""

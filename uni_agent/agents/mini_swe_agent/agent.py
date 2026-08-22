@@ -38,5 +38,6 @@ class MiniSweAgentAgent(Agent):
         *,
         sandbox: Sandbox,
         messages: list[dict[str, Any]],
+        workdir: str | None = None,
     ) -> AgentResult:
         pass

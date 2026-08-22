@@ -58,6 +58,7 @@ class ReActAgent(Agent):
         *,
         sandbox: Sandbox,
         messages: list[dict[str, Any]],
+        workdir: str | None = None,
     ) -> AgentResult:
         cfg: ReActConfig = self.config  # type: ignore[assignment]
         if cfg.model.base_url is None:
