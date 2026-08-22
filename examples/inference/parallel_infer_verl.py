@@ -21,7 +21,7 @@ Example (single node, 4-way tensor parallel)::
         --data-path ~/data/swe_agent/swe_bench_verified.parquet \
         --model-path ~/models/Qwen3-Coder-30B-A3B-Instruct \
         --tool-parser qwen3_coder --tensor-parallel-size 4 \
-        --task-config examples/inference/task_config.yaml --limit 8
+        --task-config examples/quickstart/inference/task_config_react.yaml --limit 8
 
 ``--task-config`` is required (same YAML shape as ``parallel_infer_api.py``); the policy
 endpoint is the gateway session, bound by the runner, not a flag.

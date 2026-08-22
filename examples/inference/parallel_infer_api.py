@@ -13,12 +13,12 @@ Bring up an OpenAI-compatible policy server, then run this against it:
 
     BASE_URL=http://localhost:8000/v1 MODEL=Qwen3-Coder-30B-A3B-Instruct \
         python examples/inference/parallel_infer_api.py \
-        --task-config examples/inference/task_config.yaml --limit 8
+        --task-config examples/quickstart/inference/task_config_react.yaml --limit 8
 
-``--task-config`` (see ``examples/inference/task_config.yaml``) accepts one Task
-Config mapping or a list keyed by ``name``. Each sample routes to the matching
-entry and is merged on top. The endpoint (--base-url / --model / --api-key or env
-BASE_URL / MODEL / API_KEY) is layered onto agent.model last.
+``--task-config`` accepts one Task Config mapping or a list keyed by ``name``.
+Each sample routes to the matching entry and is merged on top. The endpoint
+(--base-url / --model / --api-key or env BASE_URL / MODEL / API_KEY) is layered
+onto agent.model last.
 """
 
 import argparse

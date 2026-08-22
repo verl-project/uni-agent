@@ -64,11 +64,6 @@ Framework `raw_prompt` remains the Agent-neutral dataset/source prompt. A config
       sandbox:
         provider: vefaas  # <-- Change to your Sandbox provider.
         runtime_timeout: 7200
-        image_map:
-          - from: "swebench/**:latest"
-            to: "enterprise-public-cn-beijing.cr.volces.com/swe-bench-verified/**:v2"
-          - from: "swerebench/**:latest"
-            to: "enterprise-public-cn-beijing.cr.volces.com/swe-rebench/**:latest"
       agent:
         name: react
         max_steps: 200
@@ -92,11 +87,6 @@ Framework `raw_prompt` remains the Agent-neutral dataset/source prompt. A config
       sandbox:
         provider: vefaas  # <-- Change to your Sandbox provider.
         runtime_timeout: 7200
-        image_map:
-          - from: "swebench/**:latest"
-            to: "enterprise-public-cn-beijing.cr.volces.com/swe-bench-verified/**:v2"
-          - from: "swerebench/**:latest"
-            to: "enterprise-public-cn-beijing.cr.volces.com/swe-rebench/**:latest"
       agent:
         name: react
         max_steps: 200
@@ -124,11 +114,6 @@ Framework `raw_prompt` remains the Agent-neutral dataset/source prompt. A config
       sandbox:
         provider: vefaas  # <-- Change to your Sandbox provider.
         runtime_timeout: 7200
-        image_map:
-          - from: "swebench/**:latest"
-            to: "enterprise-public-cn-beijing.cr.volces.com/swe-bench-verified/**:v2"
-          - from: "swerebench/**:latest"
-            to: "enterprise-public-cn-beijing.cr.volces.com/swe-rebench/**:latest"
       agent:
         name: claude_code
         max_turns: 100
@@ -142,11 +127,6 @@ Framework `raw_prompt` remains the Agent-neutral dataset/source prompt. A config
       sandbox:
         provider: vefaas  # <-- Change to your Sandbox provider.
         runtime_timeout: 7200
-        image_map:
-          - from: "swebench/**:latest"
-            to: "enterprise-public-cn-beijing.cr.volces.com/swe-bench-verified/**:v2"
-          - from: "swerebench/**:latest"
-            to: "enterprise-public-cn-beijing.cr.volces.com/swe-rebench/**:latest"
       agent:
         name: claude_code
         max_turns: 100
