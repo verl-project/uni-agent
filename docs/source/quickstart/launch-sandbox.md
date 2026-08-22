@@ -308,5 +308,4 @@ After configuring a supported backend above, run the complete connectivity and p
     DEBUG_MODE=1 SANDBOX_PROVIDER=openyuanrong python examples/quickstart/sandbox/demo.py
     ```
 
-Next, [verify task oracle solutions](oracle-verification.md) against the configured
-sandbox before running agent inference or training.
+Next, [verify task oracle solutions](oracle-verification.md) against the configured sandbox before running agent inference or training.
