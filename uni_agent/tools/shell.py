@@ -107,20 +107,21 @@ class SandboxShell:
 async def open_shell_session(
     backend: SandboxBackend,
     *,
+    cwd: str | None = None,
     env: dict[str, str] | None = None,
     width: int = 120,
     height: int = 40,
 ) -> Shell:
     """Prefer a native shell; fall back to tmux-over-exec."""
     if isinstance(backend, Sandbox) and backend.supports_shell:
-        handle = await backend.open_shell(env=env)
+        handle = await backend.open_shell(cwd=cwd, env=env)
         logger.info("stateful_shell using native shell (%s)", type(backend).__name__)
         session: Shell = SandboxShell(handle)
         await session.start()
         return session
 
     logger.info("stateful_shell using tmux shell (%s)", type(backend).__name__)
-    session = TmuxShell(backend, width=width, height=height, env=env)
+    session = TmuxShell(backend, width=width, height=height, cwd=cwd, env=env)
     await session.start()
     return session
 
@@ -172,6 +173,7 @@ class TmuxShell:
         width: int = 120,
         height: int = 40,
         shell: str = "bash",
+        cwd: str | None = None,
         env: dict[str, str] | None = None,
     ):
         self.backend = backend
@@ -179,6 +181,7 @@ class TmuxShell:
         self.width = width
         self.height = height
         self._shell = shell
+        self._cwd = cwd
         self._env = dict(env or {})
         self._dir = f"/tmp/uni-agent-shell/{self.session_id}"
         self._sock = f"{self._dir}/tmux.sock"
@@ -219,15 +222,19 @@ class TmuxShell:
             *(f"{key}={value}" for key, value in self._env.items()),
             self._shell,
         ] if self._env else [self._shell]
-        res = await self.backend.exec(
-            self._tmux(
-                "new-session", "-d",
-                "-s", self.session_id,
-                "-x", str(self.width),
-                "-y", str(self.height),
-                *launch,
-            )
-        )
+        new_session_args = [
+            "new-session",
+            "-d",
+            "-s",
+            self.session_id,
+            "-x",
+            str(self.width),
+            "-y",
+            str(self.height),
+        ]
+        if self._cwd is not None:
+            new_session_args.extend(["-c", self._cwd])
+        res = await self.backend.exec(self._tmux(*new_session_args, *launch))
         if res.exit_code != 0:
             raise RuntimeError(f"failed to start tmux session: {res.stderr.strip()}")
         # Large scrollback so capture_pane(entire=True) can return full history.
@@ -434,6 +441,7 @@ class ShellTool(Tool):
         if self._shell is None:
             self._shell = await open_shell_session(
                 self.sandbox,
+                cwd=self.workdir,
                 width=self.config.width,
                 height=self.config.height,
                 env=self.config.env_vars,

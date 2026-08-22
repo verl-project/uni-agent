@@ -43,6 +43,7 @@ def build_gateway_manager(*, config, llm_client) -> GatewayManager:
         processor=model_config.processor,
         tool_parser_name=config.actor_rollout_ref.rollout.get("multi_turn", {}).get("format"),
         rollout_backend=config.actor_rollout_ref.rollout.get("name"),
+        enable_tool_parser_cache=af_cfg.get("enable_tool_parser_cache", True),
         apply_chat_template_kwargs=dict(apply_chat_template_kwargs),
         prompt_length=config.actor_rollout_ref.rollout.prompt_length,
         response_length=config.actor_rollout_ref.rollout.response_length,

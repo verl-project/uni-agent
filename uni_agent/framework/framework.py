@@ -44,7 +44,7 @@ class AgentRunner(Protocol):
         raw_prompt: object,
         sample_index: int,
         **sample_runner_kwargs: object,
-    ) -> None: ...
+    ) -> object: ...
 
 
 @dataclass
@@ -265,7 +265,14 @@ def _trajectory_to_reward_dataproto(trajectory, sample_fields):
     )
 
     non_tensor_batch: dict[str, object] = {}
-    for key in ("raw_prompt", "data_source", "reward_model", "extra_info", "tools_kwargs", "agent_name"):
+    for key in (
+        "raw_prompt",
+        "data_source",
+        "reward_model",
+        "extra_info",
+        "tools_kwargs",
+        "agent_name",
+    ):
         if key in sample_fields:
             non_tensor_batch[key] = np.array([sample_fields[key]], dtype=object)
     non_tensor_batch["__num_turns__"] = np.array([trajectory.num_turns])
@@ -970,7 +977,15 @@ class OpenAICompatibleAgentFramework(AgentFramework):
         field["response_mask"] = response_mask
         field["loss_mask"] = response_mask
         field.pop("multi_modal_data", None)
-        for key in ("uid", "raw_prompt", "data_source", "reward_model", "extra_info", "tools_kwargs", "agent_name"):
+        for key in (
+            "uid",
+            "raw_prompt",
+            "data_source",
+            "reward_model",
+            "extra_info",
+            "tools_kwargs",
+            "agent_name",
+        ):
             if key in sample_fields:
                 field[key] = sample_fields[key]
         field["session_id"] = session_index

@@ -149,6 +149,7 @@ class Tool(abc.ABC):
 
     def __init__(self, sandbox: SandboxBackend, **kwargs: Any):
         self.sandbox = sandbox
+        self.workdir: str | None = None
         if self.config_model is not None:
             # Auto-parse: raw kwargs -> typed, validated config object.
             self.config: BaseModel | None = self.config_model(**kwargs)
@@ -243,7 +244,13 @@ class Toolbox:
             self._tools[tool.name] = tool
 
     @classmethod
-    def from_specs(cls, specs: list[dict[str, Any]], *, sandbox: SandboxBackend) -> Toolbox:
+    def from_specs(
+        cls,
+        specs: list[dict[str, Any]],
+        *,
+        sandbox: SandboxBackend,
+        workdir: str | None = None,
+    ) -> Toolbox:
         """Build a toolbox from ``{name, ...kwargs}`` config entries bound to ``sandbox``.
 
         Each entry has a ``name`` (a TOOL_REGISTRY key) plus that tool's kwargs, e.g.
@@ -254,13 +261,18 @@ class Toolbox:
             if not isinstance(entry, dict) or not entry.get("name"):
                 raise ValueError(f"each tools entry must be a mapping with a 'name': {entry!r}")
             kwargs = {k: v for k, v in entry.items() if k != "name"}
-            tools.append(get_tool(entry["name"], sandbox, **kwargs))
+            tool = get_tool(entry["name"], sandbox, **kwargs)
+            tool.workdir = workdir
+            tools.append(tool)
         return cls(tools)
 
     @classmethod
-    def all(cls, *, sandbox: SandboxBackend) -> Toolbox:
+    def all(cls, *, sandbox: SandboxBackend, workdir: str | None = None) -> Toolbox:
         """Build a toolbox from every registered tool, each bound to ``sandbox``."""
-        return cls([t(sandbox) for t in TOOL_REGISTRY.values()])
+        tools = [tool_cls(sandbox) for tool_cls in TOOL_REGISTRY.values()]
+        for tool in tools:
+            tool.workdir = workdir
+        return cls(tools)
 
     def names(self) -> list[str]:
         return list(self._tools)

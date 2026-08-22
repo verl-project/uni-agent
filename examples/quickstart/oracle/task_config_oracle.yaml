@@ -1,0 +1,23 @@
+- name: swe_bench
+  run_oracle_solution: true
+  sandbox:
+    provider: modal
+    runtime_timeout: 3600
+
+- name: swe_bench_multilingual
+  run_oracle_solution: true
+  sandbox:
+    provider: modal
+    runtime_timeout: 3600
+
+- name: swe_rebench
+  run_oracle_solution: true
+  sandbox:
+    provider: modal
+    runtime_timeout: 3600
+
+- name: terminal_bench
+  run_oracle_solution: true
+  sandbox:
+    provider: modal
+    runtime_timeout: 3600

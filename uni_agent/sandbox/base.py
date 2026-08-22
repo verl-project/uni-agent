@@ -15,7 +15,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, ClassVar, Protocol, runtime_checkable
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .utils import (
     extract_dir_from_file,
@@ -44,6 +44,54 @@ class ExecResult:
     stderr: str
 
 
+def _name_tag(ref: str) -> tuple[str, str | None]:
+    slash, colon = ref.rfind("/"), ref.rfind(":")
+    return (ref[:colon], ref[colon + 1 :]) if colon > slash else (ref, None)
+
+
+def _capture(pattern: str, value: str) -> str | None:
+    """Captured ``**`` (``""`` if the pattern has none). ``None`` if no match."""
+    if "**" not in pattern:
+        return "" if value == pattern else None
+    left, right = pattern.split("**", 1)
+    if not value.startswith(left) or (right and not value.endswith(right)):
+        return None
+    return value[len(left) : len(value) - len(right) if right else None] or None
+
+
+class ImageMap(BaseModel):
+    """Glob ``from`` → ``to`` for ``image``. ``**`` captures; ``:latest`` also matches untagged."""
+
+    from_: str = Field(alias="from", min_length=1)
+    to: str = Field(min_length=1)
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    @model_validator(mode="after")
+    def _check(self) -> ImageMap:
+        if self.from_.count("**") > 1 or self.to.count("**") > 1:
+            raise ValueError("image_map may contain at most one '**'")
+        if "**" in self.to and "**" not in self.from_:
+            raise ValueError("image_map to has ** but from has none")
+        return self
+
+    def _match(self, image: str, pattern: str) -> str | None:
+        src_name, src_tag = _name_tag(image)
+        pat_name, pat_tag = _name_tag(pattern)
+        mid = _capture(pat_name, src_name)
+        if mid is None or (pat_tag and (src_tag or "latest") != pat_tag):
+            return None
+        return mid
+
+    def try_map(self, image: str) -> str | None:
+        mid = self._match(image, self.from_)
+        if mid is None:
+            return None
+        to_name, to_tag = _name_tag(self.to)
+        _, src_tag = _name_tag(image)
+        name, tag = to_name.replace("**", mid, 1), to_tag or src_tag
+        return f"{name}:{tag}" if tag else name
+
+
 class SandboxConfig(BaseModel):
     """Which provider to run, plus its construction kwargs.
 
@@ -59,12 +107,38 @@ class SandboxConfig(BaseModel):
         description="Max sandbox runtime/lifetime (seconds) before it is killed; used by remote providers.",
     )
     image: str = Field(default="python:3.12", description="Container image for remote providers (e.g. modal).")
+    image_map: list[ImageMap] = Field(
+        default_factory=list,
+        description="Optional glob from/to rules applied to image at construction. First match wins.",
+    )
     sandbox_kwargs: dict[str, Any] = Field(
         default_factory=dict,
         description="Extra provider-specific kwargs forwarded to the sandbox constructor.",
     )
 
     model_config = ConfigDict(extra="forbid")
+
+    @field_validator("image_map", mode="before")
+    @classmethod
+    def _coerce_image_map(cls, value: object) -> object:
+        if value is None:
+            return []
+        if isinstance(value, dict):
+            return [value]
+        return value
+
+    @model_validator(mode="after")
+    def _apply_image_map(self) -> SandboxConfig:
+        if not self.image_map:
+            return self
+        for rule in self.image_map:
+            if (mapped := rule.try_map(self.image)) is not None:
+                self.image = mapped
+                return self
+        if any(rule._match(self.image, rule.to) is not None for rule in self.image_map):
+            return self
+        froms = ", ".join(repr(m.from_) for m in self.image_map)
+        raise ValueError(f"image_map from {froms} does not match image {self.image!r}")
 
 
 @runtime_checkable

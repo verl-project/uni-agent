@@ -33,7 +33,7 @@ Task dependencies provide task-specific datasets, verifiers, and reward implemen
 === "SWE-Bench"
 
     ```bash
-    pip install swebench
+    pip install swebench==4.1.0
     ```
 
 
@@ -72,7 +72,7 @@ pip:
   packages:
     - "volcengine-python-sdk"
     - "swe-rex"
-    - "swebench"
+    - "swebench==4.1.0"
 env_vars:
   PYTHONPATH: "verl"
   # ......

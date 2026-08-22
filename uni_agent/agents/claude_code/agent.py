@@ -61,29 +61,6 @@ def _strip_v1(base_url: str) -> str:
     return b[:-3].rstrip("/") if b.endswith("/v1") else b
 
 
-def _build_claude_prompt(problem_statement: str) -> str:
-    """Use the raw issue description when the task prompt wraps it in XML tags."""
-    start_tag = "<issue_description>"
-    end_tag = "</issue_description>"
-    start = problem_statement.find(start_tag)
-    end = problem_statement.find(end_tag, start + len(start_tag)) if start >= 0 else -1
-    if start < 0 or end < 0:
-        return problem_statement
-
-    issue = problem_statement[start + len(start_tag) : end].strip()
-    if not issue:
-        return problem_statement
-
-    return (
-        "Read the following task description and resolve the issue in the current directory.\n\n"
-        "Task description:\n"
-        f"{issue}\n\n"
-        "Inspect the relevant code, make the minimal correct changes, and verify the result with appropriate tests or checks. "
-        "Do not modify tests or commit changes. "
-        "When finished, briefly summarize what changed and how it was verified."
-    )
-
-
 class ClaudeCodeConfig(AgentConfig):
     """Black-box launch params for Claude Code (policy endpoint lives on :attr:`AgentConfig.model`)."""
 
@@ -127,8 +104,10 @@ class ClaudeCodeAgent(Agent):
         base_url = cfg.model.base_url
         if not base_url:
             raise ValueError("claude_code: config.model.base_url is not set (the gateway/vLLM policy endpoint)")
-        assert [message.get("role") for message in messages] == ["system", "user"]
-        problem_statement = messages[1]["content"]
+        user_messages = [message.get("content") for message in messages if message.get("role") == "user"]
+        if len(user_messages) != 1:
+            raise ValueError("claude_code requires exactly one 'user' message")
+        problem_statement = user_messages[0]
         if not isinstance(problem_statement, str) or not problem_statement.strip():
             raise ValueError("claude_code requires a non-empty user problem statement")
 
@@ -138,7 +117,7 @@ class ClaudeCodeAgent(Agent):
 
         # Point claude at the Anthropic endpoint (gateway session or vLLM) and run it.
         endpoint = _strip_v1(base_url)
-        argv = self._claude_argv(_build_claude_prompt(problem_statement))
+        argv = self._claude_argv(problem_statement)
         env = self._claude_env(endpoint)
         logger.info("claude_code: launch (endpoint=%s)", endpoint)
         proc = await sandbox.exec(argv, env=env, timeout=cfg.run_timeout, workdir=workdir)

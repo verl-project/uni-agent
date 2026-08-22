@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import functools
+import string
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -23,6 +24,61 @@ def _deep_merge(base: dict, overrides: dict) -> dict:
         else:
             result[key] = value
     return result
+
+
+def render_prompt_template(
+    metadata: object,
+    prompt_template: object,
+) -> list[dict[str, Any]]:
+    """Render text-only chat messages from direct Task metadata fields."""
+    if not isinstance(prompt_template, list):
+        raise ValueError("prompt_template must be a list of template messages")
+    if not isinstance(metadata, Mapping):
+        raise ValueError("prompt_template metadata must be a mapping")
+
+    formatter = string.Formatter()
+    rendered: list[dict[str, Any]] = []
+    for index, message in enumerate(prompt_template):
+        if not isinstance(message, Mapping):
+            raise ValueError(f"prompt_template message {index} must be a template message mapping")
+        role = message.get("role")
+        if not isinstance(role, str) or not role:
+            raise ValueError(f"prompt_template message {index} must contain a non-empty string 'role'")
+        content = message.get("content")
+        if not isinstance(content, str):
+            raise ValueError(f"prompt_template message {index} must contain string 'content'")
+        try:
+            parsed = list(formatter.parse(content))
+        except ValueError as exc:
+            raise ValueError(f"prompt_template message {index} has invalid content: {exc}") from exc
+        rendered_parts: list[str] = []
+        for literal_text, field_name, format_spec, conversion in parsed:
+            rendered_parts.append(literal_text)
+            if field_name is None:
+                continue
+            if not field_name.isidentifier():
+                raise ValueError(
+                    f"prompt_template message {index} must reference a direct metadata field; got {field_name!r}"
+                )
+            if conversion is not None:
+                raise ValueError(f"prompt_template message {index} field {field_name!r} does not support conversion")
+            if format_spec:
+                raise ValueError(f"prompt_template message {index} field {field_name!r} does not support a format spec")
+            try:
+                value = metadata[field_name]
+            except KeyError as exc:
+                raise ValueError(
+                    f"prompt_template message {index} references missing metadata field {field_name!r}"
+                ) from exc
+            if not isinstance(value, str):
+                raise ValueError(
+                    f"prompt_template message {index} requires text metadata field {field_name!r}; "
+                    f"got {type(value).__name__}"
+                )
+            rendered_parts.append(value)
+        rendered_content = "".join(rendered_parts)
+        rendered.append({**message, "content": rendered_content})
+    return rendered
 
 
 @functools.lru_cache(maxsize=8)
@@ -72,6 +128,8 @@ class TaskConfigResolver:
 
         file_defaults = self.defaults_by_name.get(str(task_name), {})
         resolved = _deep_merge(dict(file_defaults), dict(sample_config))
+        if "prompt_template" in file_defaults:
+            resolved["prompt_template"] = file_defaults["prompt_template"]
 
         model_binding = {key: value for key, value in (runtime_model or {}).items() if value is not None}
         if model_binding:

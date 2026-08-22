@@ -121,6 +121,8 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
     rollout.calculate_log_probs = True
     rollout.enable_rollout_routing_replay = args.enable_rollout_routing_replay
     rollout.disable_log_stats = False
+    rollout.free_cache_engine = False
+    OmegaConf.update(config, "actor_rollout_ref.rollout.enable_sleep_mode", False, force_add=True)
 
     # Gateway tool-call parser: the gateway decodes tool calls from raw tokens, so
     # this must match the model's chat template (the analog of vLLM's

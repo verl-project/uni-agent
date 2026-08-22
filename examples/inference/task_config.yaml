@@ -1,6 +1,11 @@
 - name: swe_bench
   sandbox:
     provider: modal
+    image_map:
+      - from: "swebench/**:latest"
+        to: "enterprise-public-cn-beijing.cr.volces.com/swe-bench-verified/**:v2"
+      - from: "swerebench/**:latest"
+        to: "enterprise-public-cn-beijing.cr.volces.com/swe-rebench/**:latest"
   agent:
     name: react
     max_steps: 200

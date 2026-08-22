@@ -123,7 +123,13 @@ async def test_model_forwards_finish_reason(monkeypatch):
 )
 @pytest.mark.asyncio
 async def test_react_reports_completion(monkeypatch, termination_reason: str, expected: bool):
-    monkeypatch.setattr(react_module.Toolbox, "from_specs", lambda specs, *, sandbox: _FakeToolbox())
+    workdirs: list[str | None] = []
+
+    def fake_from_specs(specs, *, sandbox, workdir=None):
+        workdirs.append(workdir)
+        return _FakeToolbox()
+
+    monkeypatch.setattr(react_module.Toolbox, "from_specs", fake_from_specs)
     monkeypatch.setattr(react_module, "OpenAICompatibleChatModel", _FakeModel)
 
     agent = _agent()
@@ -133,9 +139,10 @@ async def test_react_reports_completion(monkeypatch, termination_reason: str, ex
 
     monkeypatch.setattr(agent, "step", stop_with_reason)
 
-    result = await agent.run(sandbox=object(), messages=[])
+    result = await agent.run(sandbox=object(), messages=[], workdir="/testbed")
 
     assert result.finished is expected
+    assert workdirs == ["/testbed"]
 
 
 @pytest.mark.asyncio

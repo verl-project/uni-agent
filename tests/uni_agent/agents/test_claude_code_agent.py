@@ -161,17 +161,38 @@ def test_run_forwards_workdir():
     assert sandbox.exec_calls[0]["env"]["CLAUDE_CODE_DISABLE_TERMINAL_TITLE"] == "1"
 
 
-def test_run_requires_system_then_user_messages():
+def test_run_accepts_user_only_message_without_rewriting():
+    config = ClaudeCodeConfig(
+        model=ModelConfig(base_url="http://gateway:8000/v1", model_name="policy"),
+    )
+    sandbox = _FakeSandbox(probe_results=[0])
+    prompt = (
+        "Inspect the repository in /testbed and resolve the following issue:\n\n"
+        "<issue_description>\nfix the bug\n</issue_description>\n\n"
+        "Run the relevant tests before finishing."
+    )
+
+    asyncio.run(
+        ClaudeCodeAgent(config).run(
+            sandbox=sandbox,
+            messages=[{"role": "user", "content": prompt}],
+        )
+    )
+
+    assert sandbox.exec_calls[0]["argv"][2] == prompt
+
+
+def test_run_requires_exactly_one_user_message():
     config = ClaudeCodeConfig(
         model=ModelConfig(base_url="http://gateway:8000/v1", model_name="policy"),
     )
     sandbox = _FakeSandbox(probe_results=[])
 
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError, match="exactly one 'user' message"):
         asyncio.run(
             ClaudeCodeAgent(config).run(
                 sandbox=sandbox,
-                messages=[{"role": "user", "content": "fix the bug"}],
+                messages=[{"role": "system", "content": "system prompt"}],
             )
         )
 

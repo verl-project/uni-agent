@@ -125,6 +125,8 @@ For an authenticated endpoint, also set `API_KEY` or pass `--api-key`. The scrip
 
 Each rollout writes `<log_dir>/<log_id>/task.log`. Set `--log-dir` to a shared-storage path when Ray workers may run on different nodes.
 
+`parallel_infer_api.py` treats the dataset's top-level `prompt` as the authoritative source message list and binds it over any nested Task prompt. Without `prompt_template`, those messages are passed to the Agent unchanged. With `prompt_template`, the Task instead builds the Agent-facing messages from metadata.
+
 Useful controls:
 
 - `--concurrency`: maximum number of in-flight tasks across all workers; defaults to `GLOBAL_CONCURRENCY`.
@@ -174,6 +176,13 @@ Important controls:
 - `--log-dir`: runtime root for Framework logs, Task logs, and trajectory artifacts.
 
 Task/Agent/Tool events go to `task.log`; Framework events go to `framework.log`.
+
+In Framework-managed mode, `raw_prompt` always means the Agent-neutral dataset/source prompt. verl uses it for loader-time token-length checks when overlong-prompt filtering is enabled, makes it available when a configured RewardLoop or judge scoring path is used, and preserves it as TransferQueue metadata. Task-rendered messages may replace it on the Agent side but do not overwrite the source value used by verl. The Gateway captures the Agent's actual model requests to build the trajectory token tensors.
+
+Self-rendering Agents receive that source message unchanged and may apply their own template inside the Sandbox. Their final internal messages are not observable through the current Task Runner, so Task-rendered messages and an Agent's final internal prompt are not necessarily identical. This is the intended path for the planned mini-swe-agent integration.
+
+!!! note "Current scope"
+    Runtime prompt templates accept string message content only; multimodal template rendering is deferred. Without a template, pre-rendered structured messages can pass through in `prompt`, although end-to-end image, video, or audio support still depends on the selected Agent, API adapter, and model processor. Templates do not change the sandbox working directory or environment.
 
 For a Ray cluster, you can submit your job via a pre-defined Runtime Environment, for example:
 

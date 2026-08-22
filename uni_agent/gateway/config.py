@@ -22,6 +22,9 @@ class GatewayActorConfig:
         tool_parser_name: Optional tool parser name for decoding tool calls.
         rollout_backend: Inference backend name used to select the matching
             SGLang or vLLM parser. Other backends use verl's parser registry.
+        enable_tool_parser_cache: Whether to reuse parser instances within an
+            actor-scoped codec. Disable for parsers that require request-scoped
+            instances; enabled by default for the parser-construction speedup.
         apply_chat_template_kwargs: Default kwargs passed to chat-template rendering.
         allowed_request_sampling_param_keys: Request sampling keys accepted by the
             provider adapters when merging payload sampling params.
@@ -38,6 +41,7 @@ class GatewayActorConfig:
     processor: Any | None = None
     tool_parser_name: str | None = None
     rollout_backend: str | None = None
+    enable_tool_parser_cache: bool = True
     apply_chat_template_kwargs: dict[str, Any] | None = None
     allowed_request_sampling_param_keys: set[str] | frozenset[str] | None = None
     vision_info_extractor: Callable | None = None
@@ -47,6 +51,10 @@ class GatewayActorConfig:
     enable_last_assistant_rollback: bool = True
 
     def __post_init__(self) -> None:
+        if type(self.enable_tool_parser_cache) is not bool:
+            raise ValueError(
+                f"enable_tool_parser_cache must be a bool, got {type(self.enable_tool_parser_cache).__name__}"
+            )
         if type(self.enable_last_assistant_rollback) is not bool:
             raise ValueError(
                 "enable_last_assistant_rollback must be a bool, "

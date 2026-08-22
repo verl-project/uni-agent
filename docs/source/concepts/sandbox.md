@@ -25,10 +25,29 @@ The standard fields are:
 
 - `provider`: registered backend name.
 - `image`: container image used by image-backed providers such as Docker and Modal.
+- `image_map`: optional rewrite from the dataset image name to the image your cluster can pull (see below).
 - `runtime_timeout`: maximum remote sandbox lifetime.
 - `sandbox_kwargs`: provider-specific constructor arguments.
 
 Unknown fields are rejected. Put provider-specific options inside `sandbox_kwargs`.
+
+### `image_map`
+
+SWE-Bench samples ship with public image names such as `swebench/sweb.eval.x86_64.astropy_1776_astropy-13033`. If your cluster cannot pull those names (private registry, mirror, or a local tag), add `image_map` under `sandbox` in Task Config. Do not edit the parquet.
+
+```yaml
+sandbox:
+  provider: vefaas
+  image_map:
+    - from: "swebench/**:latest"
+      to: "<your-registry>/swe-bench-verified/**:v2"
+    - from: "swerebench/**:latest"
+      to: "<your-registry>/swe-rebench/**:latest"
+```
+
+`**` copies the instance-specific path, so `swebench/sweb.eval.x86_64.astropy_1776_astropy-13033` becomes `<your-registry>/swe-bench-verified/sweb.eval.x86_64.astropy_1776_astropy-13033:v2`.
+
+List as many rules as you need; the first matching `from` is used. Omit `image_map` when the sandbox can pull the dataset image as written.
 
 ## Lifecycle
 

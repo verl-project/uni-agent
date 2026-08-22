@@ -29,8 +29,8 @@ async def run_task(
     """Resolve the sample's task, run it against ``session``, and return its result.
 
     Satisfies the framework's ``AgentRunner`` contract (``session`` / ``raw_prompt``
-    / ``sample_index`` / ``tools_kwargs``). ``raw_prompt`` is accepted for protocol
-    parity but unused: a uni_agent task carries its own prompt on the task config.
+    / ``sample_index`` / ``tools_kwargs``). The framework's ``raw_prompt`` contains
+    the authoritative dataset/source messages and overrides any serialized Task prompt.
 
     Run-level defaults come from the per-task-name YAML file selected by
     ``task_config_path``. ``TaskConfigResolver`` applies that Task Config, the
@@ -41,6 +41,8 @@ async def run_task(
     sample_config = tools_kwargs.get("task") if tools_kwargs else None
     if not isinstance(sample_config, dict):
         raise ValueError("run_task requires tools_kwargs['task'] (the serialized Task Config)")
+    sample_config = dict(sample_config)
+    sample_config["prompt"] = raw_prompt
 
     resolver = TaskConfigResolver.from_file(task_config_path) if task_config_path else TaskConfigResolver()
     task = resolver.resolve(
@@ -55,7 +57,8 @@ async def run_task(
     task_name = task.get("name")
     logger.info("run_task start: task=%s sample_index=%s", task_name, sample_index)
 
-    result = await get_task(task).run()
+    task_instance = get_task(task)
+    result = await task_instance.run()
 
     reward_posted = False
     if report_reward and session.reward_info_url:

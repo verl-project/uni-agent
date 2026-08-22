@@ -64,7 +64,7 @@ class ReActAgent(Agent):
         if cfg.model.base_url is None:
             raise ValueError("react: config.model.base_url is not set (the endpoint the policy calls)")
 
-        toolbox = Toolbox.from_specs(cfg.tools, sandbox=sandbox)
+        toolbox = Toolbox.from_specs(cfg.tools, sandbox=sandbox, workdir=workdir)
         model = OpenAICompatibleChatModel(
             base_url=cfg.model.base_url,
             api_key=cfg.model.api_key,

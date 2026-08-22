@@ -211,11 +211,13 @@ async def _create_claude_sandbox(
     sidecar_image: str,
     gateway_url: str,
     proxy_port: int,
+    image_map: object = None,
 ) -> Sandbox:
     upstream = extract_upstream(gateway_url) if gateway_url else None
     config = SandboxConfig(
         provider=os.getenv("SANDBOX_PROVIDER", "openyuanrong"),
         image=image,
+        image_map=image_map or [],
         sandbox_kwargs={
             "mounts": [{"target": TOOL_TARGET, "image_url": sidecar_image}],
             "upstream": upstream,
@@ -234,6 +236,7 @@ async def claude_code_runner(
     sample_index: int,
     tools_kwargs: dict | None = None,
     tool_image: str = DEFAULT_TOOL_IMAGE,
+    image_map: object = None,
     run_timeout: int = 7200,
     conda_env: str = "testbed",
     proxy_port: int = DEFAULT_GATEWAY_PROXY_PORT,
@@ -265,6 +268,7 @@ async def claude_code_runner(
         sidecar_image=tool_image,
         gateway_url=gateway_url,
         proxy_port=proxy_port,
+        image_map=image_map,
     )
 
     try:
