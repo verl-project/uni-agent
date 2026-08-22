@@ -108,7 +108,7 @@ class SandboxConfig(BaseModel):
     )
     image: str | None = Field(
         default=None,
-        description="Container image for non-local providers; defaults to python:3.12.",
+        description="Container image for non-local providers",
     )
     image_map: list[ImageMap] = Field(
         default_factory=list,
