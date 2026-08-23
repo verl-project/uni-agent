@@ -119,7 +119,7 @@ class ClaudeCodeAgent(Agent):
         endpoint = _strip_v1(base_url)
         argv = self._claude_argv(problem_statement)
         env = self._claude_env(endpoint)
-        logger.info("claude_code: launch (endpoint=%s)", endpoint)
+        logger.info("claude_code: launch with problem_statement:\n%s", problem_statement)
         proc = await sandbox.exec(argv, env=env, timeout=cfg.run_timeout, workdir=workdir)
 
         out_tail = (proc.stdout or "").strip()[-2000:]
