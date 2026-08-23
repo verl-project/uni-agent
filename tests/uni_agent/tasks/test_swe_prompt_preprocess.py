@@ -120,10 +120,12 @@ def test_swe_recipe_renders_complete_metadata_prompt(recipe_path, task_name, exp
     }
     if expects_language:
         metadata["language"] = language
+    image_prefix = "swerebench" if task_name == "swe_rebench" else "swebench"
 
     resolved = TaskConfigResolver.from_file(recipe_path).resolve(
         {
             "name": task_name,
+            "sandbox": {"image": f"{image_prefix}/test-repo:latest"},
             "prompt": [{"role": "user", "content": source_problem}],
             "metadata": metadata,
         }
