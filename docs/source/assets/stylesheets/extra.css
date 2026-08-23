@@ -133,27 +133,35 @@ body[data-md-color-scheme] .md-content__inner {
     font-weight: 700;
 }
 
-/* Present fenced code as a focused developer surface. */
-.md-typeset .highlight {
+/* Present code blocks and Markdown tables as focused developer surfaces. */
+.md-typeset .highlight,
+.md-typeset table:not([class]) {
     border: 1px solid #d8d1e8;
     border-radius: 0.5rem;
     box-shadow: 0 0.2rem 0.7rem rgba(31, 35, 40, 0.06);
-    overflow: hidden;
 }
 
-[data-md-color-scheme="slate"] .md-typeset .highlight {
+[data-md-color-scheme="slate"] .md-typeset .highlight,
+[data-md-color-scheme="slate"] .md-typeset table:not([class]) {
     border-color: rgba(179, 136, 255, 0.24);
     box-shadow: 0 0.55rem 1.4rem rgba(0, 0, 0, 0.22);
+}
+
+.md-typeset .highlight {
+    overflow: hidden;
 }
 
 .md-typeset .highlight pre {
     margin: 0;
 }
 
-[data-md-color-scheme="default"] .md-typeset .highlight,
-[data-md-color-scheme="default"] .md-typeset .highlight pre,
-[data-md-color-scheme="default"] .md-typeset .highlight code {
-    background: #f1eef8 !important;
+.md-typeset .highlight,
+.md-typeset .highlight pre,
+.md-typeset .highlight code,
+.md-typeset table:not([class]),
+.md-typeset table:not([class]) th,
+.md-typeset table:not([class]) td {
+    background: var(--md-code-bg-color) !important;
 }
 
 /* Keep inline code subtle and distinct from full code blocks. */
@@ -245,4 +253,54 @@ body[data-md-color-scheme] .md-content__inner {
     .md-sidebar--primary .md-nav--primary > .md-nav__title {
         display: none;
     }
+}
+
+/* Keep Markdown tables compact while preserving Material's native scrolling. */
+.md-typeset table:not([class]) {
+    border-collapse: separate;
+    border-spacing: 0;
+    display: table;
+    margin: 0;
+    overflow: hidden;
+    width: 100%;
+}
+
+.md-typeset table:not([class]) th,
+.md-typeset table:not([class]) td {
+    border: 0;
+    padding: 0.55rem 0.65rem;
+    text-align: left;
+    vertical-align: middle;
+}
+
+.md-typeset table:not([class]) th {
+    border-bottom: 1px solid var(--md-default-fg-color--lightest);
+    color: var(--md-primary-fg-color);
+    font-family: "Space Grotesk", "Inter", sans-serif;
+    font-size: 0.7rem;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.md-typeset table:not([class]) td {
+    border-bottom: 1px solid var(--md-default-fg-color--lightest);
+}
+
+.md-typeset table:not([class]) tbody tr:last-child td {
+    border-bottom: 0;
+}
+
+.md-typeset .md-typeset__table {
+    box-sizing: border-box;
+    margin-bottom: 0;
+    width: 100%;
+}
+
+.md-typeset .md-typeset__scrollwrap {
+    margin-bottom: 0;
+}
+
+.md-typeset table:not([class]) + h2,
+.md-typeset .md-typeset__scrollwrap + h2 {
+    margin-top: 1rem;
 }

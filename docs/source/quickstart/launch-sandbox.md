@@ -21,10 +21,13 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
 
 === "Local"
 
-    **Local, non-isolated.** Commands run directly on the host.
+    **Host execution only; `local` is not a sandbox.** Commands run directly on the host.
 
-    !!! warning "Local execution can modify your machine"
-        Commands can read, modify, or delete local files and change the active Python environment. Use this backend only for small-scale validation with trusted commands.
+    !!! danger "Do not use `local` for sandboxed tasks"
+        Use `local` **only** for tasks that do not require a sandbox, such as HotpotQA.
+        Do not use it for tasks that require sandbox isolation: commands can read, modify,
+        or delete files on the host and change the active Python environment. To run a
+        sandbox locally, use the `Docker` backend instead.
 
     ```python
     from uni_agent.sandbox import SandboxConfig

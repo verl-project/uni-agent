@@ -106,7 +106,10 @@ class SandboxConfig(BaseModel):
         default=3600.0,
         description="Max sandbox runtime/lifetime (seconds) before it is killed; used by remote providers.",
     )
-    image: str = Field(default="python:3.12", description="Container image for remote providers (e.g. modal).")
+    image: str | None = Field(
+        default=None,
+        description="Container image for non-local providers",
+    )
     image_map: list[ImageMap] = Field(
         default_factory=list,
         description="Optional glob from/to rules applied to image at construction. First match wins.",
@@ -128,9 +131,19 @@ class SandboxConfig(BaseModel):
         return value
 
     @model_validator(mode="after")
+    def _validate_provider_image(self) -> SandboxConfig:
+        if self.provider == "local" and self.image is not None:
+            raise ValueError(
+                "image must be None when provider='local'; use provider='docker' to run a container image locally"
+            )
+        return self
+
+    @model_validator(mode="after")
     def _apply_image_map(self) -> SandboxConfig:
         if not self.image_map:
             return self
+        if self.image is None:
+            raise ValueError("image_map requires a non-local provider with an image")
         for rule in self.image_map:
             if (mapped := rule.try_map(self.image)) is not None:
                 self.image = mapped
