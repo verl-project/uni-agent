@@ -46,8 +46,6 @@ When a recipe supplies `prompt_template`, datasets should keep the source `promp
 ```yaml
 - name: swe_bench
   prompt_template:
-    - role: system
-      content: You are a software engineer working in an existing repository.
     - role: user
       content: |-
         Resolve this issue in /testbed:
