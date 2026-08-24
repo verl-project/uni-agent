@@ -1,9 +1,58 @@
 import pytest
 
 from uni_agent.framework import task_runner
-from uni_agent.framework.task_runner import _reward_info_from_result
+from uni_agent.framework.task_runner import (
+    _extract_upstream,
+    _inject_gateway_tunnel,
+    _reward_info_from_result,
+    _rewrite_gateway_url,
+)
 from uni_agent.gateway.session import SessionHandle
 from uni_agent.tasks import TaskConfig, TaskResult
+
+
+def test_rewrite_gateway_url_replaces_host_with_tunnel_port():
+    assert _rewrite_gateway_url("http://gateway.example:40169/sessions/abc/v1", 38197) == (
+        "http://127.0.0.1:38197/sessions/abc/v1"
+    )
+
+
+def test_rewrite_gateway_url_custom_proxy_port():
+    assert _rewrite_gateway_url("http://gateway:8000/v1", 4242) == "http://127.0.0.1:4242/v1"
+
+
+def test_extract_upstream_returns_host_port():
+    assert _extract_upstream("http://gateway.example:40169/sessions/abc/v1") == "gateway.example:40169"
+
+
+def test_extract_upstream_none_without_port():
+    assert _extract_upstream("http://gateway/v1") is None
+
+
+def test_inject_gateway_tunnel_rewrites_upstream_and_base_url():
+    task = {
+        "sandbox": {"provider": "openyuanrong", "sandbox_kwargs": {"proxy_port": 38197, "image": "x"}},
+        "agent": {"step_limit": 10},
+    }
+    merged = _inject_gateway_tunnel(task, "http://gateway.example:40169/sessions/abc/v1")
+
+    assert merged["sandbox"]["sandbox_kwargs"]["upstream"] == "gateway.example:40169"
+    assert merged["sandbox"]["sandbox_kwargs"]["proxy_port"] == 38197
+    # The agent receives the tunnel-rewritten base_url; unrelated keys are preserved.
+    assert merged["agent"]["model"]["base_url"] == "http://127.0.0.1:38197/sessions/abc/v1"
+    assert merged["agent"]["step_limit"] == 10
+
+
+def test_inject_gateway_tunnel_raises_without_port():
+    task = {"sandbox": {"provider": "openyuanrong", "sandbox_kwargs": {"proxy_port": 38197}}}
+    with pytest.raises(ValueError, match="cannot derive gateway tunnel upstream"):
+        _inject_gateway_tunnel(task, "http://gateway.example/v1")
+
+
+def test_inject_gateway_tunnel_rejects_non_yuanrong_sandbox():
+    task = {"sandbox": {"provider": "local", "sandbox_kwargs": {"proxy_port": 38197}}}
+    with pytest.raises(ValueError, match="supported only on 'openyuanrong'"):
+        _inject_gateway_tunnel(task, "http://gateway.example:40169/v1")
 
 
 def test_task_result_positional_field_order():

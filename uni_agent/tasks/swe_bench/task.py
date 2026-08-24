@@ -19,6 +19,10 @@ class SWEBenchTaskConfig(TaskConfig):
         default=False,
         description="Oracle mode: skip the agent and score the dataset's gold patch directly.",
     )
+    eval_timeout: float = Field(
+        default=600.0,
+        description="Per-sample reward-eval timeout (s) inside the sandbox.",
+    )
 
 
 @register_task("swe_bench")
@@ -55,7 +59,7 @@ class SWEBenchTask(Task):
 
             from .reward import compute_reward
 
-            result = await compute_reward(sample, sandbox)
+            result = await compute_reward(sample, sandbox, eval_timeout=cfg.eval_timeout)
 
             logger.info(f"task done: resolved={result['resolved']}")
             return TaskResult(

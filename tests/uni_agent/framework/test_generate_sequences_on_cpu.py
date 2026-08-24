@@ -1057,3 +1057,73 @@ async def test_score_trajectories_merges_final_reward_info_into_reward_extra_inf
         (0.42, {"acc": 1.0, "format": 0.8}),
         (0.42, {"acc": 1.0, "format": 0.8}),
     ]
+
+
+@pytest.mark.asyncio
+async def test_session_timeout_cancels_ray_runner_task(monkeypatch, fake_tq):
+    """A timed-out ray_task session must cancel the underlying Ray task.
+
+    ``asyncio.wait_for`` only bounds the parent's await; without an explicit
+    ``ray.cancel`` the remote runner (and its sandbox) would keep running and
+    consuming a worker slot. Mirrors real Ray semantics: after a graceful
+    ``ray.cancel``, awaiting the ObjectRef raises (TaskCancelledError), so the
+    framework must not escalate to a force-kill.
+    """
+    import types as types_module
+
+    from uni_agent.framework import framework as framework_module
+
+    cancel_calls: list[dict] = []
+
+    class _TaskCancelledError(Exception):
+        """Stand-in for ray.exceptions.TaskCancelledError (an Exception, not
+        BaseException -- so it is catchable by the framework's cleanup path)."""
+
+    class _PendingRef:
+        """ObjectRef stand-in with real-Ray semantics.
+
+        Awaiting it blocks until ``ray.cancel`` marks the ref cancelled, and each
+        ``await`` observes the ref's current state (the first wait_for's local
+        task cancellation must NOT settle the ref -- with real Ray the remote
+        task keeps running until ray.cancel, which is the bug under test).
+        """
+
+        def __init__(self):
+            self._cancelled = False
+
+        def __await__(self):
+            fut: asyncio.Future = asyncio.get_event_loop().create_future()
+            if self._cancelled:
+                fut.set_exception(_TaskCancelledError("runner task cancelled"))
+            return fut.__await__()
+
+    def _fake_remote(*args, **kwargs):
+        return _PendingRef()
+
+    def _fake_cancel(ref, *, force=False):
+        cancel_calls.append({"ref": ref, "force": force})
+        ref._cancelled = True
+
+    monkeypatch.setattr(framework_module._run_agent_runner_ray_task, "remote", _fake_remote)
+    monkeypatch.setattr(framework_module, "ray", types_module.SimpleNamespace(cancel=_fake_cancel))
+
+    runtime = _FakeGatewayManager({})
+    framework = await _build_framework_with_agent_runners(
+        agent_runners={
+            "runner": {
+                "runner_fqn": "tests.uni_agent.support.logging_runner",
+                "dispatch_mode": "ray_task",
+                "session_timeout_seconds": 0.01,
+            }
+        },
+        gateway_manager=runtime,
+    )
+    framework._RUNNER_CANCEL_GRACE_SECONDS = 1.0
+
+    with pytest.raises(RuntimeError, match="All rollouts failed"):
+        await framework.generate_sequences(_build_prompts(count=1, global_steps=3))
+
+    # One graceful cancel only: the post-cancel await raised TaskCancelledError,
+    # so no force-kill escalation happened.
+    assert [call["force"] for call in cancel_calls] == [False]
+    assert runtime.aborted_sessions, "timed-out session must be aborted"

@@ -54,6 +54,7 @@ class _RunnerConfig:
     dispatch_mode: str
     max_concurrent_sessions: int
     trajectory_selection: str = "all"
+    session_timeout_seconds: float | None = None
 
     def __post_init__(self) -> None:
         if not self.runner_fqn:
@@ -64,6 +65,8 @@ class _RunnerConfig:
             raise ValueError(f"max_concurrent_sessions must be non-negative, got {self.max_concurrent_sessions}")
         if self.trajectory_selection not in {"all", "longest"}:
             raise ValueError(f"Unknown trajectory selection: {self.trajectory_selection}. Expected 'all' or 'longest'")
+        if self.session_timeout_seconds is not None and self.session_timeout_seconds <= 0:
+            raise ValueError(f"session_timeout_seconds must be positive, got {self.session_timeout_seconds}")
 
     @classmethod
     def from_config(cls, runner_name: object, runner_cfg) -> _RunnerConfig:
@@ -82,6 +85,8 @@ class _RunnerConfig:
         dispatch_mode = str(runner_cfg.get("dispatch_mode", "inline_async"))
         max_concurrent_sessions = int(runner_cfg.get("max_concurrent_sessions", 0) or 0)
         trajectory_selection = str(runner_cfg.get("trajectory_selection", "all"))
+        raw_timeout = runner_cfg.get("session_timeout_seconds")
+        session_timeout_seconds = None if raw_timeout is None else float(raw_timeout)
         try:
             return cls(
                 runner_fqn="" if runner_fqn is None else str(runner_fqn),
@@ -89,6 +94,7 @@ class _RunnerConfig:
                 dispatch_mode=dispatch_mode,
                 max_concurrent_sessions=max_concurrent_sessions,
                 trajectory_selection=trajectory_selection,
+                session_timeout_seconds=session_timeout_seconds,
             )
         except ValueError as exc:
             raise ValueError(f"agent_runners.{runner_name}: {exc}") from exc
@@ -292,6 +298,11 @@ class OpenAICompatibleAgentFramework(AgentFramework):
     trajectories in the session (matching ``AgentLoopWorkerTQ._agent_loop_postprocess``).
     The framework then writes them to the TransferQueue schema consumed by sync training.
     """
+
+    #: Grace period for a timed-out runner Ray task to observe a graceful
+    #: ray.cancel (letting its sandbox context manager tear down) before the
+    #: framework escalates to a force-kill.
+    _RUNNER_CANCEL_GRACE_SECONDS = 30.0
 
     def __init__(
         self,
@@ -692,7 +703,23 @@ class OpenAICompatibleAgentFramework(AgentFramework):
                         tools_kwargs=tools_kwargs,
                         log_context=task_log,
                     )
-                    await object_ref
+                    # Guard against runners that hang without raising (e.g. a
+                    # remote sandbox that OOM-killed the kernel and never returns).
+                    # Without this cap a single stuck session would hold its
+                    # concurrency slot forever and stall the whole training batch.
+                    # wait_for only bounds the parent's await; the Ray task must
+                    # be cancelled explicitly or it (and its sandbox) would keep
+                    # running. Graceful cancel first so the runner's asyncio.run
+                    # unwinds and its sandbox context manager tears down cleanly;
+                    # force-kill only if it ignores the cancel.
+                    try:
+                        await asyncio.wait_for(
+                            object_ref,
+                            timeout=runner_config.session_timeout_seconds,
+                        )
+                    except (asyncio.TimeoutError, asyncio.CancelledError):
+                        await self._cancel_runner_task(object_ref, session_id)
+                        raise
                 else:
                     runner = self._inline_runners[runner_name]
                     await runner(
@@ -741,6 +768,39 @@ class OpenAICompatibleAgentFramework(AgentFramework):
             if run_dir is not None:
                 await asyncio.to_thread(self._dump_trajectories, run_dir, session_id, result_trajectories)
             return result_trajectories, sample_fields
+
+    async def _cancel_runner_task(self, object_ref, session_id: str) -> None:
+        """Cancel a dispatched runner Ray task after its session timed out.
+
+        Graceful cancel (``force=False``) lets the worker's ``asyncio.run`` raise
+        ``CancelledError`` and unwind, so runner-side cleanup (e.g. the task's
+        sandbox context manager) runs. If the task is still pending after a short
+        grace period, force-kill it: correctness of the batch (freeing the worker
+        and its resources) beats the risk of skipping graceful teardown.
+        """
+        try:
+            ray.cancel(object_ref)
+        except Exception:
+            logger.exception("session %s: ray.cancel failed for runner task", session_id)
+            return
+        try:
+            await asyncio.wait_for(object_ref, timeout=self._RUNNER_CANCEL_GRACE_SECONDS)
+        except asyncio.TimeoutError:
+            logger.warning(
+                "session %s: runner task ignored graceful cancel after %ss; force-killing",
+                session_id,
+                self._RUNNER_CANCEL_GRACE_SECONDS,
+            )
+            try:
+                ray.cancel(object_ref, force=True)
+            except Exception:
+                logger.exception("session %s: force ray.cancel failed", session_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            # Task terminated while being cancelled (e.g. TaskCancelledError);
+            # that is the expected outcome.
+            pass
 
     def _log_trajectory_summary(self, session_id: str, trajectories: list[Trajectory]) -> None:
         """Log a per-session trajectory summary -- the info the task layer can't emit,

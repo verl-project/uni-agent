@@ -1,0 +1,60 @@
+# Task Config for the mini-swe-agent blackbox recipe.
+#
+# The sample rows (produced by `uni_agent.tasks.swe_rebench.preprocess` /
+# `uni_agent.tasks.swe_bench.preprocess`) carry only the canonical sandbox image name
+# (`sandbox.image`) plus prompt/metadata; everything below is the per-task default
+# layered on top by `TaskConfigResolver` (file defaults -> sample values -> runtime
+# model binding).
+#
+# - sandbox.provider=openyuanrong reuses `uni_agent.sandbox.openyuanrong`; the
+#   sandbox mounts the prebuilt tool image (mini-swe-agent + run_agent.py) at
+#   /opt/mini-swe-agent.
+# - sandbox.sandbox_kwargs.proxy_port is the in-sandbox reverse-tunnel port; the
+#   runtime `upstream` (gateway host:port) is injected by `run_task`, which also
+#   rewrites the agent's model.base_url to http://127.0.0.1:<proxy_port> so the
+#   agent itself stays tunnel-agnostic.
+# - agent.model.base_url/api_key/model_name are injected at runtime from the gateway
+#   session; run_task rewrites base_url to the tunnel address when a tunnel is
+#   configured (openyuanrong sandboxes only).
+# - agent.tool_python / agent.run_agent_script are REQUIRED: they name the paths
+#   inside the prebuilt tool image and are bound to its Dockerfile layout
+#   (mounted at /opt/mini-swe-agent); change them together with the tool image.
+- name: swe_rebench
+  sandbox:
+    provider: openyuanrong
+    runtime_timeout: 7200
+    image_map:
+      - from: "swerebench/sweb.eval.x86_64.**"
+        to: "swr.cn-east-3.myhuaweicloud.com/openyuanrong/swe-rebench/**:latest"
+    sandbox_kwargs:
+      proxy_port: 38197
+      mounts:
+        - target: /opt/mini-swe-agent
+          image_url: swr.cn-east-3.myhuaweicloud.com/openyuanrong/mini-swe-agent-tool:latest
+  agent:
+    name: mini_swe_agent
+    step_limit: 100
+    run_timeout: 7200
+    conda_env: testbed
+    tool_python: /opt/mini-swe-agent/bin/python
+    run_agent_script: /opt/mini-swe-agent/bin/run_agent.py
+
+- name: swe_bench
+  sandbox:
+    provider: openyuanrong
+    runtime_timeout: 7200
+    image_map:
+      - from: "swebench/**"
+        to: "swr.cn-east-3.myhuaweicloud.com/openyuanrong/swe-bench-verified/**:v2"
+    sandbox_kwargs:
+      proxy_port: 38197
+      mounts:
+        - target: /opt/mini-swe-agent
+          image_url: swr.cn-east-3.myhuaweicloud.com/openyuanrong/mini-swe-agent-tool:latest
+  agent:
+    name: mini_swe_agent
+    step_limit: 100
+    run_timeout: 7200
+    conda_env: testbed
+    tool_python: /opt/mini-swe-agent/bin/python
+    run_agent_script: /opt/mini-swe-agent/bin/run_agent.py

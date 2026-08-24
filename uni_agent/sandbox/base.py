@@ -148,10 +148,7 @@ class SandboxConfig(BaseModel):
             if (mapped := rule.try_map(self.image)) is not None:
                 self.image = mapped
                 return self
-        if any(rule._match(self.image, rule.to) is not None for rule in self.image_map):
-            return self
-        froms = ", ".join(repr(m.from_) for m in self.image_map)
-        raise ValueError(f"image_map from {froms} does not match image {self.image!r}")
+        return self
 
 
 @runtime_checkable

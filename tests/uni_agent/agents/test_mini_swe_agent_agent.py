@@ -1,62 +1,117 @@
 """Tests for the mini-swe-agent agent's host-side glue.
 
-mini-swe-agent owns its own loop and runs entirely *inside* the sandbox (like
-claude_code), so there's nothing to drive here except the sandbox calls: the
-venv install step, the config/driver files it writes, the launch argv, and how
-it turns the sandbox's result file back into an :class:`AgentResult`. No real
-sandbox / mini-swe-agent install -- :class:`_FakeSandbox` is a tiny in-memory
-fake, so this runs fast under ``pytest`` (or ``python`` on this file).
+mini-swe-agent runs entirely *inside* the sandbox from a prebuilt tool image
+mounted at ``/opt/mini-swe-agent``. The agent's host-side glue is thin:
+base64-encode the task config (the gateway URL is passed through as-is; the
+reverse-tunnel rewrite happens in ``run_task``), pipe it into the tool-image
+python via stdin, and parse the result JSON out of stdout (litellm noise
+tolerated). These tests cover that glue with a tiny in-memory fake sandbox, so
+they run fast under ``pytest`` (or ``python``).
 """
 
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 
 import pytest
 
 from uni_agent.agents.base import AgentResult, ModelConfig
-from uni_agent.agents.mini_swe_agent.agent import MiniSweAgentAgent, MiniSweAgentConfig
+from uni_agent.agents.mini_swe_agent.agent import (
+    MiniSweAgentAgent,
+    MiniSweAgentConfig,
+    build_agent_command,
+    parse_agent_result,
+)
 from uni_agent.sandbox.base import ExecResult
 
 
 class _FakeSandbox:
-    """Records every call and answers just enough to drive the agent's flow."""
+    """Records the one ``exec_shell`` call and returns canned stdout."""
 
-    def __init__(self, *, install_exit_code: int = 0, result: dict | None = None):
-        self.install_exit_code = install_exit_code
-        self._result = result if result is not None else {"exit_status": "Submitted", "submission": "diff --git..."}
+    def __init__(self, *, stdout: str = "", exit_code: int = 0):
+        self._stdout = stdout
+        self._exit_code = exit_code
         self.exec_shell_calls: list[str] = []
-        self.exec_calls: list[dict] = []
-        self.written_files: dict[str, str] = {}
 
     async def exec_shell(self, script, *, timeout=None, workdir=None, env=None):
         self.exec_shell_calls.append(script)
-        stderr = "" if self.install_exit_code == 0 else "boom"
-        return ExecResult(exit_code=self.install_exit_code, stdout="", stderr=stderr)
-
-    async def write_file(self, path, content):
-        self.written_files[path] = content
-
-    async def exec(self, argv, *, timeout=None, workdir=None, env=None):
-        self.exec_calls.append({"argv": argv, "timeout": timeout})
-        return ExecResult(exit_code=0, stdout="mini-swe-agent noisy log line\n", stderr="")
-
-    async def read_file(self, path):
-        assert path in self.written_files or path.endswith("result.json")
-        return json.dumps(self._result).encode("utf-8")
+        return ExecResult(exit_code=self._exit_code, stdout=self._stdout, stderr="")
 
 
-def _agent(**config_kwargs) -> MiniSweAgentAgent:
-    model = ModelConfig(base_url="http://gateway:8000/v1", model_name="policy")
+_TOOL_PYTHON = "/opt/mini-swe-agent/bin/python"
+_RUN_AGENT_SCRIPT = "/opt/mini-swe-agent/bin/run_agent.py"
+
+
+def _agent(base_url: str = "http://gateway:8000/v1", **config_kwargs) -> MiniSweAgentAgent:
+    model = ModelConfig(base_url=base_url, model_name="policy")
+    config_kwargs.setdefault("tool_python", _TOOL_PYTHON)
+    config_kwargs.setdefault("run_agent_script", _RUN_AGENT_SCRIPT)
     return MiniSweAgentAgent(MiniSweAgentConfig(model=model, **config_kwargs))
+
+
+def _decode_task_config(cmd: str) -> dict:
+    """Pull the base64 task config out of a built agent command and decode it."""
+    _, _, after = cmd.partition("printf %s ")
+    config_b64, _, _ = after.partition(" | base64 -d")
+    return json.loads(base64.b64decode(config_b64))
+
+
+# --------------------------- helpers ---------------------------
+
+
+def test_build_agent_command_pipes_config_and_invokes_tool_python():
+    cmd = build_agent_command(
+        config_b64="Zm9v",
+        conda_env="testbed",
+        tool_python=_TOOL_PYTHON,
+        run_agent_script=_RUN_AGENT_SCRIPT,
+    )
+    assert cmd.startswith("unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy NO_PROXY no_proxy;")
+    assert "printf %s Zm9v | base64 -d |" in cmd
+    assert "/opt/mini-swe-agent/bin/python /opt/mini-swe-agent/bin/run_agent.py" in cmd
+    # The task conda env is activated around the launch.
+    assert "CONDA_DEFAULT_ENV=testbed" in cmd
+    assert "/opt/miniconda3/envs/testbed/bin" in cmd
+
+
+def test_build_agent_command_honors_overrides():
+    cmd = build_agent_command(
+        config_b64="",
+        conda_env="myenv",
+        tool_python="/x/python",
+        run_agent_script="/y/run.py",
+    )
+    assert "/x/python /y/run.py" in cmd
+    assert "CONDA_DEFAULT_ENV=myenv" in cmd
+
+
+def test_parse_agent_result_empty_is_error():
+    assert parse_agent_result("") == {"exit_status": "error", "submission": ""}
+
+
+def test_parse_agent_result_picks_last_json_line_ignoring_litellm_noise():
+    stdout = "litellm warning: something\nrandom noise\n" + json.dumps(
+        {"exit_status": "Submitted", "submission": "diff"}
+    )
+    assert parse_agent_result(stdout) == {"exit_status": "Submitted", "submission": "diff"}
+
+
+def test_parse_agent_result_single_json_object():
+    result = parse_agent_result(json.dumps({"exit_status": "error", "submission": ""}))
+    assert result["exit_status"] == "error"
+
+
+def test_parse_agent_result_unparseable_is_error():
+    assert parse_agent_result("totally not json at all") == {"exit_status": "error", "submission": ""}
 
 
 # --------------------------- validation ---------------------------
 
 
 def test_missing_base_url_raises():
-    agent = MiniSweAgentAgent(MiniSweAgentConfig())
+    agent = MiniSweAgentAgent(MiniSweAgentConfig(tool_python=_TOOL_PYTHON, run_agent_script=_RUN_AGENT_SCRIPT))
     with pytest.raises(ValueError, match="base_url"):
         asyncio.run(agent.run(sandbox=_FakeSandbox(), messages=[{"role": "user", "content": "fix the bug"}]))
 
@@ -77,82 +132,54 @@ def test_too_many_messages_raises():
 # --------------------------- happy path ---------------------------
 
 
-def test_run_installs_writes_config_and_launches_the_venv_python():
-    sandbox = _FakeSandbox()
+def test_run_pipes_config_and_parses_stdout_into_result():
+    stdout = "mini-swe-agent noisy log line\n" + json.dumps(
+        {"exit_status": "Submitted", "submission": "diff --git a/...", "model_stats": {"api_calls": 3}}
+    )
+    sandbox = _FakeSandbox(stdout=stdout)
     agent = _agent(step_limit=25)
     messages = [{"role": "system", "content": "be careful"}, {"role": "user", "content": "fix the off-by-one bug"}]
 
     result = asyncio.run(agent.run(sandbox=sandbox, messages=messages))
 
-    # install step ran once, before anything else touched the sandbox.
+    # Exactly one exec_shell, piping the base64 config into the tool-image python.
     assert len(sandbox.exec_shell_calls) == 1
-    assert "/opt/mini-swe-agent-venv" in sandbox.exec_shell_calls[0]
-    assert "pip install" in sandbox.exec_shell_calls[0]
+    cmd = sandbox.exec_shell_calls[0]
+    assert "base64 -d" in cmd
+    assert "/opt/mini-swe-agent/bin/python /opt/mini-swe-agent/bin/run_agent.py" in cmd
 
-    # driver script + task config were written before the launch.
-    driver_paths = [p for p in sandbox.written_files if p.endswith("run_agent.py")]
-    config_paths = [p for p in sandbox.written_files if p.endswith("task.json")]
-    assert len(driver_paths) == 1 and len(config_paths) == 1
-    assert "DefaultAgent" in sandbox.written_files[driver_paths[0]]
-
-    task_config = json.loads(sandbox.written_files[config_paths[0]])
+    # The decoded task config carries the user task, the gateway URL (base_url
+    # passed through unchanged -- run_task does the tunnel rewrite), and step_limit.
+    task_config = _decode_task_config(cmd)
     assert task_config["task"] == "fix the off-by-one bug"
+    assert task_config["gateway_url"] == "http://gateway:8000/v1"
     assert task_config["agent"]["step_limit"] == 25
-    assert task_config["agent"]["system_template"] == "be careful"
-    assert task_config["environment"]["cwd"] == "/testbed"
-    assert task_config["model"]["model_name"] == "openai/policy"
-    assert task_config["model"]["model_kwargs"]["api_base"] == "http://gateway:8000/v1"
-    assert task_config["model"]["cost_tracking"] == "ignore_errors"
 
-    # launched with the venv's own interpreter against the driver + config + result paths.
-    assert len(sandbox.exec_calls) == 1
-    argv = sandbox.exec_calls[0]["argv"]
-    assert argv[0] == "/opt/mini-swe-agent-venv/bin/python"
-    assert argv[1] == driver_paths[0]
-    assert argv[2] == config_paths[0]
-    assert argv[3].endswith("result.json")
-
-    # result file (not the noisy stdout) is what fills the AgentResult.
+    # The result is parsed out of stdout (litellm noise tolerated) into an AgentResult.
     assert isinstance(result, AgentResult)
     assert result.output["exit_status"] == "Submitted"
-    assert result.output["submission"] == "diff --git..."
-    assert result.output["agent_stdout"] == "mini-swe-agent noisy log line\n"
+    assert result.output["submission"] == "diff --git a/..."
+    assert result.output["model_stats"]["api_calls"] == 3
+    assert result.info == {"step_limit": 25, "exit_status": "Submitted"}
+    assert result.finished is True
+    assert result.transcript == messages
 
 
-def test_default_model_name_used_when_unset():
-    sandbox = _FakeSandbox()
-    config = MiniSweAgentConfig(model=ModelConfig(base_url="http://gateway:8000/v1"))
-    agent = MiniSweAgentAgent(config)
-
-    asyncio.run(agent.run(sandbox=sandbox, messages=[{"role": "user", "content": "task"}]))
-
-    config_path = next(p for p in sandbox.written_files if p.endswith("task.json"))
-    assert json.loads(sandbox.written_files[config_path])["model"]["model_name"] == "openai/default"
-
-
-def test_install_failure_raises_runtime_error():
-    sandbox = _FakeSandbox(install_exit_code=1)
+def test_run_marks_unfinished_when_not_submitted():
+    sandbox = _FakeSandbox(stdout=json.dumps({"exit_status": "error", "submission": ""}))
     agent = _agent()
-    with pytest.raises(RuntimeError, match="install step failed"):
-        asyncio.run(agent.run(sandbox=sandbox, messages=[{"role": "user", "content": "task"}]))
+    result = asyncio.run(agent.run(sandbox=sandbox, messages=[{"role": "user", "content": "task"}]))
+    assert result.finished is False
+    assert result.info["exit_status"] == "error"
 
 
-def test_custom_install_command_is_honored():
-    sandbox = _FakeSandbox()
-    agent = _agent(install_command="echo custom-install")
+def test_run_passes_base_url_through_unchanged():
+    sandbox = _FakeSandbox(stdout=json.dumps({"exit_status": "Submitted", "submission": "diff"}))
+    # A tunnel-rewritten base_url (what run_task injects) is forwarded verbatim.
+    agent = _agent(base_url="http://127.0.0.1:38197/sessions/abc/v1")
     asyncio.run(agent.run(sandbox=sandbox, messages=[{"role": "user", "content": "task"}]))
-    assert sandbox.exec_shell_calls == ["echo custom-install"]
-
-
-def test_unreadable_result_file_is_reported_instead_of_raising():
-    class _BrokenResultSandbox(_FakeSandbox):
-        async def read_file(self, path):
-            return b"not json"
-
-    agent = _agent()
-    result = asyncio.run(agent.run(sandbox=_BrokenResultSandbox(), messages=[{"role": "user", "content": "task"}]))
-    assert result.output["exit_status"] == "runner_error"
-    assert "error" in result.info
+    task_config = _decode_task_config(sandbox.exec_shell_calls[0])
+    assert task_config["gateway_url"] == "http://127.0.0.1:38197/sessions/abc/v1"
 
 
 if __name__ == "__main__":

@@ -104,7 +104,8 @@ def _get_eval_report(metadata, eval_output: str):
     return eval_report
 
 
-async def compute_reward(metadata, sandbox, eval_timeout: float = 300.0) -> dict:
+async def compute_reward(metadata, sandbox, eval_timeout: float = 600.0) -> dict:
+    """Score one instance; ``eval_timeout`` (s) comes from the task config."""
     result = {
         "eval_completed": False,
         "eval_execution_time": None,

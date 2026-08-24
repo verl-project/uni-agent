@@ -1,0 +1,6 @@
+verl==0.9.0
+
+pytest_asyncio
+fastapi
+uvicorn
+cachetools
