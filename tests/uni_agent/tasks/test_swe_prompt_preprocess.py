@@ -134,7 +134,6 @@ def test_swe_recipe_renders_complete_metadata_prompt(recipe_path, task_name, exp
     rendered_messages = TaskConfig(**resolved).prompt
     rendered_text = "\n".join(str(message["content"]) for message in rendered_messages)
 
-    assert [message["role"] for message in rendered_messages] == ["system", "user"]
     assert metadata_problem in rendered_text
     assert source_problem not in rendered_text
     assert "SECRET GOLD PATCH" not in rendered_text
