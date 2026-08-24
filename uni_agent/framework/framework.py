@@ -803,6 +803,14 @@ class OpenAICompatibleAgentFramework(AgentFramework):
                     session_trajectories,
                     runner_config.trajectory_selection,
                 )
+            except asyncio.CancelledError:
+                # Parent shutdown/cancellation must not leave the Gateway route
+                # and actor-owned session live after the runner task is gone.
+                try:
+                    await asyncio.shield(self.gateway_manager.abort_session(session_id))
+                except Exception:
+                    logger.exception("session %s: Gateway abort failed during parent cancellation", session_id)
+                raise
             except Exception:
                 logger.exception("session %s failed (runner=%s); aborting session", session_id, runner_name)
                 await self.gateway_manager.abort_session(session_id)
@@ -861,16 +869,20 @@ class OpenAICompatibleAgentFramework(AgentFramework):
     async def _cancel_runner_task(self, object_ref, session_id: str) -> None:
         """Cancel a dispatched runner Ray task after its session timed out.
 
-        Graceful cancel (``force=False``) lets the worker's ``asyncio.run`` raise
-        ``CancelledError`` and unwind, so runner-side cleanup (e.g. the task's
-        sandbox context manager) runs. If the task is still pending after a short
-        grace period, force-kill it: correctness of the batch (freeing the worker
-        and its resources) beats the risk of skipping graceful teardown.
+        Graceful cancel (``force=False``) asks Ray to interrupt the task and
+        unwind its runner stack, so runner-side cleanup (e.g. the task's sandbox
+        context manager) can run. If the task is still pending after a short grace
+        period, force-kill it: correctness of the batch (freeing the worker and its
+        resources) beats the risk of skipping graceful teardown.
         """
         try:
             ray.cancel(object_ref)
         except Exception:
             logger.exception("session %s: ray.cancel failed for runner task", session_id)
+            try:
+                ray.cancel(object_ref, force=True)
+            except Exception:
+                logger.exception("session %s: force ray.cancel failed after graceful cancel error", session_id)
             return
         try:
             await asyncio.wait_for(object_ref, timeout=self._RUNNER_CANCEL_GRACE_SECONDS)
@@ -885,6 +897,10 @@ class OpenAICompatibleAgentFramework(AgentFramework):
             except Exception:
                 logger.exception("session %s: force ray.cancel failed", session_id)
         except asyncio.CancelledError:
+            try:
+                ray.cancel(object_ref, force=True)
+            except Exception:
+                logger.exception("session %s: force ray.cancel failed after cleanup cancellation", session_id)
             raise
         except Exception:
             # Task terminated while being cancelled (e.g. TaskCancelledError);
