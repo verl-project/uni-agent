@@ -49,13 +49,7 @@ The processed rows remain independent of the runtime Sandbox provider and Agent 
 
 ### Task Configuration
 
-The Quickstart provides separate configs for the two Agent types:
-
-Both files define a complete metadata-based `prompt_template` for each task. ReAct owns its `submit` protocol in the ReAct recipe; the Claude Code recipe contains no generated submit instruction. Templates may use direct fields such as `{problem_statement}` and multilingual `{language}` wherever needed. Attribute or index access, conversions, format specifications, missing fields, non-text values, malformed templates, and structured message content are rejected; multimodal template rendering is deferred. Without a template, pre-rendered structured messages can pass through in `prompt`, subject to support in the selected Agent, API adapter, and model processor.
-
-Each YAML file is parsed into an index by Task `name`, but only the entry matching a dataset sample is merged, validated as a Task Config, and rendered. If a dataset has no `swe_bench_multilingual` rows, the multilingual entry is not applied or sent to an Agent. Invalid YAML, entries without `name`, and duplicate names still fail when the file is loaded.
-
-Framework `raw_prompt` remains the Agent-neutral dataset/source prompt. A configured RewardLoop or judge can obtain the problem statement from its user content when that scoring path is used, while the built-in SWE Task evaluates from `TaskConfig.metadata`. verl also uses the source prompt for loader-time token-length checks when overlong-prompt filtering is enabled and preserves it as TransferQueue metadata; trajectory token tensors come from the Agent's actual requests captured by the Gateway. A template-free self-rendering Agent can receive that source message and apply its own template inside the Sandbox; this is the intended path for the planned mini-swe-agent integration. The current Task Runner cannot observe such an Agent's final internal messages and does not replace downstream `raw_prompt` with an approximation.
+The Quickstart provides separate Task Configs for ReAct and Claude Code. Each recipe owns its prompt template and Agent-specific behavior.
 
 === "ReAct"
 
@@ -140,7 +134,9 @@ Framework `raw_prompt` remains the Agent-neutral dataset/source prompt. A config
     !!! warning "Network connectivity"
         The Claude Code sandbox must be able to reach the GPU machine hosting its session-scoped Gateway endpoint.
 
-Each Task Config lists both `swebench` and `swerebench` `image_map` rules so train (reBench) and val (Verified) samples share one file. `**` copies the instance-specific path; `:latest` on `from` also matches untagged parquet images. See [`image_map`](../concepts/sandbox.md#image_map).
+`image_map` is optional. Add it under a task entry's `sandbox` block in the selected training Task Config when the canonical image from the dataset must be rewritten to a registry your cluster can pull; do not modify the parquet. See [`image_map`](../concepts/sandbox.md#image_map) for matching rules and examples.
+
+For prompt resolution, template validation, and `raw_prompt` semantics, see [Source Prompts and Runtime Templates](../concepts/task-and-reward.md#source-prompts-and-runtime-templates).
 
 ### Ray Runtime Environment
 
