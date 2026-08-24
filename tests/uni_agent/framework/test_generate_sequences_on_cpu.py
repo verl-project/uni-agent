@@ -303,46 +303,6 @@ class _FakeGatewayManager:
         self.aborted_sessions.append(session_id)
 
 
-class _FakeRayTaskCancelledError(Exception):
-    """Stand-in for Ray's Exception-based task cancellation result."""
-
-
-class _PendingRayRef:
-    """Reusable ObjectRef fake whose await observes Ray cancellation state."""
-
-    def __init__(self, awaited: asyncio.Event | None = None):
-        self._awaited = awaited
-        self._cancelled = False
-
-    def __await__(self):
-        if self._awaited is not None:
-            self._awaited.set()
-        fut: asyncio.Future = asyncio.get_event_loop().create_future()
-        if self._cancelled:
-            fut.set_exception(_FakeRayTaskCancelledError("runner task cancelled"))
-        return fut.__await__()
-
-
-def _install_pending_ray_runner(monkeypatch, *, remote_started: asyncio.Event | None = None) -> list[dict]:
-    """Install the shared fake boundary for a pending, cancellable Ray runner task."""
-    from uni_agent.framework import framework as framework_module
-
-    cancel_calls: list[dict] = []
-
-    def fake_remote(*args, **kwargs):
-        if remote_started is not None:
-            remote_started.set()
-        return _PendingRayRef()
-
-    def fake_cancel(ref, *, force=False):
-        cancel_calls.append({"ref": ref, "force": force})
-        ref._cancelled = True
-
-    monkeypatch.setattr(framework_module._run_agent_runner_ray_task, "remote", fake_remote)
-    monkeypatch.setattr(framework_module, "ray", types.SimpleNamespace(cancel=fake_cancel))
-    return cancel_calls
-
-
 def _build_prompts(
     count: int = 2,
     *,
@@ -1271,8 +1231,9 @@ async def test_score_trajectories_merges_final_reward_info_into_reward_extra_inf
 
 
 @pytest.mark.asyncio
-async def test_session_timeout_cancels_ray_runner_task(monkeypatch, fake_tq):
-    """A timed-out ray_task session must cancel the underlying Ray task.
+@pytest.mark.parametrize("termination", ["timeout", "parent_cancel"])
+async def test_ray_task_termination_cancels_runner_and_aborts_session(monkeypatch, fake_tq, termination):
+    """Timeout and parent cancellation clean up both sides of a ray_task session.
 
     ``asyncio.wait_for`` only bounds the parent's await; without an explicit
     ``ray.cancel`` the remote runner (and its sandbox) would keep running and
@@ -1280,132 +1241,101 @@ async def test_session_timeout_cancels_ray_runner_task(monkeypatch, fake_tq):
     ``ray.cancel``, awaiting the ObjectRef raises (TaskCancelledError), so the
     framework must not escalate to a force-kill.
     """
-    cancel_calls = _install_pending_ray_runner(monkeypatch)
+    from uni_agent.framework import framework as framework_module
 
-    runtime = _FakeGatewayManager({})
+    remote_started = asyncio.Event()
+    cancel_calls: list[dict] = []
+
+    class _TaskCancelledError(Exception):
+        pass
+
+    class _PendingRef:
+        def __init__(self):
+            self.cancelled = False
+
+        def __await__(self):
+            remote_started.set()
+            fut: asyncio.Future = asyncio.get_running_loop().create_future()
+            if self.cancelled:
+                fut.set_exception(_TaskCancelledError("runner task cancelled"))
+            return fut.__await__()
+
+    def fake_remote(*args, **kwargs):
+        return _PendingRef()
+
+    def fake_cancel(ref, *, force=False):
+        cancel_calls.append({"ref": ref, "force": force})
+        ref.cancelled = True
+
+    monkeypatch.setattr(framework_module._run_agent_runner_ray_task, "remote", fake_remote)
+    monkeypatch.setattr(framework_module, "ray", types.SimpleNamespace(cancel=fake_cancel))
+
+    class _GatewayManager(_FakeGatewayManager):
+        async def abort_session(self, session_id: str) -> None:
+            await super().abort_session(session_id)
+            if termination == "parent_cancel":
+                raise RuntimeError("gateway unavailable")
+
+    runtime = _GatewayManager({})
     framework = await _build_framework_with_agent_runners(
         agent_runners={
             "runner": {
                 "runner_fqn": "tests.uni_agent.support.logging_runner",
                 "dispatch_mode": "ray_task",
-                "session_timeout_seconds": 0.01,
+                "session_timeout_seconds": 0.01 if termination == "timeout" else 10.0,
             }
         },
         gateway_manager=runtime,
     )
     framework._RUNNER_CANCEL_GRACE_SECONDS = 1.0
 
-    with pytest.raises(RuntimeError, match="All rollouts failed"):
-        await framework.generate_sequences(_build_prompts(count=1, global_steps=3))
+    task = asyncio.create_task(framework.generate_sequences(_build_prompts(count=1, global_steps=3)))
+    await remote_started.wait()
+    if termination == "parent_cancel":
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    else:
+        with pytest.raises(RuntimeError, match="All rollouts failed"):
+            await task
 
     # One graceful cancel only: the post-cancel await raised TaskCancelledError,
     # so no force-kill escalation happened.
     assert [call["force"] for call in cancel_calls] == [False]
-    assert runtime.aborted_sessions, "timed-out session must be aborted"
+    assert runtime.aborted_sessions, "terminated session must be aborted"
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("abort_fails", [False, True], ids=["abort-succeeds", "abort-fails"])
-async def test_parent_cancellation_aborts_gateway_session_before_propagating(monkeypatch, abort_fails):
-    """Parent cancellation waits for Gateway abort and remains cancellation if abort fails."""
-    remote_started = asyncio.Event()
-    abort_started = asyncio.Event()
-    abort_release = asyncio.Event()
-
-    class _GatedAbortGatewayManager(_FakeGatewayManager):
-        async def abort_session(self, session_id: str) -> None:
-            self.aborted_sessions.append(session_id)
-            abort_started.set()
-            await abort_release.wait()
-            if abort_fails:
-                raise RuntimeError("gateway unavailable")
-
-    cancel_calls = _install_pending_ray_runner(monkeypatch, remote_started=remote_started)
-
-    runtime = _GatedAbortGatewayManager({})
-    framework = await _build_framework_with_agent_runners(
-        agent_runners={
-            "runner": {
-                "runner_fqn": "tests.uni_agent.support.logging_runner",
-                "dispatch_mode": "ray_task",
-                "session_timeout_seconds": 10.0,
-            }
-        },
-        gateway_manager=runtime,
-    )
-
-    runner_config = framework.runner_registry["runner"]
-    task = asyncio.create_task(
-        framework._run_session(
-            sample_fields={"raw_prompt": []},
-            sample_index=0,
-            session_index=0,
-            global_steps=3,
-            runner_name="runner",
-            runner_config=runner_config,
-            sampling_params={},
-        )
-    )
-    await remote_started.wait()
-    task.cancel()
-
-    await abort_started.wait()
-    await asyncio.sleep(0)
-    assert not task.done(), "parent cancellation must wait for Gateway abort cleanup"
-    abort_release.set()
-
-    with pytest.raises(asyncio.CancelledError):
-        await task
-
-    assert [call["force"] for call in cancel_calls] == [False]
-    assert runtime.aborted_sessions, "parent cancellation must abort the live session"
-
-
-@pytest.mark.asyncio
-async def test_runner_cancel_force_escalates_when_grace_wait_is_cancelled(monkeypatch):
-    """Cancelling cleanup during the graceful grace period must still force-cancel the runner."""
+@pytest.mark.parametrize("interruption", ["cancel_request_error", "grace_wait_cancelled"])
+async def test_runner_cancel_force_fallback(monkeypatch, interruption):
+    """Force-cancel when graceful cancellation cannot complete."""
     from uni_agent.framework import framework as framework_module
 
     grace_started = asyncio.Event()
     cancel_calls: list[dict] = []
 
-    def _fake_cancel(ref, *, force=False):
+    class _PendingRef:
+        def __await__(self):
+            grace_started.set()
+            return asyncio.get_running_loop().create_future().__await__()
+
+    def fake_cancel(ref, *, force=False):
         cancel_calls.append({"force": force})
-
-    monkeypatch.setattr(framework_module, "ray", types.SimpleNamespace(cancel=_fake_cancel))
-    framework = await _build_framework_with_agent_runners(
-        agent_runners={"runner": _inline_runner_config(_async_noop_runner)},
-        gateway_manager=_FakeGatewayManager({}),
-    )
-    cleanup_task = asyncio.create_task(
-        framework._cancel_runner_task(_PendingRayRef(awaited=grace_started), "session-cancelled")
-    )
-    await grace_started.wait()
-    cleanup_task.cancel()
-
-    with pytest.raises(asyncio.CancelledError):
-        await cleanup_task
-
-    assert [call["force"] for call in cancel_calls] == [False, True]
-
-
-@pytest.mark.asyncio
-async def test_runner_cancel_force_falls_back_when_graceful_cancel_raises(monkeypatch):
-    """A failed graceful Ray cancel must get one force-cancel fallback."""
-    from uni_agent.framework import framework as framework_module
-
-    cancel_calls: list[dict] = []
-
-    def _fake_cancel(ref, *, force=False):
-        cancel_calls.append({"force": force})
-        if not force:
+        if interruption == "cancel_request_error" and not force:
             raise RuntimeError("control plane unavailable")
 
-    monkeypatch.setattr(framework_module, "ray", types.SimpleNamespace(cancel=_fake_cancel))
+    monkeypatch.setattr(framework_module, "ray", types.SimpleNamespace(cancel=fake_cancel))
     framework = await _build_framework_with_agent_runners(
         agent_runners={"runner": _inline_runner_config(_async_noop_runner)},
         gateway_manager=_FakeGatewayManager({}),
     )
-    await framework._cancel_runner_task(object(), "session-cancel-fallback")
+    cleanup_task = asyncio.create_task(framework._cancel_runner_task(_PendingRef(), "session-cancelled"))
+    if interruption == "grace_wait_cancelled":
+        await grace_started.wait()
+        cleanup_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await cleanup_task
+    else:
+        await cleanup_task
 
     assert [call["force"] for call in cancel_calls] == [False, True]

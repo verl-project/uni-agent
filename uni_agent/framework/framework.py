@@ -867,7 +867,7 @@ class OpenAICompatibleAgentFramework(AgentFramework):
             return result_trajectories, sample_fields
 
     async def _cancel_runner_task(self, object_ref, session_id: str) -> None:
-        """Cancel a dispatched runner Ray task after its session timed out.
+        """Cancel a dispatched runner Ray task after timeout or parent cancellation.
 
         Graceful cancel (``force=False``) asks Ray to interrupt the task and
         unwind its runner stack, so runner-side cleanup (e.g. the task's sandbox
