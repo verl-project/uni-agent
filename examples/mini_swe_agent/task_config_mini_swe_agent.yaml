@@ -24,10 +24,10 @@
     provider: openyuanrong
     runtime_timeout: 7200
     image_map:
-      - from: "swebench/**:latest"
-        to: "swr.cn-east-3.myhuaweicloud.com/openyuanrong/**:latest"
-      - from: "swerebench/**:latest"
-        to: "swr.cn-east-3.myhuaweicloud.com/openyuanrong/**:latest"
+      - from: "swebench/**"
+        to: "swr.cn-east-3.myhuaweicloud.com/openyuanrong/swebench/**"
+      - from: "swerebench/**"
+        to: "swr.cn-east-3.myhuaweicloud.com/openyuanrong/swerebench/**"
     sandbox_kwargs:
       proxy_port: 38197
       mounts:
@@ -46,10 +46,10 @@
     provider: openyuanrong
     runtime_timeout: 7200
     image_map:
-      - from: "swebench/**:latest"
-        to: "swr.cn-east-3.myhuaweicloud.com/openyuanrong/**:latest"
-      - from: "swerebench/**:latest"
-        to: "swr.cn-east-3.myhuaweicloud.com/openyuanrong/**:latest"
+      - from: "swebench/**"
+        to: "swr.cn-east-3.myhuaweicloud.com/openyuanrong/swebench/**"
+      - from: "swerebench/**"
+        to: "swr.cn-east-3.myhuaweicloud.com/openyuanrong/swerebench/**"
     sandbox_kwargs:
       proxy_port: 38197
       mounts:

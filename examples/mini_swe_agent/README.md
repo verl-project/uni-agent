@@ -139,7 +139,7 @@ touching the training script:
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `sandbox.image_map` | `swebench/**:latest` → `swr.cn-east-3.myhuaweicloud.com/openyuanrong/**:latest` (and `swerebench/**`) | Maps canonical SWE image refs to the sandbox registry at run time |
+| `sandbox.image_map` | `swebench/**` → `swr.cn-east-3.myhuaweicloud.com/openyuanrong/swebench/**` (and `swerebench/**`) | Prefixes canonical SWE image refs with the sandbox registry; keeps `swebench/` / `swerebench/` and the source tag |
 | `sandbox.sandbox_kwargs.mounts[].image_url` | `swr.cn-east-3.myhuaweicloud.com/openyuanrong/mini-swe-agent-tool:latest` | Sidecar tool image mounted at `/opt/mini-swe-agent` |
 | `sandbox.sandbox_kwargs.proxy_port` | `38197` | Sandbox-internal reverse-tunnel port — **single source of truth** |
 | `sandbox.sandbox_kwargs.cpu/memory/…` | provider defaults | Sandbox resource sizes (pass through to the openyuanrong SDK) |
