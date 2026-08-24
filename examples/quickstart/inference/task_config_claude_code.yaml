@@ -34,4 +34,12 @@
       temperature: 1.0
       top_p: 0.95
       max_total_tokens: 131072
-  prompt_template: *claude_code_prompt
+  prompt_template:
+    - role: user
+      content: |-
+        Read the following task description and resolve the issue in the current directory (primary language: {language}).
+
+        Task description:
+        {problem_statement}
+
+        Inspect the relevant code, make the minimal correct changes, and verify the result with appropriate tests or checks. Do not modify tests or commit changes. When finished, briefly summarize what changed and how it was verified.

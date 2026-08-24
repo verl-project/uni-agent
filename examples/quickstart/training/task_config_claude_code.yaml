@@ -11,20 +11,14 @@
       top_p: 1.0
       max_total_tokens: 131072
   prompt_template: &swe_claude_prompt
-    - role: system
-      content: You are a software engineer working in an existing repository.
     - role: user
       content: |-
-        <uploaded_files>
-        /testbed
-        </uploaded_files>
-        Inspect the repository in /testbed and resolve the following issue:
+        Read the following task description and resolve the issue in the current directory.
 
-        <issue_description>
+        Task description:
         {problem_statement}
-        </issue_description>
 
-        Understand the relevant code and expected behavior before editing. Implement the smallest correct change in non-test files, preserve existing behavior outside the issue, and follow the repository's established patterns. Do not modify existing tests. Validate the change with focused reproduction steps and the relevant test suite before finishing.
+        Inspect the relevant code, make the minimal correct changes, and verify the result with appropriate tests or checks. Do not modify tests or commit changes. When finished, briefly summarize what changed and how it was verified.
 
 - name: swe_rebench
   sandbox:
@@ -53,17 +47,11 @@
       top_p: 1.0
       max_total_tokens: 131072
   prompt_template:
-    - role: system
-      content: You are a software engineer working in an existing repository.
     - role: user
       content: |-
-        <uploaded_files>
-        /testbed
-        </uploaded_files>
-        Inspect the repository in /testbed (primary language: {language}) and resolve the following issue:
+        Read the following task description and resolve the issue in the current directory (primary language: {language}).
 
-        <issue_description>
+        Task description:
         {problem_statement}
-        </issue_description>
 
-        Understand the relevant code and expected behavior before editing. Implement the smallest correct change in non-test files, preserve existing behavior outside the issue, and follow the repository's established patterns. Do not modify existing tests. Validate the change with focused reproduction steps and the relevant test suite before finishing.
+        Inspect the relevant code, make the minimal correct changes, and verify the result with appropriate tests or checks. Do not modify tests or commit changes. When finished, briefly summarize what changed and how it was verified.
