@@ -90,7 +90,7 @@ ignore_errors = false
 include-package-data = true
 
 [tool.setuptools.dynamic]
-version = {file = "verl/version/version"}
+version = {file = "verl/verl/version/version"}
 
 [tool.setuptools.package-dir]
 "" = "."
