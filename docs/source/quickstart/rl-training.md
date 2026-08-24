@@ -134,7 +134,7 @@ The Quickstart provides separate Task Configs for ReAct and Claude Code. Each re
     !!! warning "Network connectivity"
         The Claude Code sandbox must be able to reach the GPU machine hosting its session-scoped Gateway endpoint.
 
-`image_map` is optional. Add it under a task entry's `sandbox` block in the selected training Task Config when the canonical image from the dataset must be rewritten to a registry your cluster can pull; do not modify the parquet. See [`image_map`](../concepts/sandbox.md#image_map) for matching rules and examples.
+Some sandbox providers requires self-hosted task images instead of pulling directly from Docker Hub, you can set `sandbox.image_map` in the Task Config. See [`image_map`](../concepts/sandbox.md#image_map) for details.
 
 For prompt resolution, template validation, and `raw_prompt` semantics, see [Source Prompts and Runtime Templates](../concepts/task-and-reward.md#source-prompts-and-runtime-templates).
 
