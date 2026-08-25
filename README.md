@@ -49,18 +49,18 @@ For detailed guides and examples, we strongly recommend reading the [Uni-Agent d
 
 ### Parallel Inference & Verification
 
-We compare Uni-Agent with existing agent systems on parallel inference and verification workloads.
+Uni-Agent supports scalable inference and verification for multiple agent implementations and task types. It also integrates [Harbor](https://github.com/laude-institute/harbor) as an additional task format, allowing all Harbor tasks to run through the same inference pipeline.
 
+The table below highlights a selection of representative results.
 
-| Model            | Benchmark             | Resolved  | Setting |
-| ---------------- | --------------------- |:---------:| ------- |
-| Qwen3-Coder-30B  | SWE-Bench Verified    | **49.2**  | Avg@4, 100 turns, 128K |
-| Qwen3-Coder-480B | SWE-Bench Verified    | **64.2**  | Avg@4, 500 turns, 256K |
-| Qwen3-Coder-Next | SWE-Bench Verified    | **67.6**  | Avg@4, 300 turns, 128K |
-| Qwen3-Coder-30B  | SWE-Bench Multiligual | **35.0**  | Avg@1, 200 turns, 128K |
-| Qwen3.5-9B       | SWE-Bench Verified    | **58.2**  | Avg@1, 200 turns, 128K |
-| Qwen3.5-35B-A3B  | SWE-Bench Verified    | **68.4**  | Avg@1, 200 turns, 128K |
-| Qwen3.6-35B-A3B  | Terminal-Bench v2     | **42.5**  | Avg@1, 200K |
+| Benchmark              | Agent | Model            | Setting          | Score    |
+| ---------------------- | ----- | ---------------- | ---------------- |:--------:|
+| SWE-Bench Verified     | ReAct | Qwen3-Coder-30B  | 100 turns, 128K  | **49.2** |
+| SWE-Bench Verified     | ReAct | Qwen3-Coder-480B | 500 turns, 256K  | **64.2** |
+| SWE-Bench Verified     | Claude Code | Qwen3.5-9B | 200 turns, 128K  | **58.2** |
+| SWE-Bench Multilingual | ReAct | Qwen3-Coder-30B  | 200 turns, 128K  | **35.0** |
+| Terminal-Bench v2.0    | ReAct | GLM5.2-733B      | 256K             | **42.5** |
+| Terminal-Bench v2.1    | Harbor / CC | GLM5.2-733B | 256K            | **42.5** |
 
 Detailed settings and additional reference results are available in [Inference and Verification](https://uni-agent.readthedocs.io/en/latest/benchmark/inference.html).
 

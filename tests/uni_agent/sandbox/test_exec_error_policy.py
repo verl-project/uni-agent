@@ -23,7 +23,7 @@ import asyncio
 import pytest
 
 from uni_agent.sandbox.base import ExecResult, Sandbox
-from uni_agent.sandbox.registry import SANDBOX_MODULES, get_sandbox_cls
+from uni_agent.sandbox.registry import get_sandbox_cls
 
 
 class _FakeSandbox(Sandbox):
@@ -146,7 +146,7 @@ def test_is_timeout_error_override_is_honored_by_exec():
 
 # --------------------------- provider wiring ---------------------------
 
-_PROVIDERS = ["local", "docker", "modal", "vefaas", "seed", "openyuanrong"]
+_PROVIDERS = ["local", "docker", "modal", "vefaas", "openyuanrong"]
 
 
 @pytest.mark.parametrize("name", _PROVIDERS)
@@ -180,23 +180,9 @@ def test_local_file_operations_use_host_filesystem(tmp_path):
     assert downloaded_file.read_bytes() == b"\x00upload\xff"
 
 
-def test_registry_includes_seed_provider():
-    assert SANDBOX_MODULES["seed"] == "uni_agent.sandbox.seed"
-    assert get_sandbox_cls("seed").__name__ == "SeedSandbox"
-
-
 def _named_exc(name: str) -> Exception:
     """An exception whose class name matches a provider's SDK timeout type."""
     return type(name, (Exception,), {})()
-
-
-def test_seed_recognizes_its_timeout_by_name():
-    from uni_agent.sandbox.seed import SeedSandbox
-
-    sb = SeedSandbox()
-    assert sb._is_timeout_error(_named_exc("TimeoutException")) is True
-    assert sb._is_timeout_error(TimeoutError()) is True  # base check still applies
-    assert sb._is_timeout_error(RuntimeError("other")) is False
 
 
 def test_vefaas_recognizes_its_timeout_by_name(monkeypatch):
@@ -241,12 +227,6 @@ def test_docker_is_alive_false_before_start():
     from uni_agent.sandbox.docker import DockerSandbox
 
     assert asyncio.run(DockerSandbox().is_alive()) is False
-
-
-def test_seed_is_alive_false_before_start():
-    from uni_agent.sandbox.seed import SeedSandbox
-
-    assert asyncio.run(SeedSandbox().is_alive()) is False
 
 
 def test_vefaas_is_alive_false_before_start(monkeypatch):
@@ -300,55 +280,6 @@ def test_modal_is_alive_false_and_swallows_poll_errors():
     sb = ModalSandbox()
     sb._sandbox = _fake_modal_sandbox(poll_raises=RuntimeError("connection lost"))
     assert asyncio.run(sb.is_alive()) is False  # must never raise
-
-
-# --------------------------- seed _exec env handling ---------------------------
-
-
-class _FakeSeedResult:
-    def __init__(self, stdout="out", stderr="", return_code=0):
-        self.stdout = stdout
-        self.stderr = stderr
-        self.return_code = return_code
-
-
-class _FakeSeedBackend:
-    """Records ``execute`` kwargs; stands in for the byted-seed SDK sandbox object."""
-
-    def __init__(self):
-        self.calls: list[dict] = []
-
-    async def execute(self, *, command, **kwargs):
-        self.calls.append({"command": command, **kwargs})
-        return _FakeSeedResult()
-
-
-def test_seed_exec_injects_lowercase_proxy_only():
-    # Guards the WSGI/CGI leak fix: uppercase HTTP_PROXY must never be injected, or it
-    # surfaces as a bogus request header in env-sensitive tests (Django basehttp).
-    from uni_agent.sandbox.seed import SeedSandbox
-
-    sb = SeedSandbox(proxy=True)
-    backend = _FakeSeedBackend()
-    sb._sandbox = backend
-    res = asyncio.run(sb._exec(["echo", "hi"]))
-    assert (res.exit_code, res.stdout) == (0, "out")
-    env = backend.calls[0]["env"]
-    assert env["http_proxy"] and env["https_proxy"] and env["no_proxy"]
-    assert "HTTP_PROXY" not in env and "HTTPS_PROXY" not in env and "NO_PROXY" not in env
-    assert "PYTHONPATH" not in env  # not force-set; the sandbox image owns PYTHONPATH
-
-
-def test_seed_exec_merges_caller_env_over_base():
-    from uni_agent.sandbox.seed import SeedSandbox
-
-    sb = SeedSandbox(proxy=True)
-    backend = _FakeSeedBackend()
-    sb._sandbox = backend
-    asyncio.run(sb._exec(["x"], env={"http_proxy": "http://caller:1", "PYTHONPATH": "/custom"}))
-    env = backend.calls[0]["env"]
-    assert env["http_proxy"] == "http://caller:1"  # caller overrides the base proxy
-    assert env["PYTHONPATH"] == "/custom"  # caller-provided values pass through untouched
 
 
 # --------------------------- veFaaS multi-function selection ---------------------------
