@@ -28,6 +28,8 @@ jobs:
       # 1. git clone code
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          submodules: true
 
       # 2. set up python
       - name: Set up Python ${{ matrix.python-version }}
@@ -52,7 +54,6 @@ jobs:
           pip install pytest pytest-cov
           export PYTHONPATH="${PYTHONPATH}:${GITHUB_WORKSPACE}"
           pytest tests/ --cov=./ --cov-report=xml --cov-report=term
-        continue-on-error: true  # allow failed node
 
       # 5. Upload coverage to Codecov
       - name: Upload coverage to Codecov

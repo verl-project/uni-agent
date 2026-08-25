@@ -3,7 +3,7 @@
 # -------------------------------
 [build-system]
 requires = [
-    "setuptools>=61.0",
+    "setuptools>=77.0",
     "wheel"
 ]
 build-backend = "setuptools.build_meta"
@@ -15,10 +15,16 @@ build-backend = "setuptools.build_meta"
 name = "uni-agent"
 dynamic = ["version"]
 
-description = "UniAgent"
-license = {text = "Apache-2.0"}
+description = "Build, run, and train long-horizon agents at scale"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 readme = {file = "README.md", content-type = "text/markdown"}
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.13"
+
+[project.urls]
+Documentation = "https://uni-agent.readthedocs.io/"
+Repository = "https://github.com/verl-project/uni-agent"
+Issues = "https://github.com/verl-project/uni-agent/issues"
 
 # -------------------------------
 # tool.ruff - Linting configuration
@@ -90,17 +96,16 @@ ignore_errors = false
 include-package-data = true
 
 [tool.setuptools.dynamic]
-version = {file = "verl/verl/version/version"}
+version = {file = "uni_agent/version/version"}
 
 [tool.setuptools.package-dir]
 "" = "."
 
+[tool.setuptools.packages.find]
+include = ["uni_agent*"]
+
 [tool.setuptools.package-data]
-verl = [
-  "version/*",
-  "trainer/config/*.yaml",
-  "trainer/config/*/*.yaml",
-]
+uni_agent = ["version/*"]
 
 [tool.pytest.ini_options]
 markers = [
