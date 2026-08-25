@@ -867,22 +867,18 @@ class OpenAICompatibleAgentFramework(AgentFramework):
             return result_trajectories, sample_fields
 
     async def _cancel_runner_task(self, object_ref, session_id: str) -> None:
-        """Cancel a dispatched runner Ray task after timeout or parent cancellation.
+        """Cancel a dispatched runner Ray task after its session timed out.
 
-        Graceful cancel (``force=False``) asks Ray to interrupt the task and
-        unwind its runner stack, so runner-side cleanup (e.g. the task's sandbox
-        context manager) can run. If the task is still pending after a short grace
-        period, force-kill it: correctness of the batch (freeing the worker and its
-        resources) beats the risk of skipping graceful teardown.
+        Graceful cancel (``force=False``) lets the worker's ``asyncio.run`` raise
+        ``CancelledError`` and unwind, so runner-side cleanup (e.g. the task's
+        sandbox context manager) runs. If the task is still pending after a short
+        grace period, force-kill it: correctness of the batch (freeing the worker
+        and its resources) beats the risk of skipping graceful teardown.
         """
         try:
             ray.cancel(object_ref)
         except Exception:
             logger.exception("session %s: ray.cancel failed for runner task", session_id)
-            try:
-                ray.cancel(object_ref, force=True)
-            except Exception:
-                logger.exception("session %s: force ray.cancel failed after graceful cancel error", session_id)
             return
         try:
             await asyncio.wait_for(object_ref, timeout=self._RUNNER_CANCEL_GRACE_SECONDS)
