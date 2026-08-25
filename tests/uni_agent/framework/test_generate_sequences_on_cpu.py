@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import replace
 import types
+from dataclasses import replace
 
 import numpy as np
 import pytest
