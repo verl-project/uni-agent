@@ -1307,8 +1307,8 @@ async def test_ray_task_termination_cancels_runner_and_aborts_session(monkeypatc
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("interruption", ["cancel_request_error", "grace_wait_cancelled"])
-async def test_runner_cancel_force_fallback(monkeypatch, interruption):
-    """Force-cancel when graceful cancellation cannot complete."""
+async def test_runner_cancel_handles_interruption(monkeypatch, interruption):
+    """Force only failed requests; preserve cancellation of the cleanup wait."""
     from uni_agent.framework import framework as framework_module
 
     grace_started = asyncio.Event()
@@ -1338,4 +1338,5 @@ async def test_runner_cancel_force_fallback(monkeypatch, interruption):
     else:
         await cleanup_task
 
-    assert [call["force"] for call in cancel_calls] == [False, True]
+    expected_force_calls = [False, True] if interruption == "cancel_request_error" else [False]
+    assert [call["force"] for call in cancel_calls] == expected_force_calls

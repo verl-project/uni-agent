@@ -897,10 +897,6 @@ class OpenAICompatibleAgentFramework(AgentFramework):
             except Exception:
                 logger.exception("session %s: force ray.cancel failed", session_id)
         except asyncio.CancelledError:
-            try:
-                ray.cancel(object_ref, force=True)
-            except Exception:
-                logger.exception("session %s: force ray.cancel failed after cleanup cancellation", session_id)
             raise
         except Exception:
             # Task terminated while being cancelled (e.g. TaskCancelledError);
