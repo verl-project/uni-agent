@@ -110,7 +110,7 @@ The Quickstart provides separate Task Configs for ReAct and Claude Code. Each re
         runtime_timeout: 7200
       agent:
         name: claude_code
-        max_turns: 100
+        max_turns: 200
         run_timeout: 4800
         model:
           temperature: 1.0
@@ -123,7 +123,7 @@ The Quickstart provides separate Task Configs for ReAct and Claude Code. Each re
         runtime_timeout: 7200
       agent:
         name: claude_code
-        max_turns: 100
+        max_turns: 200
         run_timeout: 4800
         model:
           temperature: 1.0
@@ -267,19 +267,26 @@ DATA_DIR=/path/to/data \
 RUNTIME_DIR=/path/to/runtime \
 NNODES=4 \
 CONCURRENCY=1024 \
-TP=4 PP=2 CP=1 \
+GEN_TP=2 \
+TP=1 PP=1 CP=8 \
+TRAIN_PROMPT_BSZ=32 \
+N_RESP_PER_PROMPT=16 \
+PPO_MINI_BATCH_SIZE=32 \
 TASK_CONFIG=examples/quickstart/training/task_config_claude_code.yaml \
 MASK_UNFINISHED_EPISODE=True \
-EXP_NAME=claude_code_qwen3_5_4b_dppo_tv \
-ADV_ESTIMATOR=rloo \
-LOSS_MODE=dppo_tv \
-CLIP_RATIO_LOW=0.15 \
-CLIP_RATIO_HIGH=0.15 \
-CLIP_RATIO_C=10000 \
-LOSS_AGG_MODE=seq-mean-token-sum-norm \
+EXP_NAME=claude_code_qwen3p5_4b \
+ADV_ESTIMATOR=grpo \
+CLIP_RATIO_LOW=0.2 \
+CLIP_RATIO_HIGH=0.28 \
+CLIP_RATIO_C=10 \
+LOSS_AGG_MODE=token-mean \
 BYPASS_MODE=False \
-ROLLOUT_IS=null \
+ROLLOUT_IS=token \
+ROLLOUT_IS_THRESHOLD=2.0 \
+ROLLOUT_IS_BATCH_NORMALIZE=False \
 ROLLOUT_RS=null \
+LR_DECAY_STEPS=10000 \
+TEST_FREQ=-1 \
 bash examples/quickstart/training/train_qwen3p5_dense.sh
 ```
 

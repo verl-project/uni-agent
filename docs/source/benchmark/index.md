@@ -4,7 +4,7 @@ This section collects reproducible reference results for agent inference, verifi
 
 ## Results
 
-- [Inference and Verification](inference.md) covers SWE-Bench Verified, SWE-Bench Multilingual, and Terminal-Bench v2.
+- [Inference and Verification](inference.md) covers SWE-Bench Verified, SWE-Bench Multilingual, and Terminal-Bench v2.0 and v2.1.
 - [RL Training](rl-training.md) covers Base-to-RL improvements, asynchronous rollout performance, and representative training curves.
 
 ## Metric Conventions

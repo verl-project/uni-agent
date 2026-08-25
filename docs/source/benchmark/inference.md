@@ -4,29 +4,33 @@ Uni-Agent reuses the same Task, Agent, Sandbox, and reward definitions for paral
 
 ## SWE-Bench Verified
 
-| Model | Score | Rollouts | Setting |
-| --- | ---: | :---: | --- |
-| Qwen3-Coder-30B-A3B-Instruct | **49.2** | Avg@4 | 100 turns, 128K context |
-| Qwen3-Coder-480B-A35B-Instruct | **64.2** | Avg@4 | 500 turns, 256K context |
-| Qwen3-Coder-Next | **67.6** | Avg@4 | 300 turns, 128K context |
-| Qwen3.5-4B | **45.2** | Avg@1 | 100 turns, 64K context |
-| Qwen3.5-9B | **53.8** | Avg@1 | 100 turns, 64K context |
-| Qwen3.5-9B | **65.6** | Avg@1 | 200 turns, 128K context |
-| Qwen3.5-35B-A3B | **68.4** | Avg@1 | 200 turns, 128K context |
+| Agent | Model | Rollouts | Setting | Score |
+| --- | --- | :---: | --- | ---: |
+| ReAct | Qwen3-Coder-30B-A3B-Instruct | Avg@4 | 100 turns, 128K context | **49.2** |
+| ReAct | Qwen3-Coder-480B-A35B-Instruct | Avg@4 | 500 turns, 256K context | **64.2** |
+| ReAct | Qwen3-Coder-Next | Avg@4 | 300 turns, 128K context | **67.6** |
+| ReAct | Qwen3.5-4B | Avg@1 | 100 turns, 64K context | **45.2** |
+| ReAct | Qwen3.5-9B | Avg@1 | 100 turns, 64K context | **56.8** |
+| ReAct | Qwen3.5-9B | Avg@1 | 200 turns, 128K context | **63.8** |
+| Claude Code | Qwen3.5-9B | Avg@1 | 200 turns, 128K context | **51.0** |
+| ReAct | Qwen3.5-35B-A3B | Avg@1 | 200 turns, 128K context | **68.4** |
 
-The Qwen3-Coder runs use temperature `0.8` and top-p `0.9`. The Qwen3.5 runs use task-specific sampling configurations; consult the associated recipe before comparing rows.
+The Qwen3-Coder runs use temperature `0.8` and top-p `0.9`. The Qwen3.5 runs use task-specific sampling configurations; consult the associated recipe before comparing rows. An Agent value of `—` means the original result summary did not record the Agent implementation.
 
 ## SWE-Bench Multilingual
 
-| Model | Score | Rollouts | Setting |
-| --- | ---: | :---: | --- |
-| Qwen3-Coder-30B-A3B-Instruct | **32.3** | Avg@1 | 200 turns, 128K context |
+| Agent | Model | Rollouts | Setting | Score |
+| --- | --- | :---: | --- | ---: |
+| ReAct | Qwen3-Coder-30B-A3B-Instruct | Avg@1 | 200 turns, 128K context | **35.0** |
 
-## Terminal-Bench v2
+## Terminal-Bench
 
-| Model | Score | Rollouts | Setting |
-| --- | ---: | :---: | --- |
-| Qwen3.6-35B-A3B | **42.53** | Avg@1 | 200K context |
+Harbor is listed as a task format, not an Agent implementation.
+
+| Version | Task Format | Agent | Model | Rollouts | Setting | Score |
+| --- | --- | --- | --- | :---: | --- | ---: |
+| v2.0 | Native | ReAct | Qwen3.6-35B-A3B | Avg@1 | 256K context | **42.5** |
+| v2.1 | Harbor | Claude Code | GLM5.2-733B | — | 256K context | **67.4** |
 
 ## Run the Evaluation
 
