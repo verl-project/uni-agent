@@ -10,7 +10,7 @@ Uni-Agent reuses the same Task, Agent, Sandbox, and reward definitions for paral
 | ReAct | Qwen3-Coder-480B-A35B-Instruct | Avg@4 | 500 turns, 256K context | **64.2** |
 | ReAct | Qwen3-Coder-Next | Avg@4 | 300 turns, 128K context | **67.6** |
 | ReAct | Qwen3.5-4B | Avg@1 | 100 turns, 64K context | **45.2** |
-| ReAct | Qwen3.5-9B | Avg@1 | 100 turns, 64K context | **56.8** |
+| ReAct | Qwen3.5-9B | Avg@1 | 100 turns, 64K context | **53.8** |
 | ReAct | Qwen3.5-9B | Avg@1 | 200 turns, 128K context | **63.8** |
 | Claude Code | Qwen3.5-9B | Avg@1 | 200 turns, 128K context | **51.0** |
 | ReAct | Qwen3.5-35B-A3B | Avg@1 | 200 turns, 128K context | **68.4** |
