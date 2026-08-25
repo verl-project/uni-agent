@@ -71,7 +71,7 @@ def build_harbor_dataset(
             "dataset": name,
             "task_path": str(task_dir),
         }
-        task_config = {"name": TASK_NAME, "prompt": prompt, "metadata": metadata}
+        task_config = {"name": TASK_NAME, "metadata": metadata}
         rows.append(
             {
                 "data_source": name,
