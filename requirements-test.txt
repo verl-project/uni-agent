@@ -4,3 +4,4 @@ pytest_asyncio
 fastapi
 uvicorn
 cachetools
+vllm==0.23.0
