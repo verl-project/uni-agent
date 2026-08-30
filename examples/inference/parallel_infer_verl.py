@@ -114,6 +114,8 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
     config.actor_rollout_ref.model.path = os.path.expanduser(args.model_path)
     rollout.name = args.engine
     rollout.mode = "async"
+    # Standalone inference has no trainer to broadcast weights.
+    rollout.load_format = "auto"
     rollout.prompt_length = DEFAULT_PROMPT_LENGTH
     rollout.response_length = response_length
     rollout.tensor_model_parallel_size = args.tensor_parallel_size
