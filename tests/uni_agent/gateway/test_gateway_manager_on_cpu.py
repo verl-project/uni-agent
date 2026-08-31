@@ -42,6 +42,8 @@ class _FakeGateway:
         return _FakeRemoteMethod(self._create)
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_gateway_manager_balances_concurrent_session_creation():
     """Concurrently created sessions must spread evenly across gateways. The
@@ -68,6 +70,8 @@ async def test_gateway_manager_balances_concurrent_session_creation():
     assert [len(g.created) for g in gateways] == counts
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_gateway_manager_rejects_zero_gateway_count():
     """``GatewayManager`` raises ``ValueError`` when ``gateway_count=0``, rather
     than silently spawning a half-initialized manager."""
@@ -82,6 +86,8 @@ def test_gateway_manager_rejects_zero_gateway_count():
         )
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_gateway_manager_round_robins_actors_across_alive_nodes(ray_runtime, monkeypatch):
     """gateway_count > 1 should distribute actors across alive CPU nodes round-robin."""
@@ -129,6 +135,8 @@ async def test_gateway_manager_round_robins_actors_across_alive_nodes(ray_runtim
     # No shutdown call needed: stub actors have no real Ray state.
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_gateway_manager_finalizes_each_session_on_its_owning_gateway(ray_runtime):
     """create/finalize must route every session back to the same owning gateway
@@ -173,6 +181,8 @@ async def test_gateway_manager_finalizes_each_session_on_its_owning_gateway(ray_
     await manager.shutdown()
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_gateway_manager_default_chains_config_to_http_finalizes_subagent_before_updated_main(
     ray_runtime,
@@ -252,6 +262,8 @@ async def test_gateway_manager_default_chains_config_to_http_finalizes_subagent_
         await manager.shutdown()
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_gateway_manager_allows_concurrent_http_requests_within_one_session(ray_runtime):
     """Two HTTP requests must reach backend generation concurrently and both materialize."""

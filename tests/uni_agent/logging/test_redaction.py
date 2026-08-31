@@ -8,6 +8,8 @@ from uni_agent.logging.handlers import _formatter
 from uni_agent.logging.redaction import _redact_sensitive_text
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.parametrize(
     ("message", "secret"),
     [
@@ -26,11 +28,15 @@ def test_redact_sensitive_text_hides_endpoint_and_credentials(message, secret):
     assert "<redacted>" in redacted
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_redaction_preserves_non_secret_model_names():
     message = "model=ark-code-latest"
     assert _redact_sensitive_text(message) == message
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_shared_formatter_redacts_rendered_log_arguments():
     record = logging.LogRecord(
         name="uni_agent.test",

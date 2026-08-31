@@ -9,6 +9,8 @@ ALLOWED_SAMPLING_KEYS = frozenset({"temperature", "top_p", "top_k", "max_tokens"
 BASE = dict(base_sampling_params={}, allowed_sampling_keys=ALLOWED_SAMPLING_KEYS)
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_system_string_becomes_first_message():
     """Top-level Anthropic system text becomes the leading internal system
     message and max_tokens is forwarded into sampling params."""
@@ -20,6 +22,8 @@ def test_system_string_becomes_first_message():
     assert req["sampling_params"]["max_tokens"] == 16
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_user_text_image_text_order_preserved():
     """Mixed Anthropic user text/image blocks lower to OpenAI-compatible parts
     without reordering the multimodal content."""
@@ -46,6 +50,8 @@ def test_user_text_image_text_order_preserved():
     ]
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_assistant_tool_use_to_tool_calls_dict_args():
     """Anthropic assistant tool_use blocks become internal OpenAI-style
     tool_calls while preserving dict arguments."""
@@ -67,6 +73,8 @@ def test_assistant_tool_use_to_tool_calls_dict_args():
     assert tc["function"]["arguments"] == {"q": "x"}
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_malformed_anthropic_content_blocks_rejected():
     """Malformed or unsupported Anthropic content blocks fail at the adapter
     boundary before the session codec sees corrupted history."""
@@ -107,6 +115,8 @@ def test_malformed_anthropic_content_blocks_rejected():
             anthropic_to_internal(payload, **BASE)
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_user_tool_result_text_becomes_tool_message():
     """A text-only Anthropic tool_result lowers to an internal tool message with
     the original tool_use_id."""
@@ -132,6 +142,8 @@ def test_user_tool_result_text_becomes_tool_message():
     assert req["messages"][0]["content"] == "found"
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_malformed_tool_result_blocks_rejected():
     """Tool results without a usable id or with unsupported nested blocks are
     rejected instead of corrupting tool-return history."""
@@ -169,6 +181,8 @@ def test_malformed_tool_result_blocks_rejected():
             anthropic_to_internal(payload, **BASE)
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_tool_result_image_appends_user_message():
     """Tool-result images are preserved as a following user image message while
     text remains in the correlated tool message."""
@@ -201,6 +215,8 @@ def test_tool_result_image_appends_user_message():
     assert req["messages"][1]["content"][0]["type"] == "image_url"
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_tool_result_image_only_preserves_empty_tool_message():
     """Image-only tool_result content still emits an empty tool message sentinel
     before the downgraded user image message."""
@@ -232,6 +248,8 @@ def test_tool_result_image_only_preserves_empty_tool_message():
     assert req["messages"][1]["content"][0]["type"] == "image_url"
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_anthropic_request_control_fields_lower_or_reject():
     """Small Anthropic request-level controls stay adapter-owned: unsupported
     tool choices are rejected, while stop_sequences lowers to sampling stop."""
@@ -248,6 +266,8 @@ def test_anthropic_request_control_fields_lower_or_reject():
     assert req["sampling_params"]["stop"] == ["</s>"]
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_mid_list_system_folded_into_user():
     """Mid-conversation system reminders are folded into user content so chat
     templates never see a system role after the first message."""
@@ -270,6 +290,8 @@ def test_mid_list_system_folded_into_user():
     assert not any(m.get("content") == "<system-reminder>\nreminder\n</system-reminder>" for m in req["messages"])
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_mid_list_system_before_tool_result_does_not_cross_tool_message():
     """A system reminder before a tool_result folds into the prior user message
     and does not break the assistant/tool message adjacency."""
@@ -306,6 +328,8 @@ def test_mid_list_system_before_tool_result_does_not_cross_tool_message():
     )
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_billing_header_stripped_from_system():
     """Claude Code billing headers embedded in system text are stripped before
     prompt construction."""
@@ -320,6 +344,8 @@ def test_billing_header_stripped_from_system():
     assert req["messages"][0] == {"role": "system", "content": "Be concise."}
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_provider_specific_tool_metadata_lowers_to_template_function_schema():
     """Provider-specific Anthropic tool metadata is ignored while the tool name
     remains available to the local chat template as an OpenAI function schema."""
@@ -341,6 +367,8 @@ def test_provider_specific_tool_metadata_lowers_to_template_function_schema():
     assert req["tools"] == [{"type": "function", "function": {"name": "web_search", "parameters": {}}}]
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_tool_input_schema_passes_through_json_schema():
     """Anthropic JSON schema is copied into OpenAI function parameters without
     gateway-specific parser normalization."""
@@ -368,6 +396,8 @@ def test_tool_input_schema_passes_through_json_schema():
     assert "enum" not in params["properties"]["target"]
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_tool_input_schema_anyof_preserves_heterogeneous_branches_without_inferred_type():
     """Heterogeneous anyOf branches keep their distinct JSON types instead of
     being collapsed into a compatibility hint for a specific parser."""
@@ -390,6 +420,8 @@ def test_tool_input_schema_anyof_preserves_heterogeneous_branches_without_inferr
     }
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_thinking_block_dropped_with_warning(caplog):
     """Inbound Anthropic thinking blocks are dropped with a warning while
     neighboring assistant text remains in the prompt history."""
@@ -411,6 +443,8 @@ def test_thinking_block_dropped_with_warning(caplog):
     assert any("thinking" in r.message for r in caplog.records)
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_unsupported_system_and_redacted_thinking_blocks_rejected():
     """System non-text blocks and encrypted redacted_thinking blocks are rejected
     because neither has a faithful local template representation."""
@@ -440,6 +474,8 @@ def test_unsupported_system_and_redacted_thinking_blocks_rejected():
         )
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_anthropic_build_response_text():
     """A text GenerationOutcome serializes to the Anthropic Messages response
     shape with end_turn stop reason and usage counts."""
@@ -462,6 +498,8 @@ def test_anthropic_build_response_text():
     assert body["usage"] == {"input_tokens": 3, "output_tokens": 1}
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_anthropic_build_response_tool_use():
     """Internal OpenAI-style tool_calls serialize back to Anthropic tool_use
     blocks and map finish_reason to tool_use."""
@@ -486,6 +524,8 @@ def test_anthropic_build_response_tool_use():
     assert body["stop_reason"] == "tool_use"
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_anthropic_build_response_length_maps_to_max_tokens():
     """Internal length finish reasons are exposed as Anthropic max_tokens stop
     reasons."""
@@ -504,6 +544,8 @@ def test_anthropic_build_response_length_maps_to_max_tokens():
     assert body["stop_reason"] == "max_tokens"
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_anthropic_build_response_normalizes_tool_use_input():
     """Tool parser arguments are normalized for Anthropic clients: JSON-string
     objects become dicts and invalid strings become empty input."""
@@ -528,6 +570,8 @@ def test_anthropic_build_response_normalizes_tool_use_input():
         assert tu["input"] == expected_input
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_anthropic_stream_event_sequence():
     """A synthesized text response follows the Anthropic Messages SSE event
@@ -562,6 +606,8 @@ async def test_anthropic_stream_event_sequence():
     assert "event: message_stop" in text
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_anthropic_stream_response_emits_tool_use_delta():
     """A synthesized tool-call response emits Anthropic tool_use start data and

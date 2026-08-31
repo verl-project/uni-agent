@@ -7,6 +7,8 @@ class _UnstableGenerationPromptTokenizer:
         return [10, 20] if not add_generation_prompt else [99, 30, 40]
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_initialize_generation_prompt_returns_generation_suffix():
     from tests.uni_agent.support import FakeTokenizer
     from uni_agent.gateway.session import codec as codec_module
@@ -14,6 +16,8 @@ def test_initialize_generation_prompt_returns_generation_suffix():
     assert codec_module.initialize_generation_prompt(FakeTokenizer()) == [ord(char) for char in "assistant:"]
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_initialize_generation_prompt_rejects_non_prefix_template():
     from uni_agent.gateway.session import codec as codec_module
 

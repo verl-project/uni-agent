@@ -94,10 +94,14 @@ def _agent() -> ReActAgent:
     return ReActAgent(ReActConfig(model=model, tools=[], max_steps=1))
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_agent_result_defaults_to_unreported_completion():
     assert AgentResult().finished is None
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_model_forwards_finish_reason(monkeypatch):
     model = OpenAICompatibleChatModel(
@@ -123,6 +127,8 @@ async def test_model_forwards_finish_reason(monkeypatch):
     assert generation_info["finish_reason"] == "length"
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.parametrize(
     ("termination_reason", "expected"),
     [
@@ -150,6 +156,8 @@ async def test_react_reports_completion(monkeypatch, termination_reason: str, ex
     assert toolbox.calls == [("shell", {"command": "cd -- /testbed"})]
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_length_finish_reason_is_unfinished():
     agent = _agent()
@@ -160,6 +168,8 @@ async def test_length_finish_reason_is_unfinished():
     assert reason == "token_limit"
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_length_exhausted_empty_response_ends_the_episode():
     # What the Gateway returns once the session's response budget is spent: an
@@ -173,6 +183,8 @@ async def test_length_exhausted_empty_response_ends_the_episode():
     assert reason == "token_limit"
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_total_tokens_tracks_current_context_size():
     agent = _agent()
@@ -186,6 +198,8 @@ async def test_total_tokens_tracks_current_context_size():
     assert info["total_tokens"] == 102
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_plain_text_without_tool_call_finishes_episode():
     agent = _agent()
@@ -198,6 +212,8 @@ async def test_plain_text_without_tool_call_finishes_episode():
     assert [message["role"] for message in transcript] == ["assistant"]
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_failed_finish_tool_does_not_finish():
     agent = _agent()
@@ -226,6 +242,8 @@ async def test_failed_finish_tool_does_not_finish():
     assert info["errors"] == 1
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_truncated_tool_call_is_not_dispatched():
     # The Gateway reports tool_calls, never length, whenever it parsed a tool call
@@ -261,6 +279,8 @@ def _per_turn_capped_agent(*, max_tokens_per_turn: int, max_total_tokens: int | 
     return ReActAgent(ReActConfig(model=model, tools=[], max_steps=2))
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_per_turn_cap_truncation_ends_the_episode():
     agent = _per_turn_capped_agent(max_tokens_per_turn=8)
@@ -273,6 +293,8 @@ async def test_per_turn_cap_truncation_ends_the_episode():
     assert reason == "token_limit"
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_max_tokens_is_clamped_to_the_remaining_episode_budget():
     agent = _per_turn_capped_agent(max_tokens_per_turn=8, max_total_tokens=105)

@@ -42,6 +42,8 @@ def ray_runtime():
     ray.shutdown()
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.parametrize("response_length", [0, -1])
 def test_gateway_actor_config_rejects_non_positive_response_length(response_length):
     from uni_agent.gateway.config import GatewayActorConfig
@@ -50,6 +52,8 @@ def test_gateway_actor_config_rejects_non_positive_response_length(response_leng
         GatewayActorConfig(tokenizer=FakeTokenizer(), response_length=response_length)
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.parametrize("prompt_length", [0, -1])
 def test_gateway_actor_config_rejects_non_positive_prompt_length(prompt_length):
     from uni_agent.gateway.config import GatewayActorConfig
@@ -58,6 +62,8 @@ def test_gateway_actor_config_rejects_non_positive_prompt_length(prompt_length):
         GatewayActorConfig(tokenizer=FakeTokenizer(), prompt_length=prompt_length)
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.parametrize("field", ["enable_last_assistant_rollback", "enable_tool_parser_cache"])
 @pytest.mark.parametrize("value", ["true", 1, None])
 def test_gateway_actor_config_rejects_non_bool_options(field, value):
@@ -67,12 +73,16 @@ def test_gateway_actor_config_rejects_non_bool_options(field, value):
         GatewayActorConfig(tokenizer=FakeTokenizer(), **{field: value})
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_gateway_actor_config_enables_last_assistant_rollback_by_default():
     from uni_agent.gateway.config import GatewayActorConfig
 
     assert GatewayActorConfig(tokenizer=FakeTokenizer()).enable_last_assistant_rollback is True
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_gateway_actor_forwards_last_assistant_rollback_to_session():
     from uni_agent.gateway.config import GatewayActorConfig
@@ -102,6 +112,8 @@ async def test_gateway_actor_forwards_last_assistant_rollback_to_session():
     assert state["rollback_count"] == 1
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_gateway_actor_max_tokens_clamped_to_remaining_trajectory_capacity():
     """Clamp ``max_tokens`` to total capacity minus the selected chain context."""
@@ -144,6 +156,8 @@ async def test_gateway_actor_max_tokens_clamped_to_remaining_trajectory_capacity
         await actor.shutdown()
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_gateway_actor_exhausted_trajectory_closes_without_backend_call():
     from uni_agent.gateway.config import GatewayActorConfig
@@ -181,6 +195,8 @@ async def test_gateway_actor_exhausted_trajectory_closes_without_backend_call():
         await actor.shutdown()
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_gateway_actor_rejects_invalid_session_max_tokens_before_backend_call():
     from fastapi import HTTPException
@@ -205,6 +221,8 @@ async def test_gateway_actor_rejects_invalid_session_max_tokens_before_backend_c
         await actor.shutdown()
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_gateway_actor_continuation_budget_exhausted_materializes_length_stop():
     """When a continuation request exceeds the selected chain trajectory capacity,
@@ -257,6 +275,8 @@ async def test_gateway_actor_continuation_budget_exhausted_materializes_length_s
         await actor.shutdown()
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_backend_value_error_raises_400():
     """Backend ``ValueError`` (e.g. prompt-too-long litellm vLLM errors)
@@ -282,6 +302,8 @@ async def test_backend_value_error_raises_400():
         await actor.shutdown()
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_unknown_session_raises_404():
     """A chat request targeting a session_id that was never created is rejected
@@ -304,6 +326,8 @@ async def test_unknown_session_raises_404():
         await actor.shutdown()
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_prefix_canonicalization_ignores_provider_ids_and_normalizes_arguments():
     """Drop provider IDs and normalize arguments without mutating the message."""
     from uni_agent.gateway.session.codec import MessageCodec
@@ -364,6 +388,8 @@ def test_prefix_canonicalization_ignores_provider_ids_and_normalizes_arguments()
         ) is expect_equal
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_config_chat_template_kwargs_forwarded(monkeypatch):
     """Codec-level chat-template kwargs are copied and forwarded."""
@@ -405,6 +431,8 @@ async def test_config_chat_template_kwargs_forwarded(monkeypatch):
         await actor.shutdown()
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_gateway_actor_get_session_state_reports_default_chain_tips():
     from uni_agent.gateway.config import GatewayActorConfig
@@ -449,6 +477,8 @@ async def test_gateway_actor_get_session_state_reports_default_chain_tips():
     assert len(trajectories) == 2
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_unsupported_capabilities_rejected_with_400():
     """OpenAI capabilities that the gateway does not support (``n > 1``,
@@ -481,6 +511,8 @@ async def test_unsupported_capabilities_rejected_with_400():
         await actor.shutdown()
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_provider_stream_true_returns_sse():
     """OpenAI and Anthropic requests with stream=true return provider-shaped
@@ -515,6 +547,8 @@ async def test_provider_stream_true_returns_sse():
         await actor.shutdown()
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_openai_chat_completion_response_uses_request_model_or_unknown():
     """The route passes the request model into the OpenAI response envelope and
@@ -549,6 +583,8 @@ async def test_openai_chat_completion_response_uses_request_model_or_unknown():
         await actor.shutdown()
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_tool_choice_none_skips_tool_injection_and_parser(monkeypatch):
     """When ``tool_choice="none"``, tools are cleared before encoding so the
@@ -594,6 +630,8 @@ async def test_tool_choice_none_skips_tool_injection_and_parser(monkeypatch):
         await actor.shutdown()
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_gateway_actor_forwards_image_data_on_initial_multimodal_request(ray_runtime):
     """On the first turn of a multimodal session, ``image_data`` extracted
@@ -667,6 +705,8 @@ async def test_gateway_actor_forwards_image_data_on_initial_multimodal_request(r
     assert trajectories[0].multi_modal_data == {"images": ["image://a.png"]}
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_gateway_actor_reward_info_endpoint_attaches_metadata_on_finalize(ray_runtime):
     """The per-session reward_info endpoint stores metadata returned on finalize."""
@@ -702,6 +742,8 @@ async def test_gateway_actor_reward_info_endpoint_attaches_metadata_on_finalize(
     assert trajectories[0].reward_info == {"score": 1.0, "label": "A"}
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_gateway_actor_continuation_reuses_accumulated_media_context(ray_runtime):
     """On a prefix-continuation turn, the accumulated media from the initial
@@ -764,6 +806,8 @@ async def test_gateway_actor_continuation_reuses_accumulated_media_context(ray_r
     assert trajectories[0].multi_modal_data == {"images": ["image://a.png"]}
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_gateway_actor_multimodal_reference_change_splits_trajectory(ray_runtime):
     """When a follow-up request changes the image reference (different URL),
@@ -824,6 +868,8 @@ async def test_gateway_actor_multimodal_reference_change_splits_trajectory(ray_r
     assert len(trajectories) == 2
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_gateway_actor_continuation_with_tool_returned_image_appends_media(monkeypatch):
     """When a tool-call continuation brings a new image (e.g. a zoomed crop),
@@ -937,6 +983,8 @@ async def test_gateway_actor_continuation_with_tool_returned_image_appends_media
     assert second_call["prompt_ids"] == expected_prompt_ids
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("session_id", "first_payload", "second_payload"),
@@ -996,6 +1044,8 @@ async def test_gateway_actor_context_change_splits_trajectory(ray_runtime, sessi
     assert len(trajectories) == 2
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("backend_kwargs", "session_id", "request_extra"),
@@ -1066,6 +1116,8 @@ async def test_gateway_actor_allowlist_filters_sampling_params(ray_runtime, back
     assert response.status_code == 200
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 @pytest.mark.parametrize("provider", ["openai", "anthropic"])
 async def test_gateway_actor_session_sampling_defaults_are_isolated_and_request_overridable(provider):
@@ -1141,6 +1193,8 @@ async def test_gateway_actor_session_sampling_defaults_are_isolated_and_request_
     ]
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_gateway_actor_continuation_preserves_prompt_and_generation_masks(ray_runtime):
     """Token-truth: on a continuation turn, the incremental interstitial tokens
@@ -1189,6 +1243,8 @@ async def test_gateway_actor_continuation_preserves_prompt_and_generation_masks(
     assert trajectories[0].response_mask[-len("SECOND") :] == [1] * len("SECOND")
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_gateway_actor_parallel_same_session_requests_by_default():
     from uni_agent.gateway.config import GatewayActorConfig
@@ -1219,6 +1275,8 @@ async def test_gateway_actor_parallel_same_session_requests_by_default():
     ]
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_gateway_actor_rejects_malformed_requests_with_bad_request(ray_runtime):
     """Malformed request payloads (empty messages, bad types, invalid
@@ -1285,6 +1343,8 @@ async def test_gateway_actor_rejects_malformed_requests_with_bad_request(ray_run
         assert detail_fragment in body["error"]["message"]
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_gateway_actor_backend_failure_does_not_commit_partial_state(ray_runtime):
     """Commit-on-success isolation: when the backend raises an error, the
@@ -1312,6 +1372,8 @@ async def test_gateway_actor_backend_failure_does_not_commit_partial_state(ray_r
     assert state["has_active_trajectory"] is False
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_gateway_actor_backend_failure_after_tool_mismatch_does_not_split(ray_runtime):
     """When the first turn succeeds but the second turn causes a backend
@@ -1363,6 +1425,8 @@ async def test_gateway_actor_backend_failure_after_tool_mismatch_does_not_split(
     assert trajectories[0].response_ids == [ord(char) for char in "FIRST"]
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_gateway_actor_tool_call_decode_returns_openai_format(monkeypatch):
     """When tool_parser_name is set and model outputs tool call tokens,
@@ -1446,6 +1510,8 @@ async def test_gateway_actor_tool_call_decode_returns_openai_format(monkeypatch)
     assert 1 in trajectories[0].response_mask
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_anthropic_messages_end_to_end():
     """The Anthropic Messages route lowers a simple request, runs one
@@ -1469,6 +1535,8 @@ async def test_anthropic_messages_end_to_end():
         await actor.shutdown()
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_anthropic_and_openai_produce_identical_trajectory():
     """An Anthropic request and its equivalent OpenAI request yield identical
@@ -1503,6 +1571,8 @@ async def test_anthropic_and_openai_produce_identical_trajectory():
         await actor.shutdown()
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_anthropic_tool_turn_round_trip_extends_not_reencodes(monkeypatch):
     """A real Anthropic tool_result round trip extends the existing trajectory."""
@@ -1562,6 +1632,8 @@ async def test_anthropic_tool_turn_round_trip_extends_not_reencodes(monkeypatch)
         await actor.shutdown()
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_anthropic_error_envelope_shape():
     """Malformed Anthropic requests return Anthropic-shaped error bodies rather
@@ -1588,6 +1660,8 @@ async def test_anthropic_error_envelope_shape():
         await actor.shutdown()
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_provider_malformed_json_uses_error_envelope():
     """Invalid JSON is reported through the matching provider error envelope."""
@@ -1625,6 +1699,8 @@ async def test_provider_malformed_json_uses_error_envelope():
         await actor.shutdown()
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_unhandled_exception_uses_provider_error_envelope(monkeypatch):
     """Unhandled route exceptions still produce provider-shaped error bodies,

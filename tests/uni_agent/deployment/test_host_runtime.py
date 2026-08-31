@@ -32,6 +32,8 @@ async def runtime():
         await rt.close()
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_sequential_commands_keep_session_state(runtime: HostRuntime) -> None:
     """Persistent session: state from one command must be visible in the next."""
@@ -43,6 +45,8 @@ async def test_sequential_commands_keep_session_state(runtime: HostRuntime) -> N
     assert r2.output.strip() == "bar"
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_concurrent_commands_are_serialized(runtime: HostRuntime) -> None:
     """Concurrent run_in_session calls must not interleave their stdout/stdin."""
@@ -55,6 +59,8 @@ async def test_concurrent_commands_are_serialized(runtime: HostRuntime) -> None:
         assert r.exit_code == 0
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_timeout_does_not_pollute_next_command(runtime: HostRuntime) -> None:
     """After a timeout, the next command must see a clean stdout stream."""
@@ -68,6 +74,8 @@ async def test_timeout_does_not_pollute_next_command(runtime: HostRuntime) -> No
     assert r.output.strip() == "recovered"
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_interrupt_unblocks_running_command(runtime: HostRuntime) -> None:
     """BashInterruptAction must be deliverable while another command holds
@@ -93,6 +101,8 @@ async def test_interrupt_unblocks_running_command(runtime: HostRuntime) -> None:
     assert r.output.strip() == "after_interrupt"
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_interrupt_kills_entire_pipeline(runtime: HostRuntime) -> None:
     """A pipeline (e.g. `sleep 30 | cat | cat`) spawns multiple processes
@@ -116,6 +126,8 @@ async def test_interrupt_kills_entire_pipeline(runtime: HostRuntime) -> None:
     assert r.output.strip() == "still_alive"
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_dead_session_raises_instead_of_silent_rebuild(runtime: HostRuntime) -> None:
     """If the bash process exits, the next call must surface the failure so

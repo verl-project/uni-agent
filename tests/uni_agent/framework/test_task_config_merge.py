@@ -9,10 +9,14 @@ from uni_agent.tasks import TaskConfig, TaskConfigResolver, get_task
 _LOCAL_SANDBOX = {"provider": "local"}
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_task_config_has_no_logging_runtime_fields():
     assert "log_dir" not in TaskConfig.model_fields
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_sample_config_overrides_file_defaults_and_runtime_endpoint_wins():
     file_defaults = {
         "name": "swe_bench",
@@ -86,6 +90,8 @@ def test_sample_config_overrides_file_defaults_and_runtime_endpoint_wins():
     assert parsed.agent.model.base_url == "http://gateway:8000/sessions/1/v1"
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_model_fallbacks_do_not_override_task_config_defaults():
     resolved = TaskConfigResolver(
         {
@@ -120,6 +126,8 @@ def test_model_fallbacks_do_not_override_task_config_defaults():
     assert model.top_k == 42
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_task_prompt_without_template_passes_through_unchanged():
     messages = [
         {"role": "system", "content": "Existing instructions"},
@@ -137,6 +145,8 @@ def test_task_prompt_without_template_passes_through_unchanged():
     assert config.prompt == messages
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_task_prompt_template_renders_multiple_metadata_fields():
     config = TaskConfig(
         sandbox=_LOCAL_SANDBOX,
@@ -162,6 +172,8 @@ def test_task_prompt_template_renders_multiple_metadata_fields():
     ]
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_task_prompt_template_allows_no_placeholders():
     config = TaskConfig(
         sandbox=_LOCAL_SANDBOX,
@@ -173,6 +185,8 @@ def test_task_prompt_template_allows_no_placeholders():
     assert config.prompt == [{"role": "user", "content": "Static recipe prompt"}]
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_prompt_template_is_input_only_across_task_config_serialization():
     config = TaskConfig(
         sandbox=_LOCAL_SANDBOX,
@@ -188,6 +202,8 @@ def test_prompt_template_is_input_only_across_task_config_serialization():
     assert TaskConfig.model_validate(dumped).prompt == config.prompt
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.parametrize(
     ("prompt_template", "metadata", "error"),
     [
@@ -221,6 +237,8 @@ def test_task_prompt_template_rejects_invalid_metadata_formatting(prompt_templat
         )
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.parametrize(
     ("prompt_template", "error"),
     [
@@ -239,6 +257,8 @@ def test_task_prompt_template_rejects_incompatible_template_messages(prompt_temp
         )
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_recipe_prompt_template_overrides_sample_template_and_uses_metadata():
     recipe_template = [
         {"role": "system", "content": "Recipe instructions"},

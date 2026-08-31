@@ -157,6 +157,8 @@ async def _build_framework_with_agent_runners(
     )
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.parametrize(
     (
         "data_config",
@@ -376,6 +378,8 @@ def _install_fake_score(monkeypatch, *, score_from_sample_fields=None, default_s
     monkeypatch.setattr(GatewayAgentFramework, "_score_trajectories", fake_score)
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_agent_runners_registry_materializes_runners_and_selects_by_agent_name(fake_tq):
     """Function and class runners keep per-runner kwargs, and each prompt's
@@ -429,6 +433,8 @@ async def test_agent_runners_registry_materializes_runners_and_selects_by_agent_
     assert all("gateway_manager" not in call["kwargs"] for call in calls)
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 @pytest.mark.parametrize("dispatch_mode", ["inline_async", "ray_task"])
 async def test_framework_and_runner_logs_share_one_session_directory(tmp_path, fake_tq, dispatch_mode):
@@ -471,6 +477,8 @@ async def test_framework_and_runner_logs_share_one_session_directory(tmp_path, f
         assert "session session-sample-0-rollout-0-" in task_log.read_text()
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_validation_logs_omit_global_step_directory(tmp_path, fake_tq):
     runtime = _FakeGatewayManager({"session-sample-0-rollout-0": [_trajectory()]})
@@ -493,6 +501,8 @@ async def test_validation_logs_omit_global_step_directory(tmp_path, fake_tq):
     assert tu.get(batch["fields"], "global_steps") == [None]
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_validation_logs_keep_provided_global_step(tmp_path, fake_tq):
     runtime = _FakeGatewayManager({"session-sample-0-rollout-0": [_trajectory()]})
@@ -514,6 +524,8 @@ async def test_validation_logs_keep_provided_global_step(tmp_path, fake_tq):
     assert tu.get(batch["fields"], "global_steps") == [12]
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_training_requires_global_steps(fake_tq):
     framework = await _build_framework_with_agent_runners(
@@ -525,6 +537,8 @@ async def test_training_requires_global_steps(fake_tq):
         await framework.generate_sequences(_build_prompts(count=1, global_steps=None))
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("validate", "do_sample", "expected_sampling_params"),
@@ -587,6 +601,8 @@ async def test_framework_binds_sampling_defaults_to_gateway_sessions(
     assert [kwargs["sampling_params"] for kwargs in runtime.created_session_kwargs] == [expected_sampling_params]
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_generate_sequences_writes_tq_schema_for_each_session(monkeypatch, fake_tq):
     """Full ``generate_sequences`` path writes one TQ batch per successful
@@ -695,6 +711,8 @@ async def test_generate_sequences_writes_tq_schema_for_each_session(monkeypatch,
     assert "multi_modal_data" not in fields.keys()
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_generate_sequences_masks_unfinished_trajectory_without_dropping_it(fake_tq):
     runtime = _FakeGatewayManager(
@@ -733,6 +751,8 @@ async def test_generate_sequences_masks_unfinished_trajectory_without_dropping_i
     assert fake_tq.puts == [{"key": "uid-0", "partition_id": "train", "tag": {"status": "finished"}}]
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_unfinished_trajectory_remains_trainable_when_masking_is_disabled(fake_tq):
     runtime = _FakeGatewayManager(
@@ -760,6 +780,8 @@ async def test_unfinished_trajectory_remains_trainable_when_masking_is_disabled(
     assert "finished" not in batch["fields"].keys()
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_masking_keeps_trajectory_trainable_when_completion_metadata_is_missing(fake_tq):
     runtime = _FakeGatewayManager(
@@ -786,6 +808,8 @@ async def test_masking_keeps_trajectory_trainable_when_completion_metadata_is_mi
     assert batch["fields"]["loss_mask"][0].tolist() == [1, 0]
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_generate_sequences_reports_unfinished_episode_count(fake_tq, caplog):
     # A session materializing two trajectories is still one episode: completion is
@@ -811,6 +835,8 @@ async def test_generate_sequences_reports_unfinished_episode_count(fake_tq, capl
     assert "num_unfinished_episodes=1" in caplog.text
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_framework_rejects_non_boolean_masking_config():
     with pytest.raises(ValueError, match="mask_unfinished_episode must be a bool"):
@@ -821,6 +847,8 @@ async def test_framework_rejects_non_boolean_masking_config():
         )
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_align_routed_experts_preserves_backend_dtype():
     aligned = _align_routed_experts(np.array([[[256, 511]]], dtype=np.uint16), seq_len=2)
 
@@ -829,6 +857,8 @@ def test_align_routed_experts_preserves_backend_dtype():
     assert aligned.tolist() == [[[256, 511]], [[0, 0]]]
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_generate_sequences_batches_length_trajectory_before_normal_trajectory(fake_tq):
     """Keep length metadata in tags when mixed trajectories share one TQ batch."""
@@ -860,6 +890,8 @@ async def test_generate_sequences_batches_length_trajectory_before_normal_trajec
     assert batch["fields"]["responses"][1].tolist() == [21]
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_generate_sequences_selects_longest_model_token_trajectory(fake_tq):
     runtime = _FakeGatewayManager(
@@ -898,6 +930,8 @@ async def test_generate_sequences_selects_longest_model_token_trajectory(fake_tq
     assert batch["fields"]["num_turns"].tolist() == [2]
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_framework_rejects_unknown_trajectory_selection(fake_tq):
     with pytest.raises(ValueError, match="Unknown trajectory selection"):
@@ -912,6 +946,8 @@ async def test_framework_rejects_unknown_trajectory_selection(fake_tq):
         )
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_trajectory_postprocessor_applies_kwargs_before_scoring_and_tq(monkeypatch, fake_tq):
     _POSTPROCESSOR_CALLS.clear()
@@ -951,6 +987,8 @@ async def test_trajectory_postprocessor_applies_kwargs_before_scoring_and_tq(mon
     assert [score.tolist() for score in fields["rm_scores"]] == [[0.5], [0.5]]
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_async_trajectory_postprocessor_is_awaited(fake_tq):
     runtime = _FakeGatewayManager(
@@ -973,6 +1011,8 @@ async def test_async_trajectory_postprocessor_is_awaited(fake_tq):
     assert fake_tq.batch_puts[0]["fields"]["responses"][0].tolist() == [30]
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("postprocessor_name", "error_type", "error_message"),
@@ -996,6 +1036,8 @@ async def test_trajectory_postprocessor_reports_invalid_extensions(
         await framework._apply_trajectory_postprocessor([_trajectory()])
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_trajectory_postprocessor_rejects_dropped_reward_info():
     framework = await _build_framework_with_agent_runners(
@@ -1008,6 +1050,8 @@ async def test_trajectory_postprocessor_rejects_dropped_reward_info():
         await framework._apply_trajectory_postprocessor([_trajectory(reward_info={"reward": 0.5, "finished": False})])
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_framework_rejects_non_callable_trajectory_postprocessor():
     with pytest.raises(TypeError, match="must resolve to a callable"):
@@ -1018,6 +1062,8 @@ async def test_framework_rejects_non_callable_trajectory_postprocessor():
         )
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("postprocessor_fqn", "postprocessor_kwargs", "error_type", "error_message"),
@@ -1043,6 +1089,8 @@ async def test_framework_rejects_invalid_trajectory_postprocessor_config(
         )
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_generate_sequences_keeps_successful_sessions_when_one_session_fails(fake_tq):
     """A failed rollout session aborts only that session; other successful
@@ -1073,6 +1121,8 @@ async def test_generate_sequences_keeps_successful_sessions_when_one_session_fai
     assert runtime.aborted_sessions[0].startswith("session-sample-0-rollout-1-")
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_generate_sequences_marks_prompt_failure_when_all_sessions_fail(fake_tq):
     """Filtering every session to empty marks the uid failed and raises."""
@@ -1098,6 +1148,8 @@ async def test_generate_sequences_marks_prompt_failure_when_all_sessions_fail(fa
     assert fake_tq.puts == [{"key": "uid-0", "partition_id": "val", "tag": {"status": "failure"}}]
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_generate_sequences_omits_missing_rollout_log_probs(fake_tq):
     """Missing backend logprobs are omitted while reward scores remain zero-filled."""
@@ -1117,6 +1169,8 @@ async def test_generate_sequences_omits_missing_rollout_log_probs(fake_tq):
     assert "rollout_log_probs" not in fields
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_generate_sequences_keeps_other_prompts_when_one_prompt_fails(fake_tq):
     """Prompt-level failures are isolated: one uid can fail while another uid
@@ -1155,6 +1209,8 @@ async def test_generate_sequences_keeps_other_prompts_when_one_prompt_fails(fake
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_score_trajectories_merges_final_reward_info_into_reward_extra_info():
     """Reward scoring dispatches only the final trajectory to the worker and
@@ -1230,6 +1286,8 @@ async def test_score_trajectories_merges_final_reward_info_into_reward_extra_inf
     ]
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 @pytest.mark.parametrize("termination", ["timeout", "parent_cancel"])
 async def test_ray_task_termination_cancels_runner_and_aborts_session(monkeypatch, fake_tq, termination):

@@ -14,11 +14,15 @@ def _parse_view_range(value):
     ).view_range
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.parametrize("value", ([51, 63], "[51, 63]", "  [51, 63]\n"))
 def test_view_range_accepts_list_and_json_encoded_list(value):
     assert _parse_view_range(value) == [51, 63]
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.parametrize(
     "value",
     (
@@ -33,6 +37,8 @@ def test_view_range_rejects_invalid_json_shape_or_elements(value):
         _parse_view_range(value)
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_view_range_schema_remains_an_integer_array():
     schema = EditFileTool(object()).schema()
     view_range_schema = schema["function"]["parameters"]["properties"]["view_range"]
