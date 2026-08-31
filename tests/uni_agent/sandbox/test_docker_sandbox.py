@@ -14,6 +14,8 @@ def _ok(stdout: str = "") -> ExecResult:
     return ExecResult(exit_code=0, stdout=stdout, stderr="")
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_registry_builds_docker_sandbox_from_config():
     config = SandboxConfig(
         provider="docker",
@@ -33,6 +35,8 @@ def test_registry_builds_docker_sandbox_from_config():
     assert DockerSandbox.exec is Sandbox.exec
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_start_requires_local_image_and_builds_detached_run(monkeypatch):
     sandbox = DockerSandbox(
         image="example:local",
@@ -70,6 +74,8 @@ def test_start_requires_local_image_and_builds_detached_run(monkeypatch):
     assert sandbox._container_name == "agent-test"
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_start_pulls_missing_image_through_docker_run(monkeypatch):
     sandbox = DockerSandbox(image="registry.example.com/agent:latest", container_name="agent-test")
     calls: list[tuple[str, ...]] = []
@@ -98,6 +104,8 @@ def test_start_pulls_missing_image_through_docker_run(monkeypatch):
     ]
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_start_rejects_missing_local_image(monkeypatch):
     sandbox = DockerSandbox(image="missing:local", pull_policy="never")
 
@@ -111,11 +119,15 @@ def test_start_rejects_missing_local_image(monkeypatch):
     assert sandbox._container_name is None
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_rejects_unknown_pull_policy():
     with pytest.raises(ValueError, match="pull_policy"):
         DockerSandbox(pull_policy="sometimes")
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_exec_forwards_workdir_environment_and_argv(monkeypatch):
     sandbox = DockerSandbox(image="example:local")
     sandbox._container_name = "agent-test"
@@ -156,6 +168,8 @@ def test_exec_forwards_workdir_environment_and_argv(monkeypatch):
     ]
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_stop_is_idempotent_and_checks_liveness(monkeypatch):
     sandbox = DockerSandbox(image="example:local")
     sandbox._container_name = "agent-test"
@@ -182,6 +196,8 @@ def test_stop_is_idempotent_and_checks_liveness(monkeypatch):
     ]
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_upload_and_download_use_docker_cp(monkeypatch, tmp_path: Path):
     sandbox = DockerSandbox(image="example:local")
     sandbox._container_name = "agent-test"

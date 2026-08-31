@@ -50,6 +50,8 @@ def _agent() -> ClaudeCodeAgent:
     return ClaudeCodeAgent(ClaudeCodeConfig())
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_ensure_claude_skips_install_when_already_available():
     sandbox = _FakeSandbox(probe_results=[0])
 
@@ -59,6 +61,8 @@ def test_ensure_claude_skips_install_when_already_available():
     assert sandbox.calls[0]["script"].startswith("command -v claude")
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_ensure_claude_installs_and_rechecks_path():
     sandbox = _FakeSandbox(probe_results=[1, 0])
 
@@ -73,6 +77,8 @@ def test_ensure_claude_installs_and_rechecks_path():
     assert sandbox.calls[2]["timeout"] == 600
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_ensure_claude_uses_native_installer_when_npm_is_missing():
     sandbox = _FakeSandbox(probe_results=[1, 0], npm_available=False)
 
@@ -87,6 +93,8 @@ def test_ensure_claude_uses_native_installer_when_npm_is_missing():
     assert sandbox.calls[2]["timeout"] == 600
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_ensure_claude_surfaces_install_failure():
     sandbox = _FakeSandbox(probe_results=[1], install_exit_code=1, install_stderr="npm failed")
 
@@ -94,6 +102,8 @@ def test_ensure_claude_surfaces_install_failure():
         asyncio.run(_agent()._ensure_claude(sandbox))
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_ensure_claude_surfaces_native_install_failure():
     sandbox = _FakeSandbox(
         probe_results=[1],
@@ -106,6 +116,8 @@ def test_ensure_claude_surfaces_native_install_failure():
         asyncio.run(_agent()._ensure_claude(sandbox))
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_ensure_claude_requires_binary_on_path_after_install():
     sandbox = _FakeSandbox(probe_results=[1, 1])
 
@@ -113,6 +125,8 @@ def test_ensure_claude_requires_binary_on_path_after_install():
         asyncio.run(_agent()._ensure_claude(sandbox))
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_run_forwards_workdir():
     config = ClaudeCodeConfig(
         model=ModelConfig(
@@ -161,6 +175,8 @@ def test_run_forwards_workdir():
     assert sandbox.exec_calls[0]["env"]["CLAUDE_CODE_DISABLE_TERMINAL_TITLE"] == "1"
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_run_accepts_user_only_message_without_rewriting():
     config = ClaudeCodeConfig(
         model=ModelConfig(base_url="http://gateway:8000/v1", model_name="policy"),
@@ -182,6 +198,8 @@ def test_run_accepts_user_only_message_without_rewriting():
     assert sandbox.exec_calls[0]["argv"][2] == prompt
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_run_requires_exactly_one_user_message():
     config = ClaudeCodeConfig(
         model=ModelConfig(base_url="http://gateway:8000/v1", model_name="policy"),
@@ -197,6 +215,8 @@ def test_run_requires_exactly_one_user_message():
         )
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.parametrize(
     ("enable_web_tools", "enable_subagents", "expected_disallowed"),
     [
@@ -222,6 +242,8 @@ def test_claude_argv_controls_web_tools_and_subagents_independently(
     assert set(disallowed_tools) == expected_disallowed
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.parametrize(("enable_subagents", "expected_model"), [(False, None), (True, "policy")])
 def test_claude_env_pins_enabled_subagents_to_policy_model(enable_subagents, expected_model):
     config = ClaudeCodeConfig(
@@ -234,6 +256,8 @@ def test_claude_env_pins_enabled_subagents_to_policy_model(enable_subagents, exp
     assert env.get("CLAUDE_CODE_SUBAGENT_MODEL") == expected_model
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_claude_argv_can_keep_slash_commands_enabled():
     config = ClaudeCodeConfig(
         model=ModelConfig(model_name="policy"),
@@ -245,6 +269,8 @@ def test_claude_argv_can_keep_slash_commands_enabled():
     assert "--disable-slash-commands" not in argv
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_run_reports_nonzero_process_exit():
     config = ClaudeCodeConfig(
         model=ModelConfig(base_url="http://gateway:8000/v1", model_name="policy"),
@@ -265,6 +291,8 @@ def test_run_reports_nonzero_process_exit():
     assert result.info["exit_code"] == 2
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_claude_env_uses_placeholders_for_session_gateway():
     config = ClaudeCodeConfig(model=ModelConfig(base_url="http://gateway:8000/v1", model_name="policy"))
 

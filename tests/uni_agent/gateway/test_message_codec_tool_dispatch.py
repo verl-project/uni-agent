@@ -27,6 +27,8 @@ def _ids(text: str) -> list[int]:
     return [ord(char) for char in text]
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_qwen_vllm_parser_uses_tool_schema_for_argument_types():
     from uni_agent.gateway.session.codec import MessageCodec
 
@@ -48,6 +50,8 @@ def test_qwen_vllm_parser_uses_tool_schema_for_argument_types():
     assert json.loads(calls[0].arguments) == {"query": "docs", "limit": 2}
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.parametrize(
     "constructor_accepts_tools",
     [False, True],
@@ -101,6 +105,8 @@ def test_vllm_parser_supports_tool_schema_constructor_contracts(monkeypatch, con
         assert "tools" not in seen
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_tool_call_dispatch_uses_sglang_for_sglang_rollout(monkeypatch):
     from uni_agent.gateway.session.codec import MessageCodec
@@ -129,6 +135,8 @@ async def test_tool_call_dispatch_uses_sglang_for_sglang_rollout(monkeypatch):
     assert seen["sglang"] == ("raw", TOOLS, "hermes")
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_tool_call_dispatch_uses_vllm_for_vllm_rollout_with_name_mapping(monkeypatch):
     from uni_agent.gateway.session.codec import MessageCodec
@@ -157,6 +165,8 @@ async def test_tool_call_dispatch_uses_vllm_for_vllm_rollout_with_name_mapping(m
     assert seen["vllm"] == ("raw", TOOLS, "qwen3_xml")
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_tool_call_dispatch_uses_verl_for_other_rollout_backends(monkeypatch):
     from uni_agent.gateway.session.codec import MessageCodec
@@ -183,6 +193,8 @@ async def test_tool_call_dispatch_uses_verl_for_other_rollout_backends(monkeypat
     assert seen["verl"] == (_ids(text), TOOLS, "hermes")
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_tool_call_dispatch_surfaces_selected_parser_failure_without_fallback(monkeypatch):
     from uni_agent.gateway.session.codec import MessageCodec
@@ -203,6 +215,8 @@ async def test_tool_call_dispatch_surfaces_selected_parser_failure_without_fallb
     assert isinstance(exc_info.value.__cause__, ModuleNotFoundError)
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_selected_parser_empty_result_is_not_an_error(monkeypatch):
     from uni_agent.gateway.session.codec import MessageCodec
@@ -230,6 +244,8 @@ async def test_selected_parser_empty_result_is_not_an_error(monkeypatch):
     assert calls == []
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_verl_parser_parses_hermes_envelope():
     from uni_agent.gateway.session.codec import MessageCodec
@@ -242,6 +258,8 @@ async def test_verl_parser_parses_hermes_envelope():
     assert json.loads(calls[0].arguments) == {"query": "docs", "limit": 2}
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_decode_response_uses_gateway_dispatcher_for_tool_calls(monkeypatch):
     from uni_agent.gateway.session.codec import MessageCodec

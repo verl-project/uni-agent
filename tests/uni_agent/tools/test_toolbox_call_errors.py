@@ -84,6 +84,8 @@ def _toolbox() -> Toolbox:
 # --------------------------- Toolbox.call: error returns ---------------------------
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_unknown_tool_returns_format_hint():
     result = asyncio.run(_toolbox().call("does_not_exist", "{}"))
     assert result.status == "format_error"
@@ -91,6 +93,8 @@ def test_unknown_tool_returns_format_hint():
     assert "Allowed functions should be one of:" in result.text
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.parametrize(
     "raw, needle",
     [
@@ -106,12 +110,16 @@ def test_bad_arguments_return_format_hint(raw, needle):
     assert needle in result.text
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_tool_error_is_caught_and_tagged():
     result = asyncio.run(_toolbox().call("boom", "{}"))
     assert result.status == "error"
     assert result.text == "Error: kaboom"
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_unexpected_exception_propagates():
     # A non-ToolError (tool bug / infra fault) is NOT swallowed into an observation;
     # it propagates so the caller ends/buckets the episode instead of feeding it back.
@@ -119,6 +127,8 @@ def test_unexpected_exception_propagates():
         asyncio.run(_toolbox().call("kaboom", "{}"))
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.parametrize("raw", ["{}", "", None, '{"a": 1}', {"a": 1}])
 def test_valid_arguments_run_the_tool(raw):
     result = asyncio.run(_toolbox().call("echo", raw))
@@ -126,6 +136,8 @@ def test_valid_arguments_run_the_tool(raw):
     assert result.text.startswith("args=")
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_arguments_are_validated_and_coerced_before_dispatch():
     result = asyncio.run(
         _toolbox().call(
@@ -137,6 +149,8 @@ def test_arguments_are_validated_and_coerced_before_dispatch():
     assert json.loads(result.text) == {"limit": 2, "mode": "fast", "query": "docs"}
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.parametrize(
     ("arguments", "needle"),
     [
@@ -153,6 +167,8 @@ def test_schema_validation_errors_are_returned_as_format_observations(arguments,
     assert needle in result.text
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_timeout_is_forwarded_to_the_tool():
     result = asyncio.run(_toolbox().call("echo", "{}", timeout=12.5))
     assert "timeout=12.5" in result.text
@@ -161,6 +177,8 @@ def test_timeout_is_forwarded_to_the_tool():
 # --------------------------- status classification ---------------------------
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.parametrize(
     "name, raw, expected_status",
     [
@@ -180,11 +198,15 @@ def test_call_status(name, raw, expected_status):
 # --------------------------- to_observation() ---------------------------
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_to_observation_prepends_the_label():
     assert ToolResult(text="hello").to_observation() == "Observation:\nhello"
     assert ToolResult().to_observation() == "Observation:\n"  # no text channel -> just the label
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_to_observation_clips_over_max_length():
     text = "x" * 50
     clipped = ToolResult(text=text).to_observation(max_length=10)

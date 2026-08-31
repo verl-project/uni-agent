@@ -56,6 +56,8 @@ class _FakeSandbox(Sandbox):
 # --------------------------- exec() error policy ---------------------------
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_success_passes_through_and_forwards_args():
     sb = _FakeSandbox(result=ExecResult(exit_code=0, stdout="hi", stderr=""))
     res = asyncio.run(sb.exec(["echo", "hi"], timeout=7, workdir="/w", env={"A": "1"}))
@@ -63,6 +65,8 @@ def test_success_passes_through_and_forwards_args():
     assert sb.calls == [{"argv": ["echo", "hi"], "timeout": 7, "workdir": "/w", "env": {"A": "1"}}]
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.parametrize("exc", [asyncio.TimeoutError(), TimeoutError("slow")])
 def test_timeout_becomes_exit_code_minus_one(exc):
     sb = _FakeSandbox(error=exc)
@@ -72,6 +76,8 @@ def test_timeout_becomes_exit_code_minus_one(exc):
     assert "exec timed out after 5" in res.stderr
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_non_timeout_error_downgrades_to_127_when_alive():
     sb = _FakeSandbox(error=RuntimeError("no such file"), alive=True)
     res = asyncio.run(sb.exec(["missing-bin"]))
@@ -80,6 +86,8 @@ def test_non_timeout_error_downgrades_to_127_when_alive():
     assert res.stderr == "no such file"  # exact backend message, verbatim
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_non_timeout_error_reraises_when_sandbox_dead():
     boom = RuntimeError("backend gone")
     sb = _FakeSandbox(error=boom, alive=False)
@@ -88,6 +96,8 @@ def test_non_timeout_error_reraises_when_sandbox_dead():
     assert excinfo.value is boom  # the original infra fault, re-raised unchanged
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_timeout_wins_over_liveness_even_when_dead():
     # A timeout is classified before the liveness check, so it never re-raises.
     sb = _FakeSandbox(error=TimeoutError(), alive=False)
@@ -95,6 +105,8 @@ def test_timeout_wins_over_liveness_even_when_dead():
     assert res.exit_code == -1
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_exec_shell_wraps_in_non_login_bash():
     sb = _FakeSandbox(result=ExecResult(exit_code=0, stdout="", stderr=""))
     asyncio.run(sb.exec_shell("echo hi", timeout=3, workdir="/tmp"))
@@ -121,6 +133,8 @@ class _NoIsAlive(Sandbox):
         raise RuntimeError("kaboom")
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_base_is_alive_defaults_true_so_errors_downgrade():
     sb = _NoIsAlive()
     assert asyncio.run(sb.is_alive()) is True
@@ -137,6 +151,8 @@ class _CustomTimeoutSandbox(_FakeSandbox):
         return isinstance(exc, _CustomTimeout) or super()._is_timeout_error(exc)
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_is_timeout_error_override_is_honored_by_exec():
     sb = _CustomTimeoutSandbox(error=_CustomTimeout("slow"))
     res = asyncio.run(sb.exec(["x"], timeout=9))
@@ -149,6 +165,8 @@ def test_is_timeout_error_override_is_honored_by_exec():
 _PROVIDERS = ["local", "docker", "modal", "vefaas", "openyuanrong"]
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.parametrize("name", _PROVIDERS)
 def test_provider_implements_private_exec_and_shares_public_exec(name):
     cls = get_sandbox_cls(name)
@@ -157,6 +175,8 @@ def test_provider_implements_private_exec_and_shares_public_exec(name):
     assert cls.exec is Sandbox.exec
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_local_file_operations_use_host_filesystem(tmp_path):
     from uni_agent.sandbox.local import LocalSandbox
 
@@ -185,6 +205,8 @@ def _named_exc(name: str) -> Exception:
     return type(name, (Exception,), {})()
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_vefaas_recognizes_its_timeout_by_name(monkeypatch):
     monkeypatch.setenv("VEFAAS_FUNCTION_ID", "fid")
     monkeypatch.setenv("VEFAAS_FUNCTION_ROUTE", "route")
@@ -196,6 +218,8 @@ def test_vefaas_recognizes_its_timeout_by_name(monkeypatch):
     assert sb._is_timeout_error(RuntimeError("other")) is False
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_modal_inherits_base_timeout_check():
     from uni_agent.sandbox.modal import ModalSandbox
 
@@ -205,6 +229,8 @@ def test_modal_inherits_base_timeout_check():
     assert sb._is_timeout_error(RuntimeError("other")) is False
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_openyuanrong_recognizes_its_timeout():
     from uni_agent.sandbox.openyuanrong import OpenyuanrongSandbox
 
@@ -217,18 +243,24 @@ def test_openyuanrong_recognizes_its_timeout():
 # --------------------------- provider is_alive() liveness ---------------------------
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_modal_is_alive_false_before_start():
     from uni_agent.sandbox.modal import ModalSandbox
 
     assert asyncio.run(ModalSandbox().is_alive()) is False
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_docker_is_alive_false_before_start():
     from uni_agent.sandbox.docker import DockerSandbox
 
     assert asyncio.run(DockerSandbox().is_alive()) is False
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_vefaas_is_alive_false_before_start(monkeypatch):
     monkeypatch.setenv("VEFAAS_FUNCTION_ID", "fid")
     monkeypatch.setenv("VEFAAS_FUNCTION_ROUTE", "route")
@@ -237,6 +269,8 @@ def test_vefaas_is_alive_false_before_start(monkeypatch):
     assert asyncio.run(VefaasSandbox().is_alive()) is False
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_openyuanrong_is_alive_false_before_start():
     from uni_agent.sandbox.openyuanrong import OpenyuanrongSandbox
 
@@ -258,6 +292,8 @@ def _fake_modal_sandbox(*, poll_returns=None, poll_raises: BaseException | None 
     return _Sandbox()
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_modal_is_alive_true_while_task_running():
     from uni_agent.sandbox.modal import ModalSandbox
 
@@ -266,6 +302,8 @@ def test_modal_is_alive_true_while_task_running():
     assert asyncio.run(sb.is_alive()) is True
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_modal_is_alive_false_when_terminated():
     from uni_agent.sandbox.modal import ModalSandbox
 
@@ -274,6 +312,8 @@ def test_modal_is_alive_false_when_terminated():
     assert asyncio.run(sb.is_alive()) is False
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_modal_is_alive_false_and_swallows_poll_errors():
     from uni_agent.sandbox.modal import ModalSandbox
 
@@ -285,6 +325,8 @@ def test_modal_is_alive_false_and_swallows_poll_errors():
 # --------------------------- veFaaS multi-function selection ---------------------------
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_vefaas_single_function_pair(monkeypatch):
     monkeypatch.setenv("VEFAAS_FUNCTION_ID", "fid")
     monkeypatch.setenv("VEFAAS_FUNCTION_ROUTE", "route")
@@ -294,6 +336,8 @@ def test_vefaas_single_function_pair(monkeypatch):
     assert (sb._function_id, sb._function_route) == ("fid", "route")
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_vefaas_multi_function_pairs_by_index(monkeypatch):
     # Comma-separated ids/routes pair up one-to-one; whitespace is trimmed.
     monkeypatch.setenv("VEFAAS_FUNCTION_ID", "fid1, fid2 ,fid3")
@@ -316,6 +360,8 @@ def test_vefaas_multi_function_pairs_by_index(monkeypatch):
     assert seen == expected
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_vefaas_mismatched_pair_counts_raise(monkeypatch):
     monkeypatch.setenv("VEFAAS_FUNCTION_ID", "fid1,fid2")
     monkeypatch.setenv("VEFAAS_FUNCTION_ROUTE", "route1")
@@ -325,6 +371,8 @@ def test_vefaas_mismatched_pair_counts_raise(monkeypatch):
         VefaasSandbox()
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_vefaas_missing_function_env_raises(monkeypatch):
     monkeypatch.delenv("VEFAAS_FUNCTION_ID", raising=False)
     monkeypatch.setenv("VEFAAS_FUNCTION_ROUTE", "route")
@@ -334,6 +382,8 @@ def test_vefaas_missing_function_env_raises(monkeypatch):
         VefaasSandbox()
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_vefaas_install_command_downloads_then_execs():
     from uni_agent.sandbox.vefaas import _install_command
 

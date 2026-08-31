@@ -5,6 +5,8 @@ import pytest
 ALLOWED_SAMPLING_KEYS = frozenset({"temperature", "top_p", "top_k", "max_tokens", "stop"})
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_openai_build_response_shape():
     """A completed internal outcome serializes to the basic OpenAI chat
     completion envelope with ids, model, choices, and token usage."""
@@ -27,6 +29,8 @@ def test_openai_build_response_shape():
     assert body["model"] == "m"
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_openai_stream_response_emits_compatible_sse_chunks():
     """A completed internal outcome is synthesized into OpenAI-compatible SSE
@@ -77,6 +81,8 @@ async def test_openai_stream_response_emits_compatible_sse_chunks():
     }
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_openai_to_internal_normalizes_messages_sampling_and_tools():
     """OpenAI wire requests lower to the internal shape: sampling params use the
     gateway allowlist, JSON tool arguments are parsed, malformed argument

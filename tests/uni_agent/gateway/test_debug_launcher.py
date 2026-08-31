@@ -12,6 +12,8 @@ from examples.gateway import debug_launcher
 from uni_agent.gateway.session import SessionHandle, Trajectory
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_trajectory_to_record_is_json_serializable_and_preserves_fields():
     """Trajectory output records keep every training-visible field and can be
     written as plain JSON."""
@@ -56,6 +58,8 @@ def test_trajectory_to_record_is_json_serializable_and_preserves_fields():
     }
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_write_trajectories_jsonl_writes_expected_file(tmp_path):
     """Finalized trajectories are written under the session output directory as
     one JSON record per line with stable trajectory indexes."""
@@ -83,6 +87,8 @@ def test_write_trajectories_jsonl_writes_expected_file(tmp_path):
     assert records[1]["trajectory"]["response_logprobs"] == [-0.2]
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_write_session_metadata_json_writes_run_context_without_trajectories(tmp_path):
     """Session metadata is written even when no trajectories were captured so a
     failed smoke still leaves inspectable run context."""
@@ -116,6 +122,8 @@ def test_write_session_metadata_json_writes_run_context_without_trajectories(tmp
     assert record["debug_snapshot_path"].endswith("debug_snapshot.json")
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_write_debug_snapshot_json_writes_message_history_and_session_state(tmp_path):
     """Debug snapshots preserve normalized conversation state separately from
     token-level trajectories for post-run diagnosis."""
@@ -138,6 +146,8 @@ def test_write_debug_snapshot_json_writes_message_history_and_session_state(tmp_
     assert record["message_history"] == [{"role": "user", "content": "hi"}]
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_capture_debug_snapshot_preserves_multiple_active_chains():
     chains = [
         SimpleNamespace(
@@ -163,6 +173,8 @@ def test_capture_debug_snapshot_preserves_multiple_active_chains():
     assert "multiple chains" in snapshot["note"]
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_provider_urls_strips_v1_for_anthropic_and_keeps_openai_base_url():
     """The printed Anthropic base URL omits /v1 for Claude Code while the
     OpenAI-compatible URL keeps the session-scoped /v1 suffix."""
@@ -179,6 +191,8 @@ def test_provider_urls_strips_v1_for_anthropic_and_keeps_openai_base_url():
     }
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_build_claude_env_removes_auth_and_proxy_vars_and_sets_expected_vars():
     """Claude Code smoke env construction removes conflicting auth/proxy
     variables and injects the local gateway Anthropic endpoint."""
@@ -210,6 +224,8 @@ def test_build_claude_env_removes_auth_and_proxy_vars_and_sets_expected_vars():
     assert env["NO_PROXY"] == "10.1.2.3,127.0.0.1,localhost"
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_parse_args_minimal_and_openai_required_args_validation(tmp_path):
     """The fake backend has minimal CLI requirements, while openai-completions
     requires backend URL, backend model, and tokenizer path."""
@@ -254,6 +270,8 @@ def test_parse_args_minimal_and_openai_required_args_validation(tmp_path):
     assert args.tokenizer == "/tmp/tokenizer"
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_real_tokenizer_wrapper_flattens_encoding_template_results():
     """Real tokenizer wrappers flatten tokenizers Encoding objects returned by
     apply_chat_template while delegating other tokenizer methods."""
@@ -275,6 +293,8 @@ def test_real_tokenizer_wrapper_flattens_encoding_template_results():
     assert wrapper.decode([1, 2, 3]) == "decoded"
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_build_claude_command(tmp_path):
     """One-shot Claude Code smoke uses the bare, non-persistent CLI mode with
     captured debug output, prompt text output, and the requested frontend model."""
@@ -295,6 +315,8 @@ def test_build_claude_command(tmp_path):
     assert command[command.index("--model") + 1] == "claude-sonnet-4-5"
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_openai_completions_backend_generate_sends_prompt_token_ids_and_parses_token_ids_logprobs(
     monkeypatch,
@@ -375,6 +397,8 @@ async def test_openai_completions_backend_generate_sends_prompt_token_ids_and_pa
     assert output.stop_reason == "length"
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_openai_completions_backend_requires_token_ids(monkeypatch):
     """A completions backend response without token_ids is rejected because
@@ -410,6 +434,8 @@ async def test_openai_completions_backend_requires_token_ids(monkeypatch):
         await backend.generate(request_id="s1", prompt_ids=[1], sampling_params={})
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_openai_completions_backend_http_error_includes_request_id_and_body(monkeypatch):
     """HTTP errors from the completions backend include the gateway request id,
@@ -449,6 +475,8 @@ async def test_openai_completions_backend_http_error_includes_request_id_and_bod
         await backend.generate(request_id="s1", prompt_ids=[1], sampling_params={})
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_run_claude_once_records_timeout_metadata(monkeypatch, tmp_path):
     """A timed-out one-shot Claude subprocess records timeout metadata and
@@ -476,6 +504,8 @@ async def test_run_claude_once_records_timeout_metadata(monkeypatch, tmp_path):
     assert Path(metadata["stderr_path"]).read_text() == "slow"
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_wait_for_manual_finalize_accepts_enter_from_tty_stdin():
     """Manual launcher mode can be finalized with Enter instead of requiring a
@@ -505,6 +535,8 @@ async def test_wait_for_manual_finalize_accepts_enter_from_tty_stdin():
     assert trigger == "stdin"
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_run_debug_session_once_fake_creates_finalizes_and_writes_trajectories(
     monkeypatch,
@@ -589,6 +621,8 @@ async def test_run_debug_session_once_fake_creates_finalizes_and_writes_trajecto
     assert debug_snapshot["active_chains"][0]["message_history"] == debug_snapshot["message_history"]
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_async_main_returns_nonzero_when_claude_fails(monkeypatch, tmp_path):
     """The CLI exits with Claude's non-zero return code when one-shot Claude

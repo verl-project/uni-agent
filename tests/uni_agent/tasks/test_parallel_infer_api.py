@@ -6,6 +6,8 @@ from examples.inference import parallel_infer_api
 from examples.inference.parallel_infer_api import _allocate_worker_concurrency
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.parametrize(
     ("total_concurrency", "num_workers", "expected"),
     [
@@ -21,6 +23,8 @@ def test_allocate_worker_concurrency_preserves_global_limit(total_concurrency, n
     assert sum(limits) == total_concurrency
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_standalone_inference_binds_top_level_source_prompt(monkeypatch, tmp_path):
     config_path = tmp_path / "tasks.yaml"
     config_path.write_text(

@@ -19,6 +19,8 @@ class RecordingBackend:
         self.writes.append((path, content))
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_start_command_keeps_large_payload_out_of_tmux_argv():
     backend = RecordingBackend()
@@ -40,6 +42,8 @@ async def test_start_command_keeps_large_payload_out_of_tmux_argv():
     assert len(injected_line) < 1_000
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_interrupt_returns_when_ctrl_c_finishes_command(monkeypatch: pytest.MonkeyPatch):
     backend = RecordingBackend()
@@ -61,6 +65,8 @@ async def test_interrupt_returns_when_ctrl_c_finishes_command(monkeypatch: pytes
     assert [call[-1] for call in send_keys_calls] == ["C-c"]
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_interrupt_suspends_and_kills_job_when_ctrl_c_fails(monkeypatch: pytest.MonkeyPatch):
     backend = RecordingBackend()
@@ -87,6 +93,8 @@ async def test_interrupt_suspends_and_kills_job_when_ctrl_c_fails(monkeypatch: p
     assert "kill -KILL %+" in fallback_line
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_run_marks_timeout_even_when_interrupt_reports_an_exit_code(
     monkeypatch: pytest.MonkeyPatch,
