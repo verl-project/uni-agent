@@ -61,6 +61,8 @@ def _decode_task_config(cmd: str) -> dict:
 # --------------------------- helpers ---------------------------
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_build_agent_command_pipes_config_and_invokes_tool_python():
     cmd = build_agent_command(
         config_b64="Zm9v",
@@ -76,6 +78,8 @@ def test_build_agent_command_pipes_config_and_invokes_tool_python():
     assert "/opt/miniconda3/envs/testbed/bin" in cmd
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_build_agent_command_honors_overrides():
     cmd = build_agent_command(
         config_b64="",
@@ -87,10 +91,14 @@ def test_build_agent_command_honors_overrides():
     assert "CONDA_DEFAULT_ENV=myenv" in cmd
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_parse_agent_result_empty_is_error():
     assert parse_agent_result("") == {"exit_status": "error", "submission": ""}
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_parse_agent_result_picks_last_json_line_ignoring_litellm_noise():
     stdout = "litellm warning: something\nrandom noise\n" + json.dumps(
         {"exit_status": "Submitted", "submission": "diff"}
@@ -98,11 +106,15 @@ def test_parse_agent_result_picks_last_json_line_ignoring_litellm_noise():
     assert parse_agent_result(stdout) == {"exit_status": "Submitted", "submission": "diff"}
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_parse_agent_result_single_json_object():
     result = parse_agent_result(json.dumps({"exit_status": "error", "submission": ""}))
     assert result["exit_status"] == "error"
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_parse_agent_result_unparseable_is_error():
     assert parse_agent_result("totally not json at all") == {"exit_status": "error", "submission": ""}
 
@@ -110,18 +122,24 @@ def test_parse_agent_result_unparseable_is_error():
 # --------------------------- validation ---------------------------
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_missing_base_url_raises():
     agent = MiniSweAgentAgent(MiniSweAgentConfig(tool_python=_TOOL_PYTHON, run_agent_script=_RUN_AGENT_SCRIPT))
     with pytest.raises(ValueError, match="base_url"):
         asyncio.run(agent.run(sandbox=_FakeSandbox(), messages=[{"role": "user", "content": "fix the bug"}]))
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_missing_user_message_raises():
     agent = _agent()
     with pytest.raises(ValueError, match="requires a 'user' message"):
         asyncio.run(agent.run(sandbox=_FakeSandbox(), messages=[{"role": "system", "content": "sys"}]))
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_too_many_messages_raises():
     agent = _agent()
     messages = [{"role": "system", "content": "s"}, {"role": "user", "content": "u"}, {"role": "user", "content": "u2"}]
@@ -132,6 +150,8 @@ def test_too_many_messages_raises():
 # --------------------------- happy path ---------------------------
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_run_pipes_config_and_parses_stdout_into_result():
     stdout = "mini-swe-agent noisy log line\n" + json.dumps(
         {"exit_status": "Submitted", "submission": "diff --git a/...", "model_stats": {"api_calls": 3}}
@@ -165,6 +185,8 @@ def test_run_pipes_config_and_parses_stdout_into_result():
     assert result.transcript == messages
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_run_marks_unfinished_when_not_submitted():
     sandbox = _FakeSandbox(stdout=json.dumps({"exit_status": "error", "submission": ""}))
     agent = _agent()
@@ -173,6 +195,8 @@ def test_run_marks_unfinished_when_not_submitted():
     assert result.info["exit_status"] == "error"
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_run_passes_base_url_through_unchanged():
     sandbox = _FakeSandbox(stdout=json.dumps({"exit_status": "Submitted", "submission": "diff"}))
     # A tunnel-rewritten base_url (what run_task injects) is forwarded verbatim.

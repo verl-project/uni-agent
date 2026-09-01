@@ -5,6 +5,8 @@ import pytest
 from uni_agent.tasks import TaskConfigResolver
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_resolver_loads_every_named_entry(tmp_path):
     config_path = tmp_path / "tasks.yaml"
     config_path.write_text(
@@ -29,6 +31,8 @@ def test_resolver_loads_every_named_entry(tmp_path):
     assert resolver.defaults_by_name["task_a"]["agent"]["model"]["temperature"] == 0.2
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_resolver_routes_by_name_and_applies_sample_and_runtime_overrides():
     defaults = {
         "task_a": {
@@ -83,6 +87,8 @@ def test_resolver_routes_by_name_and_applies_sample_and_runtime_overrides():
     assert resolved["agent"]["model"]["api_key"] == "runtime-key"
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_resolver_rejects_missing_route():
     resolver = TaskConfigResolver({"other": {"name": "other"}})
     with pytest.raises(ValueError, match="no Task Config for sample task 'missing'"):

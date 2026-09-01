@@ -28,6 +28,8 @@ class _FakeDataset:
         return _FakeDataset([function(deepcopy(row)) for row in self.rows])
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.parametrize(
     ("module", "build_name", "row"),
     [
@@ -94,6 +96,8 @@ def test_swe_preprocess_emits_source_prompt_without_nested_rendered_prompt(monke
         assert task_config["metadata"]["language"] == "C"
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.parametrize(
     ("recipe_path", "task_name", "expects_submit", "expects_language"),
     [

@@ -26,6 +26,8 @@ def _capture_trace_span(monkeypatch: pytest.MonkeyPatch):
     return captured
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_report_span_merges_identity_and_normalizes_attributes(monkeypatch: pytest.MonkeyPatch) -> None:
     captured = _capture_trace_span(monkeypatch)
     token = rlinsight_adapter._set_trace_identity({"uid": "u1", "sample": "7"})
@@ -44,6 +46,8 @@ def test_report_span_merges_identity_and_normalizes_attributes(monkeypatch: pyte
     assert attributes["payload"] == '{"turn": 1}'
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_task_span_reports_identity_and_result(monkeypatch: pytest.MonkeyPatch) -> None:
     captured = _capture_trace_span(monkeypatch)
     tools_kwargs = {
@@ -70,6 +74,8 @@ def test_task_span_reports_identity_and_result(monkeypatch: pytest.MonkeyPatch) 
     assert attributes["reward_posted"] is True
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_generation_span_success_uses_chain_lane(monkeypatch: pytest.MonkeyPatch) -> None:
     captured = _capture_trace_span(monkeypatch)
     monkeypatch.setattr(
@@ -108,6 +114,8 @@ def test_generation_span_success_uses_chain_lane(monkeypatch: pytest.MonkeyPatch
     assert attributes["finish_reason"] == "stop"
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_old_verl_missing_optional_apis_degrades_to_warnings(monkeypatch: pytest.MonkeyPatch, caplog) -> None:
     class OldVerlLogger:
         pass

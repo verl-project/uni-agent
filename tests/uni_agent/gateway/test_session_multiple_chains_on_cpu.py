@@ -66,6 +66,8 @@ def _session(
     )
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.parametrize("response_length", [0, -1])
 def test_gateway_session_rejects_non_positive_response_length(response_length):
     """Reject non-positive session response budgets during construction."""
@@ -73,6 +75,8 @@ def test_gateway_session_rejects_non_positive_response_length(response_length):
         _session("invalid-response-length", response_length=response_length)
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.parametrize("prompt_length", [0, -1])
 def test_gateway_session_rejects_non_positive_prompt_length(prompt_length):
     """Reject non-positive session prompt capacity during construction."""
@@ -80,6 +84,8 @@ def test_gateway_session_rejects_non_positive_prompt_length(prompt_length):
         _session("invalid-prompt-length", prompt_length=prompt_length)
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_gateway_session_enables_last_assistant_rollback_by_default():
     session = GatewaySession(
         SessionHandle(session_id="rollback-default"),
@@ -224,6 +230,8 @@ def _assert_active_chain_tip_hashes_match_history(session: GatewaySession) -> No
         assert state["active_chain_tip_hashes"][chain.chain_id] == expected_tip_hash
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_multiple_chains_linear_conversation_stays_single_chain():
     """Continue a linear conversation on one active chain and trajectory."""
@@ -247,6 +255,8 @@ async def test_multiple_chains_linear_conversation_stays_single_chain():
     assert chain_trajectories[0].reward_info == {"label": "linear"}
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_multiple_chains_subagent_system_split_returns_to_main_chain():
     """Split subagent history into a sibling and later resume the main chain."""
@@ -280,6 +290,8 @@ async def test_multiple_chains_subagent_system_split_returns_to_main_chain():
     assert trajectories[1].response_mask[-len("Apple") :] == [1] * len("Apple")
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_multiple_chains_context_compaction_starts_new_chain():
     """Start a new chain when compacted context no longer matches a stored prefix."""
@@ -303,6 +315,8 @@ async def test_multiple_chains_context_compaction_starts_new_chain():
     assert all(t.response_mask == [1] * len(t.response_ids) for t in trajectories)
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_first_assistant_rewrite_reuses_chain_without_stale_response():
     """Replace a first assistant in place when no earlier response tokens exist."""
@@ -337,6 +351,8 @@ async def test_first_assistant_rewrite_reuses_chain_without_stale_response():
     assert chain.buffer.response_logprobs == [0.0] * len(incremental_ids) + [-0.1] * len("FIXED")
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_first_assistant_rollback_failure_preserves_original_chain():
     """Keep the original first-turn chain when replacement generation fails."""
@@ -358,6 +374,8 @@ async def test_first_assistant_rollback_failure_preserves_original_chain():
     assert _decode_response_ids(session.active_chains[0].buffer.response_ids) == "FORMAT_ERROR"
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_first_assistant_rollback_drops_chain_when_replacement_exceeds_capacity():
     """Drop the empty-prefix chain when the replacement prompt cannot fit."""
@@ -387,6 +405,8 @@ async def test_first_assistant_rollback_drops_chain_when_replacement_exceeds_cap
     assert await session.finalize() == []
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_first_assistant_rewrite_with_assistant_tool_context_reuses_chain():
     """Replace a first-turn assistant/tool context in the existing chain."""
@@ -409,6 +429,8 @@ async def test_first_assistant_rewrite_with_assistant_tool_context_reuses_chain(
     assert chain.buffer.response_ids[-len("FIXED") :] == _ids("FIXED")
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_later_assistant_rollback_removes_only_the_response_side_gp():
     """Preserve earlier trainable output while removing the latest stale GP."""
@@ -443,6 +465,8 @@ async def test_later_assistant_rollback_removes_only_the_response_side_gp():
     )
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_later_assistant_rollback_rejects_misaligned_assistant_prefix():
     """Fail closed when the stored turn separator no longer matches the codec."""
@@ -469,6 +493,8 @@ async def test_later_assistant_rollback_rejects_misaligned_assistant_prefix():
         await _run(session, backend, rewrite_messages)
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_last_assistant_rollback_splits_when_history_changes_before_boundary():
     """Split when request drift starts before the latest assistant boundary."""
@@ -502,6 +528,8 @@ async def test_last_assistant_rollback_splits_when_history_changes_before_bounda
     assert _decode_response_ids(chains_by_id[2].buffer.response_ids) == "A3"
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_last_assistant_rollback_ambiguous_deepest_boundary_splits_over_shallower_exact():
     """Do not fall back to a shallower exact chain when the deepest rewrite is ambiguous."""
@@ -530,6 +558,8 @@ async def test_last_assistant_rollback_ambiguous_deepest_boundary_splits_over_sh
     assert _decode_response_ids(chains_by_id[4].buffer.response_ids) == "FIXED"
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_last_assistant_rollback_ignores_shallower_candidate_for_unique_deepest_boundary():
     """Rollback the unique deepest match even when a shallower rewrite also matches."""
@@ -558,6 +588,8 @@ async def test_last_assistant_rollback_ignores_shallower_candidate_for_unique_de
     assert "A2" not in deep_text
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_last_assistant_rollback_excludes_reserved_candidate():
     """Do not select an in-flight chain as a rollback target."""
@@ -580,6 +612,8 @@ async def test_last_assistant_rollback_excludes_reserved_candidate():
     assert _decode_response_ids(chains_by_id[2].buffer.response_ids) == "FIXED"
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_last_assistant_rollback_prefers_longer_service_chain_over_exact_short_chain():
     """Rollback the deeper live chain instead of continuing its exact prefix sibling."""
@@ -611,6 +645,8 @@ async def test_last_assistant_rollback_prefers_longer_service_chain_over_exact_s
     assert "A2" not in long_chain_text
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_last_assistant_rollback_tie_prefers_exact_chain_without_drop():
     """Continue the exact chain when its service value ties a rollback candidate."""
@@ -635,6 +671,8 @@ async def test_last_assistant_rollback_tie_prefers_exact_chain_without_drop():
     assert _decode_response_ids(chains_by_id[2].buffer.response_ids).endswith("A2")
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_chain_prefix_hash_match_accepts_empty_history_for_any_request():
     """Document the current empty-history wildcard behavior without changing it."""
     session = _session("empty-history-prefix")
@@ -650,6 +688,8 @@ def test_chain_prefix_hash_match_accepts_empty_history_for_any_request():
     )
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_later_assistant_rollback_rejects_misaligned_stored_logprobs():
     """Fail loudly instead of slicing a chain whose token truth is already corrupt."""
@@ -671,6 +711,8 @@ async def test_later_assistant_rollback_rejects_misaligned_stored_logprobs():
         await _run(session, backend, rewrite_messages)
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_last_assistant_rollback_disabled_splits_rewritten_assistant():
     """Allow explicit opt-out so rewritten assistants still split trajectories."""
@@ -690,6 +732,8 @@ async def test_last_assistant_rollback_disabled_splits_rewritten_assistant():
     assert _decode_response_ids(chains_by_id[2].buffer.response_ids) == "FIXED"
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_multiple_chains_repeated_same_prompt_creates_siblings_and_continues_latest():
     """Create siblings for repeated prompts and continue the most recently updated one."""
@@ -720,6 +764,8 @@ async def test_multiple_chains_repeated_same_prompt_creates_siblings_and_continu
     assert 0 in trajectories[-1].response_mask
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_multiple_chains_distinct_sibling_continuation_matches_older_assistant_prefix():
     """Select an older sibling when its assistant prefix uniquely matches the request."""
@@ -756,6 +802,8 @@ async def test_multiple_chains_distinct_sibling_continuation_matches_older_assis
     assert decoded == ["NEWER", "OLDERuser:continue older sibling\nassistant:CONT"]
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_multiple_chains_reserved_siblings_fall_back_before_starting_new_chain():
     """Reserve matching siblings newest-first, then full-encode when all are busy."""
@@ -795,6 +843,8 @@ async def test_multiple_chains_reserved_siblings_fall_back_before_starting_new_c
     assert new_chain.buffer.response_mask == [1] * len("NEW")
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_multiple_chains_parallel_different_chains_commit_in_place():
     """Commit parallel generations in place when they target distinct live chains."""
@@ -832,6 +882,8 @@ async def test_multiple_chains_parallel_different_chains_commit_in_place():
     assert any(text.startswith("SUB1") and text.endswith("SUB2") for text in decoded)
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_multiple_chains_parallel_new_siblings_reuse_session_request_id():
     """Retain concurrent first-turn siblings while reusing the sticky session id."""
@@ -852,6 +904,8 @@ async def test_multiple_chains_parallel_new_siblings_reuse_session_request_id():
     assert sorted(_decode_response_ids(trajectory.response_ids) for trajectory in trajectories) == ["A", "B", "C"]
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_multiple_chains_tools_gate_chain_reuse():
     """Start a sibling chain when a continuation changes the available tools."""
@@ -875,6 +929,8 @@ async def test_multiple_chains_tools_gate_chain_reuse():
     assert [_decode_response_ids(t.response_ids) for t in trajectories] == ["SEARCH", "LOOKUP"]
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_multiple_chains_committed_assistant_tip_hash_round_trips_through_echoed_request():
     """Match a continuation that echoes the canonical committed assistant message."""
@@ -910,6 +966,8 @@ async def test_multiple_chains_committed_assistant_tip_hash_round_trips_through_
     assert 0 in trajectories[0].response_mask
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_multiple_chains_backend_failure_releases_reserved_chain_for_retry():
     """Release an existing-chain reservation when backend generation fails."""
@@ -934,6 +992,8 @@ async def test_multiple_chains_backend_failure_releases_reserved_chain_for_retry
     assert 0 in trajectories[0].response_mask
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_multiple_chains_new_chain_backend_failure_does_not_leave_partial_chain():
     """Avoid creating partial state when a new-chain backend request fails."""
@@ -960,6 +1020,8 @@ async def test_multiple_chains_new_chain_backend_failure_does_not_leave_partial_
     assert trajectories[0].response_mask == [1] * len("MAIN")
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_multiple_chains_length_exhaustion_closes_selected_chain_and_orders_it_last():
     """Close and order the selected chain when its trajectory capacity is exhausted."""
@@ -991,6 +1053,8 @@ async def test_multiple_chains_length_exhaustion_closes_selected_chain_and_order
     assert trajectories[1].extra_fields["materialization_reason"] == "max_trajectory_length"
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_multiple_chains_exactly_exhausted_chain_closes_without_backend_call():
     """Close an exhausted chain even when the repeated request has no incremental tail."""
@@ -1017,6 +1081,8 @@ async def test_multiple_chains_exactly_exhausted_chain_closes_without_backend_ca
     assert trajectories[0].extra_fields["materialization_reason"] == "max_trajectory_length"
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_multiple_chains_length_exhaustion_orders_before_later_fresh_chain():
     """Order a closed length trajectory before a later normal trajectory."""
@@ -1045,6 +1111,8 @@ async def test_multiple_chains_length_exhaustion_orders_before_later_fresh_chain
     assert trajectories[1].extra_fields == {}
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_multiple_chains_exactly_exhausted_chain_skips_new_media_extraction():
     """Do not parse unused incremental media after trajectory capacity is full."""
@@ -1082,6 +1150,8 @@ async def test_multiple_chains_exactly_exhausted_chain_skips_new_media_extractio
     assert trajectories[0].extra_fields == {"materialization_reason": "max_trajectory_length"}
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_multiple_chains_does_not_enforce_response_length_without_prompt_length():
     """Do not treat response_length alone as a response-only token budget."""
@@ -1093,6 +1163,8 @@ async def test_multiple_chains_does_not_enforce_response_length_without_prompt_l
     assert "max_tokens" not in backend.calls[0]["sampling_params"]
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_multiple_chains_uses_total_trajectory_capacity_instead_of_response_only_budget():
     """Allow response tokens to use unused prompt capacity across turns."""
@@ -1118,6 +1190,8 @@ async def test_multiple_chains_uses_total_trajectory_capacity_instead_of_respons
     assert _decode_response_ids(trajectories[0].response_ids).endswith("SECOND")
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_multiple_chains_closes_when_continuation_fills_total_trajectory_capacity():
     """Count prompt, generated, and continuation-context tokens against one capacity."""
@@ -1146,6 +1220,8 @@ async def test_multiple_chains_closes_when_continuation_fills_total_trajectory_c
     assert trajectories[0].extra_fields == {"materialization_reason": "max_trajectory_length"}
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_multiple_chains_returns_length_when_initial_context_fills_total_trajectory_capacity():
     """Return a normal length stop when a fresh prompt leaves no generation room."""
@@ -1168,6 +1244,8 @@ async def test_multiple_chains_returns_length_when_initial_context_fills_total_t
     assert await session.finalize() == []
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_multimodal_processor_kwargs_stay_aligned_across_gateway_paths():
     processor = FakeProcessor()
@@ -1225,6 +1303,8 @@ async def test_multiple_chains_multimodal_media_stays_chain_local():
     assert trajectories[1].multi_modal_data == {"images": ["image://main-a.png"]}
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_multiple_chains_video_media_stays_chain_local():
     """Keep video media and metadata isolated between sibling chains."""
@@ -1264,6 +1344,8 @@ async def test_multiple_chains_video_media_stays_chain_local():
     assert trajectories[1].multi_modal_data == {"videos": [main_video]}
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.parametrize(
     ("media_kind", "message_factory", "extractor", "sent_url", "unsent_url", "backend_field", "trajectory_key"),
     [
@@ -1319,6 +1401,8 @@ async def test_multiple_chains_rejects_incremental_media_without_mutating_stored
     assert trajectories[0].extra_fields == {}
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_multiple_chains_abort_clears_length_materialized_trajectories():
     """Clear length-materialized trajectories when the session is aborted."""
@@ -1351,6 +1435,8 @@ async def test_multiple_chains_abort_clears_length_materialized_trajectories():
         await session.finalize()
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 @pytest.mark.parametrize("terminal_action", ["finalize", "abort"])
 async def test_multiple_chains_terminal_state_rejects_late_commit(terminal_action):
@@ -1384,6 +1470,8 @@ async def test_multiple_chains_terminal_state_rejects_late_commit(terminal_actio
     assert session.snapshot_state()["active_chain_ids"] == []
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_multiple_chains_oversized_split_returns_length_without_closing_reserved_chain():
     """Return a length stop without closing the chain reserved by another request."""
@@ -1427,6 +1515,8 @@ async def test_multiple_chains_oversized_split_returns_length_without_closing_re
     assert decoded[0].endswith("CONT")
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_multiple_chains_decode_failure_releases_reserved_chain_for_retry(monkeypatch):
     """Release an existing-chain reservation when response decoding fails."""
@@ -1454,6 +1544,8 @@ async def test_multiple_chains_decode_failure_releases_reserved_chain_for_retry(
     assert _decode_response_ids(trajectories[0].response_ids).endswith("SECOND")
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_multiple_chains_cancelled_generation_releases_reserved_chain_for_retry():
     """Release an existing-chain reservation when generation is cancelled."""
@@ -1480,6 +1572,8 @@ async def test_multiple_chains_cancelled_generation_releases_reserved_chain_for_
     assert _decode_response_ids(trajectories[0].response_ids).endswith("RETRY")
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_multiple_chains_prefix_content_change_does_not_reuse_chain_and_hashes_match_history():
     """Split on changed prefix content and keep stored hashes aligned with history."""
@@ -1505,6 +1599,8 @@ async def test_multiple_chains_prefix_content_change_does_not_reuse_chain_and_ha
     assert all(t.response_mask == [1] * len(t.response_ids) for t in trajectories)
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_message_prefix_hashes_canonicalize_json_tool_call_arguments():
     """Canonicalize JSON-equivalent tool arguments before computing prefix hashes."""
     session = _session("hash-tool-arguments")
@@ -1533,6 +1629,8 @@ def test_message_prefix_hashes_canonicalize_json_tool_call_arguments():
     assert raw_a != raw_b
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_message_prefix_hashes_ignore_renamed_and_swapped_tool_call_ids():
     """Ignore call IDs, including whole renames and exchanged result IDs."""
     session = _session("hash-tool-call-ids")
@@ -1567,6 +1665,8 @@ def test_message_prefix_hashes_ignore_renamed_and_swapped_tool_call_ids():
     assert original == swapped_results
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 @pytest.mark.parametrize("rewrite_fresh_tool_result_id", [False, True], ids=["matching-id", "rewritten-fresh-id"])
 async def test_multiple_chains_tool_call_echo_reuses_chain_despite_fresh_tool_result_id(
@@ -1620,6 +1720,8 @@ async def test_multiple_chains_tool_call_echo_reuses_chain_despite_fresh_tool_re
     assert 0 in trajectories[0].response_mask
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_multiple_chains_tool_call_id_rewrite_reuses_chain(monkeypatch):
     """Reuse a chain when committed tool-call IDs are rewritten."""
@@ -1675,6 +1777,8 @@ async def test_multiple_chains_tool_call_id_rewrite_reuses_chain(monkeypatch):
     assert 0 in trajectories[0].response_mask
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_multiple_chains_requested_response_logprobs_stay_aligned():
     """Collect requested logprobs and zero-fill continuation context tokens."""
@@ -1698,6 +1802,8 @@ async def test_multiple_chains_requested_response_logprobs_stay_aligned():
     assert 0.0 in trajectory.response_logprobs
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_multiple_chains_unrequested_response_logprobs_are_ignored():
     """Ignore backend logprobs unless the effective sampling params request them."""
@@ -1709,6 +1815,8 @@ async def test_multiple_chains_unrequested_response_logprobs_are_ignored():
     assert trajectory.response_logprobs is None
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("backend_logprobs", "error_match"),
@@ -1737,6 +1845,8 @@ async def test_multiple_chains_requested_response_logprobs_reject_invalid_backen
     assert state["num_trajectories"] == 0
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_multiple_chains_invalid_continuation_logprobs_release_chain_for_retry():
     """Keep the selected chain unchanged and reusable after logprob validation fails."""
@@ -1767,6 +1877,8 @@ async def test_multiple_chains_invalid_continuation_logprobs_release_chain_for_r
     assert len(trajectory.response_logprobs) == len(trajectory.response_ids)
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_weight_versions_span_every_generation_in_a_chain():
     """Report the full weight-version span a multi-turn chain was generated across."""
@@ -1787,6 +1899,8 @@ async def test_weight_versions_span_every_generation_in_a_chain():
     assert trajectory.extra_fields["max_global_steps"] == 5
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_weight_versions_stay_independent_across_split_chains():
     """Keep each chain's version span separate when a request splits a new chain."""
@@ -1808,6 +1922,8 @@ async def test_weight_versions_stay_independent_across_split_chains():
     assert spans == {"BASE": (3, 3), "FRESH": (7, 7)}
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_weight_versions_absent_when_backend_omits_them():
     """Omit the version keys rather than materializing None for version-less backends."""

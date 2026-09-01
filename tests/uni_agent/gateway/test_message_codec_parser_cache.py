@@ -136,6 +136,8 @@ def _install_fake_verl(monkeypatch, lookups):
     monkeypatch.setitem(sys.modules, "verl.tools.schemas", schemas_module)
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_sglang_parser_cache_reuses_equivalent_tool_schemas(monkeypatch):
     from uni_agent.gateway.session.codec import MessageCodec
 
@@ -155,6 +157,8 @@ def test_sglang_parser_cache_reuses_equivalent_tool_schemas(monkeypatch):
     assert len(constructions) == 1
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_vllm_parser_cache_separates_tool_schemas(monkeypatch):
     from uni_agent.gateway.session.codec import MessageCodec
 
@@ -169,6 +173,8 @@ def test_vllm_parser_cache_separates_tool_schemas(monkeypatch):
     assert len(constructions) == 2
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("enable_tool_parser_cache", "expected_constructions"),
@@ -196,6 +202,8 @@ async def test_message_codec_applies_parser_cache_policy_across_decode_calls(
     assert len(constructions) == expected_constructions
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_parser_cache_is_scoped_to_message_codec(monkeypatch):
     from uni_agent.gateway.session.codec import MessageCodec
 
@@ -208,6 +216,8 @@ def test_parser_cache_is_scoped_to_message_codec(monkeypatch):
     assert len(constructions) == 2
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_verl_parser_cache_ignores_tool_schema(monkeypatch):
     from uni_agent.gateway.session.codec import MessageCodec

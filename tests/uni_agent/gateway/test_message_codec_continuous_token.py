@@ -156,6 +156,8 @@ def _messages(arguments):
     return user, assistant, tool
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.parametrize(
     ("model_name", "requires_user", "thinking_prompt"),
     [
@@ -202,6 +204,8 @@ def test_incremental_encode_matches_full_qwen_template(
     assert appended_text.startswith("\n<|im_start|>user\n<tool_response>\nObservation:\nresult")
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.parametrize(
     ("model_name", "requires_user", "thinking_prompt"),
     [
@@ -272,6 +276,8 @@ def test_incremental_encode_matches_full_qwen_template_for_multiple_tools(
     assert appended_text.count("<tool_response>") == 2
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.parametrize(
     ("model_name", "requires_user", "thinking_prompt"),
     [
@@ -318,6 +324,8 @@ def test_incremental_user_encode_appends_qwen_turn(
     assert appended_text == expected_append
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_incremental_encode_rejects_assistant_after_first_message():
     codec = MessageCodec(
         _QwenTemplateTokenizer(
@@ -336,6 +344,8 @@ def test_incremental_encode_rejects_assistant_after_first_message():
         )
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_incremental_assistant_user_encode_matches_full_after_generation_prompt_rollback():
     tokenizer = _QwenTemplateTokenizer(
         "Qwen/Qwen3.5-4B",
@@ -367,6 +377,8 @@ def test_incremental_assistant_user_encode_matches_full_after_generation_prompt_
     assert result_ids == expected_ids
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.parametrize(
     ("model_name", "requires_user", "thinking_prompt"),
     [
@@ -414,6 +426,8 @@ def test_incremental_assistant_tool_encode_matches_full_after_generation_prompt_
     assert result_ids == expected_ids
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_qwen35_processor_incremental_encode_matches_full_template():
     tokenizer = _QwenTemplateTokenizer(
         "Qwen/Qwen3.5-4B",
@@ -444,6 +458,8 @@ def test_qwen35_processor_incremental_encode_matches_full_template():
     assert runtime_ids + incremental_ids == expected_ids
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_qwen35_processor_assistant_tool_encode_matches_full_after_generation_prompt_rollback():
     tokenizer = _QwenTemplateTokenizer(
         "Qwen/Qwen3.5-4B",

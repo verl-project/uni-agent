@@ -109,6 +109,9 @@ uni_agent = ["version/*"]
 
 [tool.pytest.ini_options]
 markers = [
-    "cpu: mark cpu backedn",
-    "level0: mark level0 case",
+    "cpu: run on cpu backend",
+    "gpu: run on gpu backend",
+    "npu: run on npu backend",
+    "level0: mark level0 case, always run in CI",
+    "level1: mark level1 case, full test, not included in CI"
 ]
