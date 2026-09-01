@@ -11,6 +11,7 @@ from pydantic import Field
 
 from uni_agent.sandbox import SandboxConfig, build_sandbox
 
+from ...metrics import task_metrics, timing
 from ..base import Task, TaskConfig, TaskResult
 from ..registry import register_task
 from .reward import install_archive, parse_json_mapping, resolve_env_mapping
@@ -106,99 +107,112 @@ class TerminalBenchTask(Task):
     config_model = TerminalBenchTaskConfig
 
     async def run(self) -> TaskResult:
-        cfg: TerminalBenchTaskConfig = self.config  # type: ignore[assignment]
-        metadata = cfg.metadata
-        instance_id = metadata["instance_id"]
-        dataset_version = metadata["dataset_version"]
-        agent_timeout = float(metadata["agent_timeout"])
-        verifier_timeout = float(metadata["verifier_timeout"])
-        environment = parse_json_mapping(metadata.get("environment_json"), field="environment_json")
-        workdir = str(environment["workdir"]) if environment.get("workdir") else None
-        sandbox_config = build_terminal_bench_sandbox_config(cfg.sandbox, metadata)
-        task_config_dump = cfg.model_dump(mode="json", exclude={"metadata", "prompt"})
-        logger.info(
-            "starting Terminal-Bench %s task (instance_id=%s, oracle=%s) "
-            "agent_timeout=%gs verifier_timeout=%gs sandbox_runtime_timeout=%gs\n"
-            "task config: %s\nsandbox config: %s",
-            dataset_version,
-            instance_id,
-            cfg.run_oracle_solution,
-            agent_timeout,
-            verifier_timeout,
-            sandbox_config.runtime_timeout,
-            json.dumps(task_config_dump, indent=2),
-            json.dumps(sandbox_config.model_dump(mode="json"), indent=2),
-        )
-
-        async with build_sandbox(sandbox_config) as sandbox:
-            prepared = await sandbox.exec_shell(
-                "mkdir -p /logs/agent /logs/verifier /logs/artifacts && "
-                "chmod 777 /logs/agent /logs/verifier /logs/artifacts"
-            )
-            if prepared.exit_code != 0:
-                raise RuntimeError(f"failed to prepare Terminal-Bench log directories: {prepared.stderr.strip()}")
-
-            if cfg.run_oracle_solution:
-                agent_info = await _run_oracle(
-                    metadata,
-                    sandbox,
-                    timeout=agent_timeout,
+        async with task_metrics() as collector:
+            with timing("task.total_s"):
+                cfg: TerminalBenchTaskConfig = self.config  # type: ignore[assignment]
+                metadata = cfg.metadata
+                instance_id = metadata["instance_id"]
+                dataset_version = metadata["dataset_version"]
+                agent_timeout = float(metadata["agent_timeout"])
+                verifier_timeout = float(metadata["verifier_timeout"])
+                environment = parse_json_mapping(metadata.get("environment_json"), field="environment_json")
+                workdir = str(environment["workdir"]) if environment.get("workdir") else None
+                sandbox_config = build_terminal_bench_sandbox_config(cfg.sandbox, metadata)
+                task_config_dump = cfg.model_dump(mode="json", exclude={"metadata", "prompt"})
+                logger.info(
+                    "starting Terminal-Bench %s task (instance_id=%s, oracle=%s) "
+                    "agent_timeout=%gs verifier_timeout=%gs sandbox_runtime_timeout=%gs\n"
+                    "task config: %s\nsandbox config: %s",
+                    dataset_version,
+                    instance_id,
+                    cfg.run_oracle_solution,
+                    agent_timeout,
+                    verifier_timeout,
+                    sandbox_config.runtime_timeout,
+                    json.dumps(task_config_dump, indent=2),
+                    json.dumps(sandbox_config.model_dump(mode="json"), indent=2),
                 )
-                finished: bool | None = agent_info["exit_code"] == 0
-            else:
-                agent = self.build_agent()
-                try:
-                    agent_result = await asyncio.wait_for(
-                        agent.run(
-                            sandbox=sandbox,
-                            messages=cfg.prompt,
-                            workdir=workdir,
-                        ),
-                        timeout=agent_timeout,
+
+                async with build_sandbox(sandbox_config) as sandbox:
+                    prepared = await sandbox.exec_shell(
+                        "mkdir -p /logs/agent /logs/verifier /logs/artifacts && "
+                        "chmod 777 /logs/agent /logs/verifier /logs/artifacts"
                     )
-                except TimeoutError:
-                    logger.warning("Terminal-Bench agent timed out for %s after %.0fs", instance_id, agent_timeout)
-                    agent_info = {
-                        "mode": "agent",
-                        "timed_out": True,
-                        "error": f"agent exceeded {agent_timeout:g}s",
-                    }
-                    finished = False
-                except Exception as exc:  # score the resulting filesystem even when the agent fails
-                    logger.exception("Terminal-Bench agent failed for %s; continuing to verifier", instance_id)
-                    agent_info = {
-                        "mode": "agent",
-                        "timed_out": False,
-                        "error": f"{type(exc).__name__}: {exc}",
-                    }
-                    finished = False
-                else:
-                    agent_info = {
-                        "mode": "agent",
-                        "timed_out": False,
-                        "error": None,
-                        **agent_result.info,
-                    }
-                    finished = agent_result.finished
+                    if prepared.exit_code != 0:
+                        raise RuntimeError(
+                            f"failed to prepare Terminal-Bench log directories: {prepared.stderr.strip()}"
+                        )
 
-            from .reward import compute_reward
+                    if cfg.run_oracle_solution:
+                        with timing("task.generate_s"):
+                            agent_info = await _run_oracle(
+                                metadata,
+                                sandbox,
+                                timeout=agent_timeout,
+                            )
+                        finished: bool | None = agent_info["exit_code"] == 0
+                    else:
+                        agent = self.build_agent()
+                        try:
+                            with timing("task.generate_s"):
+                                agent_result = await asyncio.wait_for(
+                                    agent.run(
+                                        sandbox=sandbox,
+                                        messages=cfg.prompt,
+                                        workdir=workdir,
+                                    ),
+                                    timeout=agent_timeout,
+                                )
+                        except TimeoutError:
+                            logger.warning(
+                                "Terminal-Bench agent timed out for %s after %.0fs",
+                                instance_id,
+                                agent_timeout,
+                            )
+                            agent_info = {
+                                "mode": "agent",
+                                "timed_out": True,
+                                "error": f"agent exceeded {agent_timeout:g}s",
+                            }
+                            finished = False
+                        except Exception as exc:  # score the resulting filesystem even when the agent fails
+                            logger.exception("Terminal-Bench agent failed for %s; continuing to verifier", instance_id)
+                            agent_info = {
+                                "mode": "agent",
+                                "timed_out": False,
+                                "error": f"{type(exc).__name__}: {exc}",
+                            }
+                            finished = False
+                        else:
+                            agent_info = {
+                                "mode": "agent",
+                                "timed_out": False,
+                                "error": None,
+                                **agent_result.info,
+                            }
+                            finished = agent_result.finished
 
-            result = await compute_reward(
-                metadata,
-                sandbox,
-            )
-            result["agent"] = agent_info
+                    from .reward import compute_reward
 
-        score = float(result["reward"])
-        logger.info(
-            "Terminal-Bench task done: instance_id=%s reward=%.3f resolved=%s",
-            instance_id,
-            score,
-            result["resolved"],
-        )
-        return TaskResult(
-            reward=score,
-            accuracy=score,
-            finished=finished,
-            extra_info=result,
-        )
+                    with timing("reward.s"):
+                        result = await compute_reward(
+                            metadata,
+                            sandbox,
+                        )
+                    result["agent"] = agent_info
+
+                score = float(result["reward"])
+                logger.info(
+                    "Terminal-Bench task done: instance_id=%s reward=%.3f resolved=%s",
+                    instance_id,
+                    score,
+                    result["resolved"],
+                )
+                outcome = TaskResult(
+                    reward=score,
+                    accuracy=score,
+                    finished=finished,
+                    extra_info=result,
+                )
+            outcome.metrics = collector.metrics()
+            return outcome

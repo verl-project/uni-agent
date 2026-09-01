@@ -10,8 +10,17 @@ import pytest
 import torch
 
 from tests.uni_agent.support import logging_runner
-from uni_agent.framework.framework import GatewayAgentFramework, _align_routed_experts
+from uni_agent.framework.framework import (
+    GatewayAgentFramework,
+    _align_routed_experts,
+    _attach_session_reward_info,
+    _reward_info_from_result,
+    _score_from_task_result,
+    _scoring_task_result,
+    _stamp_session_agent_metrics,
+)
 from uni_agent.gateway.session import SessionHandle, Trajectory
+from uni_agent.tasks.base import TaskResult
 from verl.utils import tensordict_utils as tu
 
 _RUNNER_CALLS = []
@@ -84,7 +93,17 @@ async def _async_noop_runner(**kwargs):
 
 async def _inline_runner_proxy(*, runner_key, **kwargs):
     runner = _TEST_INLINE_RUNNERS[runner_key]
-    await runner(**kwargs)
+    return await runner(**kwargs)
+
+
+async def _task_result_runner(*, raw_prompt, session, sample_index, **kwargs):
+    return TaskResult(
+        reward=0.75,
+        accuracy=1.0,
+        finished=True,
+        extra_info={"stdout": "should-not-reach-reward-info"},
+        metrics={"task.total_s": {"aggregation": "sum", "values": [1.2]}},
+    )
 
 
 def _inline_runner_config(
@@ -241,13 +260,44 @@ def test_build_gateway_manager_wires_gateway_config_defaults(
     assert captured["gateway_actor_config"].apply_chat_template_kwargs == expected_chat_template_kwargs
 
 
+def _prompt_put(
+    uid: str,
+    partition_id: str,
+    status: str,
+    *,
+    global_steps: int,
+    expected_sessions: int,
+    success_sessions: int,
+    failed_sessions: int = 0,
+    unfinished_sessions: int = 0,
+    extra_stats: dict | None = None,
+):
+    summary = {
+        "expected_sessions": expected_sessions,
+        "success_sessions": success_sessions,
+        "failed_sessions": failed_sessions,
+        "unfinished_sessions": unfinished_sessions,
+    }
+    if extra_stats:
+        summary.update(extra_stats)
+    return {
+        "key": uid,
+        "partition_id": partition_id,
+        "tag": {"is_prompt": True, "status": status, "global_steps": global_steps},
+        "fields": {"agent_metrics_summary": summary},
+    }
+
+
 class _FakeTransferQueue:
     def __init__(self):
         self.puts = []
         self.batch_puts = []
 
-    async def async_kv_put(self, *, key, partition_id, tag):
-        self.puts.append({"key": key, "partition_id": partition_id, "tag": dict(tag)})
+    async def async_kv_put(self, *, key, partition_id, tag, fields=None):
+        entry = {"key": key, "partition_id": partition_id, "tag": dict(tag)}
+        if fields is not None:
+            entry["fields"] = fields
+        self.puts.append(entry)
 
     async def async_kv_batch_put(self, *, keys, fields, tags, partition_id):
         self.batch_puts.append(
@@ -629,7 +679,16 @@ async def test_generate_sequences_writes_tq_schema_for_each_session(monkeypatch,
 
     assert fake_tq.batch_puts[0]["keys"] == ["uid-0_0_0"]
     assert fake_tq.batch_puts[1]["keys"] == ["uid-0_1_0"]
-    assert fake_tq.puts == [{"key": "uid-0", "partition_id": "train", "tag": {"status": "finished"}}]
+    assert fake_tq.puts == [
+        _prompt_put(
+            "uid-0",
+            "train",
+            "finished",
+            global_steps=7,
+            expected_sessions=2,
+            success_sessions=2,
+        )
+    ]
 
     first = fake_tq.batch_puts[0]
     fields = first["fields"]
@@ -730,7 +789,17 @@ async def test_generate_sequences_masks_unfinished_trajectory_without_dropping_i
     assert "finished" not in batch["tags"][0]
     assert "finished" not in batch["fields"].keys()
     assert tu.get(batch["fields"], "reward_extra_info") == [{}]
-    assert fake_tq.puts == [{"key": "uid-0", "partition_id": "train", "tag": {"status": "finished"}}]
+    assert fake_tq.puts == [
+        _prompt_put(
+            "uid-0",
+            "train",
+            "finished",
+            global_steps=7,
+            expected_sessions=1,
+            success_sessions=1,
+            unfinished_sessions=1,
+        )
+    ]
 
 
 @pytest.mark.asyncio
@@ -787,9 +856,9 @@ async def test_masking_keeps_trajectory_trainable_when_completion_metadata_is_mi
 
 
 @pytest.mark.asyncio
-async def test_generate_sequences_reports_unfinished_episode_count(fake_tq, caplog):
-    # A session materializing two trajectories is still one episode: completion is
-    # session-level metadata copied onto every trajectory it produced.
+async def test_generate_sequences_reports_unfinished_session_count(fake_tq, caplog):
+    # A session materializing two trajectories is still one unfinished session:
+    # completion is session-level metadata copied onto every trajectory it produced.
     runtime = _FakeGatewayManager(
         {
             "session-sample-0-rollout-0": [
@@ -808,7 +877,65 @@ async def test_generate_sequences_reports_unfinished_episode_count(fake_tq, capl
         await framework.generate_sequences(_build_prompts(count=1, global_steps=7))
 
     assert "num_success_outputs=2" in caplog.text
-    assert "num_unfinished_episodes=1" in caplog.text
+    assert "num_unfinished_sessions=1" in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dispatch_mode", ["inline_async", "ray_task"])
+async def test_generate_sequences_scores_from_runner_task_result(fake_tq, dispatch_mode):
+    """Framework scores from the runner's TaskResult, not Gateway POST."""
+    runtime = _FakeGatewayManager({"session-sample-0-rollout-0": [_trajectory()]})
+    runner_config = (
+        _inline_runner_config(_task_result_runner)
+        if dispatch_mode == "inline_async"
+        else {
+            "runner_fqn": f"{__name__}._task_result_runner",
+            "dispatch_mode": "ray_task",
+        }
+    )
+    framework = await _build_framework_with_agent_runners(
+        agent_runners={"runner": runner_config},
+        gateway_manager=runtime,
+    )
+
+    await framework.generate_sequences(_build_prompts(count=1, global_steps=7))
+
+    fields = fake_tq.batch_puts[0]["fields"]
+    assert fields["rm_scores"][0].tolist() == [0.0, 0.75]
+    assert tu.get(fields, "reward_extra_info") == [{"acc": 1.0}]
+    assert tu.get(fields, "agent_metrics") == [{"task.total_s": {"aggregation": "sum", "values": [1.2]}}]
+    assert "stdout" not in str(tu.get(fields, "reward_extra_info"))
+    assert fake_tq.puts == [
+        _prompt_put(
+            "uid-0",
+            "train",
+            "finished",
+            global_steps=7,
+            expected_sessions=1,
+            success_sessions=1,
+            extra_stats={
+                "task.total_s": {"count": 1.0, "sum": 1.2, "min": 1.2, "max": 1.2},
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_generate_sequences_runner_task_result_overrides_gateway_reward_info(fake_tq):
+    runtime = _FakeGatewayManager(
+        {"session-sample-0-rollout-0": [_trajectory(reward_info={"reward": 0.1, "acc": 0.0, "finished": False})]}
+    )
+    framework = await _build_framework_with_agent_runners(
+        agent_runners={"runner": _inline_runner_config(_task_result_runner)},
+        gateway_manager=runtime,
+        mask_unfinished_episode=True,
+    )
+
+    await framework.generate_sequences(_build_prompts(count=1, global_steps=7))
+
+    fields = fake_tq.batch_puts[0]["fields"]
+    assert fields["rm_scores"][0].tolist() == [0.0, 0.75]
+    assert fields["response_mask"][0].tolist() == [1, 1]
 
 
 @pytest.mark.asyncio
@@ -827,6 +954,114 @@ def test_align_routed_experts_preserves_backend_dtype():
     assert aligned is not None
     assert aligned.dtype == torch.uint16
     assert aligned.tolist() == [[[256, 511]], [[0, 0]]]
+
+
+def test_reward_info_from_result_is_session_metadata_only():
+    result = TaskResult(
+        reward=0.5,
+        accuracy=1.0,
+        finished=True,
+        metrics={"task.total_s": {"aggregation": "sum", "values": [1.2]}},
+    )
+
+    assert _reward_info_from_result(result) == {
+        "reward": 0.5,
+        "acc": 1.0,
+        "finished": True,
+    }
+
+
+def test_score_from_task_result_uses_reward_and_accuracy():
+    result = TaskResult(
+        reward=0.75,
+        accuracy=1.0,
+        finished=True,
+        extra_info={"stdout": "should-not-reach-extra"},
+        metrics={"task.total_s": {"aggregation": "sum", "values": [1.2]}},
+    )
+
+    assert _score_from_task_result(result, 2) == [
+        (0.75, {"acc": 1.0}),
+        (0.75, {"acc": 1.0}),
+    ]
+    assert _score_from_task_result(TaskResult(reward=None, accuracy=1.0), 1) is None
+
+
+def test_reward_info_from_result_rejects_non_boolean_finished():
+    with pytest.raises(ValueError, match="finished must be a bool or None"):
+        _reward_info_from_result(TaskResult(reward=0.0, finished=0))  # type: ignore[arg-type]
+
+
+def test_scoring_task_result_drops_extra_info_and_ignores_non_results():
+    full = TaskResult(reward=1.0, accuracy=1.0, finished=True, extra_info={"stdout": "huge"}, metrics={"n": 1})
+
+    slim = _scoring_task_result(full)
+    assert slim == TaskResult(reward=1.0, accuracy=1.0, finished=True, metrics={"n": 1})
+    assert slim.extra_info is None
+    assert _scoring_task_result(None) is None
+    assert _scoring_task_result({"reward": 1.0}) is None
+
+
+def test_attach_session_reward_info_copies_the_same_dict_onto_every_trajectory():
+    """Mirrors GatewaySession.finalize: one session dict, per-trajectory copies."""
+    reward_info = {"reward": 0.5, "acc": 1.0, "finished": True}
+    left = _trajectory(reward_info={"stale": True})
+    right = _trajectory(reward_info={"stale": True})
+
+    attached = _attach_session_reward_info([left, right], reward_info)
+
+    assert attached[0].reward_info == reward_info
+    assert attached[1].reward_info == reward_info
+    assert attached[0].reward_info is not reward_info
+    assert attached[0].reward_info is not attached[1].reward_info
+    attached[0].reward_info["reward"] = 0.0
+    assert attached[1].reward_info["reward"] == 0.5
+    assert left.reward_info == {"stale": True}
+
+
+def test_stamp_session_agent_metrics_keeps_session_values_on_the_last_trajectory():
+    gateway = {"gateway.requests": {"aggregation": "sum", "values": [2.0]}}
+    task = {"task.total_s": {"aggregation": "sum", "values": [1.2]}}
+    first = _trajectory()
+    last = _trajectory(extra_fields={"agent_metrics": gateway, "materialization_reason": "max_trajectory_length"})
+
+    _stamp_session_agent_metrics([first, last], task)
+
+    assert first.extra_fields["agent_metrics"] == {}
+    assert last.extra_fields["agent_metrics"] == {
+        "gateway.requests": {"aggregation": "sum", "values": [2.0]},
+        "task.total_s": {"aggregation": "sum", "values": [1.2]},
+    }
+    assert last.extra_fields["materialization_reason"] == "max_trajectory_length"
+
+
+@pytest.mark.asyncio
+async def test_generate_sequences_puts_session_metrics_only_on_last_trajectory(fake_tq):
+    runtime = _FakeGatewayManager(
+        {
+            "session-sample-0-rollout-0": [
+                _trajectory(extra_fields={"materialization_reason": "max_trajectory_length"}),
+                _trajectory(
+                    extra_fields={
+                        "agent_metrics": {"gateway.requests": {"aggregation": "sum", "values": [3.0]}},
+                    }
+                ),
+            ]
+        }
+    )
+    framework = await _build_framework_with_agent_runners(
+        agent_runners={"runner": _inline_runner_config(_task_result_runner)},
+        gateway_manager=runtime,
+    )
+
+    await framework.generate_sequences(_build_prompts(count=1, global_steps=7))
+
+    metrics = tu.get(fake_tq.batch_puts[0]["fields"], "agent_metrics")
+    assert metrics[0] == {}
+    assert metrics[1] == {
+        "gateway.requests": {"aggregation": "sum", "values": [3.0]},
+        "task.total_s": {"aggregation": "sum", "values": [1.2]},
+    }
 
 
 @pytest.mark.asyncio
@@ -1068,7 +1303,17 @@ async def test_generate_sequences_keeps_successful_sessions_when_one_session_fai
     await framework.generate_sequences(_build_prompts(count=1, global_steps=8))
 
     assert fake_tq.batch_puts[0]["keys"] == ["uid-0_0_0"]
-    assert fake_tq.puts == [{"key": "uid-0", "partition_id": "train", "tag": {"status": "finished"}}]
+    assert fake_tq.puts == [
+        _prompt_put(
+            "uid-0",
+            "train",
+            "finished",
+            global_steps=8,
+            expected_sessions=2,
+            success_sessions=1,
+            failed_sessions=1,
+        )
+    ]
     assert len(runtime.aborted_sessions) == 1
     assert runtime.aborted_sessions[0].startswith("session-sample-0-rollout-1-")
 
@@ -1095,7 +1340,17 @@ async def test_generate_sequences_marks_prompt_failure_when_all_sessions_fail(fa
         await framework.generate_sequences(_build_prompts(count=1, global_steps=9, validate=True))
 
     assert fake_tq.batch_puts == []
-    assert fake_tq.puts == [{"key": "uid-0", "partition_id": "val", "tag": {"status": "failure"}}]
+    assert fake_tq.puts == [
+        _prompt_put(
+            "uid-0",
+            "val",
+            "failure",
+            global_steps=9,
+            expected_sessions=1,
+            success_sessions=0,
+            failed_sessions=1,
+        )
+    ]
 
 
 @pytest.mark.asyncio
@@ -1142,8 +1397,23 @@ async def test_generate_sequences_keeps_other_prompts_when_one_prompt_fails(fake
 
     assert [put["keys"] for put in fake_tq.batch_puts] == [["uid-1_0_0"]]
     assert sorted(fake_tq.puts, key=lambda put: put["key"]) == [
-        {"key": "uid-0", "partition_id": "train", "tag": {"status": "failure"}},
-        {"key": "uid-1", "partition_id": "train", "tag": {"status": "finished"}},
+        _prompt_put(
+            "uid-0",
+            "train",
+            "failure",
+            global_steps=11,
+            expected_sessions=1,
+            success_sessions=0,
+            failed_sessions=1,
+        ),
+        _prompt_put(
+            "uid-1",
+            "train",
+            "finished",
+            global_steps=11,
+            expected_sessions=1,
+            success_sessions=1,
+        ),
     ]
     assert len(runtime.aborted_sessions) == 1
     assert runtime.aborted_sessions[0].startswith("session-sample-0-rollout-0-")

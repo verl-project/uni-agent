@@ -78,9 +78,11 @@ Task-rendered messages are not guaranteed to equal a self-rendering Agent's fina
 
 ## Episode Implementation
 
-A Task implements `run()` without arguments because all sample state lives on its config:
+A Task implements `run()` without arguments because all sample state lives on its config.
+Each Task installs per-task metrics in `run()` with :class:`~uni_agent.metrics.task_metrics`.
 
 ```python
+from uni_agent.metrics import task_metrics, timing
 from uni_agent.tasks.base import Task, TaskResult
 from uni_agent.tasks.registry import register_task
 
@@ -90,28 +92,34 @@ class MyTask(Task):
     config_model = MyTaskConfig
 
     async def run(self) -> TaskResult:
-        config: MyTaskConfig = self.config
+        async with task_metrics() as collector:
+            with timing("task.total_s"):
+                config: MyTaskConfig = self.config
 
-        async with self.build_sandbox() as sandbox:
-            agent = self.build_agent()
-            agent_result = await agent.run(
-                sandbox=sandbox,
-                messages=config.prompt,
-                workdir=None,
-            )
+                async with self.build_sandbox() as sandbox:
+                    agent = self.build_agent()
+                    with timing("task.generate_s"):
+                        agent_result = await agent.run(
+                            sandbox=sandbox,
+                            messages=config.prompt,
+                            workdir=None,
+                        )
 
-            score = await compute_reward(
-                config.metadata,
-                sandbox,
-                agent_result,
-            )
+                    with timing("reward.s"):
+                        score = await compute_reward(
+                            config.metadata,
+                            sandbox,
+                            agent_result,
+                        )
 
-        return TaskResult(
-            reward=score,
-            accuracy=score,
-            finished=agent_result.finished,
-            extra_info={"score": score},
-        )
+                result = TaskResult(
+                    reward=score,
+                    accuracy=score,
+                    finished=agent_result.finished,
+                    extra_info={"score": score},
+                )
+            result.metrics = collector.metrics()
+            return result
 ```
 
 `build_sandbox()` and `build_agent()` dispatch through their registries. Logging is provided by the runtime that invokes the Task; the Task only emits normal log records.
@@ -150,7 +158,12 @@ TaskResult(
 ```
 
 Custom Tasks may return scalar, dense, rubric-based, or multi-component rewards. The framework consumes
-`TaskResult.reward`; additional metrics belong in `accuracy` and `extra_info`.
+`TaskResult.reward`; additional scoring fields belong in `accuracy` and `extra_info`.
+Observability timings and counters belong in `TaskResult.metrics`.
+
+Not returning a `TaskResult` (or returning one with no `reward`) is the same as a
+Gateway session that never received a reward. A configured `RewardLoopWorker` is
+the custom scoring path for that case, not a fallback after Task scoring.
 
 `TaskResult.finished` is factual episode metadata copied from
 `AgentResult.finished`; it does not decide whether the trajectory contributes to

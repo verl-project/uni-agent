@@ -25,7 +25,9 @@ from tensordict.tensorclass import NonTensorData, NonTensorStack
 
 from uni_agent.gateway.session import SessionHandle, Trajectory
 from uni_agent.logging import LogContext, sample_logging
+from uni_agent.metrics import build_prompt_metrics_summary, merge_metrics
 from uni_agent.rlinsight_adapter import agent_loop_session
+from uni_agent.tasks.base import TaskResult
 from verl.tools.tool_registry import initialize_tools_from_config
 from verl.utils import tensordict_utils as tu
 from verl.utils.import_utils import load_class_from_fqn
@@ -39,7 +41,14 @@ logger = logging.getLogger(__name__)
 
 
 class AgentRunner(Protocol):
-    """Callable contract for an agent episode over a Gateway-owned session."""
+    """Callable contract for an agent episode over a Gateway-owned session.
+
+    Return a :class:`~uni_agent.tasks.base.TaskResult` so the Framework can score
+    the session from ``reward`` / ``accuracy`` / ``finished`` / ``metrics``.
+    Returning ``None`` is the same as a Gateway session that never received a
+    reward: score from session ``reward_info`` if present, otherwise a configured
+    RewardLoopWorker can apply custom scoring.
+    """
 
     async def __call__(
         self,
@@ -48,7 +57,7 @@ class AgentRunner(Protocol):
         raw_prompt: object,
         sample_index: int,
         **sample_runner_kwargs: object,
-    ) -> object: ...
+    ) -> TaskResult | None: ...
 
 
 TrajectoryPostprocessor = Callable[..., list[Trajectory] | Awaitable[list[Trajectory]]]
@@ -132,11 +141,15 @@ def _run_agent_runner_ray_task(
     sample_index: int,
     tools_kwargs: object | None,
     log_context: LogContext | None,
-) -> None:
-    """Run only the user runner in Ray; parent owns session lifecycle outputs."""
+) -> TaskResult | None:
+    """Run only the user runner in Ray; parent owns session lifecycle outputs.
+
+    The returned :class:`TaskResult` is slimmed to scoring fields so bulky
+    ``extra_info`` (eval logs, stdout tails) does not cross the Ray boundary.
+    """
     runner = _materialize_runner(runner_fqn, runner_kwargs)
     with _log_scope(log_context):
-        asyncio.run(
+        result = asyncio.run(
             runner(
                 raw_prompt=raw_prompt,
                 session=session,
@@ -144,6 +157,7 @@ def _run_agent_runner_ray_task(
                 **({"tools_kwargs": tools_kwargs} if tools_kwargs is not None else {}),
             )
         )
+    return _scoring_task_result(result)
 
 
 def _short_failure_reason(error: BaseException) -> str:
@@ -151,6 +165,94 @@ def _short_failure_reason(error: BaseException) -> str:
     if not message:
         message = error.__class__.__name__
     return f"{error.__class__.__name__}:{message}"[:512]
+
+
+def _scoring_task_result(value: object) -> TaskResult | None:
+    """Keep only the TaskResult fields the Framework scores from.
+
+    ``extra_info`` can carry sandbox eval logs; drop it before crossing Ray.
+    Non-TaskResult returns are ignored: the session is scored as if the runner
+    returned ``None`` (no Task-provided reward).
+    """
+    if value is None:
+        return None
+    if not isinstance(value, TaskResult):
+        logger.warning(
+            "agent runner returned %s, expected TaskResult; ignoring return value",
+            type(value).__name__,
+        )
+        return None
+    return TaskResult(
+        reward=value.reward,
+        accuracy=value.accuracy,
+        finished=value.finished,
+        metrics=value.metrics,
+    )
+
+
+def _reward_info_from_result(result: TaskResult) -> dict[str, object]:
+    """Copy dump/mask metadata from ``TaskResult`` onto trajectories.
+
+    Scoring and metrics stay on ``TaskResult``; this dict is session metadata
+    (``reward`` / ``acc`` / ``finished``) only.
+    """
+    if result.finished is not None and type(result.finished) is not bool:
+        raise ValueError("TaskResult.finished must be a bool or None")
+    reward_info: dict[str, object] = {"reward": result.reward}
+    if result.accuracy is not None:
+        reward_info["acc"] = result.accuracy
+    if result.finished is not None:
+        reward_info["finished"] = result.finished
+    return reward_info
+
+
+def _score_from_task_result(result: TaskResult, n: int) -> list[tuple[float, dict[str, object]]] | None:
+    """Build per-trajectory annotations from ``TaskResult.reward`` / ``accuracy``.
+
+    ``finished`` is session metadata, not a reward extra. Metrics are stamped
+    separately onto the last trajectory.
+    """
+    if result.reward is None:
+        return None
+    extra: dict[str, object] = {}
+    if result.accuracy is not None:
+        extra["acc"] = result.accuracy
+    return [(float(result.reward), dict(extra)) for _ in range(n)]
+
+
+def _attach_session_reward_info(
+    trajectories: list[Trajectory],
+    reward_info: dict[str, object],
+) -> list[Trajectory]:
+    """Copy session-level ``reward_info`` onto every trajectory.
+
+    Same as ``GatewaySession.finalize``::
+
+        [replace(trajectory, reward_info=dict(self.reward_info)) for trajectory in ...]
+    """
+    return [replace(trajectory, reward_info=dict(reward_info)) for trajectory in trajectories]
+
+
+def _stamp_session_agent_metrics(
+    trajectories: list[Trajectory],
+    task_metrics: dict[str, object] | None,
+) -> None:
+    """Merge Gateway + Task metrics onto the last trajectory of a session.
+
+    Gateway already attached its session snapshot during ``finalize``.  After
+    trajectory selection/postprocess, Framework merges ``TaskResult.metrics``
+    here.  Earlier trajectories keep ``agent_metrics={}`` so TransferQueue still
+    has the column without double-counting session-level timings.
+    """
+    if not trajectories:
+        return
+    last = trajectories[-1]
+    merged = merge_metrics(last.extra_fields.get("agent_metrics"), task_metrics)
+    if not merged:
+        return
+    for trajectory in trajectories[:-1]:
+        trajectory.extra_fields.setdefault("agent_metrics", {})
+    last.extra_fields["agent_metrics"] = merged
 
 
 def _select_session_trajectories(
@@ -298,12 +400,15 @@ class GatewayAgentFramework(AgentFramework):
 
     Each sample in the batch is run as an independent Gateway session: the agent
     communicates through the Gateway's provider adapter (OpenAI Chat Completions
-    or Anthropic Messages), and the Gateway collects token-level trajectories. After
-    finalization, scoring prefers the reward the runner posted to the session
-    (``_score_from_reward_info``); otherwise, if a RewardLoopWorker is configured,
-    ``_score_trajectories`` scores the final trajectory and broadcasts the score to all
-    trajectories in the session (matching ``AgentLoopWorkerTQ._agent_loop_postprocess``).
-    The framework then writes them to the TransferQueue schema consumed by sync training.
+    or Anthropic Messages), and the Gateway collects token-level trajectories.
+    After finalization, the framework copies ``reward`` / ``acc`` / ``finished``
+    from the runner's :class:`TaskResult` onto every trajectory as session
+    ``reward_info`` (dump / ``mask_unfinished_episode`` metadata). Scoring and
+    metrics come from ``TaskResult`` itself after trajectory selection and
+    postprocess. Not returning a ``TaskResult`` is the same as a Gateway session
+    that never received a reward. A configured RewardLoopWorker is the custom
+    reward path for that case. The framework then writes trajectories to the
+    TransferQueue schema consumed by sync training.
     """
 
     #: Grace period for a timed-out runner Ray task to observe a graceful
@@ -313,7 +418,7 @@ class GatewayAgentFramework(AgentFramework):
 
     def __init__(
         self,
-        gateway_manager,  # GatewayManager: framework calls create_session/finalize_session/abort_session
+        gateway_manager,  # GatewayManager: create/finalize/abort session
         *,
         runner_registry: dict[str, _RunnerConfig],
         reward_loop_worker_handles=None,
@@ -485,13 +590,13 @@ class GatewayAgentFramework(AgentFramework):
         )
         logger.info(
             "generate_sequences summary: num_input_prompts=%s num_success_sessions=%s "
-            "num_failed_sessions=%s num_success_outputs=%s num_unfinished_episodes=%s "
+            "num_failed_sessions=%s num_success_outputs=%s num_unfinished_sessions=%s "
             "num_failed_uids=%s failure_reasons=%s",
             stats["num_input_prompts"],
             stats["num_success_sessions"],
             stats["num_failed_sessions"],
             stats["num_success_outputs"],
-            stats["num_unfinished_episodes"],
+            stats["num_unfinished_sessions"],
             stats["num_failed_uids"],
             stats["failure_reasons"][:3],
         )
@@ -536,7 +641,7 @@ class GatewayAgentFramework(AgentFramework):
             "num_success_sessions": 0,
             "num_failed_sessions": 0,
             "num_success_outputs": 0,
-            "num_unfinished_episodes": 0,
+            "num_unfinished_sessions": 0,
             "num_failed_uids": 0,
             "failure_reasons": failure_reasons,
         }
@@ -553,7 +658,7 @@ class GatewayAgentFramework(AgentFramework):
             stats["num_success_sessions"] += outcome["num_success_sessions"]
             stats["num_failed_sessions"] += outcome["num_failed_sessions"]
             stats["num_success_outputs"] += outcome["num_success_outputs"]
-            stats["num_unfinished_episodes"] += outcome["num_unfinished_episodes"]
+            stats["num_unfinished_sessions"] += outcome["num_unfinished_sessions"]
             stats["num_failed_uids"] += outcome["num_failed_uids"]
             failure_reasons.extend(outcome["failure_reasons"])
         return stats
@@ -594,8 +699,9 @@ class GatewayAgentFramework(AgentFramework):
         success_sessions = 0
         failed_sessions = 0
         success_outputs = 0
-        unfinished_episodes = 0
+        unfinished_sessions = 0
         failure_reasons: list[str] = []
+        session_metrics: list[dict[str, dict]] = []
         for session_index, outcome in enumerate(outcomes):
             if isinstance(outcome, Exception):
                 failed_sessions += 1
@@ -628,23 +734,44 @@ class GatewayAgentFramework(AgentFramework):
             else:
                 success_sessions += 1
                 success_outputs += len(trajectories)
-                # One session is one episode; its trajectories all carry the same
-                # session-level completion flag, so this counts episodes, not tokens.
+                # Completion is session-level; count sessions, not trajectories.
                 if any(traj.reward_info.get("finished") is False for traj in trajectories):
-                    unfinished_episodes += 1
+                    unfinished_sessions += 1
+                last_metrics = trajectories[-1].extra_fields.get("agent_metrics")
+                if last_metrics:
+                    session_metrics.append(last_metrics)
 
         if success_sessions > 0:
-            await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "finished"})
+            status = "finished"
             failed_uids = 0
         else:
-            await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "failure"})
+            status = "failure"
             failed_uids = 1
+
+        summary = build_prompt_metrics_summary(
+            expected_sessions=num_sessions,
+            success_sessions=success_sessions,
+            failed_sessions=failed_sessions,
+            unfinished_sessions=unfinished_sessions,
+            metrics=session_metrics,
+        )
+        tag: dict[str, object] = {
+            "is_prompt": True,
+            "status": status,
+            "global_steps": int(global_steps or 0),
+        }
+        await tq.async_kv_put(
+            key=uid,
+            partition_id=partition_id,
+            tag=tag,
+            fields={"agent_metrics_summary": summary},
+        )
 
         return {
             "num_success_sessions": success_sessions,
             "num_failed_sessions": failed_sessions,
             "num_success_outputs": success_outputs,
-            "num_unfinished_episodes": unfinished_episodes,
+            "num_unfinished_sessions": unfinished_sessions,
             "num_failed_uids": failed_uids,
             "failure_reasons": failure_reasons,
         }
@@ -761,6 +888,7 @@ class GatewayAgentFramework(AgentFramework):
                 global_steps,
             )
             try:
+                runner_result: TaskResult | None = None
                 if runner_config.dispatch_mode == "ray_task":
                     # Ray workers run only the runner. Gateway token truth,
                     # finalization, reward scoring, and TQ writes stay in parent.
@@ -783,22 +911,33 @@ class GatewayAgentFramework(AgentFramework):
                     # unwinds and its sandbox context manager tears down cleanly;
                     # force-kill only if it ignores the cancel.
                     try:
-                        await asyncio.wait_for(
-                            object_ref,
-                            timeout=runner_config.session_timeout_seconds,
+                        runner_result = _scoring_task_result(
+                            await asyncio.wait_for(
+                                object_ref,
+                                timeout=runner_config.session_timeout_seconds,
+                            )
                         )
                     except (asyncio.TimeoutError, asyncio.CancelledError):
                         await self._cancel_runner_task(object_ref, session_id)
                         raise
                 else:
                     runner = self._inline_runners[runner_name]
-                    await runner(
-                        raw_prompt=raw_prompt,
-                        session=session,
-                        sample_index=sample_index,
-                        **({"tools_kwargs": tools_kwargs} if tools_kwargs is not None else {}),
+                    runner_result = _scoring_task_result(
+                        await runner(
+                            raw_prompt=raw_prompt,
+                            session=session,
+                            sample_index=sample_index,
+                            **({"tools_kwargs": tools_kwargs} if tools_kwargs is not None else {}),
+                        )
                     )
                 session_trajectories = await self.gateway_manager.finalize_session(session_id)
+                if runner_result is not None:
+                    # Dump / mask_unfinished_episode metadata only. Scoring and
+                    # metrics stay on TaskResult and are applied after selection.
+                    session_trajectories = _attach_session_reward_info(
+                        session_trajectories,
+                        _reward_info_from_result(runner_result),
+                    )
                 session_trajectories = _select_session_trajectories(
                     session_id,
                     session_trajectories,
@@ -833,10 +972,22 @@ class GatewayAgentFramework(AgentFramework):
                 )
                 return session_trajectories, sample_fields
 
-            # Prefer the reward the runner posted to the session (report_reward=True);
-            # otherwise defer to the RewardLoopWorker (if any), else rm_scores stays 0.
-            annotations = self._score_from_reward_info(session_trajectories)
-            reward_source = "reward_info" if annotations is not None else None
+            _stamp_session_agent_metrics(
+                session_trajectories,
+                None if runner_result is None else runner_result.metrics,
+            )
+            annotations = None
+            reward_source = None
+            if runner_result is not None:
+                annotations = _score_from_task_result(runner_result, len(session_trajectories))
+                if annotations is not None:
+                    reward_source = "task_result"
+            else:
+                # No TaskResult: same as a Gateway session that never received
+                # a Task reward. Score session reward_info if the Gateway has one.
+                annotations = self._score_from_reward_info(session_trajectories)
+                if annotations is not None:
+                    reward_source = "reward_info"
             if annotations is None and self.reward_loop_worker_handles:
                 annotations = await self._score_trajectories(session_trajectories, sample_fields)
                 reward_source = "reward_loop_worker"
@@ -976,12 +1127,12 @@ class GatewayAgentFramework(AgentFramework):
     def _score_from_reward_info(
         self, session_trajectories: list[Trajectory]
     ) -> list[tuple[float, dict[str, object]]] | None:
-        """Score from the reward the runner posted to the session, if any.
+        """Score from Gateway session ``reward_info['reward']``, if present.
 
-        reward_score = the posted ``reward``; anything else posted (e.g. ``acc``)
-        rides along as reward_extra_info. ``finished`` is dropped instead: the
-        framework consumes it directly as a completion fact, so it is not a reward
-        metric. See ``task_runner._post_reward_info`` for what's posted.
+        Used when the runner did not return a ``TaskResult`` — the same path as
+        a Gateway session that never received a Task reward. ``finished`` is
+        dropped: the framework consumes it as a completion fact. Metrics never
+        travel on ``reward_info``.
         """
         reward_info = dict(session_trajectories[-1].reward_info or {})
         reward = reward_info.pop("reward", None)
@@ -996,9 +1147,11 @@ class GatewayAgentFramework(AgentFramework):
         session_trajectories: list[Trajectory],
         sample_fields: dict[str, object],
     ) -> list[tuple[float, dict[str, object]]]:
-        """Score the session's final trajectory and broadcast (score, extra_info) to all.
+        """Custom reward: score the session's final trajectory via RewardLoopWorker.
 
-        Mirrors AgentLoopWorkerTQ._agent_loop_postprocess
+        This is the configured custom reward path when the session has no
+        Task-provided reward, not a last-resort fallback. Mirrors
+        AgentLoopWorkerTQ._agent_loop_postprocess
         (verl/trainer/main_ppo_sync.py:353-396): only the final trajectory (the
         session's last interaction segment) is dispatched to RewardLoopWorker;
         its score + reward_extra_info are then broadcast to every trajectory in

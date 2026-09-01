@@ -35,6 +35,7 @@ from datasets import load_dataset
 from tqdm import tqdm
 
 from uni_agent.logging import LogContext, sample_logging
+from uni_agent.metrics import aggregate, report_metrics
 from uni_agent.tasks import TaskConfigResolver, get_task
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
@@ -65,6 +66,7 @@ class InferenceActor:
                         "eval_completed": bool(info.get("eval_completed", True)),
                         "eval_execution_time": info.get("eval_execution_time"),
                         "eval_report": info.get("eval_report"),
+                        "metrics": result.metrics or {},
                     }
                 except Exception as e:
                     logger.error(f"error running {instance_id}: {type(e).__name__}: {e}")
@@ -76,6 +78,7 @@ class InferenceActor:
                         "eval_completed": False,
                         "eval_execution_time": None,
                         "error": f"{type(e).__name__}: {e}",
+                        "metrics": {},
                     }
 
 
@@ -229,6 +232,12 @@ def main() -> None:
     pass_rate = success_num / all_num * 100 if all_num else 0.0
     mean_reward = sum(float(r.get("reward", 0.0)) for r in results) / all_num if all_num else 0.0
 
+    metrics = [r["metrics"] for r in results if r.get("metrics")]
+    flat_metrics = aggregate(metrics)
+    flat_metrics["tasks"] = float(all_num)
+    metrics_path = str(Path(args.log_dir).expanduser() / "metrics.jsonl") if args.log_dir else None
+    report_metrics(flat_metrics, experiment="parallel_infer_api", filepath=metrics_path)
+
     summary = "\n".join(
         [
             "",
@@ -255,6 +264,7 @@ def main() -> None:
         "mean_reward": mean_reward,
         "average_eval_execution_time": avg_exec_time,
         "wall_time": wall,
+        "metrics": flat_metrics,
     }
     if args.result_path:
         output_path = Path(args.result_path).expanduser()

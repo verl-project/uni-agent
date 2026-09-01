@@ -11,8 +11,8 @@ framework adapter + TransferQueue (TQ):
     ->  per-trajectory records written to TransferQueue
 
 The per-sample score is the trainer's own ``rm_scores`` read back from TQ: ``run_task``
-(``report_reward=True``) posts the task reward to its session, and the framework writes
-it as ``reward_score`` -- no external reward model. Fan-out is ``rollout.n`` (``--n``),
+returns a ``TaskResult``, and the framework stamps it onto the session trajectories as
+``reward_score`` -- no external reward model. Fan-out is ``rollout.n`` (``--n``),
 with no resolved/wrong-answer/timeout bucketing (just mean ``rm_scores``).
 
 Example (single node, 4-way tensor parallel)::
@@ -49,6 +49,7 @@ except ImportError:  # fall back to verl's shim (mock raises a clear error if TQ
     from verl.utils.transferqueue_utils import tq
 
 from uni_agent.framework.entry import AgentFrameworkRolloutAdapter
+from uni_agent.metrics import aggregate, report_metrics
 from uni_agent.tasks import TaskConfigResolver
 from verl.utils import tensordict_utils as tu
 from verl.workers.rollout.llm_server import LLMServerManager
@@ -141,7 +142,6 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
                 "runner_kwargs": {
                     "task_config_path": args.task_config,
                     "model_name": served_model_name,
-                    "report_reward": True,
                 },
             }
         },
@@ -209,8 +209,15 @@ def _read_rm_scores(uids: list, *, partition_id: str = PARTITION_ID) -> dict:
 
     per_uid: dict[str, list[float]] = defaultdict(list)
     scores: list[float] = []
+    metrics: list = []
     if final_keys:
-        data = tq.kv_batch_get(keys=final_keys, partition_id=partition_id, select_fields=["rm_scores"])
+        try:
+            data = tq.kv_batch_get(
+                keys=final_keys, partition_id=partition_id, select_fields=["rm_scores", "agent_metrics"]
+            )
+            metrics = [item for item in list(data.get("agent_metrics") or []) if item]
+        except ValueError:
+            data = tq.kv_batch_get(keys=final_keys, partition_id=partition_id, select_fields=["rm_scores"])
         scores = [float(s) for s in data["rm_scores"].sum(dim=-1).tolist()]
         for (uid, _session), score in zip(final_sessions, scores, strict=True):
             per_uid[uid].append(score)
@@ -223,6 +230,7 @@ def _read_rm_scores(uids: list, *, partition_id: str = PARTITION_ID) -> dict:
         "final_keys": final_keys,
         "traj_keys": traj_keys,
         "uid_keys": uid_keys,
+        "metrics": metrics,
     }
 
 
@@ -255,6 +263,12 @@ def _report(
         ]
     )
     print(summary)
+
+    metrics = read.get("metrics") or []
+    if metrics:
+        flat_metrics = aggregate(metrics)
+        metrics_path = os.path.join(os.path.expanduser(args.log_dir), "metrics.jsonl") if args.log_dir else None
+        report_metrics(flat_metrics, experiment="parallel_infer_verl", filepath=metrics_path)
 
     if args.result_path:
         result_path = os.path.expanduser(args.result_path)

@@ -17,6 +17,7 @@ from pydantic import Field, field_validator, model_validator
 
 from uni_agent.agents import AgentConfig
 from uni_agent.logging import get_current_log_context
+from uni_agent.metrics import task_metrics, timing
 
 from ..base import Task, TaskConfig, TaskResult
 from ..registry import register_task
@@ -187,27 +188,31 @@ class HarborTask(Task):
     config_model = HarborTaskConfig
 
     async def run(self) -> TaskResult:
-        config: HarborTaskConfig = self.config  # type: ignore[assignment]
-        log_context = get_current_log_context()
-        output_dir: Path | None = None
-        if log_context is not None and log_context.log_path:
-            rollout_dir = Path(log_context.log_path).expanduser().resolve().parent
-            output_dir = rollout_dir / "harbor"
-            await asyncio.to_thread(rollout_dir.mkdir, parents=True, exist_ok=True)
-            if output_dir.exists():
-                raise RuntimeError(f"Harbor output directory already exists: {output_dir}")
+        async with task_metrics() as collector:
+            with timing("task.total_s"):
+                config: HarborTaskConfig = self.config  # type: ignore[assignment]
+                log_context = get_current_log_context()
+                output_dir: Path | None = None
+                if log_context is not None and log_context.log_path:
+                    rollout_dir = Path(log_context.log_path).expanduser().resolve().parent
+                    output_dir = rollout_dir / "harbor"
+                    await asyncio.to_thread(rollout_dir.mkdir, parents=True, exist_ok=True)
+                    if output_dir.exists():
+                        raise RuntimeError(f"Harbor output directory already exists: {output_dir}")
 
-        trial_name = str(uuid4().hex)
-        trial_dir = _TEMP_TRIALS_DIR / trial_name
-        try:
-            return await self._run_trial(
-                config,
-                _TEMP_TRIALS_DIR,
-                trial_name=trial_name,
-                output_dir=output_dir,
-            )
-        finally:
-            await asyncio.to_thread(shutil.rmtree, trial_dir, ignore_errors=True)
+                trial_name = str(uuid4().hex)
+                trial_dir = _TEMP_TRIALS_DIR / trial_name
+                try:
+                    outcome = await self._run_trial(
+                        config,
+                        _TEMP_TRIALS_DIR,
+                        trial_name=trial_name,
+                        output_dir=output_dir,
+                    )
+                finally:
+                    await asyncio.to_thread(shutil.rmtree, trial_dir, ignore_errors=True)
+            outcome.metrics = collector.metrics()
+            return outcome
 
     async def _run_trial(
         self,
@@ -238,7 +243,8 @@ class HarborTask(Task):
         )
         started = time.perf_counter()
         try:
-            response = await run_harbor_cli(command, env=process_env)
+            with timing("task.generate_s"):
+                response = await run_harbor_cli(command, env=process_env)
         except FileNotFoundError as exc:
             raise RuntimeError(
                 "Harbor CLI executable was not found; install Harbor 0.16.0 or later and ensure `harbor` is on PATH"
@@ -276,14 +282,15 @@ class HarborTask(Task):
                 encoding="utf-8",
             )
 
-        result = task_result_from_harbor_trial(
-            payload,
-            trial_dir=trial_dir,
-            cli_exit_code=response.exit_code,
-            stdout=response.stdout,
-            stderr=response.stderr,
-            elapsed=elapsed,
-        )
+        with timing("reward.s"):
+            result = task_result_from_harbor_trial(
+                payload,
+                trial_dir=trial_dir,
+                cli_exit_code=response.exit_code,
+                stdout=response.stdout,
+                stderr=response.stderr,
+                elapsed=elapsed,
+            )
         info = result.extra_info or {}
         if not info.get("eval_completed"):
             logger.warning(

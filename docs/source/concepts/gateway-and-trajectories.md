@@ -37,8 +37,8 @@ For each rollout session, the Agent Framework:
 4. The runner injects the session endpoint into `agent.model`.
 5. The Agent sends OpenAI Chat Completions or Anthropic Messages requests to the session URL.
 6. The Gateway forwards tokenized requests to the verl rollout engine.
-7. The Task posts its final reward to the session.
-8. The framework finalizes the session and writes trajectories to TransferQueue.
+7. The Task returns a `TaskResult` with `reward` / `accuracy` / `finished` / `metrics`.
+8. The framework finalizes the session, scores from `TaskResult`, and writes trajectories to TransferQueue.
 
 The model-facing endpoints are:
 
@@ -67,9 +67,10 @@ finalized trajectories before reward scoring and artifact logging. The order is:
 
 ```text
 Gateway finalization
+    -> Framework copies TaskResult reward/acc/finished onto every trajectory as reward_info
     -> Runner trajectory_selection (all or longest)
     -> trajectory postprocessor
-    -> reward scoring
+    -> score from TaskResult; merge TaskResult.metrics onto the last trajectory
     -> trajectory logs and TransferQueue
 ```
 
@@ -150,25 +151,34 @@ by default and can be disabled with
 
 ## Reward Flow
 
-The built-in Task Runner posts:
+The built-in Task Runner returns a `TaskResult`. Reward does not enter the
+Gateway. After finalization the Agent Framework copies `reward` / `acc` /
+`finished` onto every trajectory as session `reward_info` (dump /
+`mask_unfinished_episode` metadata only):
 
 ```json
 {
-  "reward_info": {
-    "reward": 1.0,
-    "acc": 1.0,
-    "finished": true
-  }
+  "reward": 1.0,
+  "acc": 1.0,
+  "finished": true
 }
 ```
 
-The Agent Framework reads the session reward, applies it to finalized trajectories, and writes a sparse token-level `rm_scores` tensor with the reward on the final token.
+Scoring and metrics stay on `TaskResult`. After `trajectory_selection` /
+`trajectory_postprocessor`, the Framework writes `TaskResult.reward` onto a
+sparse token-level `rm_scores` tensor and merges `TaskResult.metrics` onto the
+last trajectory's `agent_metrics`.
+
+Not returning a `TaskResult` is the same as a Gateway session that never
+received a reward. Session `reward_info` is scored if the Gateway has one. A
+configured `RewardLoopWorker` is the custom reward path for sessions with no
+Task-provided reward (judge / RewardManager), not a last-resort fallback.
+Without a session reward and without a RewardLoopWorker score, `rm_scores`
+remains zero and the framework emits a warning.
 
 Agent completion is factual session metadata; the Framework, not the Task, decides how training consumes it. When the training configuration enables `mask_unfinished_episode`, a session with `finished=false` is still written and tagged as successful, but its TransferQueue `response_mask` and `loss_mask` are all zero so it does not contribute policy gradients, loss-normalization counts, or auxiliary losses.
 
 Masking stops at the loss. The trajectory keeps its reward in `rm_scores`, so a group-relative estimator such as GRPO or RLOO still folds that reward into the group mean and standard deviation, shifting the advantages of the sibling rollouts sharing its `uid`. The masked trajectory itself gets a zero advantage, and it still costs a full forward and backward pass. Treat unfinished episodes as evidence that keeps the baseline honest, not as samples removed from the batch.
-
-If no Task reward is reported, an optional verl Reward Loop Worker can score the final trajectory. Without either source, `rm_scores` remains zero and the framework emits a warning.
 
 ## TransferQueue
 
@@ -202,7 +212,6 @@ The trainer's ReplayBuffer consumes completed records independently of rollout t
 - A prompt is marked `finished` when any of its sessions succeeds.
 - A prompt is marked `failure` when all sessions fail.
 - A batch raises only when every rollout fails.
-- Reward reporting is best-effort and logs failures.
 
 This isolation is important for long-horizon workloads, where session latency and failure modes vary widely.
 

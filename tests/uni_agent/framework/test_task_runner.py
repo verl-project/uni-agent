@@ -4,7 +4,6 @@ from uni_agent.framework import task_runner
 from uni_agent.framework.task_runner import (
     _extract_upstream,
     _inject_gateway_tunnel,
-    _reward_info_from_result,
     _rewrite_gateway_url,
 )
 from uni_agent.gateway.session import SessionHandle
@@ -64,32 +63,6 @@ def test_task_result_positional_field_order():
     assert result.extra_info == {"reason": "limit"}
 
 
-def test_reward_info_omits_unknown_agent_completion():
-    result = TaskResult(reward=0.5, accuracy=1.0)
-
-    assert _reward_info_from_result(result) == {
-        "reward": 0.5,
-        "acc": 1.0,
-    }
-
-
-@pytest.mark.parametrize("finished", [True, False])
-def test_reward_info_forwards_agent_completion(finished):
-    result = TaskResult(reward=0.0, finished=finished)
-
-    assert _reward_info_from_result(result) == {
-        "reward": 0.0,
-        "finished": finished,
-    }
-
-
-def test_reward_info_rejects_non_boolean_agent_completion():
-    result = TaskResult(reward=0.0, finished=0)  # type: ignore[arg-type]
-
-    with pytest.raises(ValueError, match="finished must be a bool or None"):
-        _reward_info_from_result(result)
-
-
 @pytest.mark.asyncio
 async def test_run_task_binds_raw_prompt_to_sample_task_config(monkeypatch, tmp_path):
     config_path = tmp_path / "tasks.yaml"
@@ -116,7 +89,7 @@ async def test_run_task_binds_raw_prompt_to_sample_task_config(monkeypatch, tmp_
     monkeypatch.setattr(task_runner, "get_task", _FakeTask)
     source_prompt = [{"role": "user", "content": "Canonical source problem"}]
 
-    await task_runner.run_task(
+    result = await task_runner.run_task(
         session=SessionHandle(
             session_id="test-session",
             base_url="http://gateway/sessions/test/v1",
@@ -133,3 +106,4 @@ async def test_run_task_binds_raw_prompt_to_sample_task_config(monkeypatch, tmp_
     )
 
     assert captured["config"].prompt == source_prompt
+    assert result == TaskResult(reward=1.0, accuracy=1.0, finished=True)

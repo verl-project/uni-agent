@@ -31,9 +31,9 @@ class SessionHandle:
         session_id: Stable session identifier assigned by the caller.
         base_url: Per-session provider-compatible ``/v1`` API root, or ``None``
             when the handle only needs to identify the session.
-        reward_info_url: Per-session endpoint used by runners to attach reward
-            metadata; this is a sibling of the provider ``/v1`` root rather
-            than part of that API.
+        reward_info_url: Optional per-session endpoint that can attach reward
+            metadata before finalization (debug). Training copies the runner
+            ``TaskResult`` onto trajectories in the Framework, not through this URL.
     """
 
     session_id: str
@@ -60,8 +60,9 @@ class Trajectory:
         routed_experts: Optional expert-routing data captured by the backend.
         multi_modal_data: Optional image/video data associated with the prompt.
         extra_fields: Gateway-owned extension fields, such as trajectory
-            materialization metadata consumed by training adapters and the
-            ``min_global_steps``/``max_global_steps`` weight-version span.
+            materialization metadata consumed by training adapters, the
+            ``min_global_steps``/``max_global_steps`` weight-version span, and
+            session-level ``agent_metrics`` on the last trajectory.
     """
 
     prompt_ids: list[int]

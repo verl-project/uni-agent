@@ -11,6 +11,7 @@ from uni_agent.agents.claude_code.agent import (
     ClaudeCodeAgent,
     ClaudeCodeConfig,
 )
+from uni_agent.metrics import task_metrics
 from uni_agent.sandbox.base import ExecResult
 
 
@@ -159,6 +160,26 @@ def test_run_forwards_workdir():
     assert sandbox.exec_calls[0]["env"]["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] == "1"
     assert sandbox.exec_calls[0]["env"]["CLAUDE_CODE_SKIP_PROMPT_HISTORY"] == "1"
     assert sandbox.exec_calls[0]["env"]["CLAUDE_CODE_DISABLE_TERMINAL_TITLE"] == "1"
+
+
+def test_run_records_outer_wall_clock_when_task_metrics_are_active():
+    config = ClaudeCodeConfig(
+        model=ModelConfig(base_url="http://gateway:8000/v1", model_name="policy"),
+    )
+    sandbox = _FakeSandbox(probe_results=[0])
+
+    with task_metrics() as collector:
+        asyncio.run(
+            ClaudeCodeAgent(config).run(
+                sandbox=sandbox,
+                messages=[{"role": "user", "content": "fix the bug"}],
+            )
+        )
+
+    snap = collector.metrics()
+    assert snap["agent.run_s"]["aggregation"] == "sum"
+    assert len(snap["agent.run_s"]["values"]) == 1
+    assert snap["agent.run_s"]["values"][0] >= 0.0
 
 
 def test_run_accepts_user_only_message_without_rewriting():

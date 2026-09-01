@@ -14,6 +14,7 @@ from fastapi import HTTPException
 
 from uni_agent.gateway.session.codec import MessageCodec
 from uni_agent.gateway.session.types import InternalGenerationRequest, SessionHandle, Trajectory
+from uni_agent.metrics import MetricsCollector, merge_metrics
 from uni_agent.rlinsight_adapter import start_generation_span
 
 _EMPTY_PREFIX_HASH = hashlib.sha256(b"uni-agent-prefix-v1\0empty").hexdigest()
@@ -213,6 +214,8 @@ class GatewaySession:
         self.created_at = time.time()
         self.updated_at = self.created_at
         self.request_lock = asyncio.Lock()
+        # Session-local: Gateway cannot share Task's ContextVar across HTTP/Ray.
+        self._metrics = MetricsCollector()
 
     @property
     def sampling_params(self) -> dict[str, Any]:
@@ -234,110 +237,115 @@ class GatewaySession:
         # and broadcasts that reward, so concurrent siblings share one reward target.
         reserved_chain_id: int | None = None
         generation_span = start_generation_span(self._trace_identity)
+        self._metrics.incr("gateway.requests")
         try:
-            async with self.request_lock:
-                if self.phase != SessionPhase.ACTIVE:
-                    raise HTTPException(
-                        status_code=409,
-                        detail=f"Session {self.handle.session_id} is {self.phase.value.lower()}",
-                    )
-                # Prepare can touch codec and multimodal extractor state, so only
-                # backend generation runs outside the session lock.
-                encoded = await self._prepare_generation_inputs(request)
-                if encoded.capacity_exhausted:
-                    empty_msg = {"role": "assistant", "content": ""}
+            with self._metrics.timing("gateway.request_s"):
+                async with self.request_lock:
+                    if self.phase != SessionPhase.ACTIVE:
+                        raise HTTPException(
+                            status_code=409,
+                            detail=f"Session {self.handle.session_id} is {self.phase.value.lower()}",
+                        )
+                    # Prepare can touch codec and multimodal extractor state, so only
+                    # backend generation runs outside the session lock.
+                    with self._metrics.timing("gateway.encode_s"):
+                        encoded = await self._prepare_generation_inputs(request)
+                    if encoded.capacity_exhausted:
+                        empty_msg = {"role": "assistant", "content": ""}
+                        if encoded.chain_id is not None:
+                            self._close_length_exhausted_chain(encoded)
+                        self._touch()
+                        generation_span.capacity_exhausted(
+                            prompt_tokens=len(encoded.context_ids),
+                            chain_id=encoded.chain_id,
+                        )
+                        return GenerationOutcome(
+                            assistant_msg=empty_msg,
+                            finish_reason="length",
+                            prompt_tokens=len(encoded.context_ids),
+                            completion_tokens=0,
+                        )
                     if encoded.chain_id is not None:
-                        self._close_length_exhausted_chain(encoded)
+                        self.reserved_chain_ids.add(encoded.chain_id)
+                        reserved_chain_id = encoded.chain_id
+
+                try:
+                    with self._metrics.timing("gateway.backend_generate_s"):
+                        output = await backend.generate(
+                            request_id=self.handle.session_id,
+                            prompt_ids=encoded.context_ids,
+                            sampling_params=encoded.sampling_params,
+                            image_data=encoded.image_data,
+                            video_data=encoded.video_data,
+                        )
+                except ValueError as e:
+                    raise HTTPException(status_code=400, detail=str(e)) from e
+                except Exception as e:
+                    raise HTTPException(status_code=500, detail=f"{e.__class__.__name__}: {e}") from e
+
+                response_ids = list(output.token_ids)
+                encoded.buffer.generation_versions.append(
+                    (
+                        output.extra_fields.get("min_global_steps"),
+                        output.extra_fields.get("max_global_steps"),
+                    )
+                )
+                encoded.buffer.response_ids.extend(response_ids)
+                encoded.buffer.response_mask.extend([1] * len(response_ids))
+                if encoded.sampling_params.get("logprobs", False):
+                    if output.log_probs is None:
+                        raise RuntimeError("backend omitted logprobs when requested")
+                    log_probs = list(output.log_probs)
+                    if len(log_probs) != len(response_ids):
+                        raise RuntimeError(
+                            "backend logprobs must align with token_ids: "
+                            f"got {len(log_probs)} logprobs for {len(response_ids)} tokens"
+                        )
+                    encoded.buffer.response_logprobs.extend(log_probs)
+                self._assert_response_logprob_alignment(encoded.buffer)
+
+                # R3 router replay: the backend returns routing for the full context
+                # it just prefilled (prompt + response so far + new tokens), so keep
+                # the latest value; it supersedes prior turns. The framework aligns it
+                # to input_ids when writing to TransferQueue.
+                routed_experts = getattr(output, "routed_experts", None)
+                if routed_experts is not None:
+                    encoded.buffer.routed_experts = routed_experts
+
+                async with self.request_lock:
+                    if self.phase != SessionPhase.ACTIVE:
+                        raise HTTPException(
+                            status_code=409,
+                            detail=f"Session {self.handle.session_id} is {self.phase.value.lower()}",
+                        )
+                    # Decode runs under request_lock so this session's prepare/commit and
+                    # decode stay serialized. It does not serialize decode across sessions,
+                    # which share the actor codec.
+                    with self._metrics.timing("gateway.decode_s"):
+                        assistant_msg, finish_reason = await self._codec.decode_response(
+                            response_ids,
+                            tools=encoded.tools,
+                            stop_reason=output.stop_reason,
+                        )
+                        chain_id = self._commit_generation_to_chain(encoded, assistant_msg)
+                    if reserved_chain_id is not None:
+                        self.reserved_chain_ids.discard(reserved_chain_id)
+                        reserved_chain_id = None
                     self._touch()
-                    generation_span.capacity_exhausted(
+                    generation_span.success(
                         prompt_tokens=len(encoded.context_ids),
-                        chain_id=encoded.chain_id,
+                        completion_tokens=len(response_ids),
+                        chain_id=chain_id,
+                        turn=self._order_seq,
+                        assistant_msg=assistant_msg,
+                        finish_reason=finish_reason,
                     )
                     return GenerationOutcome(
-                        assistant_msg=empty_msg,
-                        finish_reason="length",
+                        assistant_msg=assistant_msg,
+                        finish_reason=finish_reason,
                         prompt_tokens=len(encoded.context_ids),
-                        completion_tokens=0,
+                        completion_tokens=len(response_ids),
                     )
-                if encoded.chain_id is not None:
-                    self.reserved_chain_ids.add(encoded.chain_id)
-                    reserved_chain_id = encoded.chain_id
-
-            try:
-                output = await backend.generate(
-                    request_id=self.handle.session_id,
-                    prompt_ids=encoded.context_ids,
-                    sampling_params=encoded.sampling_params,
-                    image_data=encoded.image_data,
-                    video_data=encoded.video_data,
-                )
-            except ValueError as e:
-                raise HTTPException(status_code=400, detail=str(e)) from e
-            except Exception as e:
-                raise HTTPException(status_code=500, detail=f"{e.__class__.__name__}: {e}") from e
-
-            response_ids = list(output.token_ids)
-            encoded.buffer.generation_versions.append(
-                (
-                    output.extra_fields.get("min_global_steps"),
-                    output.extra_fields.get("max_global_steps"),
-                )
-            )
-            encoded.buffer.response_ids.extend(response_ids)
-            encoded.buffer.response_mask.extend([1] * len(response_ids))
-            if encoded.sampling_params.get("logprobs", False):
-                if output.log_probs is None:
-                    raise RuntimeError("backend omitted logprobs when requested")
-                log_probs = list(output.log_probs)
-                if len(log_probs) != len(response_ids):
-                    raise RuntimeError(
-                        "backend logprobs must align with token_ids: "
-                        f"got {len(log_probs)} logprobs for {len(response_ids)} tokens"
-                    )
-                encoded.buffer.response_logprobs.extend(log_probs)
-            self._assert_response_logprob_alignment(encoded.buffer)
-
-            # R3 router replay: the backend returns routing for the full context
-            # it just prefilled (prompt + response so far + new tokens), so keep
-            # the latest value; it supersedes prior turns. The framework aligns it
-            # to input_ids when writing to TransferQueue.
-            routed_experts = getattr(output, "routed_experts", None)
-            if routed_experts is not None:
-                encoded.buffer.routed_experts = routed_experts
-
-            async with self.request_lock:
-                if self.phase != SessionPhase.ACTIVE:
-                    raise HTTPException(
-                        status_code=409,
-                        detail=f"Session {self.handle.session_id} is {self.phase.value.lower()}",
-                    )
-                # Decode runs under request_lock so this session's prepare/commit and
-                # decode stay serialized. It does not serialize decode across sessions,
-                # which share the actor codec.
-                assistant_msg, finish_reason = await self._codec.decode_response(
-                    response_ids,
-                    tools=encoded.tools,
-                    stop_reason=output.stop_reason,
-                )
-                chain_id = self._commit_generation_to_chain(encoded, assistant_msg)
-                if reserved_chain_id is not None:
-                    self.reserved_chain_ids.discard(reserved_chain_id)
-                    reserved_chain_id = None
-                self._touch()
-                generation_span.success(
-                    prompt_tokens=len(encoded.context_ids),
-                    completion_tokens=len(response_ids),
-                    chain_id=chain_id,
-                    turn=self._order_seq,
-                    assistant_msg=assistant_msg,
-                    finish_reason=finish_reason,
-                )
-                return GenerationOutcome(
-                    assistant_msg=assistant_msg,
-                    finish_reason=finish_reason,
-                    prompt_tokens=len(encoded.context_ids),
-                    completion_tokens=len(response_ids),
-                )
         except Exception as exc:
             generation_span.failure(exc)
             raise
@@ -371,7 +379,14 @@ class GatewaySession:
                 materialized.trajectory
                 for materialized in sorted(self.materialized_chains, key=lambda chain: chain.order_seq)
             ]
-            return [replace(trajectory, reward_info=dict(self.reward_info)) for trajectory in ordered_trajectories]
+            stamped = [replace(trajectory, reward_info=dict(self.reward_info)) for trajectory in ordered_trajectories]
+            metrics = self._metrics.metrics()
+            if metrics and stamped:
+                last = stamped[-1]
+                extra = dict(last.extra_fields)
+                extra["agent_metrics"] = merge_metrics(extra.get("agent_metrics"), metrics)
+                stamped[-1] = replace(last, extra_fields=extra)
+            return stamped
 
     async def abort(self) -> None:
         """Abort the session and prevent further generation."""

@@ -16,6 +16,8 @@ from typing import TYPE_CHECKING, Any
 
 from pydantic import Field
 
+from uni_agent.metrics import timing
+
 from ..base import Agent, AgentConfig, AgentResult
 from ..registry import register_agent
 
@@ -120,7 +122,8 @@ class ClaudeCodeAgent(Agent):
         argv = self._claude_argv(user_prompt)
         env = self._claude_env(endpoint)
         logger.info("claude_code: launch with user_prompt:\n%s", user_prompt)
-        proc = await sandbox.exec(argv, env=env, timeout=cfg.run_timeout, workdir=workdir)
+        with timing("agent.run_s"):
+            proc = await sandbox.exec(argv, env=env, timeout=cfg.run_timeout, workdir=workdir)
 
         out_tail = (proc.stdout or "").strip()[-2000:]
         err_tail = (proc.stderr or "").strip()[-2000:]

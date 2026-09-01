@@ -56,7 +56,6 @@ def test_task_span_reports_identity_and_result(monkeypatch: pytest.MonkeyPatch) 
     ) as span:
         span.record_result(
             SimpleNamespace(reward=0.5, accuracy=1.0, finished=True),
-            reward_posted=True,
         )
 
     attributes = captured[0]["attributes"]
@@ -67,7 +66,7 @@ def test_task_span_reports_identity_and_result(monkeypatch: pytest.MonkeyPatch) 
     assert attributes["reward"] == 0.5
     assert attributes["accuracy"] == 1.0
     assert attributes["finished"] is True
-    assert attributes["reward_posted"] is True
+    assert "reward_posted" not in attributes
 
 
 def test_generation_span_success_uses_chain_lane(monkeypatch: pytest.MonkeyPatch) -> None:

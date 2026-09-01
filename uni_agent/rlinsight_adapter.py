@@ -135,13 +135,11 @@ class TaskSpanState:
     reward: Any = None
     accuracy: Any = None
     finished: Any = None
-    reward_posted: bool = False
 
-    def record_result(self, result: Any, *, reward_posted: bool) -> None:
+    def record_result(self, result: Any) -> None:
         self.reward = result.reward
         self.accuracy = result.accuracy
         self.finished = result.finished
-        self.reward_posted = reward_posted
 
     def _attributes(self) -> dict[str, Any]:
         return {
@@ -153,7 +151,6 @@ class TaskSpanState:
             "reward": self.reward,
             "accuracy": self.accuracy,
             "finished": self.finished,
-            "reward_posted": self.reward_posted,
             "error": self.error,
         }
 

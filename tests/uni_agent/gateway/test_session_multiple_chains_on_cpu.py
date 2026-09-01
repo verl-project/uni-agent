@@ -87,6 +87,12 @@ def test_gateway_session_enables_last_assistant_rollback_by_default():
     assert session._enable_last_assistant_rollback is True
 
 
+def _extra_fields(trajectory) -> dict:
+    extra = dict(trajectory.extra_fields)
+    extra.pop("agent_metrics", None)
+    return extra
+
+
 async def _run(session: GatewaySession, backend: SequencedBackend, messages: list[dict], **payload_extra):
     request = openai_to_internal(
         {"model": "dummy-model", "messages": messages, **payload_extra},
@@ -1052,8 +1058,8 @@ async def test_multiple_chains_length_exhaustion_orders_before_later_fresh_chain
     assert len(backend.calls) == 2
     assert backend.steps == []
     assert [_decode_response_ids(trajectory.response_ids) for trajectory in trajectories] == ["FULL", "NEW"]
-    assert trajectories[0].extra_fields == {"materialization_reason": "max_trajectory_length"}
-    assert trajectories[1].extra_fields == {}
+    assert _extra_fields(trajectories[0]) == {"materialization_reason": "max_trajectory_length"}
+    assert _extra_fields(trajectories[1]) == {}
 
 
 @pytest.mark.asyncio
@@ -1090,7 +1096,7 @@ async def test_multiple_chains_exactly_exhausted_chain_skips_new_media_extractio
     assert len(backend.calls) == 1
     assert backend.steps == ["SHOULD_NOT_RUN"]
     assert trajectories[0].multi_modal_data is None
-    assert trajectories[0].extra_fields == {"materialization_reason": "max_trajectory_length"}
+    assert _extra_fields(trajectories[0]) == {"materialization_reason": "max_trajectory_length"}
 
 
 @pytest.mark.asyncio
@@ -1154,7 +1160,7 @@ async def test_multiple_chains_closes_when_continuation_fills_total_trajectory_c
     assert outcome.finish_reason == "length"
     assert len(backend.calls) == 1
     assert backend.steps == ["SHOULD_NOT_RUN"]
-    assert trajectories[0].extra_fields == {"materialization_reason": "max_trajectory_length"}
+    assert _extra_fields(trajectories[0]) == {"materialization_reason": "max_trajectory_length"}
 
 
 @pytest.mark.asyncio
@@ -1816,4 +1822,5 @@ async def test_weight_versions_absent_when_backend_omits_them():
     await _run(session, SequencedBackend(["ONLY"]), [{"role": "user", "content": "base"}])
     [trajectory] = await session.finalize()
 
-    assert trajectory.extra_fields == {}
+    assert trajectory.extra_fields.get("agent_metrics")
+    assert _extra_fields(trajectory) == {}

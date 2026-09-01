@@ -182,7 +182,6 @@ PY
     ++actor_rollout_ref.rollout.custom.agent_framework.agent_runners.task.trajectory_selection=all \
     ++actor_rollout_ref.rollout.custom.agent_framework.agent_runners.task.runner_kwargs.task_config_path="${TASK_CONFIG}" \
     ++actor_rollout_ref.rollout.custom.agent_framework.agent_runners.task.runner_kwargs.model_name="${SERVED_MODEL_NAME}" \
-    ++actor_rollout_ref.rollout.custom.agent_framework.agent_runners.task.runner_kwargs.report_reward=True \
     ++actor_rollout_ref.rollout.custom.agent_framework.use_reward_loop_worker=False \
     ++actor_rollout_ref.rollout.custom.agent_framework.mask_unfinished_episode=False \
     trainer.project_name="${PROJECT_NAME}" \

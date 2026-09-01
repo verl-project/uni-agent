@@ -77,9 +77,9 @@ agent sessions run.
 
 ### `TaskSpanState`
 
-Mutable state collected while a task runs. Call `record_result(result,
-reward_posted=...)` after the task and reward POST complete. The context manager
-reports the final `agent_task` span, including failures that propagate.
+Mutable state collected while a task runs. Call `record_result(result)` after
+the task completes. The context manager reports the final `agent_task` span,
+including failures that propagate.
 
 ### `task_span(tools_kwargs, task_name, prompt)`
 

@@ -9,7 +9,7 @@
 #
 # which resolves each sample's task from task_config_mini_swe_agent.yaml
 # (agent + sandbox defaults), deep-merges the sample values and the runtime
-# model binding, and returns the reward via report_reward=True.
+# model binding, and returns a TaskResult that the framework scores from.
 #
 # Usage:
 #   bash examples/mini_swe_agent/run_train.sh
@@ -125,7 +125,6 @@ RUNNER_ARGS=(
     "+actor_rollout_ref.rollout.custom.agent_framework.agent_runners.task.session_timeout_seconds=${SESSION_TIMEOUT_SECONDS}"
     "+actor_rollout_ref.rollout.custom.agent_framework.agent_runners.task.runner_kwargs.task_config_path=${TASK_CONFIG}"
     "+actor_rollout_ref.rollout.custom.agent_framework.agent_runners.task.runner_kwargs.model_name=${SERVED_MODEL_NAME}"
-    "+actor_rollout_ref.rollout.custom.agent_framework.agent_runners.task.runner_kwargs.report_reward=True"
     "+actor_rollout_ref.rollout.custom.agent_framework.mask_unfinished_episode=${MASK_UNFINISHED_EPISODE}"
     "+actor_rollout_ref.rollout.custom.agent_framework.use_reward_loop_worker=False"
 )

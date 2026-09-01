@@ -95,6 +95,7 @@ class TaskResult:
     accuracy: float | None = None
     finished: bool | None = None
     extra_info: dict[str, Any] | None = None
+    metrics: dict[str, Any] | None = None
 
 
 class Task(ABC):
@@ -102,7 +103,7 @@ class Task(ABC):
 
     Concrete tasks live in ``tasks/<name>/task.py``: set :attr:`name`, subclass
     :class:`TaskConfig`, and implement :meth:`run` (which also does reward scoring).
-    The base provides the config -> runtime glue (:meth:`build_sandbox`,
+    The base also provides the config -> runtime glue (:meth:`build_sandbox`,
     :meth:`build_agent`) so runners stay generic.
     """
 

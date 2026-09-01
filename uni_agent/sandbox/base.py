@@ -299,6 +299,12 @@ class Sandbox(abc.ABC):
         and is bounded by ``SANDBOX_STARTUP_TIMEOUT``; the slot is released before the
         retry backoff and the cleanup ``stop()``.
         """
+        from ..metrics import timing
+
+        with timing("env.start_s"):
+            return await self._start_with_retry(retry)
+
+    async def _start_with_retry(self, retry: int) -> Sandbox:
         retry = max(1, retry)
         last_exc: BaseException | None = None
         for attempt in range(1, retry + 1):

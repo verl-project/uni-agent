@@ -7,6 +7,7 @@ import logging
 
 from pydantic import Field
 
+from ...metrics import task_metrics, timing
 from ..base import Task, TaskConfig, TaskResult
 from ..registry import register_task
 
@@ -31,40 +32,50 @@ class SWEBenchTask(Task):
     config_model = SWEBenchTaskConfig
 
     async def run(self) -> TaskResult:
-        cfg: SWEBenchTaskConfig = self.config  # type: ignore[assignment]
-        sample = cfg.metadata  # the dataset sample is carried on the task config
+        async with task_metrics() as collector:
+            with timing("task.total_s"):
+                cfg: SWEBenchTaskConfig = self.config  # type: ignore[assignment]
+                sample = cfg.metadata  # the dataset sample is carried on the task config
 
-        instance_id = sample.get("instance_id", "?") if isinstance(sample, dict) else "?"
-        task_config_dump = cfg.model_dump(mode="json", exclude={"metadata", "prompt"})
-        logger.info(
-            f"starting swe_bench task (instance_id={instance_id}, run_oracle_solution={cfg.run_oracle_solution})\n"
-            f"task config: {json.dumps(task_config_dump, indent=2)}"
-        )
-        async with self.build_sandbox() as sandbox:
-            if cfg.run_oracle_solution:
-                logger.info("applying gold patch to /testbed")
-                await sandbox.write_file("/tmp/gold_patch.patch", sample["patch"])
-                await sandbox.exec(["git", "apply", "--whitespace=fix", "/tmp/gold_patch.patch"], workdir="/testbed")
-                finished = True
-            else:
-                agent = self.build_agent()
-                messages = cfg.prompt
-                # The endpoint the agent calls lives on cfg.agent.model (the agent validates it).
-                agent_result = await agent.run(
-                    sandbox=sandbox,
-                    messages=messages,
-                    workdir="/testbed",
+                instance_id = sample.get("instance_id", "?") if isinstance(sample, dict) else "?"
+                task_config_dump = cfg.model_dump(mode="json", exclude={"metadata", "prompt"})
+                logger.info(
+                    "starting swe_bench task "
+                    f"(instance_id={instance_id}, run_oracle_solution={cfg.run_oracle_solution})\n"
+                    f"task config: {json.dumps(task_config_dump, indent=2)}"
                 )
-                finished = agent_result.finished
+                async with self.build_sandbox() as sandbox:
+                    if cfg.run_oracle_solution:
+                        logger.info("applying gold patch to /testbed")
+                        await sandbox.write_file("/tmp/gold_patch.patch", sample["patch"])
+                        await sandbox.exec(
+                            ["git", "apply", "--whitespace=fix", "/tmp/gold_patch.patch"],
+                            workdir="/testbed",
+                        )
+                        finished = True
+                    else:
+                        agent = self.build_agent()
+                        messages = cfg.prompt
+                        # The endpoint the agent calls lives on cfg.agent.model (the agent validates it).
+                        with timing("task.generate_s"):
+                            agent_result = await agent.run(
+                                sandbox=sandbox,
+                                messages=messages,
+                                workdir="/testbed",
+                            )
+                        finished = agent_result.finished
 
-            from .reward import compute_reward
+                    from .reward import compute_reward
 
-            result = await compute_reward(sample, sandbox, eval_timeout=cfg.eval_timeout)
+                    with timing("reward.s"):
+                        result = await compute_reward(sample, sandbox, eval_timeout=cfg.eval_timeout)
 
-            logger.info(f"task done: resolved={result['resolved']}")
-            return TaskResult(
-                reward=float(result["resolved"]),
-                accuracy=float(result["resolved"]),
-                finished=finished,
-                extra_info=result,
-            )
+                    logger.info(f"task done: resolved={result['resolved']}")
+                    outcome = TaskResult(
+                        reward=float(result["resolved"]),
+                        accuracy=float(result["resolved"]),
+                        finished=finished,
+                        extra_info=result,
+                    )
+            outcome.metrics = collector.metrics()
+            return outcome
