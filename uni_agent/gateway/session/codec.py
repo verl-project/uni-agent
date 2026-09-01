@@ -16,6 +16,8 @@ from uuid import uuid4
 from verl.utils.tokenizer import normalize_token_ids
 from verl.utils.tokenizer.chat_template import apply_chat_template as _apply_chat_template
 from verl.utils.tokenizer.chat_template import initialize_turn_separator
+from verl.utils.tokenizer.continuous_token import MergeResult
+from verl.utils.tokenizer.continuous_token_wiring import create_continuous_token_builder
 
 # Map backend stop_reason values into the gateway's internal finish_reason vocabulary.
 _FINISH_REASON_MAP = {
@@ -99,22 +101,36 @@ class MessageCodec:
         tool_parser_name: str | None = None,
         rollout_backend: str | None = None,
         enable_tool_parser_cache: bool = True,
+        hf_model_type: str | None = None,
         apply_chat_template_kwargs: dict[str, Any] | None = None,
+        mm_processor_kwargs: dict[str, Any] | None = None,
     ):
         self._tokenizer = tokenizer
         self._processor = processor
         self._vision_info_extractor = vision_info_extractor or self._default_vision_info_extractor
         self._vision_info_extractor_kwargs = dict(vision_info_extractor_kwargs or {})
         self._apply_chat_template_kwargs = dict(apply_chat_template_kwargs or {})
+        self._mm_processor_kwargs = dict(mm_processor_kwargs or {})
+        self._continuous_token_builder = create_continuous_token_builder(
+            tokenizer,
+            hf_model_type=hf_model_type,
+            chat_template_kwargs=self._apply_chat_template_kwargs,
+            mm_processor_kwargs=self._mm_processor_kwargs,
+            processor=processor,
+        )
         processing_class = self._processor if self._processor is not None else tokenizer
-        self._generation_prompt = initialize_generation_prompt(
-            processing_class,
-            **self._apply_chat_template_kwargs,
-        )
-        self._turn_separator = initialize_turn_separator(
-            processing_class,
-            **self._apply_chat_template_kwargs,
-        )
+        if hasattr(processing_class, "chat_template") and processing_class.chat_template is None:
+            self._generation_prompt = []
+            self._turn_separator = []
+        else:
+            self._generation_prompt = initialize_generation_prompt(
+                processing_class,
+                **self._apply_chat_template_kwargs,
+            )
+            self._turn_separator = initialize_turn_separator(
+                processing_class,
+                **self._apply_chat_template_kwargs,
+            )
         self._tool_parser_name = tool_parser_name
         self._rollout_backend = rollout_backend
         self._enable_tool_parser_cache = enable_tool_parser_cache
@@ -127,6 +143,11 @@ class MessageCodec:
         # optimization for parser implementations that require request-scoped
         # instances.
         self._tool_parser_cache: dict[tuple[str, ...], Any] = {}
+
+    @property
+    def mm_processor_kwargs(self) -> dict[str, Any]:
+        """Return processor kwargs shared by CT rendering and inference."""
+        return dict(self._mm_processor_kwargs)
 
     @property
     def generation_prompt(self) -> list[int]:
@@ -211,24 +232,86 @@ class MessageCodec:
         )
         return normalize_token_ids(model_inputs["input_ids"])
 
-    def encode_full(
+    def build_initial_tokens(
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         image_data: list[Any] | None = None,
         video_data: list[Any] | None = None,
     ) -> list[int]:
-        """Encode a full chat history into prompt token IDs."""
-        processing_class = self._processor if self._processor is not None else self._tokenizer
-        raw_prompt = _apply_chat_template(
-            processing_class,
+        """Build the initial runtime token stream."""
+        return self._continuous_token_builder.build_initial_tokens(
             messages,
             tools=tools,
-            add_generation_prompt=True,
-            tokenize=False,
-            **self._apply_chat_template_kwargs,
+            images=image_data,
+            videos=video_data,
         )
-        return self._encode_prompt_text(raw_prompt, image_data, video_data)
+
+    def merge_assistant_tokens(
+        self,
+        runtime_token_ids: list[int],
+        assistant_token_ids: list[int],
+        response_mask: list[int],
+        response_logprobs: list[float] | None = None,
+        *,
+        assistant_logprobs: list[float] | None = None,
+    ) -> tuple[list[int], list[int], list[float] | None]:
+        """Merge model-generated tokens and align response metadata."""
+        merge_result = self._continuous_token_builder.merge_assistant_tokens(
+            runtime_token_ids,
+            assistant_token_ids,
+        )
+        response_mask, response_logprobs = self._continuous_token_builder.align_response_metadata(
+            merge_result,
+            response_mask,
+            response_logprobs,
+            assistant_logprobs=assistant_logprobs,
+        )
+        return merge_result.token_ids, response_mask, response_logprobs
+
+    def merge_context_tokens(
+        self,
+        previous_messages: list[dict[str, Any]],
+        updated_messages: list[dict[str, Any]],
+        runtime_token_ids: list[int],
+        response_mask: list[int],
+        response_logprobs: list[float] | None = None,
+        *,
+        tools: list[dict[str, Any]] | None = None,
+        is_rollback: bool = False,
+        image_data: list[Any] | None = None,
+        video_data: list[Any] | None = None,
+    ) -> tuple[list[int], list[int], list[float] | None]:
+        """Merge appended context and align response metadata."""
+        appended_messages = updated_messages[len(previous_messages) :]
+        if is_rollback:
+            incremental_ids = self.encode_incremental(
+                appended_messages,
+                image_data=image_data,
+                video_data=video_data,
+            )
+            merge_result = MergeResult(
+                token_ids=list(runtime_token_ids) + incremental_ids,
+                appended_token_count=len(incremental_ids),
+                kind="non_assistant",
+            )
+        else:
+            if image_data or video_data:
+                raise ValueError(
+                    "Continuous Token context merging does not currently support incremental image or video data"
+                )
+            merge_result = self._continuous_token_builder.merge_non_assistant_tokens(
+                previous_messages,
+                list(previous_messages) + appended_messages,
+                runtime_token_ids,
+                tools=tools,
+            )
+        response_mask, response_logprobs = self._continuous_token_builder.align_response_metadata(
+            merge_result,
+            response_mask,
+            response_logprobs,
+        )
+        return merge_result.token_ids, response_mask, response_logprobs
 
     def encode_incremental(
         self,
@@ -236,7 +319,7 @@ class MessageCodec:
         image_data: list[Any] | None = None,
         video_data: list[Any] | None = None,
     ) -> list[int]:
-        """Encode continuation messages using a dummy-user anchored delta."""
+        """Legacy rollback-only incremental encoding using a dummy-user delta."""
         if not messages:
             return []
 

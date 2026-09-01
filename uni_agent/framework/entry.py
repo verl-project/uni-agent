@@ -24,7 +24,7 @@ from uni_agent.rlinsight_adapter import init_rollout_trace_config
 from verl.utils.config import omega_conf_to_dataclass
 from verl.utils.import_utils import load_class_from_fqn
 from verl.utils.transferqueue_utils import tq
-from verl.workers.config.model import HFModelConfig
+from verl.workers.config import HFModelConfig, RolloutConfig
 
 _DEFAULT_FRAMEWORK_CLASS = "uni_agent.framework.framework.GatewayAgentFramework"
 
@@ -32,23 +32,29 @@ _DEFAULT_FRAMEWORK_CLASS = "uni_agent.framework.framework.GatewayAgentFramework"
 def build_gateway_manager(*, config, llm_client) -> GatewayManager:
     """Spawn the gateway actor pool (driver-side, driver-owned) and return its manager."""
     # TODO(phase-b): switch this to actor_rollout_ref.rollout.agent_framework.*
-    af_cfg = OmegaConf.select(config, "actor_rollout_ref.rollout.custom.agent_framework", default={}) or {}
-    apply_chat_template_kwargs = OmegaConf.select(config, "data.apply_chat_template_kwargs", default={}) or {}
-    if OmegaConf.is_config(apply_chat_template_kwargs):
-        apply_chat_template_kwargs = OmegaConf.to_container(apply_chat_template_kwargs, resolve=True)
+    data_cfg = config.data
+    model_cfg = config.actor_rollout_ref.model
+    rollout_cfg = config.actor_rollout_ref.rollout
+    af_cfg = rollout_cfg.custom.agent_framework
+
+    apply_chat_template_kwargs = data_cfg.get("apply_chat_template_kwargs", {})
+    mm_processor_kwargs = data_cfg.get("mm_processor_kwargs", {})
 
     # Match AgentLoopWorker pattern: self-load tokenizer/processor via HFModelConfig.
-    model_config: HFModelConfig = omega_conf_to_dataclass(config.actor_rollout_ref.model)
+    rollout_config: RolloutConfig = omega_conf_to_dataclass(rollout_cfg)
+    model_config: HFModelConfig = omega_conf_to_dataclass(model_cfg)
     gateway_actor_config = GatewayActorConfig(
         tokenizer=model_config.tokenizer,
         processor=model_config.processor,
-        tool_parser_name=config.actor_rollout_ref.rollout.get("multi_turn", {}).get("format"),
-        rollout_backend=config.actor_rollout_ref.rollout.get("name"),
+        tool_parser_name=rollout_config.multi_turn.format,
+        rollout_backend=rollout_config.name,
         enable_tool_parser_cache=af_cfg.get("enable_tool_parser_cache", True),
+        hf_model_type=getattr(model_config.hf_config, "model_type", None),
         apply_chat_template_kwargs=dict(apply_chat_template_kwargs),
-        prompt_length=config.actor_rollout_ref.rollout.prompt_length,
-        response_length=config.actor_rollout_ref.rollout.response_length,
-        enable_last_assistant_rollback=af_cfg.get("enable_last_assistant_rollback", True),
+        mm_processor_kwargs=dict(mm_processor_kwargs),
+        prompt_length=rollout_config.prompt_length,
+        response_length=rollout_config.response_length,
+        enable_last_assistant_rollback=af_cfg.get("enable_last_assistant_rollback", False),
     )
 
     return GatewayManager(

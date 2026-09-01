@@ -32,6 +32,7 @@ def compute_multi_modal_inputs(
     processor,
     input_ids: torch.Tensor,
     multi_modal_data: dict[str, Any] | None,
+    mm_processor_kwargs: dict[str, Any] | None = None,
 ) -> dict[str, torch.Tensor]:
     """Return processor-produced multimodal tensors for a single sample."""
     if processor is None or not multi_modal_data:
@@ -40,14 +41,17 @@ def compute_multi_modal_inputs(
     images = multi_modal_data.get("images")
     videos, video_metadata = _split_videos_and_metadata(multi_modal_data.get("videos"))
     current_text = processor.tokenizer.decode(input_ids.squeeze(0), skip_special_tokens=True)
+    processor_kwargs = dict(mm_processor_kwargs or {})
+    processor_kwargs.setdefault("return_tensors", "pt")
+    processor_kwargs.setdefault("do_sample_frames", False)
+    if video_metadata is not None:
+        processor_kwargs.setdefault("video_metadata", video_metadata)
     multi_modal_inputs = _to_plain_tensor_dict(
         processor(
             text=[current_text],
             images=images,
             videos=videos,
-            video_metadata=video_metadata,
-            return_tensors="pt",
-            do_sample_frames=False,
+            **processor_kwargs,
         )
     )
     multi_modal_inputs.pop("input_ids", None)

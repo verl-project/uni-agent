@@ -365,9 +365,8 @@ def test_prefix_canonicalization_ignores_provider_ids_and_normalizes_arguments()
 
 
 @pytest.mark.asyncio
-async def test_config_chat_template_kwargs_forwarded(monkeypatch):
+async def test_config_chat_template_kwargs_forwarded():
     """Codec-level chat-template kwargs are copied and forwarded."""
-    import uni_agent.gateway.session.codec as codec_mod
     from uni_agent.gateway.config import GatewayActorConfig
     from uni_agent.gateway.gateway import _GatewayActor
 
@@ -380,15 +379,6 @@ async def test_config_chat_template_kwargs_forwarded(monkeypatch):
         InspectingBackend(),
     )
     template_kwargs["enable_thinking"] = True
-    captured_kwargs = {}
-    template_fn_name = "_apply_chat" + "_template"
-    original_template = getattr(codec_mod, template_fn_name)
-
-    def _spy(tokenizer, messages, **kwargs):
-        captured_kwargs.update(kwargs)
-        return original_template(tokenizer, messages, **kwargs)
-
-    monkeypatch.setattr(codec_mod, template_fn_name, _spy)
     await actor.start()
     try:
         await actor.create_session("s1")
@@ -399,8 +389,10 @@ async def test_config_chat_template_kwargs_forwarded(monkeypatch):
             },
         )
 
-        assert captured_kwargs["enable_thinking"] is False
-        assert captured_kwargs["default_only"] == "kept"
+        assert actor._codec._continuous_token_builder.chat_template_kwargs == {
+            "enable_thinking": False,
+            "default_only": "kept",
+        }
     finally:
         await actor.shutdown()
 
@@ -566,14 +558,19 @@ async def test_tool_choice_none_skips_tool_injection_and_parser(monkeypatch):
         QueuedBackend(['<tool_call>\n{"name": "foo", "arguments": {}}\n</tool_call>']),
     )
     captured_tools = {}
-    template_fn_name = "_apply_chat" + "_template"
-    original_template = getattr(codec_mod, template_fn_name)
+    original_build_initial_tokens = codec_mod.MessageCodec.build_initial_tokens
 
-    def _spy(tokenizer, messages, **kwargs):
-        captured_tools["tools"] = kwargs.get("tools")
-        return original_template(tokenizer, messages, **kwargs)
+    def _spy(self, messages, tools=None, image_data=None, video_data=None):
+        captured_tools["tools"] = tools
+        return original_build_initial_tokens(
+            self,
+            messages,
+            tools=tools,
+            image_data=image_data,
+            video_data=video_data,
+        )
 
-    monkeypatch.setattr(codec_mod, template_fn_name, _spy)
+    monkeypatch.setattr(codec_mod.MessageCodec, "build_initial_tokens", _spy)
     await actor.start()
     try:
         await actor.create_session("s1")
@@ -825,19 +822,11 @@ async def test_gateway_actor_multimodal_reference_change_splits_trajectory(ray_r
 
 
 @pytest.mark.asyncio
-async def test_gateway_actor_continuation_with_tool_returned_image_appends_media(monkeypatch):
-    """When a tool-call continuation brings a new image (e.g. a zoomed crop),
-    the new image is appended to the session media accumulator. The full
-    ``prompt_ids`` sequence (initial prompt + tool-call tokens + incremental
-    prompt) is verified token-by-token."""
+async def test_gateway_actor_rejects_ct_continuation_with_tool_returned_image(monkeypatch):
+    """Reject incremental media until Continuous Token context merging supports it."""
     import uni_agent.gateway.session.codec as codec_mod
     from uni_agent.gateway.config import GatewayActorConfig
     from uni_agent.gateway.gateway import _GatewayActor
-    from verl.utils.tokenizer.chat_template import (
-        apply_chat_template,
-        initialize_system_prompt,
-        initialize_turn_separator,
-    )
 
     monkeypatch.setattr(codec_mod.MessageCodec, "_extract_tool_calls", fake_tool_call_dispatch)
     processor = FakeProcessor()
@@ -882,59 +871,21 @@ async def test_gateway_actor_continuation_with_tool_returned_image_appends_media
         ],
     }
 
-    second = await actor._handle_openai_chat_completions(
-        "session-mm-tool-image",
-        {
-            "model": "dummy-model",
-            "tools": tools,
-            "messages": [initial_message, assistant_message, tool_message],
-        },
-    )
+    with pytest.raises(ValueError, match="does not currently support incremental image or video data"):
+        await actor._handle_openai_chat_completions(
+            "session-mm-tool-image",
+            {
+                "model": "dummy-model",
+                "tools": tools,
+                "messages": [initial_message, assistant_message, tool_message],
+            },
+        )
 
     trajectories = await actor.finalize_session("session-mm-tool-image")
     await actor.shutdown()
 
-    assert second.status_code == 200
-    second_call = json.loads(json.loads(second.body)["choices"][0]["message"]["content"])
-    assert second_call["image_data"] == ["image://a.png", "image://tool-b.png"]
     assert len(trajectories) == 1
-    assert trajectories[0].multi_modal_data == {
-        "images": ["image://a.png", "image://tool-b.png"],
-    }
-
-    initial_raw_prompt = apply_chat_template(
-        processor,
-        [initial_message],
-        tools=tools,
-        tokenize=False,
-        add_generation_prompt=True,
-    )
-    initial_prompt_ids = processor(
-        text=[initial_raw_prompt],
-        images=["image://a.png"],
-        videos=None,
-        return_tensors="pt",
-        do_sample_frames=False,
-    )["input_ids"][0].tolist()
-
-    incremental_raw_prompt = apply_chat_template(
-        processor,
-        [tool_message],
-        tokenize=False,
-        add_generation_prompt=True,
-    )
-    incremental_prompt_ids = processor(
-        text=[incremental_raw_prompt],
-        images=["image://tool-b.png"],
-        videos=None,
-        return_tensors="pt",
-        do_sample_frames=False,
-    )["input_ids"][0].tolist()
-    system_prompt = initialize_system_prompt(processor)
-    turn_separator = initialize_turn_separator(processor)
-    expected_incremental_ids = turn_separator + incremental_prompt_ids[len(system_prompt) :]
-    expected_prompt_ids = initial_prompt_ids + [ord(char) for char in tool_call_text] + expected_incremental_ids
-    assert second_call["prompt_ids"] == expected_prompt_ids
+    assert trajectories[0].multi_modal_data == {"images": ["image://a.png"]}
 
 
 @pytest.mark.asyncio

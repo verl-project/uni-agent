@@ -35,7 +35,7 @@ def _decode_response_ids(response_ids: list[int]) -> str:
 
 
 def _prompt_length(messages: list[dict]) -> int:
-    return len(MessageCodec(FakeTokenizer()).encode_full(messages))
+    return len(MessageCodec(FakeTokenizer()).build_initial_tokens(messages))
 
 
 def _session(
@@ -48,6 +48,7 @@ def _session(
     processor=None,
     vision_info_extractor=None,
     tool_parser_name: str | None = None,
+    mm_processor_kwargs: dict | None = None,
 ) -> GatewaySession:
     return GatewaySession(
         SessionHandle(session_id=session_id),
@@ -56,6 +57,7 @@ def _session(
             processor=processor,
             vision_info_extractor=vision_info_extractor,
             tool_parser_name=tool_parser_name,
+            mm_processor_kwargs=mm_processor_kwargs,
         ),
         prompt_length=prompt_length,
         response_length=response_length,
@@ -100,7 +102,16 @@ class _LogprobBackend:
     def __init__(self, steps):
         self.steps = list(steps)
 
-    async def generate(self, request_id, *, prompt_ids, sampling_params, image_data=None, video_data=None):
+    async def generate(
+        self,
+        request_id,
+        *,
+        prompt_ids,
+        sampling_params,
+        image_data=None,
+        video_data=None,
+        mm_processor_kwargs=None,
+    ):
         text, log_probs = self.steps.pop(0)
         token_ids = _ids(text)
         if log_probs == "full":
@@ -115,7 +126,16 @@ class _VersionedBackend:
         # steps: list of (text, min_global_steps, max_global_steps)
         self.steps = list(steps)
 
-    async def generate(self, request_id, *, prompt_ids, sampling_params, image_data=None, video_data=None):
+    async def generate(
+        self,
+        request_id,
+        *,
+        prompt_ids,
+        sampling_params,
+        image_data=None,
+        video_data=None,
+        mm_processor_kwargs=None,
+    ):
         text, min_steps, max_steps = self.steps.pop(0)
         token_ids = _ids(text)
         return TokenOutput(
@@ -132,7 +152,16 @@ class _ControlledParallelBackend:
         self.calls = []
         self._call_added = asyncio.Event()
 
-    async def generate(self, request_id, *, prompt_ids, sampling_params, image_data=None, video_data=None):
+    async def generate(
+        self,
+        request_id,
+        *,
+        prompt_ids,
+        sampling_params,
+        image_data=None,
+        video_data=None,
+        mm_processor_kwargs=None,
+    ):
         step = self.steps.pop(0)
         call = {
             "request_id": request_id,
@@ -298,10 +327,10 @@ async def test_first_assistant_rewrite_reuses_chain_without_stale_response():
     assert state["rollback_count"] == 1
     assert state["rollback_dropped_trainable_tokens_total"] == len("FORMAT_ERROR")
     chain = session.active_chains[0]
-    expected_prompt_ids = codec.encode_full(first_messages)
+    expected_prompt_ids = codec.build_initial_tokens(first_messages)
     del expected_prompt_ids[-len(codec.turn_separator) - len(codec.generation_prompt) :]
     incremental_ids = codec.encode_incremental(rewrite_messages[len(first_messages) :])
-    assert backend.calls[1]["prompt_ids"] == codec.encode_full(rewrite_messages)
+    assert backend.calls[1]["prompt_ids"] == codec.build_initial_tokens(rewrite_messages)
     assert chain.buffer.prompt_ids == expected_prompt_ids
     assert chain.buffer.response_ids == incremental_ids + _ids("FIXED")
     assert chain.buffer.response_mask == [0] * len(incremental_ids) + [1] * len("FIXED")
@@ -376,7 +405,7 @@ async def test_first_assistant_rewrite_with_assistant_tool_context_reuses_chain(
     assert [chain.chain_id for chain in session.active_chains] == [1]
     chain = session.active_chains[0]
     codec = session._codec
-    assert backend.calls[1]["prompt_ids"] == codec.encode_full(rewrite_messages)
+    assert backend.calls[1]["prompt_ids"] == codec.build_initial_tokens(rewrite_messages)
     assert chain.buffer.response_ids[-len("FIXED") :] == _ids("FIXED")
 
 
@@ -403,7 +432,7 @@ async def test_later_assistant_rollback_removes_only_the_response_side_gp():
 
     codec = session._codec
     generation_prompt = codec.generation_prompt
-    expected_context = codec.encode_full(first_messages) + _ids("A1")
+    expected_context = codec.build_initial_tokens(first_messages) + _ids("A1")
     expected_context += codec.encode_incremental([second_messages[2]])[: -len(generation_prompt)]
     expected_context += codec.encode_incremental([rewrite_messages[-1]])
     assert backend.calls[2]["prompt_ids"] == expected_context
@@ -411,46 +440,6 @@ async def test_later_assistant_rollback_removes_only_the_response_side_gp():
     assert _decode_response_ids(chain.buffer.response_ids) == ("A1user:second\nuser:replacement\nassistant:FIXED")
     assert chain.buffer.response_mask == (
         [1] * len("A1") + [0] * len("user:second\nuser:replacement\nassistant:") + [1] * len("FIXED")
-    )
-
-
-@pytest.mark.asyncio
-async def test_later_user_rollback_deduplicates_incremental_turn_separator():
-    """Keep one turn separator when incremental encoding restores the retained boundary."""
-
-    class _LeadingSeparatorCodec(MessageCodec):
-        def __init__(self):
-            super().__init__(FakeTokenizer())
-            self._turn_separator = _ids("\n")
-
-        def encode_incremental(self, messages, image_data=None, video_data=None):
-            return self.turn_separator + self._tokenizer.apply_chat_template(
-                messages,
-                tokenize=True,
-                add_generation_prompt=True,
-            )
-
-    codec = _LeadingSeparatorCodec()
-    session = GatewaySession(
-        SessionHandle(session_id="rollback-separator"),
-        codec,
-        enable_last_assistant_rollback=True,
-    )
-    backend = SequencedBackend(["A1", "A2", "FIXED"])
-    first_messages = [{"role": "user", "content": "start"}]
-    second_messages = [
-        *first_messages,
-        {"role": "assistant", "content": "A1"},
-        {"role": "user", "content": "second"},
-    ]
-    rewrite_messages = [*second_messages, {"role": "user", "content": "replacement"}]
-
-    await _run(session, backend, first_messages)
-    await _run(session, backend, second_messages)
-    await _run(session, backend, rewrite_messages)
-
-    assert _decode_response_ids(backend.calls[2]["prompt_ids"]) == (
-        "user:start\nassistant:A1\nuser:second\nuser:replacement\nassistant:"
     )
 
 
@@ -801,7 +790,7 @@ async def test_multiple_chains_reserved_siblings_fall_back_before_starting_new_c
     assert all(0 in chains_by_id[chain_id].buffer.response_mask for chain_id in (1, 2, 3))
 
     new_chain = chains_by_id[4]
-    assert new_chain.buffer.prompt_ids == session._codec.encode_full(continuation)
+    assert new_chain.buffer.prompt_ids == session._codec.build_initial_tokens(continuation)
     assert new_chain.buffer.response_ids == _ids("NEW")
     assert new_chain.buffer.response_mask == [1] * len("NEW")
 
@@ -1138,7 +1127,7 @@ async def test_multiple_chains_closes_when_continuation_fills_total_trajectory_c
         {"role": "user", "content": "continue"},
     ]
     codec = MessageCodec(FakeTokenizer())
-    prompt_length = len(codec.encode_full(first_messages))
+    prompt_length = len(codec.build_initial_tokens(first_messages))
     incremental_length = len(codec.encode_incremental(continuation_messages[-1:]))
     session = _session(
         "total-capacity-exhausted",
@@ -1177,6 +1166,26 @@ async def test_multiple_chains_returns_length_when_initial_context_fills_total_t
     assert backend.steps == ["SHOULD_NOT_RUN"]
     assert session.active_chains == []
     assert await session.finalize() == []
+
+
+@pytest.mark.asyncio
+async def test_multimodal_processor_kwargs_stay_aligned_across_gateway_paths():
+    processor = FakeProcessor()
+    mm_processor_kwargs = {"max_pixels": 1024}
+    session = _session(
+        "mm-processor-kwargs",
+        processor=processor,
+        vision_info_extractor=fake_vision_info_extractor,
+        mm_processor_kwargs=mm_processor_kwargs,
+    )
+    backend = SequencedBackend(["DONE"])
+
+    await _run(session, backend, [_image_message("image://a.png", "describe")])
+    [trajectory] = await session.finalize()
+
+    assert processor.last_processor_call["extra_kwargs"] == mm_processor_kwargs
+    assert backend.calls[0]["mm_processor_kwargs"] == mm_processor_kwargs
+    assert trajectory.extra_fields["mm_processor_kwargs"] == mm_processor_kwargs
 
 
 @pytest.mark.asyncio
@@ -1279,44 +1288,35 @@ async def test_multiple_chains_video_media_stays_chain_local():
     ],
 )
 @pytest.mark.asyncio
-async def test_multiple_chains_length_exhaustion_does_not_materialize_unsent_media(
+async def test_multiple_chains_rejects_incremental_media_without_mutating_stored_media(
     media_kind, message_factory, extractor, sent_url, unsent_url, backend_field, trajectory_key
 ):
-    """Exclude unsent media when length exhaustion skips backend generation."""
+    """Reject unsupported CT media without mutating the selected chain."""
     first_messages = [message_factory(sent_url, "describe first")]
-    exhausted_messages = [
+    continuation_messages = [
         *first_messages,
         {"role": "assistant", "content": "FIRST"},
-        message_factory(unsent_url, "new media that exhausts length"),
+        message_factory(unsent_url, "new incremental media"),
     ]
     expected_sent = [sent_url] if media_kind == "image" else [(sent_url, {"url": sent_url})]
-    prompt_length = len(
-        MessageCodec(FakeTokenizer(), processor=FakeProcessor()).encode_full(
-            first_messages,
-            image_data=expected_sent if media_kind == "image" else None,
-            video_data=expected_sent if media_kind == "video" else None,
-        )
-    )
     session = _session(
-        f"length-unsent-{media_kind}",
-        prompt_length=prompt_length,
-        response_length=len("FIRST") + 1,
+        f"incremental-media-{media_kind}",
         processor=FakeProcessor(),
         vision_info_extractor=extractor,
     )
     backend = SequencedBackend(["FIRST", "SHOULD_NOT_RUN"])
 
     await _run(session, backend, first_messages)
-    outcome = await _run(session, backend, exhausted_messages)
+    with pytest.raises(ValueError, match="does not currently support incremental image or video data"):
+        await _run(session, backend, continuation_messages)
     trajectories = await session.finalize()
 
-    assert outcome.finish_reason == "length"
     assert len(backend.calls) == 1
     assert backend.steps == ["SHOULD_NOT_RUN"]
     assert backend.calls[0][backend_field] == expected_sent
     assert len(trajectories) == 1
     assert trajectories[0].multi_modal_data == {trajectory_key: expected_sent}
-    assert trajectories[0].extra_fields["materialization_reason"] == "max_trajectory_length"
+    assert trajectories[0].extra_fields == {}
 
 
 @pytest.mark.asyncio

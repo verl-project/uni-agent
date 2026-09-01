@@ -1094,10 +1094,14 @@ class GatewayAgentFramework(AgentFramework):
         )
         input_ids = torch.cat([prompts, responses], dim=0)
         attention_mask = torch.ones_like(input_ids, dtype=torch.long)
+        mm_processor_kwargs = trajectory.extra_fields.get("mm_processor_kwargs")
+        if mm_processor_kwargs is not None and not isinstance(mm_processor_kwargs, dict):
+            raise ValueError("trajectory extra_fields.mm_processor_kwargs must be a dict or null")
         multi_modal_inputs = compute_multi_modal_inputs(
             self._processor,
             input_ids.unsqueeze(0),
             trajectory.multi_modal_data,
+            mm_processor_kwargs,
         )
         if self._processor is None:
             position_ids = compute_position_id_with_mask(attention_mask.unsqueeze(0)).squeeze(0)

@@ -25,7 +25,11 @@ class GatewayActorConfig:
         enable_tool_parser_cache: Whether to reuse parser instances within an
             actor-scoped codec. Disable for parsers that require request-scoped
             instances; enabled by default for the parser-construction speedup.
+        hf_model_type: Root Hugging Face ``config.json`` model type used to
+            select the Continuous Token builder.
         apply_chat_template_kwargs: Default kwargs passed to chat-template rendering.
+        mm_processor_kwargs: Static multimodal processor kwargs used by the
+            Continuous Token builder.
         allowed_request_sampling_param_keys: Request sampling keys accepted by the
             provider adapters when merging payload sampling params.
         vision_info_extractor: Optional async extractor for image/video inputs.
@@ -42,7 +46,9 @@ class GatewayActorConfig:
     tool_parser_name: str | None = None
     rollout_backend: str | None = None
     enable_tool_parser_cache: bool = True
+    hf_model_type: str | None = None
     apply_chat_template_kwargs: dict[str, Any] | None = None
+    mm_processor_kwargs: dict[str, Any] | None = None
     allowed_request_sampling_param_keys: set[str] | frozenset[str] | None = None
     vision_info_extractor: Callable | None = None
     vision_info_extractor_kwargs: dict[str, Any] | None = None
