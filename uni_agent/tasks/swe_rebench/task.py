@@ -49,44 +49,6 @@ test -z "$(git status --porcelain --untracked-files=all)"
 _GIT_CLEAN_TIMEOUT_SECONDS = 600
 
 
-async def _git_stdout(sandbox: SandboxBackend, *args: str) -> str:
-    result = await sandbox.exec(["git", *args], workdir="/testbed", timeout=120)
-    if result.exit_code != 0:
-        detail = result.stderr.strip() or result.stdout.strip() or f"exit code {result.exit_code}"
-        raise RuntimeError(f"git {' '.join(args)} failed: {detail}")
-    return result.stdout.strip()
-
-
-async def _warn_if_git_history_is_unsanitized(
-    sandbox: SandboxBackend,
-    *,
-    base_commit: str,
-    instance_id: str,
-) -> None:
-    head_commit = await _git_stdout(sandbox, "rev-parse", "HEAD")
-    future_commit_count = int(
-        await _git_stdout(
-            sandbox,
-            "rev-list",
-            "--count",
-            "HEAD",
-            "--all",
-            "--reflog",
-            "--not",
-            base_commit,
-        )
-    )
-    head_is_base_commit = head_commit == base_commit
-    if not head_is_base_commit or future_commit_count:
-        logger.warning(
-            f"git-check after-cleanup instance_id={instance_id} "
-            f"head_is_base_commit={str(head_is_base_commit).lower()} "
-            f"future_commits_visible={str(future_commit_count > 0).lower()} "
-            f"future_commit_count={future_commit_count} "
-            f"head={head_commit} base={base_commit}"
-        )
-
-
 async def _clean_git_history(sandbox: SandboxBackend, base_commit: str) -> None:
     result = await sandbox.exec_shell(
         _GIT_CLEAN_HISTORY,
@@ -133,11 +95,6 @@ class SWEREBenchTask(Task):
         async with self.build_sandbox() as sandbox:
             # Reset first, then remove every other local path to future commits.
             await _clean_git_history(sandbox, base_commit.strip())
-            await _warn_if_git_history_is_unsanitized(
-                sandbox,
-                base_commit=base_commit.strip(),
-                instance_id=str(instance_id),
-            )
 
             if cfg.run_oracle_solution:
                 logger.info("applying gold patch to /testbed")
