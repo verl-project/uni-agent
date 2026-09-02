@@ -5,6 +5,8 @@ on:
     paths:
       - "docs/**"
       - "*.md"
+      - "mkdocs.yml"
+      - ".readthedocs.yaml"
       - ".github/workflows/docs.yml"
   push:
     branches:
@@ -12,6 +14,8 @@ on:
     paths:
       - "docs/**"
       - "*.md"
+      - "mkdocs.yml"
+      - ".readthedocs.yaml"
       - ".github/workflows/docs.yml"
   workflow_dispatch:
 
