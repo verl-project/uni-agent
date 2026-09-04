@@ -5,7 +5,7 @@ Uni-Agent supports RL training for both white-box and black-box Agents. By integ
 This guide demonstrates:
 
 1. Train `Qwen3-Coder-30B-A3B-Instruct` with the white-box `ReAct Agent`.
-2. Train `Qwen3.5-4B` with the black-box `Claude Code` Agent.
+2. Train `Qwen3-Coder-30B-A3B-Instruct` with the black-box `Claude Code` Agent.
 
 ## Prerequisites
 
@@ -260,24 +260,26 @@ The following dashboard summarizes reward, SWE-Bench Verified performance, rollo
 
 ### Launch Training
 
-This recipe trains `Qwen3.5-4B` with the Claude Code Task Config:
+This recipe trains `Qwen3-Coder-30B-A3B-Instruct` with the Claude Code Task Config. Parallelism, GSPO, and Router Replay match the ReAct recipe above; the Claude Code runner additionally keeps `trajectory_selection=longest`:
 
 ```bash
 DATA_DIR=/path/to/data \
 RUNTIME_DIR=/path/to/runtime \
-NNODES=4 \
+NNODES=8 \
 CONCURRENCY=1024 \
-GEN_TP=2 \
-TP=1 PP=1 CP=8 \
+GEN_TP=4 \
+TP=1 PP=2 CP=4 EP=8 ETP=1 \
 TRAIN_PROMPT_BSZ=32 \
 N_RESP_PER_PROMPT=16 \
-PPO_MINI_BATCH_SIZE=32 \
+PPO_MINI_BATCH_SIZE=16 \
 TASK_CONFIG=examples/quickstart/training/task_config_claude_code.yaml \
+TRAJECTORY_SELECTION=longest \
 MASK_UNFINISHED_EPISODE=True \
-EXP_NAME=claude_code_qwen3p5_4b \
+EXP_NAME=claude_code_qwen3_coder_30b_gspo_r3 \
 ADV_ESTIMATOR=grpo \
-CLIP_RATIO_LOW=0.2 \
-CLIP_RATIO_HIGH=0.28 \
+LOSS_MODE=gspo \
+CLIP_RATIO_LOW=4e-4 \
+CLIP_RATIO_HIGH=4e-4 \
 CLIP_RATIO_C=10 \
 LOSS_AGG_MODE=token-mean \
 BYPASS_MODE=False \
@@ -285,21 +287,23 @@ ROLLOUT_IS=token \
 ROLLOUT_IS_THRESHOLD=2.0 \
 ROLLOUT_IS_BATCH_NORMALIZE=False \
 ROLLOUT_RS=null \
+ROUTER_REPLAY_MODE=R3 \
+ENABLE_ROLLOUT_ROUTING_REPLAY=True \
 LR_DECAY_STEPS=10000 \
 TEST_FREQ=-1 \
-bash examples/quickstart/training/train_qwen3p5_dense.sh
+bash examples/quickstart/training/train_qwen3_moe.sh
 ```
 
 The Claude Code runner sets `trajectory_selection=longest`. If a Gateway session materializes multiple trajectories, the Framework keeps only the trajectory with the most model-generated tokens for RL training.
 
-Both training scripts pass `MASK_UNFINISHED_EPISODE` to the Agent Framework. It defaults to `False`, which trains on every finalized trajectory.
+`train_qwen3_moe.sh` passes `MASK_UNFINISHED_EPISODE` to the Agent Framework. It defaults to `False`, which trains on every finalized trajectory.
 The commands above opt in explicitly: completed Task rewards and trajectories are still retained, but tokens from Agents that did not finish normally are excluded from policy optimization. Agents that report no completion state stay trainable either way.
 
 The script expects:
 
 ```text
 <DATA_DIR>/
-├── models/Qwen3.5-4B/
+├── models/Qwen3-Coder-30B-A3B-Instruct/
 └── data/uni_agent/
     ├── swe_rebench_filtered_1150.parquet
     └── swe_bench_verified.parquet
@@ -317,10 +321,12 @@ The Claude Code sandbox must be able to reach the session-scoped Gateway running
 Outputs are written under:
 
 ```text
-<RUNTIME_DIR>/ckpts/Uni-Agent-Qwen3.5-4B-megatron/<EXP_NAME>/
-<RUNTIME_DIR>/logs/Uni-Agent-Qwen3.5-4B-megatron/<EXP_NAME>/
+<RUNTIME_DIR>/ckpts/Uni-Agent-Qwen3-Coder-30B-megatron/<EXP_NAME>/
+<RUNTIME_DIR>/logs/Uni-Agent-Qwen3-Coder-30B-megatron/<EXP_NAME>/
 ```
 
 ### Results
 
-_To be added._
+The following dashboard summarizes reward, SWE-Bench Verified performance, rollout behavior, throughput, timing, and policy-drift metrics for this run:
+
+![Claude Code Qwen3-Coder-30B-A3B-Instruct training metrics](../assets/results_claude_code_qwen3_coder_30b.svg){ width="1200" }

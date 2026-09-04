@@ -22,6 +22,7 @@ GATEWAY_COUNT=${GATEWAY_COUNT:-8}            # gateway actors fronting the engin
 CONCURRENCY=${CONCURRENCY:-512}              # max in-flight rollout sessions (runner cap)
 SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-"$(basename "${MODEL_PATH}")"}
 MASK_UNFINISHED_EPISODE=${MASK_UNFINISHED_EPISODE:-False}  # opt-in: zero the loss mask for unfinished episodes
+TRAJECTORY_SELECTION=${TRAJECTORY_SELECTION:-all}  # all | longest; Claude Code should use longest
 
 rollout_mode=${ROLLOUT_MODE:-"async"}
 rollout_name=${ROLLOUT_NAME:-"vllm"} # sglang or vllm
@@ -206,6 +207,7 @@ ray job submit --no-wait --runtime-env $RUNTIME_ENV \
     ++actor_rollout_ref.rollout.custom.agent_framework.agent_runners.task.runner_fqn=uni_agent.framework.task_runner.run_task \
     ++actor_rollout_ref.rollout.custom.agent_framework.agent_runners.task.dispatch_mode=ray_task \
     ++actor_rollout_ref.rollout.custom.agent_framework.agent_runners.task.max_concurrent_sessions=${CONCURRENCY} \
+    ++actor_rollout_ref.rollout.custom.agent_framework.agent_runners.task.trajectory_selection=${TRAJECTORY_SELECTION} \
     ++actor_rollout_ref.rollout.custom.agent_framework.agent_runners.task.runner_kwargs.task_config_path=${TASK_CONFIG} \
     ++actor_rollout_ref.rollout.custom.agent_framework.agent_runners.task.runner_kwargs.model_name=${SERVED_MODEL_NAME} \
     ++actor_rollout_ref.rollout.custom.agent_framework.mask_unfinished_episode=${MASK_UNFINISHED_EPISODE} \
