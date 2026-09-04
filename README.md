@@ -70,12 +70,13 @@ Uni-Agent supports agent RL training with the same interaction stack used at inf
 Example scripts are available in [examples/quickstart/training](examples/quickstart/training).
 
 
-| Model               | Dataset      | Setting | Base | RL |
-| ------------------- | ------------ | ------- |:----:|:--:|
-| Qwen3-30B-A3B       | R2E-Gym      | Fully Async, 100 turns, 128K    | 22.2    | **36.8** |
-| Qwen3-Coder-30B-A3B | R2E-Gym      | Fully Async, 100 turns, 128K    | 46.2    | **52.0** |
-| Qwen3.5-9B          | SWE-reBench  | Fully Async, 100 turns, 128K    | 53.8    | **59.2** |
-| Qwen3-Coder-30B-A3B | SWE-reBench  | Colocate Async, 200 turns, 128K | 47.4    | **54.2** |
+| Model               | Agent       | Dataset      | Setting | Base | RL |
+| ------------------- | ----------- | ------------ | ------- |:----:|:--:|
+| Qwen3-30B-A3B       | ReAct       | R2E-Gym      | Fully Async, 100 turns, 128K    | 22.2    | **36.8** |
+| Qwen3-Coder-30B-A3B | ReAct       | R2E-Gym      | Fully Async, 100 turns, 128K    | 46.2    | **52.0** |
+| Qwen3.5-9B          | ReAct       | SWE-reBench  | Fully Async, 100 turns, 128K    | 53.8    | **59.2** |
+| Qwen3-Coder-30B-A3B | ReAct       | SWE-reBench  | Colocate Async, 200 turns, 128K | 47.4    | **54.2** |
+| Qwen3-Coder-30B-A3B | Claude Code | SWE-reBench  | Colocate Async, 200 turns, 128K | 40.2    | **46.2** |
 
 Training dynamics, asynchronous rollout performance, and reproducibility details are available in [RL Training](https://uni-agent.readthedocs.io/en/latest/benchmark/rl-training.html).
 
