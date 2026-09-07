@@ -64,3 +64,16 @@ bash examples/codex/build_tool.sh \
 The image is mounted at `/opt/codex`; `run_agent.sh` writes the native
 Responses configuration, reads the task prompt from stdin, and forwards any
 extra positional arguments to `codex exec` without shell evaluation.
+
+### Agent configuration scope
+
+The recipe configures `run_timeout`, `conda_env`, `tool_script`, and the shared
+model settings. Codex agent configuration does not accept `extra_args`,
+`extra_env`, `codex_home`, or `step_limit`. Remove these keys from custom task
+configurations before using this version. The sidecar owns `CODEX_HOME`: it
+respects an inherited value, otherwise defaults to `/tmp/codex-home`, and creates
+the directory and provider configuration. Its standalone shell entrypoint still
+forwards additional arguments to `codex exec`.
+
+A completed rollout with reward and token log probabilities is distinct from a
+successful PPO update; report the training job's final status separately.
