@@ -27,6 +27,11 @@ from uni_agent.gateway.adapters.openai import (
     openai_stream_response,
     openai_to_internal,
 )
+from uni_agent.gateway.adapters.responses import (
+    responses_build_response,
+    responses_stream_response,
+    responses_to_internal,
+)
 from uni_agent.gateway.adapters.types import AnthropicRequest, MalformedRequestError, OpenAIChatCompletionRequest
 from uni_agent.gateway.config import GatewayActorConfig
 from uni_agent.gateway.session import (
@@ -81,6 +86,8 @@ class _GatewayActor:
         )
         self._prompt_length = config.prompt_length
         self._response_length = config.response_length
+        self._max_tokens_per_turn = config.max_tokens_per_turn
+        self._served_model_name = config.served_model_name
         self._enable_last_assistant_rollback = config.enable_last_assistant_rollback
         self._sessions: dict[str, GatewaySession] = {}
         self._app = FastAPI()
@@ -130,6 +137,33 @@ class _GatewayActor:
                 raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
             return await self._handle_openai_chat_completions(session_id=session_id, payload=payload)
 
+        @self._app.get("/sessions/{session_id}/v1/models")
+        async def _openai_models(session_id: str):
+            """Serve the model discovery request issued by some Responses clients."""
+            if session_id not in self._sessions:
+                raise HTTPException(status_code=404, detail=f"Unknown session_id: {session_id}")
+            return JSONResponse(
+                {
+                    "object": "list",
+                    "data": [
+                        {
+                            "id": self._served_model_name,
+                            "object": "model",
+                            "created": 0,
+                            "owned_by": "uni-agent",
+                        }
+                    ],
+                }
+            )
+
+        @self._app.post("/sessions/{session_id}/v1/responses")
+        async def _openai_responses(session_id: str, request: Request):
+            try:
+                payload = await request.json()
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
+            return await self._handle_openai_responses(session_id=session_id, payload=payload)
+
         @self._app.post("/sessions/{session_id}/v1/messages")
         async def _anthropic_messages(session_id: str, request: Request):
             try:
@@ -175,6 +209,32 @@ class _GatewayActor:
         if payload.get("stream") is True:
             return openai_stream_response(outcome, model=model)
         return JSONResponse(openai_build_response(outcome, model=model))
+
+    async def _handle_openai_responses(
+        self,
+        session_id: str,
+        payload: dict[str, Any],
+    ) -> JSONResponse | StreamingResponse:
+        """Validate a Responses API payload and serialize the session outcome."""
+        session = self._sessions.get(session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail=f"Unknown session_id: {session_id}")
+
+        try:
+            internal = responses_to_internal(
+                payload,
+                base_sampling_params=dict(session.sampling_params),
+                allowed_sampling_keys=self._allowed_request_sampling_param_keys,
+            )
+            _validate_sampling_params(internal["sampling_params"])
+        except MalformedRequestError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        outcome = await session.run_generation(internal, self._backend)
+        model = str(payload.get("model") or "unknown")
+        if payload.get("stream") is True:
+            return responses_stream_response(outcome, model=model)
+        return JSONResponse(responses_build_response(outcome, model=model))
 
     async def _handle_anthropic_messages(
         self,
@@ -243,6 +303,7 @@ class _GatewayActor:
             codec=self._codec,
             prompt_length=self._prompt_length,
             response_length=self._response_length,
+            max_tokens_per_turn=self._max_tokens_per_turn,
             sampling_params=sampling_params,
             enable_last_assistant_rollback=self._enable_last_assistant_rollback,
             metadata=metadata,

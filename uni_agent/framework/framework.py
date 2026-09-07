@@ -268,6 +268,8 @@ def _trajectory_to_reward_dataproto(trajectory, sample_fields, task_result: Task
     for key in ("raw_prompt", "data_source", "tools_kwargs", "agent_name"):
         if key in sample_fields:
             non_tensor_batch[key] = np.array([sample_fields[key]], dtype=object)
+    if "data_source" not in non_tensor_batch:
+        non_tensor_batch["data_source"] = np.array(["uni_agent"], dtype=object)
     non_tensor_batch["reward_model"] = np.array(
         [sample_fields.get("reward_model", {"ground_truth": None})],
         dtype=object,
@@ -808,9 +810,8 @@ class GatewayAgentFramework(AgentFramework):
                     # unwinds and its sandbox context manager tears down cleanly;
                     # force-kill only if it ignores the cancel.
                     try:
-                        task_result = await asyncio.wait_for(
-                            object_ref,
-                            timeout=runner_config.session_timeout_seconds,
+                        task_result = await self._await_runner_result(
+                            object_ref, session_id, runner_config.session_timeout_seconds
                         )
                     except (asyncio.TimeoutError, asyncio.CancelledError):
                         await self._cancel_runner_task(object_ref, session_id)
@@ -932,6 +933,25 @@ class GatewayAgentFramework(AgentFramework):
             )
             return result_trajectories, sample_fields
 
+    async def _await_runner_result(self, object_ref, session_id: str, timeout: float | None):
+        """Await a runner through Ray's timeout-aware wait and cancel it on expiry."""
+        if timeout is None:
+            return await object_ref
+
+        ray_wait = getattr(ray, "wait", None)
+        if ray_wait is None:
+            return await asyncio.wait_for(object_ref, timeout=timeout)
+
+        ready_refs, _ = await asyncio.to_thread(
+            ray_wait,
+            [object_ref],
+            num_returns=1,
+            timeout=timeout,
+        )
+        if not ready_refs:
+            raise asyncio.TimeoutError
+        return await object_ref
+
     async def _cancel_runner_task(self, object_ref, session_id: str) -> None:
         """Cancel a dispatched runner Ray task after its session timed out.
 
@@ -947,7 +967,7 @@ class GatewayAgentFramework(AgentFramework):
             logger.exception("session %s: ray.cancel failed for runner task", session_id)
             return
         try:
-            await asyncio.wait_for(object_ref, timeout=self._RUNNER_CANCEL_GRACE_SECONDS)
+            await self._await_runner_result(object_ref, session_id, self._RUNNER_CANCEL_GRACE_SECONDS)
         except asyncio.TimeoutError:
             logger.warning(
                 "session %s: runner task ignored graceful cancel after %ss; force-killing",

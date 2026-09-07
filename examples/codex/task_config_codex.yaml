@@ -1,0 +1,62 @@
+# Codex task configuration for the updated agents/sandbox/tasks architecture.
+# The task layer owns sandbox lifecycle and reward; the Codex Agent owns only
+# the sidecar launch and result normalization.
+- name: swe_rebench
+  sandbox:
+    provider: openyuanrong
+    runtime_timeout: 7200
+    image_map:
+      - from: "swerebench/sweb.eval.x86_64.**"
+        to: "swr.cn-east-3.myhuaweicloud.com/openyuanrong/swe-rebench/**:latest"
+    sandbox_kwargs:
+      proxy_port: 38197
+      mounts:
+        - target: /opt/codex
+          image_url: swr.cn-east-3.myhuaweicloud.com/openyuanrong/codex-tool:0.147.0-direct-stdin
+  agent:
+    name: codex
+    run_timeout: 7200
+    conda_env: testbed
+    tool_script: /opt/codex/bin/run_agent.sh
+  prompt_template: &swe_codex_prompt
+    - role: user
+      content: |-
+        You are a senior software engineer fixing a bug in the repository at /testbed.
+
+        <issue_description>
+        {problem_statement}
+        </issue_description>
+
+        The repository is already checked out at /testbed with its development environment fully set up. Make the minimal changes to non-test source files so the issue is resolved.
+
+        Work through the problem as follows:
+        1. Explore the relevant code and identify the root cause.
+        2. Reproduce the failure when practical.
+        3. Implement the minimal, idiomatic fix.
+        4. Run the relevant tests and verify the fix.
+        5. Briefly summarize the root cause and changes when complete.
+
+        Constraints:
+        - Do not commit changes.
+        - Do not install or modify packages.
+        - Do not modify, remove, or add test files.
+        - Work only inside /testbed.
+
+- name: swe_bench
+  sandbox:
+    provider: openyuanrong
+    runtime_timeout: 7200
+    image_map:
+      - from: "swebench/**"
+        to: "swr.cn-east-3.myhuaweicloud.com/openyuanrong/swe-bench-verified/**:v2"
+    sandbox_kwargs:
+      proxy_port: 38197
+      mounts:
+        - target: /opt/codex
+          image_url: swr.cn-east-3.myhuaweicloud.com/openyuanrong/codex-tool:0.147.0-direct-stdin
+  agent:
+    name: codex
+    run_timeout: 7200
+    conda_env: testbed
+    tool_script: /opt/codex/bin/run_agent.sh
+  prompt_template: *swe_codex_prompt

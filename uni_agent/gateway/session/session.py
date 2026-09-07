@@ -180,6 +180,7 @@ class GatewaySession:
         *,
         prompt_length: int | None = None,
         response_length: int | None = None,
+        max_tokens_per_turn: int | None = None,
         sampling_params: dict[str, Any] | None = None,
         enable_last_assistant_rollback: bool = True,
         metadata: dict[str, Any] | None = None,
@@ -189,6 +190,8 @@ class GatewaySession:
             raise ValueError(f"prompt_length must be positive when set, got {prompt_length}")
         if response_length is not None and response_length <= 0:
             raise ValueError(f"response_length must be positive when set, got {response_length}")
+        if max_tokens_per_turn is not None and max_tokens_per_turn <= 0:
+            raise ValueError(f"max_tokens_per_turn must be positive when set, got {max_tokens_per_turn}")
 
         self.handle = handle
         self._codec = codec
@@ -197,6 +200,7 @@ class GatewaySession:
         self._trajectory_capacity = (
             prompt_length + response_length if prompt_length is not None and response_length is not None else None
         )
+        self._max_tokens_per_turn = max_tokens_per_turn
         self._sampling_params = dict(sampling_params or {})
         self._enable_last_assistant_rollback = enable_last_assistant_rollback
         self._metadata = dict(metadata or {})
@@ -513,10 +517,13 @@ class GatewaySession:
             self._trajectory_capacity - len(context_ids) if self._trajectory_capacity is not None else None
         )
         if remaining_trajectory_capacity is not None:
-            sampling_params["max_tokens"] = min(
-                sampling_params.get("max_tokens", remaining_trajectory_capacity),
-                remaining_trajectory_capacity,
-            )
+            max_tokens = sampling_params.get("max_tokens", remaining_trajectory_capacity)
+            if self._max_tokens_per_turn is not None:
+                max_tokens = min(max_tokens, self._max_tokens_per_turn)
+            sampling_params["max_tokens"] = min(max_tokens, remaining_trajectory_capacity)
+        elif self._max_tokens_per_turn is not None:
+            max_tokens = sampling_params.get("max_tokens", self._max_tokens_per_turn)
+            sampling_params["max_tokens"] = min(max_tokens, self._max_tokens_per_turn)
         last_assistant_start = self._snapshot_last_assistant_start(
             buffer=buffer,
             message_history_len=len(messages),
