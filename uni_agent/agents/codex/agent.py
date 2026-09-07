@@ -35,9 +35,6 @@ def build_agent_command(
     api_key: str,
     project_dir: str = "/testbed",
     conda_env: str = "testbed",
-    codex_home: str = "/tmp/codex-home",
-    extra_args: list[str] | None = None,
-    extra_env: dict[str, str] | None = None,
 ) -> str:
     """Build the shell command that pipes a task into the Codex sidecar.
 
@@ -54,16 +51,13 @@ def build_agent_command(
         f"CODEX_MODEL={shlex.quote(model_name)} "
         f"CODEX_API_KEY={shlex.quote(api_key)} "
         f"CODEX_PROJECT_DIR={shlex.quote(project_dir)} "
-        f"CODEX_HOME={shlex.quote(codex_home)} "
         "NO_PROXY='*' no_proxy='*' HTTP_PROXY='' HTTPS_PROXY='' "
         "PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_PROGRESS_BAR=off"
     )
-    if extra_env:
-        env += " " + " ".join(f"{key}={shlex.quote(value)}" for key, value in extra_env.items())
     return (
         "unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy NO_PROXY no_proxy; "
         f"printf %s {shlex.quote(task_b64)} | base64 -d | "
-        f"env {env} bash {shlex.quote(tool_script)}" + "".join(f" {shlex.quote(arg)}" for arg in (extra_args or []))
+        f"env {env} bash {shlex.quote(tool_script)}"
     )
 
 
@@ -132,9 +126,6 @@ class CodexConfig(AgentConfig):
     run_timeout: float = Field(default=7200.0, description="Maximum wall-clock time for one Codex episode.")
     conda_env: str = Field(default="testbed", description="Conda environment used by repository tools.")
     tool_script: str = Field(description="Sidecar entrypoint, normally /opt/codex/bin/run_agent.sh.")
-    codex_home: str = Field(default="/tmp/codex-home", description="Per-sandbox Codex state directory.")
-    extra_args: list[str] = Field(default_factory=list, description="Extra arguments appended to codex exec.")
-    extra_env: dict[str, str] = Field(default_factory=dict, description="Extra environment for the sidecar.")
 
 
 @register_agent("codex")
@@ -177,9 +168,6 @@ class CodexAgent(Agent):
             api_key=api_key,
             project_dir=project_dir,
             conda_env=cfg.conda_env,
-            codex_home=cfg.codex_home,
-            extra_args=cfg.extra_args,
-            extra_env=cfg.extra_env,
         )
 
         logger.info("codex: launch in %s", project_dir)
