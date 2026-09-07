@@ -56,6 +56,17 @@ class SWEBenchTask(Task):
                     workdir="/testbed",
                 )
                 finished = agent_result.finished
+            if finished is not True:
+                logger.warning(
+                    "skipping swe_bench evaluation for instance_id=%s because the agent did not finish",
+                    instance_id,
+                )
+                return TaskResult(
+                    reward=0.0,
+                    accuracy=0.0,
+                    finished=False,
+                    extra_info={"resolved": False, "eval_skipped": "agent_unfinished"},
+                )
 
             from .reward import compute_reward
 

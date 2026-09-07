@@ -1,0 +1,23 @@
+# Codex native sidecar tool image.
+#
+# The npm package contains a statically linked Linux x64 Codex binary plus
+# ripgrep, bubblewrap, and zsh resources. Only those native resources and a
+# small wrapper are copied into the scratch image; Node.js is not needed at
+# sandbox runtime.
+FROM node:22-bookworm-slim AS builder
+ARG CODEX_VERSION="0.147.0"
+ARG NPM_REGISTRY=""
+ENV npm_config_audit=false npm_config_fund=false npm_config_update_notifier=false
+RUN if [ -n "${NPM_REGISTRY}" ]; then npm config set registry "${NPM_REGISTRY}"; fi \
+    && mkdir -p /tmp/codex \
+    && npm install --prefix /tmp/codex --no-save --no-package-lock --include=optional "@openai/codex@${CODEX_VERSION}" \
+    && vendor_root="$(find /tmp/codex/node_modules -type d -path '*/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl' -print -quit)" \
+    && test -n "${vendor_root}" \
+    && mkdir -p /opt/codex/vendor/x86_64-unknown-linux-musl /opt/codex/bin \
+    && cp -a "${vendor_root}/." /opt/codex/vendor/x86_64-unknown-linux-musl/ \
+    && /opt/codex/vendor/x86_64-unknown-linux-musl/bin/codex --version
+COPY codex-wrapper.sh /opt/codex/bin/codex
+COPY run_agent.sh /opt/codex/bin/run_agent.sh
+RUN chmod 0755 /opt/codex/bin/codex /opt/codex/bin/run_agent.sh
+FROM scratch
+COPY --from=builder /opt/codex /
