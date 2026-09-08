@@ -246,6 +246,8 @@ RAY_INIT_ENV_ARGS+=(
     "+ray_kwargs.ray_init.runtime_env.env_vars.VERL_DISABLE_PIN_MEMORY=\"${VERL_DISABLE_PIN_MEMORY:-}\""
     "+ray_kwargs.ray_init.runtime_env.env_vars.OPENCLAW_DEBUG_ENGINE=\"${OPENCLAW_DEBUG_ENGINE:-}\""
     "+ray_kwargs.ray_init.runtime_env.env_vars.PYTHONFAULTHANDLER=\"${PYTHONFAULTHANDLER:-}\""
+    "+ray_kwargs.ray_init.runtime_env.env_vars.MALLOC_CONF=\"${MALLOC_CONF:-}\""
+    "+ray_kwargs.ray_init.runtime_env.env_vars.ARROW_DEFAULT_MEMORY_POOL=\"${ARROW_DEFAULT_MEMORY_POOL:-}\""
 )
 
 # ── Ensure Ray is running ────────────────────────────────────────────────
