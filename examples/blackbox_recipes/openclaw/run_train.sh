@@ -31,12 +31,23 @@ VAL_DATA="${VAL_DATA:?Set the OpenClaw task validation parquet path}"
 RUNTIME_ENV="${RUNTIME_ENV:-}"
 
 # ── V1 trainer ───────────────────────────────────────────────────────────
-TRAINER_MODE="${TRAINER_MODE:-sync}"
-NUM_WARMUP_BATCHES="${NUM_WARMUP_BATCHES:-1}"
+TRAINER_MODE="${TRAINER_MODE:-colocate_async}"
+NUM_WARMUP_BATCHES="${NUM_WARMUP_BATCHES:-0}"
 PARAMETER_SYNC_STEP="${PARAMETER_SYNC_STEP:-4}"
-RAY_SUBMIT_MODE="${RAY_SUBMIT_MODE:-local}"
+RAY_SUBMIT_MODE="${RAY_SUBMIT_MODE:-job}"
 RAY_INIT_ADDRESS="${RAY_INIT_ADDRESS:-auto}"
 RAY_STATUS_TIMEOUT="${RAY_STATUS_TIMEOUT:-5}"
+
+if [[ "${TRAINER_MODE}" == "colocate_async" ]]; then
+    TRAINER_MODE_ARGS=(
+        "trainer.v1.colocate_async.num_warmup_batches=${NUM_WARMUP_BATCHES}"
+    )
+else
+    TRAINER_MODE_ARGS=(
+        "trainer.v1.separate_async.num_warmup_batches=${NUM_WARMUP_BATCHES}"
+        "trainer.v1.separate_async.parameter_sync_step=${PARAMETER_SYNC_STEP}"
+    )
+fi
 
 # ── Hardware ─────────────────────────────────────────────────────────────
 NNODES="${NNODES:-${NNODES_TRAIN:-1}}"
@@ -80,7 +91,11 @@ TOP_K="${TOP_K:--1}"
 VAL_TEMPERATURE="${VAL_TEMPERATURE:-1.0}"
 VAL_TOP_P="${VAL_TOP_P:-0.95}"
 VAL_TOP_K="${VAL_TOP_K:--1}"
-ROLLOUT_GPU_MEM_UTIL="${ROLLOUT_GPU_MEM_UTIL:-0.7}"
+ROLLOUT_GPU_MEM_UTIL="${ROLLOUT_GPU_MEM_UTIL:-0.62}"
+VLLM_MAX_NUM_SEQS="${VLLM_MAX_NUM_SEQS:-1}"
+VLLM_MAX_NUM_BATCHED_TOKENS="${VLLM_MAX_NUM_BATCHED_TOKENS:-16384}"
+VLLM_ENFORCE_EAGER="${VLLM_ENFORCE_EAGER:-True}"
+VLLM_CUDAGRAPH_MODE="${VLLM_CUDAGRAPH_MODE:-NONE}"
 UPDATE_WEIGHTS_BUCKET_MB="${UPDATE_WEIGHTS_BUCKET_MB:-2048}"
 USE_DYNAMIC_BSZ="${USE_DYNAMIC_BSZ:-False}"
 
@@ -92,10 +107,10 @@ else
 fi
 TRAIN_PP="${TRAIN_PP:-1}"
 TRAIN_CP="${TRAIN_CP:-1}"
-OFFLOAD="${OFFLOAD:-True}"
+OFFLOAD="${OFFLOAD:-False}"
 OPTIMIZER_OFFLOAD_FRACTION="${OFFLOAD_FRACTION:-1.0}"
 USE_MBRIDGE="${USE_MBRIDGE:-True}"
-PPO_MINI_BATCH_SIZE="${PPO_MINI_BATCH_SIZE:-16}"
+PPO_MINI_BATCH_SIZE="${PPO_MINI_BATCH_SIZE:-1}"
 # Per-GPU micro batch size.
 PPO_MICRO_BATCH_SIZE_PER_GPU="${PPO_MICRO_BATCH_SIZE_PER_GPU:-1}"
 
@@ -104,8 +119,8 @@ PPO_MICRO_BATCH_SIZE_PER_GPU="${PPO_MICRO_BATCH_SIZE_PER_GPU:-1}"
 # mount are configured in TASK_CONFIG (task_config_openclaw.yaml).
 TASK_CONFIG="${TASK_CONFIG:-examples/blackbox_recipes/openclaw/config/openclaw_terminal_bench.yaml}"
 TOOL_PARSER="${TOOL_PARSER:-qwen3_coder}"   # gateway tool-call parser; must match the model chat template
-GATEWAY_COUNT="${GATEWAY_COUNT:-8}"
-MAX_CONCURRENT_SESSIONS="${MAX_CONCURRENT_SESSIONS:-256}"
+GATEWAY_COUNT="${GATEWAY_COUNT:-1}"
+MAX_CONCURRENT_SESSIONS="${MAX_CONCURRENT_SESSIONS:-1}"
 # Hard cap per-session runtime (seconds). A runner that hangs without raising
 # (e.g. remote sandbox OOM-killed without surfacing an error) otherwise holds its
 # concurrency slot forever and stalls the whole training batch.
@@ -142,16 +157,16 @@ SANDBOX_NAME_PREFIX="${SANDBOX_NAME_PREFIX:-mini-swe-}"
 # ── Logging & checkpointing ──────────────────────────────────────────────
 PROJECT_NAME="${PROJECT_NAME:-openclaw_blackbox}"
 EXPERIMENT_NAME="${EXPERIMENT_NAME:-openclaw_$(date +%Y%m%d_%H%M)}"
-SAVE_FREQ="${SAVE_FREQ:-10}"
-TEST_FREQ="${TEST_FREQ:-10}"
-TOTAL_EPOCHS="${TOTAL_EPOCHS:-10}"
+SAVE_FREQ="${SAVE_FREQ:--1}"
+TEST_FREQ="${TEST_FREQ:--1}"
+TOTAL_EPOCHS="${TOTAL_EPOCHS:-1}"
 TOTAL_TRAINING_STEPS="${TOTAL_TRAINING_STEPS:-}"
-VAL_BEFORE_TRAIN="${VAL_BEFORE_TRAIN:-true}"
+VAL_BEFORE_TRAIN="${VAL_BEFORE_TRAIN:-false}"
 CKPTS_DIR="${CKPTS_DIR:?Set a checkpoint directory outside the source repository}"
 TRAIN_MAX_SAMPLES="${TRAIN_MAX_SAMPLES:-${MAX_SAMPLES:--1}}"
 VAL_MAX_SAMPLES="${VAL_MAX_SAMPLES:-${MAX_SAMPLES:--1}}"
-TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-64}"
-VAL_BATCH_SIZE="${VAL_BATCH_SIZE:-500}"
+TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-1}"
+VAL_BATCH_SIZE="${VAL_BATCH_SIZE:-1}"
 # rl-insight collector endpoint. Leave empty to disable rl_insight (the logger
 # list below is guarded on this being set).
 RL_INSIGHT_SERVER_URL="${RL_INSIGHT_SERVER_URL:-}"
@@ -250,13 +265,15 @@ RAY_INIT_ENV_ARGS+=(
     "+ray_kwargs.ray_init.runtime_env.env_vars.ARROW_DEFAULT_MEMORY_POOL=\"${ARROW_DEFAULT_MEMORY_POOL:-}\""
 )
 
-# ── Ensure Ray is running ────────────────────────────────────────────────
+# ── Ensure Ray is running for local acceptance mode ──────────────────────
 if [[ "${TRAINER_MODE}" == "separate_async" ]]; then
     TOTAL_GPUS=$(( NNODES * N_GPUS_PER_NODE + ROLLOUT_NNODES * ROLLOUT_NGPUS_PER_NODE ))
 else
     TOTAL_GPUS=$(( NNODES * N_GPUS_PER_NODE ))
 fi
-if [[ "${DRY_RUN:-0}" == "1" || "${CONFIG_ONLY:-0}" == "1" ]]; then
+if [[ "${RAY_SUBMIT_MODE}" == "job" ]]; then
+    echo "Ray job mode: using the existing Ray Jobs endpoint."
+elif [[ "${DRY_RUN:-0}" == "1" || "${CONFIG_ONLY:-0}" == "1" ]]; then
     echo "配置检查：不启动Ray或模型进程。"
 elif ! timeout "${RAY_STATUS_TIMEOUT}" ray status &>/dev/null; then
     echo "Starting Ray cluster (${TOTAL_GPUS} GPUs)..."
@@ -277,8 +294,7 @@ MAIN_CMD=(
     "${RAY_INIT_ENV_ARGS[@]}"
     trainer.use_v1=True
     trainer.v1.trainer_mode="${TRAINER_MODE}"
-    trainer.v1.separate_async.num_warmup_batches=${NUM_WARMUP_BATCHES}
-    trainer.v1.separate_async.parameter_sync_step=${PARAMETER_SYNC_STEP}
+    "${TRAINER_MODE_ARGS[@]}"
     transfer_queue.enable=True
     transfer_queue.metrics.enabled=True
     actor_rollout_ref.nccl_timeout=9600
@@ -305,7 +321,8 @@ MAIN_CMD=(
     actor_rollout_ref.rollout.prompt_length=${PROMPT_LENGTH}
     actor_rollout_ref.rollout.response_length=${RESPONSE_LENGTH}
     actor_rollout_ref.rollout.max_model_len=${MAX_MODEL_LEN}
-    actor_rollout_ref.rollout.max_num_batched_tokens=${MAX_MODEL_LEN}
+    actor_rollout_ref.rollout.max_num_seqs=${VLLM_MAX_NUM_SEQS}
+    actor_rollout_ref.rollout.max_num_batched_tokens=${VLLM_MAX_NUM_BATCHED_TOKENS}
     actor_rollout_ref.rollout.enable_chunked_prefill=True
     +actor_rollout_ref.rollout.enable_sleep_mode=True
     actor_rollout_ref.rollout.calculate_log_probs=True
@@ -325,10 +342,11 @@ MAIN_CMD=(
     actor_rollout_ref.rollout.tensor_model_parallel_size=${GEN_TP}
     actor_rollout_ref.rollout.gpu_memory_utilization=${ROLLOUT_GPU_MEM_UTIL}
     actor_rollout_ref.rollout.disable_log_stats=False
-    "+actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode=\"FULL_DECODE_ONLY\""
+    "+actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode=\"${VLLM_CUDAGRAPH_MODE}\""
     "+actor_rollout_ref.rollout.engine_kwargs.vllm.mamba_cache_mode=align"
     "+actor_rollout_ref.rollout.engine_kwargs.vllm.additional_config.enable_cpu_binding=true"
     "+actor_rollout_ref.rollout.engine_kwargs.vllm.async_scheduling=true"
+    actor_rollout_ref.rollout.enforce_eager=${VLLM_ENFORCE_EAGER}
     actor_rollout_ref.rollout.multi_turn.enable=True
     actor_rollout_ref.rollout.multi_turn.max_assistant_turns=100
     actor_rollout_ref.rollout.multi_turn.max_parallel_calls=1
