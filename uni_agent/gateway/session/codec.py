@@ -16,7 +16,6 @@ from uuid import uuid4
 from verl.utils.tokenizer import normalize_token_ids
 from verl.utils.tokenizer.chat_template import apply_chat_template as _apply_chat_template
 from verl.utils.tokenizer.chat_template import initialize_turn_separator
-from verl.utils.tokenizer.continuous_token import MergeResult
 from verl.utils.tokenizer.continuous_token_wiring import create_continuous_token_builder
 
 # Map backend stop_reason values into the gateway's internal finish_reason vocabulary.
@@ -278,34 +277,20 @@ class MessageCodec:
         response_logprobs: list[float] | None = None,
         *,
         tools: list[dict[str, Any]] | None = None,
-        is_rollback: bool = False,
         image_data: list[Any] | None = None,
         video_data: list[Any] | None = None,
     ) -> tuple[list[int], list[int], list[float] | None]:
         """Merge appended context and align response metadata."""
-        appended_messages = updated_messages[len(previous_messages) :]
-        if is_rollback:
-            incremental_ids = self.encode_incremental(
-                appended_messages,
-                image_data=image_data,
-                video_data=video_data,
+        if image_data or video_data:
+            raise ValueError(
+                "Continuous Token context merging does not currently support incremental image or video data"
             )
-            merge_result = MergeResult(
-                token_ids=list(runtime_token_ids) + incremental_ids,
-                appended_token_count=len(incremental_ids),
-                kind="non_assistant",
-            )
-        else:
-            if image_data or video_data:
-                raise ValueError(
-                    "Continuous Token context merging does not currently support incremental image or video data"
-                )
-            merge_result = self._continuous_token_builder.merge_non_assistant_tokens(
-                previous_messages,
-                list(previous_messages) + appended_messages,
-                runtime_token_ids,
-                tools=tools,
-            )
+        merge_result = self._continuous_token_builder.merge_context_tokens(
+            previous_messages,
+            updated_messages,
+            runtime_token_ids,
+            tools=tools,
+        )
         response_mask, response_logprobs = self._continuous_token_builder.align_response_metadata(
             merge_result,
             response_mask,

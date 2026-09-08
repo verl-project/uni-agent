@@ -554,6 +554,7 @@ def test_deepseek_v4_codec_uses_continuous_token_without_chat_template():
         [],
         assistant_logprobs=[-0.1] * len(assistant_ids),
     )
+    previous_messages = previous_messages + [{"role": "assistant", "content": "FIRST"}]
     updated_messages = previous_messages + [{"role": "tool", "content": "result"}]
     continuation_token_ids, response_mask, response_logprobs = codec.merge_context_tokens(
         previous_messages,

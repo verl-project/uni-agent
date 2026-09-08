@@ -509,7 +509,6 @@ class GatewaySession:
                     buffer.response_mask,
                     buffer.response_logprobs if sampling_params.get("logprobs", False) else None,
                     tools=tools,
-                    is_rollback=rollback_to_last_assistant,
                     image_data=new_image_data,
                     video_data=new_video_data,
                 )
