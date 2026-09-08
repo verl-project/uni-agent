@@ -239,6 +239,14 @@ RAY_INIT_ENV_ARGS=(
 RAY_INIT_ENV_ARGS+=(
     "+ray_kwargs.ray_init.runtime_env.env_vars.TRANSFER_QUEUE_ENABLE=\"\""
 )
+# Explicit diagnostics/workaround switches must be forwarded to the actor
+# workers as well as the driver process.  Empty values preserve the default
+# behavior while allowing a run to opt into the host-specific workaround.
+RAY_INIT_ENV_ARGS+=(
+    "+ray_kwargs.ray_init.runtime_env.env_vars.VERL_DISABLE_PIN_MEMORY=\"${VERL_DISABLE_PIN_MEMORY:-}\""
+    "+ray_kwargs.ray_init.runtime_env.env_vars.OPENCLAW_DEBUG_ENGINE=\"${OPENCLAW_DEBUG_ENGINE:-}\""
+    "+ray_kwargs.ray_init.runtime_env.env_vars.PYTHONFAULTHANDLER=\"${PYTHONFAULTHANDLER:-}\""
+)
 
 # ── Ensure Ray is running ────────────────────────────────────────────────
 if [[ "${TRAINER_MODE}" == "separate_async" ]]; then
