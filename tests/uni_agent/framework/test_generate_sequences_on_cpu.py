@@ -169,7 +169,7 @@ async def _build_framework_with_agent_runners(
         "expected_mm_processor_kwargs",
     ),
     [
-        ({}, {}, False, True, {}, {}),
+        ({}, {}, True, True, {}, {}),
         (
             {
                 "apply_chat_template_kwargs": {"thinking": True},
@@ -181,7 +181,7 @@ async def _build_framework_with_agent_runners(
             {"thinking": True},
             {"max_pixels": 1024},
         ),
-        ({}, {"enable_tool_parser_cache": False}, False, False, {}, {}),
+        ({}, {"enable_tool_parser_cache": False}, True, False, {}, {}),
     ],
 )
 def test_build_gateway_manager_wires_gateway_config_defaults(
