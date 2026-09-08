@@ -1,0 +1,14 @@
+# Reuses the generic TerminalBenchTask verifier; not an OpenClaw-specific reward.
+- name: terminal_bench
+  sandbox:
+    provider: docker
+    image: openclaw-recipe-runtime:2026.9.2
+    runtime_timeout: 2100
+    sandbox_kwargs:
+      pull_policy: never
+  agent:
+    name: openclaw
+    tool_command: /opt/openclaw/bin/openclaw
+    run_timeout: 1800
+    cli_timeout_seconds: 1700
+    strict_single_trajectory: true

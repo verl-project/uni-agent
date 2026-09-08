@@ -1,0 +1,28 @@
+# syntax=docker/dockerfile:1
+# Build with context examples/blackbox_recipes/openclaw (Linux amd64 only).
+# Runnable stage is for standalone smoke. The final stage is a mounted tool image.
+FROM ubuntu:22.04@sha256:4f838adc7181d9039ac795a7d0aba05a9bd9ecd480d294483169c5def983b64d AS runtime
+ARG NODE_VERSION=22.22.3
+ARG NODE_SHA256=2e5d13569282d016861fae7c8f935e741693c269101a5bebcf761a5376d1f99f
+ARG OPENCLAW_VERSION=2026.9.2
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl xz-utils git python3 \
+    && rm -rf /var/lib/apt/lists/*
+RUN mkdir -p /opt/openclaw \
+    && curl -fsSL "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-x64.tar.xz" -o /tmp/node.tar.xz \
+    && echo "${NODE_SHA256}  /tmp/node.tar.xz" | sha256sum --check \
+    && tar -xJf /tmp/node.tar.xz -C /opt/openclaw --strip-components=1 \
+    && rm /tmp/node.tar.xz
+ENV PATH=/opt/openclaw/bin:$PATH
+ENV OPENCLAW_NO_RESPAWN=1
+RUN npm install --prefix /opt/openclaw --omit=dev --no-audit --no-fund \
+      --registry=https://registry.npmjs.org "openclaw@${OPENCLAW_VERSION}" \
+    && ln -s ../node_modules/.bin/openclaw /opt/openclaw/bin/openclaw \
+    && npm cache clean --force
+WORKDIR /workspace
+
+# Tool mounts need a separate task image with /usr/bin/python3 and glibc >= 2.35.
+# The complete node runtime is mounted at /opt/openclaw; no host secrets or models.
+FROM scratch AS tool
+COPY --from=runtime /opt/openclaw /
