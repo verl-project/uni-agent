@@ -343,8 +343,10 @@ async def test_first_assistant_rewrite_reuses_chain_without_stale_response():
     chain = session.active_chains[0]
     expected_prompt_ids = codec.build_initial_tokens(first_messages)
     del expected_prompt_ids[-len(codec.turn_separator) - len(codec.generation_prompt) :]
-    incremental_ids = codec.encode_incremental(rewrite_messages[len(first_messages) :])
-    assert backend.calls[1]["prompt_ids"] == codec.build_initial_tokens(rewrite_messages)
+    expected_context_ids = codec.build_initial_tokens(rewrite_messages)
+    assert expected_context_ids[: len(expected_prompt_ids)] == expected_prompt_ids
+    incremental_ids = expected_context_ids[len(expected_prompt_ids) :]
+    assert backend.calls[1]["prompt_ids"] == expected_context_ids
     assert chain.buffer.prompt_ids == expected_prompt_ids
     assert chain.buffer.response_ids == incremental_ids + _ids("FIXED")
     assert chain.buffer.response_mask == [0] * len(incremental_ids) + [1] * len("FIXED")
@@ -452,13 +454,9 @@ async def test_later_assistant_rollback_removes_only_the_response_side_gp():
     await _run(session, backend, second_messages)
     await _run(session, backend, rewrite_messages)
 
-    codec = session._codec
-    generation_prompt = codec.generation_prompt
-    expected_context = codec.build_initial_tokens(first_messages) + _ids("A1")
-    expected_context += codec.encode_incremental([second_messages[2]])[: -len(generation_prompt)]
-    expected_context += codec.encode_incremental([rewrite_messages[-1]])
-    assert backend.calls[2]["prompt_ids"] == expected_context
     [chain] = session.active_chains
+    committed_before_replacement = chain.buffer.prompt_ids + chain.buffer.response_ids[: -len("FIXED")]
+    assert backend.calls[2]["prompt_ids"] == committed_before_replacement
     assert _decode_response_ids(chain.buffer.response_ids) == ("A1user:second\nuser:replacement\nassistant:FIXED")
     assert chain.buffer.response_mask == (
         [1] * len("A1") + [0] * len("user:second\nuser:replacement\nassistant:") + [1] * len("FIXED")
@@ -1202,7 +1200,15 @@ async def test_multiple_chains_closes_when_continuation_fills_total_trajectory_c
     ]
     codec = MessageCodec(FakeTokenizer())
     prompt_length = len(codec.build_initial_tokens(first_messages))
-    incremental_length = len(codec.encode_incremental(continuation_messages[-1:]))
+    previous_messages = [*first_messages, continuation_messages[0]]
+    runtime_ids = codec.build_initial_tokens(first_messages) + _ids("FIRST")
+    merged_ids, _, _ = codec.merge_context_tokens(
+        previous_messages,
+        [*first_messages, *continuation_messages],
+        runtime_ids,
+        [1] * len("FIRST"),
+    )
+    incremental_length = len(merged_ids) - len(runtime_ids)
     session = _session(
         "total-capacity-exhausted",
         prompt_length=prompt_length,

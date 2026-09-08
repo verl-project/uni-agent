@@ -217,31 +217,6 @@ class MessageCodec:
             **self._vision_info_extractor_kwargs,
         )
 
-    def _encode_prompt_text(
-        self,
-        prompt: str,
-        image_data: list[Any] | None = None,
-        video_data: list[Any] | None = None,
-    ) -> list[int]:
-        """Encode rendered prompt text with the configured tokenizer or processor."""
-        if self._processor is None:
-            return normalize_token_ids(self._tokenizer.encode(prompt, add_special_tokens=False))
-
-        videos = video_data
-        video_metadata = None
-        if videos is not None:
-            videos, video_metadata = zip(*videos, strict=False)
-            videos, video_metadata = list(videos), list(video_metadata)
-        model_inputs = self._processor(
-            text=[prompt],
-            images=image_data,
-            videos=videos,
-            video_metadata=video_metadata,
-            return_tensors="pt",
-            do_sample_frames=False,
-        )
-        return normalize_token_ids(model_inputs["input_ids"])
-
     def build_initial_tokens(
         self,
         messages: list[dict[str, Any]],
@@ -308,53 +283,6 @@ class MessageCodec:
             response_logprobs,
         )
         return merge_result.token_ids, response_mask, response_logprobs
-
-    def encode_incremental(
-        self,
-        messages: list[dict[str, Any]],
-        image_data: list[Any] | None = None,
-        video_data: list[Any] | None = None,
-    ) -> list[int]:
-        """Legacy rollback-only incremental encoding using a dummy-user delta."""
-        if not messages:
-            return []
-
-        processing_class = self._processor if self._processor is not None else self._tokenizer
-        anchor_content = [{"type": "text", "text": ""}] if self._processor is not None else ""
-        anchor = [{"role": "user", "content": anchor_content}]
-
-        if any(message.get("role") == "assistant" for message in messages[1:]):
-            raise ValueError("An incremental assistant message may only appear first")
-
-        # TODO: Replace this user/tool empty-user fallback with continuous-token merging.
-        # A user -> tool anchor is not valid for every chat template.
-        anchor_prompt = _apply_chat_template(
-            processing_class,
-            anchor,
-            add_generation_prompt=False,
-            tokenize=False,
-            **self._apply_chat_template_kwargs,
-        )
-        full_prompt = _apply_chat_template(
-            processing_class,
-            anchor + messages,
-            add_generation_prompt=True,
-            tokenize=False,
-            **self._apply_chat_template_kwargs,
-        )
-        prefix_prompt = anchor_prompt
-        if self._turn_separator:
-            separator_text = self._tokenizer.decode(self._turn_separator, skip_special_tokens=False)
-            if not separator_text or not anchor_prompt.endswith(separator_text):
-                raise ValueError("Turn separator is not a stable text suffix")
-            prefix_prompt = anchor_prompt[: -len(separator_text)]
-        if not full_prompt.startswith(prefix_prompt):
-            raise ValueError("Incremental chat template is not prefix-stable")
-        return self._encode_prompt_text(
-            full_prompt[len(prefix_prompt) :],
-            image_data,
-            video_data,
-        )
 
     def _process_tool_calls_sglang(
         self,
