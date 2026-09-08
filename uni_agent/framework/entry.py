@@ -54,7 +54,7 @@ def build_gateway_manager(*, config, llm_client) -> GatewayManager:
         mm_processor_kwargs=dict(mm_processor_kwargs),
         prompt_length=rollout_config.prompt_length,
         response_length=rollout_config.response_length,
-        enable_last_assistant_rollback=af_cfg.get("enable_last_assistant_rollback", False),
+        enable_last_assistant_rollback=af_cfg.get("enable_last_assistant_rollback", True),
     )
 
     return GatewayManager(
