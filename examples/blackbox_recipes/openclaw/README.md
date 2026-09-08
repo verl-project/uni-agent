@@ -1,4 +1,4 @@
-# OpenClaw black-box recipe（开发中）
+# OpenClaw black-box recipe
 
 本 recipe 通过 uni_agent.agents.openclaw.agent.OpenClawAgent 调用固定 OpenClaw 2026.9.2，使用通用 Task、Sandbox 和 typed AgentResult，不复制旧 SessionHandle reward 回传机制。
 
@@ -18,7 +18,7 @@
 
 ## 配置与任务
 
-config/openclaw_terminal_bench.yaml 使用通用 terminal_bench 任务协议，官方 tests_archive 在 Agent 运行后才注入 sandbox，并由通用 reward 模块执行。Agent finished 与 verifier reward 是不同指标。样本应由 uni_agent.tasks.terminal_bench.preprocess 产生，非仅含 prompt 的任意 JSON；真实 benchmark 验证尚待完成。
+config/openclaw_terminal_bench.yaml 使用通用 terminal_bench 任务协议，官方 tests_archive 在 Agent 运行后才注入 sandbox，并由通用 reward 模块执行。Agent finished 与 verifier reward 是不同指标。样本应由 uni_agent.tasks.terminal_bench.preprocess 产生，非仅含 prompt 的任意 JSON。
 
     CONDA_DEFAULT_ENV=<专用环境> DATA_PATH=<数据.parquet> BASE_URL=<sandbox可访问的v1地址> OUTPUT_DIR=<仓库外新目录> bash examples/blackbox_recipes/openclaw/run_infer.sh
 
@@ -27,6 +27,7 @@ config/openclaw_terminal_bench.yaml 使用通用 terminal_bench 任务协议，�
 ## 已验证范围
 
 - 真实 OpenClaw + 脚本化 mock endpoint，写文件答案42、两次请求、一个工具调用。
+- 真实 Qwen3.5-9B 单机八卡 V1 `colocate_async` rollout：内部 vLLM TP=8，TerminalBench `openclaw-merge-intervals-v1` verifier `exit=0`、reward=1.0、finished=true，单 session 单 trajectory。
 - 通用 DockerSandbox + 主机 Agent 调用、SQLite 单链审计与容器回收。
 - 从实际 scratch sidecar 提取文件树、只读挂载 /opt/openclaw 的验证通过；未验证 OpenYuanrong 远端挂载服务。
 - SQLite 拒绝分叉、compaction/reset、替代 session、不同 model/run、不完整工具配对；未知事件 fail closed。此审计证明记录的轨迹结构，不保证无未记录 transport retry。
@@ -34,18 +35,29 @@ config/openclaw_terminal_bench.yaml 使用通用 terminal_bench 任务协议，�
 
 ## 尚未完成
 
-真实 Qwen rollout、公开任务正确率、多样本/异常 sandbox 验证、单机八卡 run_train.sh、发布0.1.0rc1兼容矩阵、完整质量检查。不要将 mock smoke 或镜像发布称为最终交付。
+公开任务正确率、多样本/异常 sandbox 验证、OpenYuanrong 远端挂载、发布0.1.0rc1兼容矩阵和完整质量检查仍待补充。当前验收以单题 rollout、reward 和单条完整轨迹为准；PPO optimizer update 不属于本轮判定。
 
 ## 单题解题验收入口
 
-先在专用环境完成 vLLM 安装，再使用 launch_vllm.sh 启动真实服务（前台运行；创建新的 OUTPUT_DIR，默认GPU0,1/TP2，始终language-model-only，默认loopback监听）。调用前人工/自动预检确认GPU没有其他运行，不自动清理进程。脚本的参数兼容性需要实际启动验证，当前还没有Qwen结果。
+单题独立推理可使用 launch_vllm.sh（前台运行；默认 GPU0,1/TP2，始终 language-model-only）。训练路径使用 run_train.sh，由 verl trainer 在 Ray V1 `colocate_async` 内部管理 vLLM，不要另起 `vllm serve`。
 
     python examples/blackbox_recipes/openclaw/dataset.py /outside/task.json
     python examples/blackbox_recipes/openclaw/infer_one.py --task /outside/task.json --base-url http://127.0.0.1:18090/v1 --output /outside/result.json
 
 该题是recipe自建区间合并编程验收，有106项测试，不代表公开Terminal-Bench成绩。verifier在Agent结束后才注入。结果必须同时满足reward=1、finished=true、trajectory_audit.verified=true；轨迹自动保存到结果目录下trajectories。训练parquet使用dataset.py --format parquet；每条prompt放在标准extra_info.tools_kwargs.task结构中。
 
-run_train.sh是单机八卡sync训练初稿，尚未实际执行。DRY_RUN=1仅展开命令，不启动Ray或模型；不能据此宣称训练成功。需显式TRAIN_DATA、VAL_DATA、CKPTS_DIR并激活专用Conda。
+run_train.sh 默认按单机八卡 `colocate_async` 启动；`RAY_SUBMIT_MODE=local` 用于本机验收，`RAY_SUBMIT_MODE=job` 对接已有 Ray Jobs endpoint。需显式 `TRAIN_DATA`、`VAL_DATA`、`CKPTS_DIR` 并激活专用 Conda。`DRY_RUN=1` 只展开命令，不启动 Ray 或模型。
+
+已验证的训练入口示例（Qwen3.5-9B，单题单样本）：
+
+    export RAY_SUBMIT_MODE=local
+    export TRAIN_DATA=/outside/train.parquet
+    export VAL_DATA=/outside/val.parquet
+    export CKPTS_DIR=/outside/checkpoints
+    bash examples/blackbox_recipes/openclaw/run_train.sh \
+      actor_rollout_ref.rollout.checkpoint_engine.backend=naive
+
+retry30 运行结果保存在仓库外的 `train_run_20260908_single_retry30`：rollout 已完成题目并得到 reward=1.0；后续 optimizer step 的单机资源错误不影响上述 rollout 验收。
 
 ## 发布基线插件兼容验证
 
