@@ -225,8 +225,8 @@ fi
 # PYTHONPATH is omitted here: Ray injects it from the job working_dir; the actor
 # PYTHONPATH is set by verl's get_ppo_ray_runtime_env.
 RAY_INIT_ENV_ARGS=(
-    "+ray_kwargs.ray_init.runtime_env.env_vars.NCCL_P2P_DISABLE=\"1\""
-    "+ray_kwargs.ray_init.runtime_env.env_vars.NCCL_SHM_DISABLE=\"1\""
+    "+ray_kwargs.ray_init.runtime_env.env_vars.NCCL_P2P_DISABLE=\"${NCCL_P2P_DISABLE}\""
+    "+ray_kwargs.ray_init.runtime_env.env_vars.NCCL_SHM_DISABLE=\"${NCCL_SHM_DISABLE}\""
     "+ray_kwargs.ray_init.runtime_env.env_vars.SANDBOX_NAME_PREFIX=\"${SANDBOX_NAME_PREFIX}\""
     "+ray_kwargs.ray_init.runtime_env.env_vars.RL_INSIGHT_SERVER_URL=\"${RL_INSIGHT_SERVER_URL}\""
     "+ray_kwargs.ray_init.runtime_env.env_vars.OPENYUANRONG_SERVER_ADDRESS=\"${OPENYUANRONG_SERVER_ADDRESS}\""
