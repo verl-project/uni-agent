@@ -297,6 +297,6 @@ async def test_decode_response_uses_gateway_dispatcher_for_tool_calls(monkeypatc
     assert finish_reason == "tool_calls"
     assert message["content"] == ""
     assert message["tool_calls"][0]["type"] == "function"
-    assert message["tool_calls"][0]["function"] == {"name": "search", "arguments": '{"query":"weather"}'}
+    assert message["tool_calls"][0]["function"] == {"name": "search", "arguments": {"query": "weather"}}
     assert seen["dispatch"][0] == response_ids
     assert seen["dispatch"][2] == "qwen3_xml"

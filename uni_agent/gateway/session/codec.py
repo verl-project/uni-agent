@@ -81,6 +81,17 @@ def _canonicalize_tool_arguments_for_comparison(arguments: Any) -> tuple[str, An
     return ("raw", arguments)
 
 
+def _normalize_tool_arguments_for_internal_message(arguments: Any) -> Any:
+    """Parse valid JSON-object strings into the template-facing dict form."""
+    if not isinstance(arguments, str):
+        return arguments
+    try:
+        parsed = json.loads(arguments)
+    except json.JSONDecodeError:
+        return arguments
+    return parsed if isinstance(parsed, dict) else arguments
+
+
 class MessageCodec:
     """Model-scoped request codec used by gateway sessions.
 
@@ -457,7 +468,10 @@ class MessageCodec:
                     {
                         "id": f"call_{uuid4().hex[:8]}",
                         "type": "function",
-                        "function": {"name": fc.name, "arguments": fc.arguments},
+                        "function": {
+                            "name": fc.name,
+                            "arguments": _normalize_tool_arguments_for_internal_message(fc.arguments),
+                        },
                     }
                     for fc in function_calls
                 ]

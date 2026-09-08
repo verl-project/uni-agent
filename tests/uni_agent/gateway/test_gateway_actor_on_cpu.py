@@ -1434,6 +1434,9 @@ async def test_gateway_actor_tool_call_decode_returns_openai_format(monkeypatch)
         assert "id" in tool_calls[0]
         # HTTP response arguments should be a JSON string (OpenAI compatible)
         assert isinstance(tool_calls[0]["function"]["arguments"], str)
+        [active_chain] = actor._sessions["session-tool-call"].active_chains
+        internal_arguments = active_chain.message_history[-1]["tool_calls"][0]["function"]["arguments"]
+        assert internal_arguments == {"query": "weather"}
 
         # Second request: agent sends back tool result as continuation
         second = await actor._handle_openai_chat_completions(
