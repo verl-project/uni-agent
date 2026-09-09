@@ -82,6 +82,13 @@ class _GatewayActor:
         self._prompt_length = config.prompt_length
         self._response_length = config.response_length
         self._enable_last_assistant_rollback = config.enable_last_assistant_rollback
+        self._kv_cache_offload_config = {
+            "enabled": config.kv_cache_offload_enabled,
+            "priority_mode": config.kv_cache_offload_priority_mode,
+            "lease_seconds": config.kv_cache_offload_lease_seconds,
+            "priority": config.kv_cache_offload_priority,
+            "tool_priority": config.kv_cache_offload_tool_priority,
+        }
         self._sessions: dict[str, GatewaySession] = {}
         self._app = FastAPI()
         self._server_port: int | None = None
@@ -246,6 +253,7 @@ class _GatewayActor:
             sampling_params=sampling_params,
             enable_last_assistant_rollback=self._enable_last_assistant_rollback,
             metadata=metadata,
+            kv_cache_offload_config=self._kv_cache_offload_config,
         )
         return handle
 

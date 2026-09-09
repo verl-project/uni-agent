@@ -1,4 +1,5 @@
 import asyncio
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -48,6 +49,7 @@ def _session(
     processor=None,
     vision_info_extractor=None,
     tool_parser_name: str | None = None,
+    kv_cache_offload_config: dict | None = None,
 ) -> GatewaySession:
     return GatewaySession(
         SessionHandle(session_id=session_id),
@@ -61,6 +63,7 @@ def _session(
         response_length=response_length,
         sampling_params=sampling_params,
         enable_last_assistant_rollback=enable_last_assistant_rollback,
+        kv_cache_offload_config=kv_cache_offload_config,
     )
 
 
@@ -100,6 +103,75 @@ async def _run(session: GatewaySession, backend: SequencedBackend, messages: lis
         allowed_sampling_keys=ALLOWED_SAMPLING_KEYS,
     )
     return await session.run_generation(request, backend)
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_gateway_session_injects_runtime_kv_hint_for_vllm():
+    backend = SequencedBackend(["OK"])
+    session = _session(
+        "trajectory-7",
+        sampling_params={"extra_args": {"caller": "preserved"}},
+        kv_cache_offload_config={
+            "enabled": True,
+            "lease_seconds": 120.0,
+            "priority": 40,
+            "tool_priority": 90,
+        },
+    )
+    before = time.time()
+    await _run(
+        session,
+        backend,
+        [{"role": "user", "content": "use a tool if needed"}],
+        tools=[{"type": "function", "function": {"name": "search", "parameters": {}}}],
+    )
+
+    params = backend.calls[-1]["sampling_params"]
+    assert params["extra_args"]["caller"] == "preserved"
+    hint = params["extra_args"]["kv_transfer_params"]["agent_hint"]
+    assert hint["schema_version"] == 1
+    assert hint["trajectory_id"] == "trajectory-7"
+    assert hint["kv_priority"] == 90
+    assert hint["tools_available"] is True
+    assert before + 120.0 <= hint["lease_until"] <= time.time() + 120.0
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_gateway_session_dynamic_hint_promotes_tool_result_continuation():
+    backend = SequencedBackend(["A", "B"])
+    session = _session(
+        "dynamic-trajectory",
+        prompt_length=10_000,
+        response_length=10_000,
+        kv_cache_offload_config={
+            "enabled": True,
+            "priority_mode": "dynamic",
+            "lease_seconds": 120.0,
+        },
+    )
+    tools = [{"type": "function", "function": {"name": "search", "parameters": {}}}]
+    user = {"role": "user", "content": "search"}
+
+    await _run(session, backend, [user], tools=tools)
+    first_hint = backend.calls[-1]["sampling_params"]["extra_args"]["kv_transfer_params"]["agent_hint"]
+    await _run(
+        session,
+        backend,
+        [
+            user,
+            {"role": "assistant", "content": "A"},
+            {"role": "tool", "tool_call_id": "call-1", "content": "result"},
+        ],
+        tools=tools,
+    )
+    second_hint = backend.calls[-1]["sampling_params"]["extra_args"]["kv_transfer_params"]["agent_hint"]
+
+    assert first_hint["kv_priority"] == 35
+    assert second_hint["kv_priority"] == 65
 
 
 class _LogprobBackend:
