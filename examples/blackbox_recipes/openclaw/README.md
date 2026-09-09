@@ -24,6 +24,17 @@ config/openclaw_terminal_bench.yaml 使用通用 terminal_bench 任务协议，�
 
 必须实际激活独立 Conda 环境。API_KEY 使用受保护环境变量，不通过 shell 命令字面值传入。文本 Qwen3.5-9B vLLM 服务必须使用 --language-model-only。默认 n=1，不用同题多 rollout 拼接结果。Docker 默认网络不能访问宿主 127.0.0.1，应提供可路由 endpoint 或明确配置网络；host-network 仅用于受控验证，不作为不可信任务的安全隔离承诺。
 
+## 外部数据验证基线
+
+retry30 是当前唯一的单机八卡 rollout 基线。使用外部任务验证时只替换 `TRAIN_DATA`、`VAL_DATA` 和任务产物，保持下面参数不变：
+
+- Qwen3.5-9B，V1 `colocate_async`，单机 `1x8`，训练/rollout TP=8、PP=1、CP=1。
+- vLLM 内部 rollout，`language_model_only=True`、prompt/response `4096/4096`、`max_model_len=8192`、`max_num_seqs=1`、`max_num_batched_tokens=8192`、`enforce_eager=True`、cudagraph `NONE`、GPU memory utilization `0.2`。
+- 单样本单并发：`N=1`、`GATEWAY_COUNT=1`、`MAX_CONCURRENT_SESSIONS=1`、`NUM_AGENT_WORKERS=8`；`OFFLOAD=True`、`OFFLOAD_FRACTION=1.0`；PPO mini/micro batch 都是 `1`。
+- `TRAIN_MAX_SAMPLES=1`、`VAL_MAX_SAMPLES=1`、train/val batch 都是 `1`、`TOTAL_TRAINING_STEPS=1`、`VAL_BEFORE_TRAIN=false`，并使用 `actor_rollout_ref.rollout.checkpoint_engine.backend=naive`。
+
+正式入口仍是 `run_train.sh`，由 verl trainer 在 Ray 内部管理 vLLM；不要启动独立 `vllm serve`。如果默认 Ray 控制面被无关集群占用，只能隔离 Ray 端口/临时目录，不能改变上述模型、rollout、并发、长度、offload 和 batch 参数。验收只看题目完成、verifier/reward、`finished=true` 以及单题单 session 单 trajectory。
+
 ## 已验证范围
 
 - 真实 OpenClaw + 脚本化 mock endpoint，写文件答案42、两次请求、一个工具调用。
