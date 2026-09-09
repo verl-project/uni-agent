@@ -128,6 +128,129 @@ def test_rejects_unknown_pull_policy():
 
 @pytest.mark.cpu
 @pytest.mark.level0
+@pytest.mark.parametrize("name", ["pull_timeout", "start_timeout"])
+def test_rejects_non_positive_timeouts(name: str):
+    with pytest.raises(ValueError, match=name):
+        DockerSandbox(**{name: 0})
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_pull_timeout_pulls_missing_image_separately(monkeypatch):
+    sandbox = DockerSandbox(
+        image="example:local",
+        container_name="agent-test",
+        pull_timeout=900,
+        start_timeout=120,
+    )
+    calls: list[tuple[tuple[str, ...], float | None]] = []
+
+    async def fake_run(*args: str, timeout=None):
+        calls.append((args, timeout))
+        if args[:2] == ("image", "inspect"):
+            return ExecResult(exit_code=1, stdout="", stderr="No such image")
+        return _ok("container-id\n")
+
+    monkeypatch.setattr(sandbox, "_run_docker", fake_run)
+    asyncio.run(sandbox.start())
+
+    assert calls == [
+        (("image", "inspect", "example:local"), None),
+        (("pull", "example:local"), 900.0),
+        (
+            (
+                "run",
+                "--rm",
+                "-d",
+                "--name",
+                "agent-test",
+                "--pull",
+                "never",
+                "--entrypoint",
+                "sleep",
+                "example:local",
+                "infinity",
+            ),
+            120.0,
+        ),
+    ]
+    assert sandbox._container_name == "agent-test"
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_pull_timeout_skips_pull_when_image_is_local(monkeypatch):
+    sandbox = DockerSandbox(image="example:local", container_name="agent-test", pull_timeout=900)
+    calls: list[tuple[str, ...]] = []
+
+    async def fake_run(*args: str, timeout=None):
+        calls.append(args)
+        return _ok("sha256:image\n" if args[:2] == ("image", "inspect") else "container-id\n")
+
+    monkeypatch.setattr(sandbox, "_run_docker", fake_run)
+    asyncio.run(sandbox.start())
+
+    assert [args[0] for args in calls] == ["image", "run"]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_pull_policy_always_pulls_without_inspecting(monkeypatch):
+    sandbox = DockerSandbox(
+        image="example:local",
+        container_name="agent-test",
+        pull_policy="always",
+        pull_timeout=900,
+    )
+    calls: list[tuple[str, ...]] = []
+
+    async def fake_run(*args: str, timeout=None):
+        calls.append(args)
+        return _ok("container-id\n")
+
+    monkeypatch.setattr(sandbox, "_run_docker", fake_run)
+    asyncio.run(sandbox.start())
+
+    assert [args[0] for args in calls] == ["pull", "run"]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_pull_timeout_reported_as_timeout_error(monkeypatch):
+    sandbox = DockerSandbox(image="example:local", pull_policy="always", pull_timeout=900)
+
+    async def fake_run(*args: str, timeout=None):
+        raise asyncio.TimeoutError
+
+    monkeypatch.setattr(sandbox, "_run_docker", fake_run)
+
+    with pytest.raises(TimeoutError, match="exceeded pull_timeout=900s"):
+        asyncio.run(sandbox.start())
+    assert sandbox._container_name is None
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_start_timeout_removes_partially_created_container(monkeypatch):
+    sandbox = DockerSandbox(image="example:local", container_name="agent-test", start_timeout=120)
+    calls: list[tuple[str, ...]] = []
+
+    async def fake_run(*args: str, timeout=None):
+        calls.append(args)
+        if args[0] == "run":
+            raise asyncio.TimeoutError
+        return _ok()
+
+    monkeypatch.setattr(sandbox, "_run_docker", fake_run)
+
+    with pytest.raises(TimeoutError, match="exceeded start_timeout=120s"):
+        asyncio.run(sandbox.start())
+    assert calls[-1] == ("rm", "-f", "agent-test")
+    assert sandbox._container_name is None
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_exec_forwards_workdir_environment_and_argv(monkeypatch):
     sandbox = DockerSandbox(image="example:local")
     sandbox._container_name = "agent-test"
