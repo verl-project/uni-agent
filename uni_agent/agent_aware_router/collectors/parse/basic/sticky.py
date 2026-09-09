@@ -26,13 +26,13 @@ Event → action mapping:
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from ....collectors.parse import Parser, StickyUpdate
 from ....collectors.transport.callback import StatisticEvent
-from ....logging import get_router_logger
 
-logger = get_router_logger("sticky-parser")
+logger = logging.getLogger(__name__)
 
 
 class StickyParser(Parser):

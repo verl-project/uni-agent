@@ -16,13 +16,13 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import TYPE_CHECKING, Any
 
 from ..config.strategy import KVCAwareStrategyConfig
 from ..debug import get_debug_var, is_debug_enabled
 from ..insight import emitter
-from ..logging import get_router_logger
 from ..types import Layer, MetricKey, OverloadMode, SlowCut
 from ..utils.knob import coerce_knob_value
 from ..utils.prefix_cache import resolve_prefix_hashes
@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     from ..store import DataStore
     from .base import ReplicaInfo
 
-logger = get_router_logger("kvc-aware-strategy")
+logger = logging.getLogger(__name__)
 
 STICKY_TOP_SCORE = 1e9
 
@@ -453,7 +453,7 @@ class KVCacheAwareStrategy:
 
         for i, row in enumerate(rows):
             tag = " ← WINNER" if i == top else ""
-            logger.info(
+            logger.debug(
                 f"score(): replica={row['replica'].replica_id} kv_perc={row['kv_perc']:.3f} "
                 f"gpu_hit={row['gpu_hit']:.3f} inflight={row['inflight']} "
                 f"avail={row['avail']:.0f} need={row['need']:.0f} "

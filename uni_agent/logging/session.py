@@ -1,33 +1,40 @@
-"""Per-process setup and the ``sample_logging`` context manager."""
+"""uni-agent logging configuration and the per-run ``sample_logging`` context
+manager."""
 
 from __future__ import annotations
 
 import logging
 from pathlib import Path
 
-from .context import LogContext, _current_log_context
-from .handlers import _add_file_handler, _cleanup_handler, _dispatch, _install_console_sink
-
-# Chatty libraries (incl. Modal's gRPC stack) pinned to WARNING to keep logs on the agent.
-_QUIET_LOGGERS = ("httpx", "httpcore", "openai", "urllib3", "asyncio", "ray", "hpack", "h2", "grpclib", "modal")
+from .context import _QUIET_LOGGERS, LogContext, _current_log_context, _resolve_level
+from .handlers import _add_file_handler, _cleanup_handler, _dispatch, _install_console_sink, _mount
 
 _process_logging_ready = False
 
 
+def _setup_console_logging(level: int | str | None = None) -> None:
+    """Configure uni-agent logging on the ``uni_agent`` namespace mount point."""
+    resolved = _resolve_level(level)
+    mount = _mount()
+    for name in _QUIET_LOGGERS:
+        logging.getLogger(name).setLevel(logging.WARNING)
+    mount.setLevel(resolved)
+    mount.propagate = False
+    _install_console_sink(resolved)
+
+
 def _ensure_process_logging() -> None:
-    """Configure root logging once per process: swap in our dispatch handler + a
-    filtered console sink, pin the level to INFO, and quiet noisy libraries."""
+    """Set up logging once per process: global namespace configuration plus our
+    per-run file-dispatch handler (records outside a LogContext are ignored).
+    """
     global _process_logging_ready
     if _process_logging_ready:
         return
-    root = logging.getLogger()
-    for handler in root.handlers[:]:
-        root.removeHandler(handler)
-    root.setLevel(logging.INFO)
-    root.addHandler(_dispatch)
-    for name in _QUIET_LOGGERS:
-        logging.getLogger(name).setLevel(logging.WARNING)
-    _install_console_sink()
+    mount = _mount()
+    if not mount.handlers and mount.level == logging.NOTSET:
+        _setup_console_logging()
+    if _dispatch not in mount.handlers:
+        mount.addHandler(_dispatch)
     _process_logging_ready = True
 
 
