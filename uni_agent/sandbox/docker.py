@@ -110,7 +110,7 @@ class DockerSandbox(Sandbox):
         # A separate `docker pull` to time-bound the pull on its own
         pull_policy = self.pull_policy
         if self.pull_timeout is not None and pull_policy != "never":
-            if pull_policy in ["always", "missing"] or not await self._has_image():
+            if pull_policy == "always" or not await self._has_image():
                 await self._pull_image()
             pull_policy = "never"
 
