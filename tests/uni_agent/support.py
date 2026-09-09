@@ -9,7 +9,7 @@ from verl.workers.rollout.replica import TokenOutput
 
 
 async def logging_runner(**kwargs):
-    logging.getLogger("test.runner").info("runner task log")
+    logging.getLogger("uni_agent.test.runner").info("runner task log")
     return None
 
 

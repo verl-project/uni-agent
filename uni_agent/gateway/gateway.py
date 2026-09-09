@@ -40,7 +40,7 @@ from verl.workers.rollout.utils import run_uvicorn
 
 DEFAULT_ALLOWED_REQUEST_SAMPLING_KEYS = frozenset({"temperature", "top_p", "top_k", "max_tokens", "stop"})
 
-logger = logging.getLogger("gateway")
+logger = logging.getLogger(__name__)
 
 
 def _validate_sampling_params(sampling_params: dict[str, Any]) -> None:

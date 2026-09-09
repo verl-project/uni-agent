@@ -20,13 +20,12 @@ store, replicas)`` and maps ``ranking[0]`` back to a server handle.
 
 from __future__ import annotations
 
+import logging
 import math
 import random
 from typing import Any, Protocol, runtime_checkable
 
-from ..logging import get_router_logger
-
-logger = get_router_logger("routing")
+logger = logging.getLogger(__name__)
 
 
 @runtime_checkable

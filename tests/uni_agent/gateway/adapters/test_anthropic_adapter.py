@@ -425,7 +425,7 @@ def test_tool_input_schema_anyof_preserves_heterogeneous_branches_without_inferr
 def test_thinking_block_dropped_with_warning(caplog):
     """Inbound Anthropic thinking blocks are dropped with a warning while
     neighboring assistant text remains in the prompt history."""
-    with caplog.at_level("WARNING", logger="gateway"):
+    with caplog.at_level("WARNING", logger="uni_agent.gateway.adapters.anthropic"):
         req = anthropic_to_internal(
             {
                 "messages": [
