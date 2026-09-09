@@ -63,6 +63,7 @@ nav:
       - Agent: concepts/agent.md
       - Task and Reward: concepts/task-and-reward.md
       - Gateway and Trajectories: concepts/gateway-and-trajectories.md
+      - Logging: concepts/logging.md
       - RL-Insight Integration: concepts/rl-insight-integration.md
   - Benchmark:
       - Overview: benchmark/index.md
