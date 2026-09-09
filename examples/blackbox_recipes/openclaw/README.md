@@ -35,6 +35,10 @@ retry30 是当前唯一的单机八卡 rollout 基线。使用外部任务验证
 
 正式入口仍是 `run_train.sh`，由 verl trainer 在 Ray 内部管理 vLLM；不要启动独立 `vllm serve`。如果默认 Ray 控制面被无关集群占用，只能隔离 Ray 端口/临时目录，不能改变上述模型、rollout、并发、长度、offload 和 batch 参数。验收只看题目完成、verifier/reward、`finished=true` 以及单题单 session 单 trajectory。
 
+### SWE-bench Verified 单题验证
+
+remote186 已用公开 `princeton-nlp/SWE-bench_Verified` 的 `astropy__astropy-12907` 完成一条真实验证。数据转换、派生 task 镜像、完整命令和日志见仓库外 `/home/zxh/openclawrecipe/artifacts/swe_bench_verified_openclaw_single_astropy_12907_run` 及 `reports/swe_bench_validation_20260909.md`。该实例在 retry30 参数下得到 `eval exit_code=0`、`resolved=True`、`reward=1.0`、`finished=True`，框架汇总为 1 input / 1 success session / 1 success output / 0 unfinished episode；唯一轨迹保存在 `trajectories/aa55a31b1fee42279f30d8e23594b369/trajectory.json`。task 镜像需要同时提供 `/opt/openclaw` 和 `/opt/miniconda3/envs/testbed`；本次通过派生镜像和 host network 访问本机 gateway。
+
 ## 已验证范围
 
 - 真实 OpenClaw + 脚本化 mock endpoint，写文件答案42、两次请求、一个工具调用。
@@ -46,7 +50,7 @@ retry30 是当前唯一的单机八卡 rollout 基线。使用外部任务验证
 
 ## 尚未完成
 
-公开任务正确率、多样本/异常 sandbox 验证、OpenYuanrong 远端挂载、发布0.1.0rc1兼容矩阵和完整质量检查仍待补充。当前验收以单题 rollout、reward 和单条完整轨迹为准；PPO optimizer update 不属于本轮判定。
+公开任务的总体正确率、多样本/异常 sandbox 验证、OpenYuanrong 远端挂载、发布0.1.0rc1兼容矩阵和完整质量检查仍待补充；已完成一条 SWE-bench Verified 真实题验证。当前验收以单题 rollout、reward 和单条完整轨迹为准；PPO optimizer update 不属于本轮判定。
 
 ## 单题解题验收入口
 

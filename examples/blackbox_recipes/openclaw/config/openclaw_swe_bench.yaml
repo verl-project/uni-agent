@@ -1,0 +1,17 @@
+# OpenClaw task defaults for the current-framework SWE-bench samples.
+# The sample row supplies the instance metadata and sandbox image; this file
+# selects the generic SWEBenchTask and binds the OpenClaw agent.
+- name: swe_bench
+  sandbox:
+    provider: docker
+    runtime_timeout: 7200
+    sandbox_kwargs:
+      pull_policy: never
+      run_args: ["--network", "host"]
+  agent:
+    name: openclaw
+    tool_command: /opt/openclaw/bin/openclaw
+    run_timeout: 600
+    cli_timeout_seconds: 540
+    artifact_dir: /home/zxh/openclawrecipe/artifacts/swe_bench_verified_openclaw_single_astropy_12907_run/trajectories
+    strict_single_trajectory: true
