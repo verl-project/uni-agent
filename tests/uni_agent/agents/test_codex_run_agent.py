@@ -17,16 +17,19 @@ RUN_AGENT = ROOT / "examples" / "codex" / "run_agent.sh"
 
 
 @pytest.mark.parametrize("via_agent", [False, True])
-def test_wrapper_preserves_stdin_arguments_and_inherited_home(tmp_path, via_agent):
+def test_run_agent_preserves_stdin_arguments_and_inherited_home(tmp_path, via_agent):
     tool_root = tmp_path / "tool"
     tool_bin = tool_root / "bin"
     tool_bin.mkdir(parents=True)
-    wrapper = tool_bin / "run_agent.sh"
-    shutil.copy2(RUN_AGENT, wrapper)
-    fake_codex = tool_bin / "codex"
+    run_agent = tool_bin / "run_agent.sh"
+    shutil.copy2(RUN_AGENT, run_agent)
+    vendor_bin = tool_root / "vendor" / "x86_64-unknown-linux-musl"
+    vendor_bin.mkdir(parents=True)
+    fake_codex = vendor_bin / "codex"
     fake_codex.write_text(
         "#!/usr/bin/env python3\nimport json, sys\n"
-        "print(json.dumps({'argv': sys.argv[1:], 'stdin': sys.stdin.read()}))\n"
+        "print(json.dumps({'argv': sys.argv[1:], 'stdin': sys.stdin.read(), "
+        "'managed_package_root': __import__('os').environ.get('CODEX_MANAGED_PACKAGE_ROOT')}))\n"
     )
     fake_codex.chmod(0o755)
 
@@ -37,11 +40,11 @@ def test_wrapper_preserves_stdin_arguments_and_inherited_home(tmp_path, via_agen
     env.update(
         CODEX_HOME=str(home), CODEX_MODEL="policy", CODEX_API_BASE="http://gateway/v1", CODEX_PROJECT_DIR=str(tmp_path)
     )
-    argv = ["bash", str(wrapper), *extra_args]
+    argv = ["bash", str(run_agent), *extra_args]
     if via_agent:
         command = build_agent_command(
             task_b64="Zml4IHRoaXM=",
-            tool_script=str(wrapper),
+            tool_script=str(run_agent),
             gateway_url="http://gateway/v1",
             model_name="policy",
             api_key="key",
@@ -62,6 +65,7 @@ def test_wrapper_preserves_stdin_arguments_and_inherited_home(tmp_path, via_agen
     payload = json.loads(result.stdout.strip())
     argv = payload["argv"]
     assert payload["stdin"] == "fix this"
+    assert payload["managed_package_root"] == str(tool_root)
     if not via_agent:
         assert argv[-len(extra_args) :] == extra_args
     assert argv[:2] == ["exec", "--json"]
@@ -70,8 +74,35 @@ def test_wrapper_preserves_stdin_arguments_and_inherited_home(tmp_path, via_agen
     assert (home / "config.toml").is_file()
 
 
+def test_run_agent_propagates_codex_exit_code(tmp_path):
+    tool_root = tmp_path / "tool"
+    tool_bin = tool_root / "bin"
+    tool_bin.mkdir(parents=True)
+    run_agent = tool_bin / "run_agent.sh"
+    shutil.copy2(RUN_AGENT, run_agent)
+    vendor_bin = tool_root / "vendor" / "x86_64-unknown-linux-musl"
+    vendor_bin.mkdir(parents=True)
+    fake_codex = vendor_bin / "codex"
+    fake_codex.write_text("#!/usr/bin/env python3\nraise SystemExit(23)\n")
+    fake_codex.chmod(0o755)
+
+    env = os.environ.copy()
+    env.update(CODEX_HOME=str(tmp_path / "codex-home"), CODEX_MODEL="policy", CODEX_API_BASE="http://gateway/v1")
+    result = subprocess.run(
+        ["bash", str(run_agent)],
+        input="fix this",
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 23
+
+
 @pytest.mark.parametrize("inherited", [None, "", "/tmp/custom-codex-state"])
-def test_wrapper_home_default_expression(inherited):
+def test_run_agent_home_default_expression(inherited):
     # Evaluate the actual assignment without creating shared /tmp state.
     assignment = next(line for line in RUN_AGENT.read_text().splitlines() if line.startswith("CODEX_HOME="))
     env = os.environ.copy()

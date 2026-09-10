@@ -33,7 +33,7 @@ unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy
 cd "${PROJECT_DIR}"
 
 # Prompt comes from stdin. With no positional prompt, Codex exec reads piped stdin.
-exec "${TOOL_ROOT}/bin/codex" exec \
+exec "${TOOL_ROOT}/vendor/x86_64-unknown-linux-musl/bin/codex" exec \
   --json \
   --ephemeral \
   --skip-git-repo-check \
