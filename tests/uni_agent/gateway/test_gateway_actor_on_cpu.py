@@ -64,16 +64,6 @@ def test_gateway_actor_config_rejects_non_positive_prompt_length(prompt_length):
 
 @pytest.mark.cpu
 @pytest.mark.level0
-@pytest.mark.parametrize("max_tokens_per_turn", [0, -1])
-def test_gateway_actor_config_rejects_non_positive_max_tokens_per_turn(max_tokens_per_turn):
-    from uni_agent.gateway.config import GatewayActorConfig
-
-    with pytest.raises(ValueError, match="max_tokens_per_turn must be positive"):
-        GatewayActorConfig(tokenizer=FakeTokenizer(), max_tokens_per_turn=max_tokens_per_turn)
-
-
-@pytest.mark.cpu
-@pytest.mark.level0
 @pytest.mark.parametrize("field", ["enable_last_assistant_rollback", "enable_tool_parser_cache"])
 @pytest.mark.parametrize("value", ["true", 1, None])
 def test_gateway_actor_config_rejects_non_bool_options(field, value):
@@ -169,40 +159,6 @@ async def test_gateway_actor_max_tokens_clamped_to_remaining_trajectory_capacity
 @pytest.mark.cpu
 @pytest.mark.level0
 @pytest.mark.asyncio
-async def test_gateway_actor_max_tokens_per_turn_is_independent_of_total_capacity():
-    from uni_agent.gateway.config import GatewayActorConfig
-    from uni_agent.gateway.gateway import _GatewayActor
-
-    backend = SequencedBackend(["A" * 4, "B" * 4])
-    actor = _GatewayActor(
-        GatewayActorConfig(
-            tokenizer=FakeTokenizer(),
-            prompt_length=2048,
-            response_length=100,
-            max_tokens_per_turn=16,
-            allowed_request_sampling_param_keys={"max_tokens"},
-        ),
-        backend,
-    )
-    await actor.start()
-    try:
-        await actor.create_session("turn-cap", sampling_params={"max_tokens": 5000})
-        first_messages = [{"role": "user", "content": "hi"}]
-        await actor._handle_openai_chat_completions("turn-cap", {"messages": first_messages})
-        assert backend.calls[-1]["sampling_params"]["max_tokens"] == 16
-
-        await actor._handle_openai_chat_completions(
-            "turn-cap",
-            {"messages": [*first_messages, {"role": "assistant", "content": "A" * 4}]},
-        )
-        assert backend.calls[-1]["sampling_params"]["max_tokens"] == 16
-    finally:
-        await actor.shutdown()
-
-
-@pytest.mark.cpu
-@pytest.mark.level0
-@pytest.mark.asyncio
 async def test_gateway_actor_responses_endpoint_returns_responses_envelope():
     from uni_agent.gateway.config import GatewayActorConfig
     from uni_agent.gateway.gateway import _GatewayActor
@@ -221,31 +177,6 @@ async def test_gateway_actor_responses_endpoint_returns_responses_envelope():
     assert body["object"] == "response"
     assert body["output_text"] == "ANSWER"
     assert body["output"][0]["type"] == "message"
-
-
-@pytest.mark.cpu
-@pytest.mark.level0
-@pytest.mark.asyncio
-async def test_gateway_actor_models_endpoint_returns_served_model():
-    from uni_agent.gateway.config import GatewayActorConfig
-    from uni_agent.gateway.gateway import _GatewayActor
-
-    actor = _GatewayActor(
-        GatewayActorConfig(tokenizer=FakeTokenizer(), served_model_name="Qwen3.5-9B"),
-        QueuedBackend(["ANSWER"]),
-    )
-    await actor.start()
-    try:
-        await actor.create_session("models-discovery")
-        transport = httpx.ASGITransport(app=actor._app)
-        async with httpx.AsyncClient(transport=transport, base_url="http://gateway.local") as client:
-            response = await client.get("/sessions/models-discovery/v1/models")
-        assert response.status_code == 200
-        body = response.json()
-        assert body["object"] == "list"
-        assert body["data"][0]["id"] == "Qwen3.5-9B"
-    finally:
-        await actor.shutdown()
 
 
 @pytest.mark.asyncio

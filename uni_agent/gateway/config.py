@@ -33,12 +33,6 @@ class GatewayActorConfig:
         prompt_length: Optional prompt component of the total trajectory capacity.
         response_length: Optional response component of the total trajectory capacity.
             The gateway enforces their sum when both values are set.
-        max_tokens_per_turn: Optional per-request generation cap. This is
-            intentionally independent from the total trajectory capacity so a
-            multi-turn agent cannot consume the whole episode budget in its
-            first request.
-        served_model_name: Model identifier returned by the optional models
-            discovery endpoint used by OpenAI-compatible clients.
         enable_last_assistant_rollback: Whether latest-assistant rewrites may
             rollback and reuse an existing chain. Enabled by default.
     """
@@ -54,8 +48,6 @@ class GatewayActorConfig:
     vision_info_extractor_kwargs: dict[str, Any] | None = None
     prompt_length: int | None = None
     response_length: int | None = None
-    max_tokens_per_turn: int | None = None
-    served_model_name: str = "unknown"
     enable_last_assistant_rollback: bool = True
 
     def __post_init__(self) -> None:
@@ -72,5 +64,3 @@ class GatewayActorConfig:
             raise ValueError(f"prompt_length must be positive when set, got {self.prompt_length}")
         if self.response_length is not None and self.response_length <= 0:
             raise ValueError(f"response_length must be positive when set, got {self.response_length}")
-        if self.max_tokens_per_turn is not None and self.max_tokens_per_turn <= 0:
-            raise ValueError(f"max_tokens_per_turn must be positive when set, got {self.max_tokens_per_turn}")

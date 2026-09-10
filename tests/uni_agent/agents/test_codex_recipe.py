@@ -67,7 +67,6 @@ def test_codex_sample_uses_community_job_shape_and_required_overrides():
     assert "ray job submit --no-wait --runtime-env" in sample
     assert "python3 -m verl.trainer.main_ppo" in sample
     assert "examples/codex/task_config_codex.yaml" in sample
-    assert "++actor_rollout_ref.rollout.custom.agent_framework.max_tokens_per_turn=${MAX_TOKENS_PER_TURN}" in sample
     assert "+actor_rollout_ref.rollout.engine_kwargs.vllm.language_model_only=True" in sample
     assert "actor_rollout_ref.rollout.engine_kwargs.vllm.reasoning_parser" in sample
 
@@ -83,7 +82,6 @@ def test_codex_sample_default_concurrency_reaches_runner_argv(tmp_path):
     assert "trainer.save_freq=-1" in args
     assert "verl.trainer.main_ppo" in args
     assert "++actor_rollout_ref.rollout.custom.agent_framework.agent_runners.task.max_concurrent_sessions=1" in args
-    assert "++actor_rollout_ref.rollout.custom.agent_framework.max_tokens_per_turn=8192" in args
     assert "data.max_prompt_length=8192" in args
     assert "data.max_response_length=122880" in args
     assert "actor_rollout_ref.rollout.gpu_memory_utilization=0.62" in args
