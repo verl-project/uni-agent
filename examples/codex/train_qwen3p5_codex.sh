@@ -21,7 +21,6 @@ MASK_UNFINISHED_EPISODE=${MASK_UNFINISHED_EPISODE:-True}
 
 max_prompt_length=${MAX_PROMPT_LENGTH:-8192}
 max_response_length=${MAX_RESPONSE_LENGTH:-122880}
-MAX_TOKENS_PER_TURN=${MAX_TOKENS_PER_TURN:-8192}
 gen_tp=${GEN_TP:-8}
 train_tp=${TP:-8}
 train_pp=${PP:-1}
@@ -46,10 +45,6 @@ VLLM_REASONING_PARSER=${VLLM_REASONING_PARSER:-qwen3}
 
 if ! [[ "${CONCURRENCY}" =~ ^[1-9][0-9]*$ ]]; then
     echo "CONCURRENCY must be a positive integer, got ${CONCURRENCY}" >&2
-    exit 2
-fi
-if ! [[ "${MAX_TOKENS_PER_TURN}" =~ ^[1-9][0-9]*$ ]]; then
-    echo "MAX_TOKENS_PER_TURN must be a positive integer, got ${MAX_TOKENS_PER_TURN}" >&2
     exit 2
 fi
 ray job submit --no-wait --runtime-env $RUNTIME_ENV \
@@ -133,8 +128,6 @@ ray job submit --no-wait --runtime-env $RUNTIME_ENV \
     ++actor_rollout_ref.rollout.custom.agent_framework.agent_runners.task.runner_kwargs.task_config_path=${TASK_CONFIG} \
     ++actor_rollout_ref.rollout.custom.agent_framework.agent_runners.task.runner_kwargs.model_name=${SERVED_MODEL_NAME} \
     ++actor_rollout_ref.rollout.custom.agent_framework.mask_unfinished_episode=${MASK_UNFINISHED_EPISODE} \
-    ++actor_rollout_ref.rollout.custom.agent_framework.max_tokens_per_turn=${MAX_TOKENS_PER_TURN} \
-    ++actor_rollout_ref.rollout.custom.agent_framework.served_model_name=${SERVED_MODEL_NAME} \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.62 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp} \
     actor_rollout_ref.rollout.prompt_length=${max_prompt_length} \
