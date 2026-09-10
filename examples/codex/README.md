@@ -22,18 +22,16 @@ NNODES=1 NGPUS_PER_NODE=8 \
 CONCURRENCY=1 GEN_TP=8 TP=8 PP=1 CP=1 \
 TRAIN_PROMPT_BSZ=1 N_RESP_PER_PROMPT=1 PPO_MINI_BATCH_SIZE=1 \
 MAX_PROMPT_LENGTH=8192 MAX_RESPONSE_LENGTH=122880 \
-MAX_TOKENS_PER_TURN=8192 \
 TASK_CONFIG=examples/codex/task_config_codex.yaml \
 MASK_UNFINISHED_EPISODE=True \
 bash examples/codex/train_qwen3p5_codex.sh
 ```
 
 The default recipe targets Qwen3.5-9B on one eight-GPU node, with a 128K total
-trajectory, an 8192-token per-turn cap, `qwen3_coder`, and one rollout
+trajectory, `qwen3_coder`, and one rollout
 session. `CONCURRENCY` maps directly to
 `agent_runners.task.max_concurrent_sessions` and must be a positive integer.
-`MAX_TOKENS_PER_TURN` is also positive and independent of the total trajectory
-capacity.
+Generation uses the baseline request sampling limits and remaining trajectory capacity.
 
 Text-only Qwen3.5 runs set
 `+actor_rollout_ref.rollout.engine_kwargs.vllm.language_model_only=True`.
