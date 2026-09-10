@@ -19,8 +19,6 @@ wire their overrides in (``_exec`` primitive, ``is_alive`` liveness probe, and t
 from __future__ import annotations
 
 import asyncio
-import ctypes
-import os
 
 import pytest
 
@@ -240,25 +238,6 @@ def test_openyuanrong_recognizes_its_timeout():
     assert sb._is_timeout_error(RuntimeError("Command timed out after 60 seconds")) is True
     assert sb._is_timeout_error(TimeoutError()) is True
     assert sb._is_timeout_error(RuntimeError("other")) is False
-
-
-def test_openyuanrong_preloads_sdk_libraries(monkeypatch):
-    import uni_agent.sandbox.openyuanrong as openyuanrong
-
-    loaded: list[tuple[str, int]] = []
-
-    def fake_cdll(path: str, *, mode: int):
-        loaded.append((path, mode))
-
-    monkeypatch.setenv("AKERNEL_SDK_LD_PRELOAD", f"/tmp/libffi.so.7{os.pathsep}/tmp/libother.so")
-    monkeypatch.setattr(ctypes, "CDLL", fake_cdll)
-
-    openyuanrong._preload_sdk_libraries()
-
-    assert loaded == [
-        ("/tmp/libffi.so.7", ctypes.RTLD_GLOBAL),
-        ("/tmp/libother.so", ctypes.RTLD_GLOBAL),
-    ]
 
 
 # --------------------------- provider is_alive() liveness ---------------------------

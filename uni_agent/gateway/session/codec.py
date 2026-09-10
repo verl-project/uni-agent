@@ -13,16 +13,10 @@ from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
-from uni_agent.gateway.message_normalization import (
-    canonicalize_messages,
-    coalesce_consecutive_assistant_messages,
-)
+from uni_agent.gateway.message_normalization import canonicalize_messages, coalesce_consecutive_assistant_messages
 from verl.utils.tokenizer import normalize_token_ids
-from verl.utils.tokenizer.chat_template import apply_chat_template as _verl_apply_chat_template
+from verl.utils.tokenizer.chat_template import apply_chat_template as _apply_chat_template
 from verl.utils.tokenizer.chat_template import initialize_turn_separator
-
-_apply_chat_template = _verl_apply_chat_template
-_ORIGINAL_APPLY_CHAT_TEMPLATE = _verl_apply_chat_template
 
 # Map backend stop_reason values into the gateway's internal finish_reason vocabulary.
 _FINISH_REASON_MAP = {
@@ -55,11 +49,8 @@ def _apply_chat_template_for_model(processing_class, messages: list[dict[str, An
     templates such as Qwen3.5 reject that ordering. Keep this compatibility at
     the recipe's model boundary so the pinned verl checkout remains unmodified.
     """
-    apply_chat_template = _apply_chat_template
-    if apply_chat_template is _ORIGINAL_APPLY_CHAT_TEMPLATE:
-        apply_chat_template = _verl_apply_chat_template
     try:
-        return apply_chat_template(processing_class, messages, **kwargs)
+        return _apply_chat_template(processing_class, messages, **kwargs)
     except Exception:
         if any(message.get("role") == "user" for message in messages):
             raise
@@ -82,7 +73,7 @@ def _apply_chat_template_for_model(processing_class, messages: list[dict[str, An
             insertion_index,
             {"role": "user", "content": [{"type": "text", "text": ""}]},
         )
-        return apply_chat_template(processing_class, normalized, **kwargs)
+        return _apply_chat_template(processing_class, normalized, **kwargs)
 
 
 def _canonical_tools_hash(tools: list[dict[str, Any]]) -> str:

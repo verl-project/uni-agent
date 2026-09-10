@@ -26,33 +26,6 @@ logger = logging.getLogger(__name__)
 _sdk_initialized = False
 
 
-def _preload_sdk_libraries() -> None:
-    """Load SDK compatibility libraries before its native modules are imported.
-
-    The OpenYuanrong SDK's native runtime links against the system libffi ABI.
-    On Ubuntu 20.04, a Conda environment can otherwise satisfy that dependency
-    with an incompatible libffi build and make ``import yr`` fail inside a Ray
-    worker.  ``AKERNEL_SDK_LD_PRELOAD`` is a colon-separated list so the same
-    hook can cover other provider-specific native dependencies when needed.
-    """
-    raw = os.getenv("AKERNEL_SDK_LD_PRELOAD", "")
-    if not raw.strip():
-        return
-
-    import ctypes
-
-    for library in raw.split(os.pathsep):
-        library = library.strip()
-        if not library:
-            continue
-        try:
-            ctypes.CDLL(library, mode=ctypes.RTLD_GLOBAL)
-        except OSError as exc:
-            # Keep the original SDK import error authoritative if the optional
-            # compatibility library is unavailable on a different host.
-            logger.warning("failed to preload OpenYuanrong SDK library %s: %s", library, exc)
-
-
 def _resolve_sandbox_name() -> str | None:
     """Return ``{prefix}{random}`` when ``SANDBOX_NAME_PREFIX`` env is set."""
     prefix = os.getenv("SANDBOX_NAME_PREFIX")
@@ -74,7 +47,6 @@ def _load_sandbox_module() -> Any:
             "OPENYUANRONG_SERVER_ADDRESS and OPENYUANRONG_TOKEN environment variables must be set for sandbox"
         )
     os.environ["TUNNEL_SSL_VERIFY"] = os.getenv("OPENYUANRONG_TUNNEL_SSL_VERIFY", "0")
-    _preload_sdk_libraries()
 
     if os.getenv("USE_OPENYUANRONG_SDK", "0") == "1":
         try:
@@ -294,6 +266,6 @@ class OpenyuanrongSandbox(Sandbox):
         exit_code = int(result.exit_code)
         stdout = _to_str(getattr(result, "stdout", ""))
         stderr = _to_str(getattr(result, "stderr", ""))
-        # Preserve the provider exit status and captured streams so black-box
-        # agents can parse structured failure events from their stdout.
-        return ExecResult(exit_code=exit_code, stdout=stdout, stderr=stderr)
+        if exit_code != 0:
+            raise RuntimeError(stderr or f"command exited with {exit_code}")
+        return ExecResult(exit_code=0, stdout=stdout, stderr=stderr)

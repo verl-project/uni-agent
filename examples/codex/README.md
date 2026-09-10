@@ -37,19 +37,15 @@ capacity.
 
 Text-only Qwen3.5 runs set
 `+actor_rollout_ref.rollout.engine_kwargs.vllm.language_model_only=True`.
-Thinking is disabled by default, with `qwen3` as the reasoning parser. Set
-`VLLM_LANGUAGE_MODEL_ONLY=False` only for an explicitly multimodal recipe.
-The sample uses `vanilla_mbridge=False`, disables Megatron gradient
-accumulation fusion, and uses 16384 max batched tokens because the pinned
-remote186 environment has no Apex CUDA extension and the long-context vLLM
-configuration is validated with these settings.
+Thinking is disabled by default, with `qwen3` as the reasoning parser. The
+launcher contains the remaining model and runtime settings required by this
+recipe.
 
 The RUNTIME_ENV YAML must provide worker environment variables for the
 OpenYuanrong provider: OPENYUANRONG_SERVER_ADDRESS,
-OPENYUANRONG_TOKEN, and OPENYUANRONG_TUNNEL_SSL_VERIFY. Add
-AKERNEL_SDK_LD_PRELOAD only when the provider environment needs the optional
-libffi compatibility hook. Keep credentials in that runtime-env file or a
-secret provider; the launcher does not put them in the Ray command line.
+OPENYUANRONG_TOKEN, and OPENYUANRONG_TUNNEL_SSL_VERIFY. Keep credentials in
+that runtime-env file or a secret provider; the launcher does not put them in
+the Ray command line.
 
 ## Sidecar
 

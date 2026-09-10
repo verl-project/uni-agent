@@ -57,7 +57,7 @@ def test_system_only_full_encode_inserts_dummy_user_after_system(monkeypatch):
         calls.append([message["role"] for message in messages])
         return processing_class.apply_chat_template(messages, **kwargs)
 
-    monkeypatch.setattr(codec_module, "_verl_apply_chat_template", clean_verl_apply)
+    monkeypatch.setattr(codec_module, "_apply_chat_template", clean_verl_apply)
     tokenizer = StrictQwenTokenizer()
     codec = MessageCodec(tokenizer)
     messages = [{"role": "system", "content": "system prompt"}]
