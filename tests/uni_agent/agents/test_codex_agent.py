@@ -44,6 +44,8 @@ def test_build_agent_command_uses_stdin_and_isolates_env():
     assert "CODEX_API_BASE=http://127.0.0.1:38197/sessions/s1/v1" in command
     assert "CODEX_MODEL=policy" in command
     assert "CODEX_HOME=" not in command
+    assert "HTTP_PROXY" not in command
+    assert "PIP_PROGRESS" not in command
     assert "fix 'this'" not in command
 
 
