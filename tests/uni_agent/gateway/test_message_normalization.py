@@ -74,6 +74,20 @@ def test_encode_incremental_reuse_preserves_token_ids_and_messages():
     assert messages == before
 
 
+def test_encode_incremental_coalesces_responses_assistant_fragments():
+    codec = MessageCodec(FakeTokenizer())
+
+    encoded = codec.encode_incremental(
+        [
+            {"role": "assistant", "content": "", "reasoning_content": "thinking"},
+            {"role": "assistant", "content": "", "tool_calls": []},
+            {"role": "tool", "tool_call_id": "call_1", "content": "ok"},
+        ]
+    )
+
+    assert encoded
+
+
 class _SessionBackend:
     def __init__(self):
         self.calls = []

@@ -50,12 +50,9 @@ def build_agent_command(
         f"CODEX_API_BASE={shlex.quote(gateway_url)} "
         f"CODEX_MODEL={shlex.quote(model_name)} "
         f"CODEX_API_KEY={shlex.quote(api_key)} "
-        f"CODEX_PROJECT_DIR={shlex.quote(project_dir)} "
-        "NO_PROXY='*' no_proxy='*' HTTP_PROXY='' HTTPS_PROXY='' "
-        "PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_PROGRESS_BAR=off"
+        f"CODEX_PROJECT_DIR={shlex.quote(project_dir)}"
     )
     return (
-        "unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy NO_PROXY no_proxy; "
         f"printf %s {shlex.quote(task_b64)} | base64 -d | "
         f"env {env} bash {shlex.quote(tool_script)}"
     )
@@ -71,7 +68,7 @@ def parse_agent_result(stdout: str, exit_code: int) -> dict[str, Any]:
             "error": "agent process timed out",
         }
 
-    events: list[dict[str, Any]] = []
+    event_count = 0
     final_content = ""
     errors: list[str] = []
     process_exit_code = exit_code
@@ -85,7 +82,7 @@ def parse_agent_result(stdout: str, exit_code: int) -> dict[str, Any]:
             continue
         if not isinstance(event, dict):
             continue
-        events.append(event)
+        event_count += 1
         event_type = event.get("type")
         if event_type == "process.completed":
             value = event.get("exit_code")
@@ -110,7 +107,7 @@ def parse_agent_result(stdout: str, exit_code: int) -> dict[str, Any]:
         "exit_status": "ok" if ok else "error",
         "ok": ok,
         "content": final_content,
-        "event_count": len(events),
+        "event_count": event_count,
     }
     if errors:
         result["error"] = errors[-1]
