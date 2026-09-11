@@ -1,0 +1,23 @@
+# OpenClaw task defaults for the current-framework SWE-bench samples.
+# The sample row supplies the instance metadata and sandbox image; this file
+# selects the generic SWEBenchTask and binds the OpenClaw agent. The user prompt
+# remains required at runtime: task_runner copies the dataset raw_prompt into
+# TaskConfig.prompt, and OpenClawAgent extracts it before --message-file launch.
+- name: swe_bench
+  sandbox:
+    provider: docker
+    runtime_timeout: 7200
+    sandbox_kwargs:
+      pull_policy: never
+      run_args: ["--network", "host"]
+  agent:
+    name: openclaw
+    tool_command: /opt/openclaw/bin/openclaw
+    run_timeout: 600
+    cli_timeout_seconds: 540
+    strict_single_trajectory: true
+    model:
+      temperature: 1.0
+      top_p: 1.0
+      top_k: -1
+      max_total_tokens: 4096
