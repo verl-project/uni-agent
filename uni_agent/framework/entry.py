@@ -39,6 +39,7 @@ def build_gateway_manager(*, config, llm_client) -> GatewayManager:
 
     # Match AgentLoopWorker pattern: self-load tokenizer/processor via HFModelConfig.
     model_config: HFModelConfig = omega_conf_to_dataclass(config.actor_rollout_ref.model)
+    kv_cfg = af_cfg.get("kv_cache_offload") or {}
     gateway_actor_config = GatewayActorConfig(
         tokenizer=model_config.tokenizer,
         processor=model_config.processor,
@@ -49,6 +50,11 @@ def build_gateway_manager(*, config, llm_client) -> GatewayManager:
         prompt_length=config.actor_rollout_ref.rollout.prompt_length,
         response_length=config.actor_rollout_ref.rollout.response_length,
         enable_last_assistant_rollback=af_cfg.get("enable_last_assistant_rollback", True),
+        kv_cache_offload_enabled=kv_cfg.get("enable", False),
+        kv_cache_offload_priority_mode=str(kv_cfg.get("priority_mode", "static")),
+        kv_cache_offload_lease_seconds=float(kv_cfg.get("active_lease_seconds", 300.0)),
+        kv_cache_offload_priority=int(kv_cfg.get("priority", 50)),
+        kv_cache_offload_tool_priority=int(kv_cfg.get("tool_priority", 90)),
     )
 
     return GatewayManager(
