@@ -13,5 +13,3 @@ file contains exactly one scored trajectory with reward `1.0`.
 
 The entrypoint selects `SAMPLE_INDEX=0` by default and normalizes legacy parquet
 rows into the current `extra_info.tools_kwargs.task` shape before submission.
-It passes `AKERNEL_SDK_LD_PRELOAD` through the Ray runtime environment for the
-OpenYuanRong worker's libffi ABI compatibility.
