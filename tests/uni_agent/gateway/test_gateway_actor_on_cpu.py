@@ -64,7 +64,10 @@ def test_gateway_actor_config_rejects_non_positive_prompt_length(prompt_length):
 
 @pytest.mark.cpu
 @pytest.mark.level0
-@pytest.mark.parametrize("field", ["enable_last_assistant_rollback", "enable_tool_parser_cache"])
+@pytest.mark.parametrize(
+    "field",
+    ["enable_last_assistant_rollback", "enable_repeated_prompt_rollback", "enable_tool_parser_cache"],
+)
 @pytest.mark.parametrize("value", ["true", 1, None])
 def test_gateway_actor_config_rejects_non_bool_options(field, value):
     from uni_agent.gateway.config import GatewayActorConfig
@@ -83,17 +86,31 @@ def test_gateway_actor_config_enables_last_assistant_rollback_by_default():
 
 @pytest.mark.cpu
 @pytest.mark.level0
+def test_repeated_prompt_rollback_requires_last_assistant_rollback():
+    from uni_agent.gateway.config import GatewayActorConfig
+
+    with pytest.raises(ValueError, match="requires enable_last_assistant_rollback"):
+        GatewayActorConfig(
+            tokenizer=FakeTokenizer(),
+            enable_last_assistant_rollback=False,
+            enable_repeated_prompt_rollback=True,
+        )
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
-async def test_gateway_actor_forwards_last_assistant_rollback_to_session():
+async def test_gateway_actor_forwards_rollback_config_to_session():
     from uni_agent.gateway.config import GatewayActorConfig
     from uni_agent.gateway.gateway import _GatewayActor
 
     actor = _GatewayActor(
-        GatewayActorConfig(tokenizer=FakeTokenizer()),
+        GatewayActorConfig(tokenizer=FakeTokenizer(), enable_repeated_prompt_rollback=True),
         SequencedBackend(["A1", "A2", "FIXED"]),
     )
     actor._server_base_url = "http://test"
     await actor.create_session("rollback-enabled")
+    assert actor._sessions["rollback-enabled"]._enable_repeated_prompt_rollback is True
     prompt = [{"role": "user", "content": "run"}]
     continuation = [
         *prompt,
