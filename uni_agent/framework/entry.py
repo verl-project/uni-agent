@@ -49,6 +49,7 @@ def build_gateway_manager(*, config, llm_client) -> GatewayManager:
         prompt_length=config.actor_rollout_ref.rollout.prompt_length,
         response_length=config.actor_rollout_ref.rollout.response_length,
         enable_last_assistant_rollback=af_cfg.get("enable_last_assistant_rollback", True),
+        coalesce_reserved_exact_requests=af_cfg.get("coalesce_reserved_exact_requests", False),
     )
 
     return GatewayManager(
