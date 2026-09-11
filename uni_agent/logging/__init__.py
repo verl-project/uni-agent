@@ -11,10 +11,12 @@ process that executes the workload.
 from __future__ import annotations
 
 from .context import LogContext, get_current_log_context
+from .process import setup_console_logging
 from .session import sample_logging
 
 __all__ = [
     "sample_logging",
     "LogContext",
     "get_current_log_context",
+    "setup_console_logging",
 ]

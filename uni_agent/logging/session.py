@@ -5,11 +5,8 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
-from .context import LogContext, _current_log_context
+from .context import _QUIET_LOGGERS, LogContext, _current_log_context
 from .handlers import _add_file_handler, _cleanup_handler, _dispatch, _install_console_sink
-
-# Chatty libraries (incl. Modal's gRPC stack) pinned to WARNING to keep logs on the agent.
-_QUIET_LOGGERS = ("httpx", "httpcore", "openai", "urllib3", "asyncio", "ray", "hpack", "h2", "grpclib", "modal")
 
 _process_logging_ready = False
 

@@ -248,14 +248,15 @@ class _ConsoleFilter(logging.Filter):
 _console_handler: logging.Handler | None = None
 
 
-def _install_console_sink() -> None:
+def _install_console_sink(level: int = logging.INFO) -> None:
     """Install the filtered INFO console handler once per process."""
     global _console_handler
     root = logging.getLogger()
     if _console_handler is not None and _console_handler in root.handlers:
+        _console_handler.setLevel(level)
         return
     handler = logging.StreamHandler(sys.stdout)
-    handler.setLevel(logging.INFO)
+    handler.setLevel(level)
     handler.setFormatter(_formatter)
     handler.addFilter(_ConsoleFilter())
     root.addHandler(handler)
