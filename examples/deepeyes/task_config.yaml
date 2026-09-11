@@ -1,0 +1,21 @@
+- name: deepeyes
+  sandbox:
+    provider: local
+  reward:
+    max_answer_chars: 1000
+    judge:
+      timeout_seconds: 120
+      max_retries: 2
+      strict: true
+      temperature: 0.1
+      preflight_max_tokens: 8
+      enable_thinking: false
+  agent:
+    name: deepeyes
+    max_turns: 4
+    request_timeout_seconds: 300
+    image_tool:
+      min_dimension: 28
+      max_aspect_ratio: 100
+      fetch_timeout_seconds: 30
+    model: {}

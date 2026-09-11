@@ -46,6 +46,48 @@ def _canonical_tools_hash(tools: list[dict[str, Any]]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _normalize_url_value(value: Any, *, field: str) -> str:
+    """Normalize a URL field to a non-empty string."""
+    if isinstance(value, dict):
+        if "url" not in value:
+            raise ValueError(f"{field} must contain a url field")
+        value = value["url"]
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{field}.url must be a non-empty string")
+    return value
+
+
+def _normalize_messages_for_qwen_vision_info(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Normalize multimodal message content for ``qwen_vl_utils``.
+
+    ``qwen_vl_utils`` expects ``image_url`` values to be URL strings and
+    video URLs under the ``video`` key. Normalize only the copied messages
+    passed to the vision extractor.
+    """
+    normalized_messages: list[dict[str, Any]] = []
+    for message in messages:
+        normalized_message = dict(message)
+        content = message.get("content")
+        if not isinstance(content, list):
+            normalized_messages.append(normalized_message)
+            continue
+
+        normalized_parts: list[Any] = []
+        for part in content:
+            if not isinstance(part, dict):
+                normalized_parts.append(part)
+                continue
+            normalized_part = dict(part)
+            if "image_url" in normalized_part:
+                normalized_part["image_url"] = _normalize_url_value(normalized_part["image_url"], field="image_url")
+            if "video_url" in normalized_part:
+                normalized_part["video"] = _normalize_url_value(normalized_part.pop("video_url"), field="video_url")
+            normalized_parts.append(normalized_part)
+        normalized_message["content"] = normalized_parts
+        normalized_messages.append(normalized_message)
+    return normalized_messages
+
+
 def initialize_generation_prompt(processing_class, **apply_chat_template_kwargs) -> list[int]:
     """Initialize the token suffix inserted by ``add_generation_prompt=True``."""
     without_generation_prompt = normalize_token_ids(
@@ -152,7 +194,7 @@ class MessageCodec:
         from qwen_vl_utils import process_vision_info
 
         return process_vision_info(
-            messages,
+            _normalize_messages_for_qwen_vision_info(messages),
             image_patch_size=image_patch_size,
             return_video_metadata=True,
         )
