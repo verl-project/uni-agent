@@ -80,6 +80,8 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
 
     prompt_length = getattr(args, "prompt_length", DEFAULT_PROMPT_LENGTH)
     response_length_override = getattr(args, "response_length", None)
+    temperature_override = getattr(args, "temperature", None)
+    top_p_override = getattr(args, "top_p", None)
 
     config_dir = str(Path(verl.__file__).resolve().parent / "trainer" / "config")
     with initialize_config_dir(config_dir=config_dir, version_base=None):
@@ -88,8 +90,12 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
     rollout = config.actor_rollout_ref.rollout
 
     model_cfgs = [entry.get("agent", {}).get("model", {}) for entry in task_configs]
-    temperature = model_cfgs[0].get("temperature", DEFAULT_TEMPERATURE)
-    top_p = model_cfgs[0].get("top_p", DEFAULT_TOP_P)
+    temperature = (
+        temperature_override
+        if temperature_override is not None
+        else model_cfgs[0].get("temperature", DEFAULT_TEMPERATURE)
+    )
+    top_p = top_p_override if top_p_override is not None else model_cfgs[0].get("top_p", DEFAULT_TOP_P)
     rollout.temperature = temperature
     rollout.top_p = top_p
     rollout.val_kwargs.temperature = temperature
@@ -340,6 +346,18 @@ def main() -> None:
         type=int,
         default=None,
         help="Per-episode response-token budget (defaults to the task model's max_total_tokens).",
+    )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=None,
+        help="Sampling temperature (defaults to the task model setting or 0.8).",
+    )
+    parser.add_argument(
+        "--top-p",
+        type=float,
+        default=None,
+        help="Nucleus sampling probability (defaults to the task model setting or 0.9).",
     )
     parser.add_argument(
         "--limit",
