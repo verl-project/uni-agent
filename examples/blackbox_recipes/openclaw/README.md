@@ -45,6 +45,8 @@ PR recipe 接入、remote 复验和最终验收统一使用 `run_infer_openclaw.
 
 remote186 已用公开 `princeton-nlp/SWE-bench_Verified` 的 `astropy__astropy-12907` 完成一条真实验证。数据转换、派生 task 镜像、完整命令和日志见仓库外 `/home/zxh/openclawrecipe/artifacts/swe_bench_verified_openclaw_single_astropy_12907_run` 及 `reports/swe_bench_validation_20260909.md`。该实例在 retry30 参数下得到 `eval exit_code=0`、`resolved=True`、`reward=1.0`、`finished=True`，框架汇总为 1 input / 1 success session / 1 success output / 0 unfinished episode；唯一轨迹保存在 `trajectories/aa55a31b1fee42279f30d8e23594b369/trajectory.json`。task 镜像需要同时提供 `/opt/openclaw` 和 `/opt/miniconda3/envs/testbed`；本次通过派生镜像和 host network 访问本机 gateway。
 
+PR infer 入口已在 remote145 复验同一真实题目：`run_infer_openclaw.sh` 以 commit `9cc6210d5e7834c7e07812556e5fe7e8cf93ebfc`、Qwen3.5-9B、内部 vLLM TP=8、`N=1` 运行成功。`acceptance.json` 检查到 1 个 task log、1 个 trajectory，`resolved=True`、`reward=1.0`、`finished=True`；完整记录在仓库外 `/home/zxh/openclaw_recipe_artifacts/swe_infer_openclaw_single_astropy_12907_20260911/run9` 和 `reports/swe_infer_openclaw_validation_20260911.md`。
+
 ## 已验证范围
 
 - 真实 OpenClaw + 脚本化 mock endpoint，写文件答案42、两次请求、一个工具调用。
