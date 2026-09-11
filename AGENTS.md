@@ -10,3 +10,6 @@ verl-managed inference path and dispatches the task through
 The acceptance run is one SWE-bench sample and one rollout session. A run is
 complete only when the script exits successfully after verifying the result
 file contains exactly one scored trajectory with reward `1.0`.
+
+The entrypoint selects `SAMPLE_INDEX=0` by default and normalizes legacy parquet
+rows into the current `extra_info.tools_kwargs.task` shape before submission.

@@ -84,11 +84,12 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
 bash examples/codex/run_infer_codex.sh
 ```
 
-The script defaults to `LIMIT=1`, `N=1`, and `CONCURRENCY=1`, then checks the
-result file for exactly one scored trajectory with reward `1.0`. Override
-`DATA_PATH`, `MODEL_PATH`, `PROMPT_LENGTH`, `RESPONSE_LENGTH`, `TEMPERATURE`,
-`TOP_P`, `TENSOR_PARALLEL_SIZE`, `LOG_DIR`, or `RESULT_PATH` for a different
-environment.
+The script defaults to `LIMIT=1`, `N=1`, `CONCURRENCY=1`, and `SAMPLE_INDEX=0`,
+then checks the result file for exactly one scored trajectory with reward `1.0`.
+It also normalizes legacy SWE-bench rows into the current `tools_kwargs.task`
+shape before submission. Override `DATA_PATH`, `SAMPLE_INDEX`, `MODEL_PATH`,
+`PROMPT_LENGTH`, `RESPONSE_LENGTH`, `TEMPERATURE`, `TOP_P`,
+`TENSOR_PARALLEL_SIZE`, `LOG_DIR`, or `RESULT_PATH` for a different environment.
 The OpenYuanRong variables are required and are
 passed to the Ray job through its runtime environment. Text-only Qwen3.5 runs
 enable `language_model_only` and disable thinking to match the training recipe;
