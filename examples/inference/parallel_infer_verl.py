@@ -117,10 +117,20 @@ def init_config(args: argparse.Namespace, *, served_model_name: str):
     rollout.max_model_len = rollout.prompt_length + rollout.response_length
     rollout.tensor_model_parallel_size = args.tensor_parallel_size
     rollout.gpu_memory_utilization = args.gpu_memory_utilization
+    if args.max_model_len is not None:
+        rollout.max_model_len = args.max_model_len
+    if args.max_num_seqs is not None:
+        rollout.max_num_seqs = args.max_num_seqs
+    if args.max_num_batched_tokens is not None:
+        rollout.max_num_batched_tokens = args.max_num_batched_tokens
+    if args.enforce_eager:
+        rollout.enforce_eager = True
+    if args.enable_chunked_prefill:
+        rollout.enable_chunked_prefill = True
     rollout.calculate_log_probs = True
     rollout.enable_rollout_routing_replay = args.enable_rollout_routing_replay
     rollout.disable_log_stats = False
-    rollout.free_cache_engine = False
+    rollout.free_cache_engine = args.free_cache_engine
     OmegaConf.update(config, "actor_rollout_ref.rollout.enable_sleep_mode", False, force_add=True)
     if args.engine == "vllm":
         OmegaConf.update(
@@ -129,6 +139,57 @@ def init_config(args: argparse.Namespace, *, served_model_name: str):
             getattr(args, "kv_cache_dtype", "auto"),
             force_add=True,
         )
+    if args.language_model_only:
+        OmegaConf.update(
+            config,
+            "actor_rollout_ref.rollout.engine_kwargs.vllm.language_model_only",
+            True,
+            force_add=True,
+        )
+    if args.cudagraph_mode is not None:
+        OmegaConf.update(
+            config,
+            "actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode",
+            args.cudagraph_mode,
+            force_add=True,
+        )
+    if args.mamba_cache_mode is not None:
+        OmegaConf.update(
+            config,
+            "actor_rollout_ref.rollout.engine_kwargs.vllm.mamba_cache_mode",
+            args.mamba_cache_mode,
+            force_add=True,
+        )
+    if args.enable_cpu_binding:
+        OmegaConf.update(
+            config,
+            "actor_rollout_ref.rollout.engine_kwargs.vllm.additional_config.enable_cpu_binding",
+            True,
+            force_add=True,
+        )
+    if args.async_scheduling:
+        OmegaConf.update(
+            config,
+            "actor_rollout_ref.rollout.engine_kwargs.vllm.async_scheduling",
+            True,
+            force_add=True,
+        )
+    if args.multi_turn:
+        OmegaConf.update(config, "actor_rollout_ref.rollout.multi_turn.enable", True, force_add=True)
+        if args.max_assistant_turns is not None:
+            OmegaConf.update(
+                config,
+                "actor_rollout_ref.rollout.multi_turn.max_assistant_turns",
+                args.max_assistant_turns,
+                force_add=True,
+            )
+        if args.max_parallel_calls is not None:
+            OmegaConf.update(
+                config,
+                "actor_rollout_ref.rollout.multi_turn.max_parallel_calls",
+                args.max_parallel_calls,
+                force_add=True,
+            )
 
     # Gateway tool-call parser: the gateway decodes tool calls from raw tokens, so
     # this must match the model's chat template (the analog of vLLM's
@@ -370,6 +431,38 @@ def main() -> None:
         "--kv-cache-dtype",
         default="auto",
         help="vLLM KV-cache dtype, for example 'auto' or 'fp8'.",
+    )
+    parser.add_argument("--max-model-len", type=int, default=None, help="Optional vLLM max model length.")
+    parser.add_argument("--max-num-seqs", type=int, default=None, help="Optional vLLM max concurrent sequences.")
+    parser.add_argument(
+        "--max-num-batched-tokens", type=int, default=None, help="Optional vLLM max batched tokens."
+    )
+    parser.add_argument(
+        "--enforce-eager", action="store_true", help="Disable torch.compile and CUDA graphs in vLLM."
+    )
+    parser.add_argument(
+        "--enable-chunked-prefill", action="store_true", help="Enable vLLM chunked prefill."
+    )
+    parser.add_argument(
+        "--language-model-only", action="store_true", help="Enable text-only vLLM language-model mode."
+    )
+    parser.add_argument(
+        "--free-cache-engine", action="store_true", help="Free the rollout cache engine between requests."
+    )
+    parser.add_argument("--cudagraph-mode", default=None, help="Optional vLLM cudagraph mode.")
+    parser.add_argument("--mamba-cache-mode", default=None, help="Optional vLLM mamba cache mode.")
+    parser.add_argument(
+        "--enable-cpu-binding", action="store_true", help="Enable vLLM CPU binding in additional_config."
+    )
+    parser.add_argument(
+        "--async-scheduling", action="store_true", help="Enable vLLM async scheduling in additional_config."
+    )
+    parser.add_argument("--multi-turn", action="store_true", help="Enable verl multi-turn tool rollout.")
+    parser.add_argument(
+        "--max-assistant-turns", type=int, default=None, help="Optional multi-turn assistant turn limit."
+    )
+    parser.add_argument(
+        "--max-parallel-calls", type=int, default=None, help="Optional maximum parallel tool calls per turn."
     )
     parser.add_argument(
         "--gateway-count",
