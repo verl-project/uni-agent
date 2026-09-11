@@ -182,6 +182,7 @@ class GatewaySession:
         response_length: int | None = None,
         sampling_params: dict[str, Any] | None = None,
         enable_last_assistant_rollback: bool = True,
+        enable_repeated_prompt_rollback: bool = False,
         metadata: dict[str, Any] | None = None,
     ):
         """Create an active session bound to a handle and model codec."""
@@ -199,6 +200,7 @@ class GatewaySession:
         )
         self._sampling_params = dict(sampling_params or {})
         self._enable_last_assistant_rollback = enable_last_assistant_rollback
+        self._enable_repeated_prompt_rollback = enable_repeated_prompt_rollback
         self._metadata = dict(metadata or {})
         self._trace_identity = dict(self._metadata.get("_trace_identity") or {})
         self.active_chains: list[ChainState] = []
@@ -477,6 +479,14 @@ class GatewaySession:
                     self._trajectory_capacity is not None
                     and current_trajectory_length + len(incremental_ids) >= self._trajectory_capacity
                 )
+            elif rollback_applied and not capacity_exhausted:
+                # Repeated prompts have no incremental messages, so restore the
+                # assistant prefix removed above before regenerating the turn.
+                incremental_ids = self._codec.turn_separator + self._codec.generation_prompt
+                capacity_exhausted = (
+                    self._trajectory_capacity is not None
+                    and current_trajectory_length + len(incremental_ids) >= self._trajectory_capacity
+                )
             if not capacity_exhausted:
                 buffer.response_ids.extend(incremental_ids)
                 buffer.response_mask.extend([0] * len(incremental_ids))
@@ -554,9 +564,16 @@ class GatewaySession:
                 continue
             assistant_start = chain.last_assistant_start
             assistant_start_len = assistant_start.message_history_len
-            # A request ending exactly at the boundary is a fresh sample from
-            # the same prompt, not a rewrite of the abandoned assistant.
-            if assistant_start_len >= len(incoming_message_prefix_hashes):
+            incoming_len = len(incoming_message_prefix_hashes)
+            if assistant_start_len > incoming_len:
+                continue
+            # Repeated prompts remain independent samples unless the client
+            # explicitly opts into treating them as rejected-assistant retries.
+            if assistant_start_len == incoming_len and not (
+                self._enable_repeated_prompt_rollback
+                and self._enable_last_assistant_rollback
+                and assistant_start_len >= 1
+            ):
                 continue
             if incoming_message_prefix_hashes[assistant_start_len - 1] != assistant_start.tip_hash:
                 continue

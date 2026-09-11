@@ -35,6 +35,9 @@ class GatewayActorConfig:
             The gateway enforces their sum when both values are set.
         enable_last_assistant_rollback: Whether latest-assistant rewrites may
             rollback and reuse an existing chain. Enabled by default.
+        enable_repeated_prompt_rollback: Whether a request ending at the previous
+            assistant boundary should replace that assistant instead of creating
+            an independent sibling sample. Disabled by default.
     """
 
     tokenizer: Any
@@ -49,6 +52,7 @@ class GatewayActorConfig:
     prompt_length: int | None = None
     response_length: int | None = None
     enable_last_assistant_rollback: bool = True
+    enable_repeated_prompt_rollback: bool = False
 
     def __post_init__(self) -> None:
         if type(self.enable_tool_parser_cache) is not bool:
@@ -60,6 +64,13 @@ class GatewayActorConfig:
                 "enable_last_assistant_rollback must be a bool, "
                 f"got {type(self.enable_last_assistant_rollback).__name__}"
             )
+        if type(self.enable_repeated_prompt_rollback) is not bool:
+            raise ValueError(
+                "enable_repeated_prompt_rollback must be a bool, "
+                f"got {type(self.enable_repeated_prompt_rollback).__name__}"
+            )
+        if self.enable_repeated_prompt_rollback and not self.enable_last_assistant_rollback:
+            raise ValueError("enable_repeated_prompt_rollback requires enable_last_assistant_rollback")
         if self.prompt_length is not None and self.prompt_length <= 0:
             raise ValueError(f"prompt_length must be positive when set, got {self.prompt_length}")
         if self.response_length is not None and self.response_length <= 0:

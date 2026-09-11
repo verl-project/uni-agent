@@ -45,6 +45,7 @@ def _session(
     response_length: int | None = None,
     sampling_params: dict | None = None,
     enable_last_assistant_rollback: bool = False,
+    enable_repeated_prompt_rollback: bool = False,
     processor=None,
     vision_info_extractor=None,
     tool_parser_name: str | None = None,
@@ -61,6 +62,7 @@ def _session(
         response_length=response_length,
         sampling_params=sampling_params,
         enable_last_assistant_rollback=enable_last_assistant_rollback,
+        enable_repeated_prompt_rollback=enable_repeated_prompt_rollback,
     )
 
 
@@ -773,6 +775,39 @@ async def test_multiple_chains_repeated_same_prompt_creates_siblings_and_continu
     assert decoded[-1].endswith("NEXT")
     assert trajectories[-1].response_mask[-len("NEXT") :] == [1] * len("NEXT")
     assert 0 in trajectories[-1].response_mask
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_repeated_prompt_can_replace_the_previous_assistant():
+    """Regenerate a rejected assistant without forking or dropping its prompt suffix."""
+    session = _session(
+        "repeated-prompt-rollback",
+        enable_last_assistant_rollback=True,
+        enable_repeated_prompt_rollback=True,
+    )
+    backend = SequencedBackend(["FIRST", "REJECTED", "REPLACEMENT"])
+    prompt = [{"role": "user", "content": "first turn"}]
+    continuation = [
+        *prompt,
+        {"role": "assistant", "content": "FIRST"},
+        {"role": "user", "content": "try the second turn"},
+    ]
+
+    await _run(session, backend, prompt)
+    await _run(session, backend, continuation)
+    await _run(session, backend, continuation)
+
+    assert session.snapshot_state()["active_chain_ids"] == [1]
+    assert session.snapshot_state()["rollback_count"] == 1
+    assert backend.calls[-1]["prompt_ids"] == backend.calls[-2]["prompt_ids"]
+    assert backend.calls[-1]["prompt_ids"][-len(session._codec.generation_prompt) :] == session._codec.generation_prompt
+    trajectories = await session.finalize()
+    decoded = _decode_response_ids(trajectories[0].response_ids)
+    assert decoded.startswith("FIRST")
+    assert decoded.endswith("REPLACEMENT")
+    assert "REJECTED" not in decoded
 
 
 @pytest.mark.cpu

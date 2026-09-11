@@ -49,6 +49,7 @@ def build_gateway_manager(*, config, llm_client) -> GatewayManager:
         prompt_length=config.actor_rollout_ref.rollout.prompt_length,
         response_length=config.actor_rollout_ref.rollout.response_length,
         enable_last_assistant_rollback=af_cfg.get("enable_last_assistant_rollback", True),
+        enable_repeated_prompt_rollback=af_cfg.get("enable_repeated_prompt_rollback", False),
     )
 
     return GatewayManager(
