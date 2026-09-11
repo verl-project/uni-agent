@@ -20,6 +20,8 @@
 
 config/openclaw_terminal_bench.yaml 使用通用 terminal_bench 任务协议，官方 tests_archive 在 Agent 运行后才注入 sandbox，并由通用 reward 模块执行。Agent finished 与 verifier reward 是不同指标。样本应由 uni_agent.tasks.terminal_bench.preprocess 产生，非仅含 prompt 的任意 JSON。
 
+这里没有取消 user prompt。新 Task Config 约定把 prompt 归数据行所有：预处理器把题目放在顶层 `prompt`，`framework.task_runner` 在运行时用 `raw_prompt` 覆盖/注入 `TaskConfig.prompt`；配置 YAML 只保存 task-name 的默认 sandbox/agent 参数，避免重复保存过期题目。OpenClaw 随后仍会校验并提取唯一 user message，写入临时 `task.txt`，通过 `--message-file` 传给 CLI。Codex/Claude Code 和 mini-swe-agent 也执行同一 user-message 校验，只是分别通过 CLI 参数或 base64/stdin 传输。
+
     CONDA_DEFAULT_ENV=<专用环境> DATA_PATH=<数据.parquet> BASE_URL=<sandbox可访问的v1地址> OUTPUT_DIR=<仓库外新目录> bash examples/blackbox_recipes/openclaw/run_infer.sh
 
 必须实际激活独立 Conda 环境。API_KEY 使用受保护环境变量，不通过 shell 命令字面值传入。文本 Qwen3.5-9B vLLM 服务必须使用 --language-model-only。默认 n=1，不用同题多 rollout 拼接结果。Docker 默认网络不能访问宿主 127.0.0.1，应提供可路由 endpoint 或明确配置网络；host-network 仅用于受控验证，不作为不可信任务的安全隔离承诺。
