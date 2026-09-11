@@ -78,6 +78,9 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
     """Compose verl's ``ppo_trainer`` config and override the engine + framework knobs."""
     from hydra import compose, initialize_config_dir
 
+    prompt_length = getattr(args, "prompt_length", DEFAULT_PROMPT_LENGTH)
+    response_length_override = getattr(args, "response_length", None)
+
     config_dir = str(Path(verl.__file__).resolve().parent / "trainer" / "config")
     with initialize_config_dir(config_dir=config_dir, version_base=None):
         config = compose(config_name="ppo_trainer")
@@ -98,7 +101,9 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
         (m.get("max_total_tokens", DEFAULT_RESPONSE_LENGTH) for m in model_cfgs),
         default=DEFAULT_RESPONSE_LENGTH,
     )
-    response_length = args.response_length if args.response_length is not None else int(max_total_tokens)
+    response_length = (
+        response_length_override if response_length_override is not None else int(max_total_tokens)
+    )
 
     # Fan-out: the framework runs rollout.n gateway sessions per prompt.
     rollout.n = max(1, args.n)
@@ -116,7 +121,7 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
     rollout.mode = "async"
     # Standalone inference has no trainer to broadcast weights.
     rollout.load_format = "auto"
-    rollout.prompt_length = args.prompt_length
+    rollout.prompt_length = prompt_length
     rollout.response_length = response_length
     rollout.tensor_model_parallel_size = args.tensor_parallel_size
     rollout.gpu_memory_utilization = args.gpu_memory_utilization
@@ -126,7 +131,7 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
     rollout.free_cache_engine = False
     OmegaConf.update(config, "actor_rollout_ref.rollout.enable_sleep_mode", False, force_add=True)
 
-    if args.language_model_only:
+    if getattr(args, "language_model_only", False):
         if args.engine != "vllm":
             raise ValueError("--language-model-only is supported only with --engine vllm")
         OmegaConf.update(
@@ -135,7 +140,7 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
             True,
             force_add=True,
         )
-    if args.disable_thinking:
+    if getattr(args, "disable_thinking", False):
         OmegaConf.update(config, "data.apply_chat_template_kwargs.enable_thinking", False, force_add=True)
 
     # Gateway tool-call parser: the gateway decodes tool calls from raw tokens, so
@@ -165,7 +170,7 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
 
     # Data.
     config.data.return_raw_chat = True
-    config.data.max_prompt_length = args.prompt_length
+    config.data.max_prompt_length = prompt_length
     config.data.max_response_length = response_length
 
     return config
