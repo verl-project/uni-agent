@@ -95,6 +95,7 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
     rollout.val_kwargs.temperature = temperature
     rollout.val_kwargs.top_p = top_p
     rollout.val_kwargs.top_k = top_k
+    rollout.val_kwargs.do_sample = True
 
     # response_length = the agent's episode token budget (max_total_tokens: the full
     # prompt+gen context the loop may consume); DEFAULT_RESPONSE_LENGTH is the fallback.
@@ -132,6 +133,8 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
         rollout.max_num_batched_tokens = args.max_num_batched_tokens
     if args.enforce_eager:
         rollout.enforce_eager = True
+    if args.enable_chunked_prefill:
+        rollout.enable_chunked_prefill = True
     rollout.calculate_log_probs = True
     rollout.enable_rollout_routing_replay = args.enable_rollout_routing_replay
     rollout.disable_log_stats = False
@@ -173,6 +176,22 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
             True,
             force_add=True,
         )
+    if args.multi_turn:
+        OmegaConf.update(config, "actor_rollout_ref.rollout.multi_turn.enable", True, force_add=True)
+        if args.max_assistant_turns is not None:
+            OmegaConf.update(
+                config,
+                "actor_rollout_ref.rollout.multi_turn.max_assistant_turns",
+                args.max_assistant_turns,
+                force_add=True,
+            )
+        if args.max_parallel_calls is not None:
+            OmegaConf.update(
+                config,
+                "actor_rollout_ref.rollout.multi_turn.max_parallel_calls",
+                args.max_parallel_calls,
+                force_add=True,
+            )
 
     # Gateway tool-call parser: the gateway decodes tool calls from raw tokens, so
     # this must match the model's chat template (the analog of vLLM's
@@ -409,6 +428,9 @@ def main() -> None:
         "--enforce-eager", action="store_true", help="Disable torch.compile and CUDA graphs in vLLM."
     )
     parser.add_argument(
+        "--enable-chunked-prefill", action="store_true", help="Enable vLLM chunked prefill."
+    )
+    parser.add_argument(
         "--language-model-only", action="store_true", help="Enable text-only vLLM language-model mode."
     )
     parser.add_argument(
@@ -421,6 +443,13 @@ def main() -> None:
     )
     parser.add_argument(
         "--async-scheduling", action="store_true", help="Enable vLLM async scheduling in additional_config."
+    )
+    parser.add_argument("--multi-turn", action="store_true", help="Enable verl multi-turn tool rollout.")
+    parser.add_argument(
+        "--max-assistant-turns", type=int, default=None, help="Optional multi-turn assistant turn limit."
+    )
+    parser.add_argument(
+        "--max-parallel-calls", type=int, default=None, help="Optional maximum parallel tool calls per turn."
     )
     parser.add_argument(
         "--artifact-dir",
