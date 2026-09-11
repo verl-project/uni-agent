@@ -13,7 +13,7 @@ from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
-from uni_agent.gateway.tool_calls import normalize_tool_arguments
+from uni_agent.gateway.utils import normalize_tool_arguments
 from verl.utils.tokenizer import normalize_token_ids
 from verl.utils.tokenizer.chat_template import apply_chat_template as _apply_chat_template
 from verl.utils.tokenizer.chat_template import initialize_turn_separator

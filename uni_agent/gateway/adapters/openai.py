@@ -15,7 +15,7 @@ from fastapi.responses import StreamingResponse
 
 from uni_agent.gateway.session.session import GenerationOutcome
 from uni_agent.gateway.session.types import InternalGenerationRequest
-from uni_agent.gateway.tool_calls import normalize_tool_arguments
+from uni_agent.gateway.utils import normalize_tool_arguments
 
 from .types import MalformedRequestError
 
