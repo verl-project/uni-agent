@@ -15,5 +15,9 @@
     tool_command: /opt/openclaw/bin/openclaw
     run_timeout: 600
     cli_timeout_seconds: 540
-    artifact_dir: /home/zxh/openclawrecipe/artifacts/swe_bench_verified_openclaw_single_astropy_12907_run/trajectories
     strict_single_trajectory: true
+    model:
+      temperature: 1.0
+      top_p: 1.0
+      top_k: -1
+      max_total_tokens: 4096
