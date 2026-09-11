@@ -1,0 +1,19 @@
+- name: pipeline_smoke
+  # local only provides the lifecycle here. The agent receives no shell or file
+  # tools, so model output cannot execute commands on the host.
+  sandbox:
+    provider: local
+    runtime_timeout: 120
+  agent:
+    name: react
+    max_steps: 2
+    timeout_budget: 0
+    tools:
+      - name: finish
+    model:
+      temperature: 1.0
+      top_p: 1.0
+      # Keep this aligned with the launcher's default max_model_len so a
+      # second turn after a malformed tool call still has context headroom.
+      max_total_tokens: 512
+      max_tokens_per_turn: 64
