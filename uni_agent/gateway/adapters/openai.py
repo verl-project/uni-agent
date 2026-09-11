@@ -15,6 +15,7 @@ from fastapi.responses import StreamingResponse
 
 from uni_agent.gateway.session.session import GenerationOutcome
 from uni_agent.gateway.session.types import InternalGenerationRequest
+from uni_agent.gateway.tool_calls import normalize_tool_arguments
 
 from .types import MalformedRequestError
 
@@ -156,12 +157,8 @@ def _normalize_tool_calls(tool_calls: Any) -> list[dict[str, Any]]:
 
         normalized_tool_call = dict(tool_call)
         normalized_function = dict(function)
-        arguments = normalized_function.get("arguments")
-        if isinstance(arguments, str):
-            try:
-                normalized_function["arguments"] = json.loads(arguments)
-            except (json.JSONDecodeError, TypeError):
-                pass
+        if "arguments" in normalized_function:
+            normalized_function["arguments"] = normalize_tool_arguments(normalized_function["arguments"])
         normalized_tool_call["function"] = normalized_function
         result.append(normalized_tool_call)
     return result

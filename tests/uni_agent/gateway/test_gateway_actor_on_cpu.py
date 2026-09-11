@@ -328,8 +328,8 @@ async def test_unknown_session_raises_404():
 
 @pytest.mark.cpu
 @pytest.mark.level0
-def test_prefix_canonicalization_ignores_provider_ids_and_normalizes_arguments():
-    """Drop provider IDs and normalize arguments without mutating the message."""
+def test_prefix_canonicalization_ignores_provider_ids_without_mutating_message():
+    """Drop provider IDs without mutating the canonical internal message."""
     from uni_agent.gateway.session.codec import MessageCodec
 
     codec = MessageCodec(FakeTokenizer())
@@ -355,37 +355,13 @@ def test_prefix_canonicalization_ignores_provider_ids_and_normalizes_arguments()
         "tool_calls": [
             {
                 "type": "function",
-                "function": {"name": "f", "arguments": ("json", {"x": 1})},
+                "function": {"name": "f", "arguments": {"x": 1}},
             }
         ],
     }
     assert message["tool_call_id"] == "call_result"
     assert message["tool_calls"][0]["id"] == "call_AAA"
     assert message["tool_calls"][0]["function"]["arguments"] == {"x": 1}
-
-    argument_cases = [
-        ({"b": 2, "a": 1}, '{"a": 1, "b": 2}', True),
-        ("{b: 2, a: 1}", "{a: 1, b: 2}", False),
-    ]
-    for arguments_a, arguments_b, expect_equal in argument_cases:
-        msg_a = {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-                {"id": "call-1", "type": "function", "function": {"name": "search", "arguments": arguments_a}}
-            ],
-        }
-        msg_b = {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-                {"id": "call-2", "type": "function", "function": {"name": "search", "arguments": arguments_b}}
-            ],
-        }
-        assert (
-            codec.canonicalize_message_for_prefix_comparison(msg_a)
-            == codec.canonicalize_message_for_prefix_comparison(msg_b)
-        ) is expect_equal
 
 
 @pytest.mark.cpu

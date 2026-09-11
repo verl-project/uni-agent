@@ -1607,8 +1607,8 @@ async def test_multiple_chains_prefix_content_change_does_not_reuse_chain_and_ha
 
 @pytest.mark.cpu
 @pytest.mark.level0
-def test_message_prefix_hashes_canonicalize_json_tool_call_arguments():
-    """Canonicalize JSON-equivalent tool arguments before computing prefix hashes."""
+def test_message_prefix_hashes_use_canonical_internal_tool_call_arguments():
+    """Hash canonical dict arguments by value without reparsing wire strings."""
     session = _session("hash-tool-arguments")
 
     def assistant_tool_call(arguments) -> dict:
@@ -1624,15 +1624,18 @@ def test_message_prefix_hashes_canonicalize_json_tool_call_arguments():
             ],
         }
 
-    canonical_a = session._extend_message_prefix_hashes([], [assistant_tool_call('{"query":"weather","limit":2}')])
-    canonical_b = session._extend_message_prefix_hashes([], [assistant_tool_call('{"limit":2,"query":"weather"}')])
-    canonical_c = session._extend_message_prefix_hashes([], [assistant_tool_call({"limit": 2, "query": "weather"})])
-    raw_a = session._extend_message_prefix_hashes([], [assistant_tool_call('{"query":"weather","limit":2')])
-    raw_b = session._extend_message_prefix_hashes([], [assistant_tool_call('{"limit":2,"query":"weather"')])
+    canonical_a = session._extend_message_prefix_hashes(
+        [], [assistant_tool_call({"query": "weather", "limit": 2})]
+    )
+    canonical_b = session._extend_message_prefix_hashes(
+        [], [assistant_tool_call({"limit": 2, "query": "weather"})]
+    )
+    unnormalized_wire = session._extend_message_prefix_hashes(
+        [], [assistant_tool_call('{"query":"weather","limit":2}')]
+    )
 
     assert canonical_a == canonical_b
-    assert canonical_a == canonical_c
-    assert raw_a != raw_b
+    assert canonical_a != unnormalized_wire
 
 
 @pytest.mark.cpu

@@ -118,8 +118,8 @@ async def test_openai_stream_response_emits_compatible_sse_chunks():
 @pytest.mark.level0
 def test_openai_to_internal_normalizes_messages_sampling_and_tools():
     """OpenAI wire requests lower to the internal shape: sampling params use the
-    gateway allowlist, JSON tool arguments are parsed, malformed argument
-    strings are preserved, and tool_choice=none clears tool schemas."""
+    gateway allowlist, JSON-object tool arguments are parsed, non-object and
+    malformed arguments stay strings, and tool_choice=none clears tool schemas."""
     from uni_agent.gateway.adapters.openai import openai_to_internal
 
     payload = {
@@ -130,6 +130,8 @@ def test_openai_to_internal_normalizes_messages_sampling_and_tools():
                 "tool_calls": [
                     {"id": "x", "type": "function", "function": {"name": "f", "arguments": '{"x": 1}'}},
                     {"id": "y", "type": "function", "function": {"name": "g", "arguments": "not json"}},
+                    {"id": "z", "type": "function", "function": {"name": "h", "arguments": "[1, 2]"}},
+                    {"id": "w", "type": "function", "function": {"name": "i", "arguments": [1, 2]}},
                 ],
             },
         ],
@@ -149,6 +151,8 @@ def test_openai_to_internal_normalizes_messages_sampling_and_tools():
     assert req["messages"][0] == {"role": "user", "content": "hi"}
     assert req["messages"][1]["tool_calls"][0]["function"]["arguments"] == {"x": 1}
     assert req["messages"][1]["tool_calls"][1]["function"]["arguments"] == "not json"
+    assert req["messages"][1]["tool_calls"][2]["function"]["arguments"] == "[1, 2]"
+    assert req["messages"][1]["tool_calls"][3]["function"]["arguments"] == "[1, 2]"
     assert req["tools"][0]["function"]["name"] == "f"
     assert req["sampling_params"]["max_tokens"] == 32
     assert req["sampling_params"]["temperature"] == 0.7

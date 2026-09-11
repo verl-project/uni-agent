@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
+from uni_agent.gateway.tool_calls import normalize_tool_arguments
 from verl.utils.tokenizer import normalize_token_ids
 from verl.utils.tokenizer.chat_template import apply_chat_template as _apply_chat_template
 from verl.utils.tokenizer.chat_template import initialize_turn_separator
@@ -68,28 +69,6 @@ def initialize_generation_prompt(processing_class, **apply_chat_template_kwargs)
     if with_generation_prompt[: len(without_generation_prompt)] != without_generation_prompt:
         raise ValueError("Generation prompt is not a stable token suffix")
     return with_generation_prompt[len(without_generation_prompt) :]
-
-
-def _canonicalize_tool_arguments_for_comparison(arguments: Any) -> tuple[str, Any]:
-    if isinstance(arguments, dict | list):
-        return ("json", arguments)
-    if isinstance(arguments, str):
-        try:
-            return ("json", json.loads(arguments))
-        except json.JSONDecodeError:
-            return ("raw", arguments)
-    return ("raw", arguments)
-
-
-def _normalize_tool_arguments_for_internal_message(arguments: Any) -> Any:
-    """Parse valid JSON-object strings into the template-facing dict form."""
-    if not isinstance(arguments, str):
-        return arguments
-    try:
-        parsed = json.loads(arguments)
-    except json.JSONDecodeError:
-        return arguments
-    return parsed if isinstance(parsed, dict) else arguments
 
 
 class MessageCodec:
@@ -398,7 +377,7 @@ class MessageCodec:
                         "type": "function",
                         "function": {
                             "name": fc.name,
-                            "arguments": _normalize_tool_arguments_for_internal_message(fc.arguments),
+                            "arguments": normalize_tool_arguments(fc.arguments),
                         },
                     }
                     for fc in function_calls
@@ -425,11 +404,6 @@ class MessageCodec:
         for tool_call in tool_calls:
             normalized_tool_call = dict(tool_call)
             normalized_tool_call.pop("id", None)
-            function = normalized_tool_call.get("function")
-            if isinstance(function, dict) and "arguments" in function:
-                normalized_function = dict(function)
-                normalized_function["arguments"] = _canonicalize_tool_arguments_for_comparison(function["arguments"])
-                normalized_tool_call["function"] = normalized_function
             normalized_tool_calls.append(normalized_tool_call)
         normalized["tool_calls"] = normalized_tool_calls
         return normalized

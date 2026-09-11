@@ -20,7 +20,7 @@ class OpenAIChatCompletionFunction(TypedDict, total=False):
     """``tool_calls[i].function`` object inside an OpenAI chat message."""
 
     name: str
-    arguments: Any  # OpenAI spec is JSON string; gateway also accepts dict (Qwen-style chat templates)
+    arguments: str | dict[str, Any]  # OpenAI wire is a JSON string; internal templates use dicts
 
 
 class OpenAIChatCompletionToolCall(TypedDict, total=False):
