@@ -139,6 +139,13 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
     rollout.enable_rollout_routing_replay = args.enable_rollout_routing_replay
     rollout.disable_log_stats = False
     rollout.free_cache_engine = args.free_cache_engine
+    if args.checkpoint_engine_backend is not None:
+        OmegaConf.update(
+            config,
+            "actor_rollout_ref.rollout.checkpoint_engine.backend",
+            args.checkpoint_engine_backend,
+            force_add=True,
+        )
     OmegaConf.update(config, "actor_rollout_ref.rollout.enable_sleep_mode", False, force_add=True)
 
     if args.language_model_only:
@@ -435,6 +442,11 @@ def main() -> None:
     )
     parser.add_argument(
         "--free-cache-engine", action="store_true", help="Free the rollout cache engine between requests."
+    )
+    parser.add_argument(
+        "--checkpoint-engine-backend",
+        default="naive",
+        help="Checkpoint engine backend for standalone inference (default: naive; no weight update is performed).",
     )
     parser.add_argument("--cudagraph-mode", default=None, help="Optional vLLM cudagraph mode.")
     parser.add_argument("--mamba-cache-mode", default=None, help="Optional vLLM mamba cache mode.")

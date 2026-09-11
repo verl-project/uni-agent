@@ -89,7 +89,7 @@ if [[ "${DRY_RUN:-0}" == "1" ]]; then
         --tool-parser "${TOOL_PARSER}" --engine vllm --nnodes 1 --n-gpus-per-node 8 \
         --tensor-parallel-size 8 --gpu-memory-utilization 0.2 --max-model-len 8192 \
         --max-num-seqs 1 --max-num-batched-tokens 8192 --enforce-eager --enable-chunked-prefill --language-model-only \
-        --free-cache-engine --cudagraph-mode NONE --mamba-cache-mode align \
+        --free-cache-engine --checkpoint-engine-backend naive --cudagraph-mode NONE --mamba-cache-mode align \
         --enable-cpu-binding --async-scheduling --multi-turn --max-assistant-turns 100 \
         --max-parallel-calls 1 --limit "${LIMIT}" --n "${N}" \
         --gateway-count "${GATEWAY_COUNT}" --concurrency "${CONCURRENCY}" \
@@ -115,6 +115,7 @@ fi
     --enable-chunked-prefill \
     --language-model-only \
     --free-cache-engine \
+    --checkpoint-engine-backend naive \
     --cudagraph-mode NONE \
     --mamba-cache-mode align \
     --enable-cpu-binding \
