@@ -51,8 +51,11 @@ except ImportError:  # fall back to verl's shim (mock raises a clear error if TQ
 
 from uni_agent.framework.entry import AgentFrameworkRolloutAdapter
 from uni_agent.tasks import TaskConfigResolver
+from verl.single_controller.base import Worker
+from verl.single_controller.ray import RayClassWithInitArgs
 from verl.utils import tensordict_utils as tu
 from verl.workers.rollout.llm_server import LLMServerManager
+from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMReplica
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 logger = logging.getLogger(__name__)
@@ -65,6 +68,42 @@ DEFAULT_TEMPERATURE = 0.8
 DEFAULT_TOP_P = 0.9
 DEFAULT_RESPONSE_LENGTH = 65536
 DEFAULT_PROMPT_LENGTH = 4096
+
+
+class InferenceRolloutWorker(Worker):
+    """Minimal standalone worker used by inference-only vLLM replicas.
+
+    ``LLMServerManager``'s regular standalone path imports
+    ``CheckpointEngineWorker`` in each Ray child.  That worker initializes a
+    training checkpoint process group and is unnecessary when no update is
+    performed; this lightweight worker only supplies the Ray GPU identity that
+    ``vLLMHttpServer`` needs to launch its internal engine.
+    """
+
+    def __init__(self, rollout_config=None, model_config=None, replica_rank: int = 0, *args, **kwargs):
+        super().__init__()
+        self.rollout_config = rollout_config
+        self.model_config = model_config
+        self.replica_rank = replica_rank
+
+
+class InferenceVLLMReplica(vLLMReplica):
+    """vLLM replica that avoids the training-only checkpoint worker import."""
+
+    def get_ray_class_with_init_args(self) -> RayClassWithInitArgs:
+        rollout_worker_actor_cls = ray.remote(InferenceRolloutWorker)
+        return RayClassWithInitArgs(
+            cls=rollout_worker_actor_cls,
+            rollout_config=self.config,
+            model_config=self.model_config,
+            replica_rank=self.replica_rank,
+        )
+
+
+class InferenceLLMServerManager(LLMServerManager):
+    """Standalone manager for inference-only runs (no checkpoint/update path)."""
+
+    rollout_replica_class = InferenceVLLMReplica
 
 
 def _rule(text: str = "", width: int = 50, ch: str = "-") -> str:
@@ -515,7 +554,7 @@ def main() -> None:
     logger.info("initializing configuration, TransferQueue, and LLMServerManager...")
     config = init_config(args, task_configs=task_configs, served_model_name=served_model_name)
     tq.init(config.transfer_queue)
-    llm_server_manager = LLMServerManager.create(config=config)
+    llm_server_manager = InferenceLLMServerManager.create(config=config)
 
     # 2. Framework rollout adapter over the engine.
     adapter = AgentFrameworkRolloutAdapter.create(
