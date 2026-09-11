@@ -170,6 +170,13 @@ def _select_session_trajectories(
     return [trajectory]
 
 
+# Inert placeholder token id for failed-session dummy trajectories. Its value is
+# semantically irrelevant: the dummy carries ``response_mask=0`` so it is never
+# trained (policy/value) and only its non-zero ``response_length`` matters for
+# keeping the failed sample in the val ``reward/mean`` denominator as a zero.
+_DUMMY_TOKEN_ID = 0
+
+
 _TQ_NESTED_SEQUENCE_FIELDS = {
     "prompts",
     "responses",
@@ -625,6 +632,15 @@ class GatewayAgentFramework(AgentFramework):
             if isinstance(outcome, Exception):
                 failed_sessions += 1
                 failure_reasons.append(_short_failure_reason(outcome))
+                # The session was aborted inside _run_session; emit a reward=0
+                # dummy so the failed sample stays in the reward/mean denominator
+                # as a zero instead of vanishing and inflating the reported score.
+                await self._write_failure_dummy_trajectory(
+                    session_index=session_index,
+                    sample_fields=sample_fields,
+                    global_steps=global_steps,
+                    partition_id=partition_id,
+                )
                 continue
             # Propagate control-flow exceptions such as CancelledError/SystemExit;
             # only ordinary Exceptions are treated as isolated rollout failures.
@@ -845,6 +861,8 @@ class GatewayAgentFramework(AgentFramework):
                 raise
             except Exception:
                 logger.exception("session %s failed (runner=%s); aborting session", session_id, runner_name)
+                # Tear down the live session; the caller emits a reward=0 dummy
+                # so the failed sample stays in the reward/mean denominator.
                 await self.gateway_manager.abort_session(session_id)
                 session_trace.finish(
                     runner_name=runner_name,
@@ -931,6 +949,53 @@ class GatewayAgentFramework(AgentFramework):
                 finished=result_trajectories[0].finished if result_trajectories else None,
             )
             return result_trajectories, sample_fields
+
+    async def _write_failure_dummy_trajectory(
+        self,
+        *,
+        session_index: int,
+        sample_fields: dict[str, object],
+        global_steps: int | None,
+        partition_id: str,
+    ) -> None:
+        """Emit a reward=0 placeholder trajectory for a failed session.
+
+        A failed rollout's partial output has undefined correctness, so the
+        session was aborted inside ``_run_session`` and the caller emits a
+        minimal dummy here instead: one prompt + one response token with
+        ``response_mask=0`` and ``reward=0``. The mask keeps it out of the
+        policy/value gradient (train/critic), while its non-zero
+        ``response_length`` keeps it in the val ``reward/mean`` denominator as
+        a zero — failed samples no longer vanish and inflate the reported
+        score. Uniform across val and train so critic and val stay consistent.
+
+        Best-effort: a TQ write error is logged and never masks the original
+        session failure.
+        """
+        dummy = Trajectory(
+            prompt_ids=[_DUMMY_TOKEN_ID],
+            response_ids=[_DUMMY_TOKEN_ID],
+            response_mask=[0],
+            reward_info={"reward": 0.0, "finished": False},
+            reward_score=0.0,
+            num_turns=0,
+            extra_fields={"materialization_reason": "session_failed"},
+        )
+        try:
+            await self._write_session_trajectories_to_tq(
+                uid=str(sample_fields.get("uid", "")),
+                session_index=session_index,
+                trajectories=[dummy],
+                sample_fields=sample_fields,
+                global_steps=global_steps,
+                partition_id=partition_id,
+            )
+        except Exception:  # noqa: BLE001 - best-effort telemetry
+            logger.warning(
+                "failed to write failure dummy trajectory for uid=%s session=%s",
+                sample_fields.get("uid", ""),
+                session_index,
+            )
 
     async def _cancel_runner_task(self, object_ref, session_id: str) -> None:
         """Cancel a dispatched runner Ray task after its session timed out.

@@ -1619,7 +1619,8 @@ async def test_framework_rejects_invalid_trajectory_postprocessor_config(
 @pytest.mark.level0
 @pytest.mark.asyncio
 async def test_generate_sequences_keeps_successful_sessions_when_one_session_fails(fake_tq):
-    """A failed rollout session aborts only that session; other successful
+    """A failed train session aborts only that session and emits a reward=0
+    dummy so it stays in the ``reward/mean`` denominator; other successful
     sessions for the same prompt are still finalized and written to TQ."""
     runtime = _FakeGatewayManager(
         {
@@ -1642,7 +1643,19 @@ async def test_generate_sequences_keeps_successful_sessions_when_one_session_fai
 
     await framework.generate_sequences(_build_prompts(count=1, global_steps=8))
 
-    assert fake_tq.batch_puts[0]["keys"] == ["uid-0_0_0"]
+    # Successful session writes its real trajectory ...
+    success_batch = next(b for b in fake_tq.batch_puts if b["keys"] == ["uid-0_0_0"])
+    assert success_batch["partition_id"] == "train"
+    assert success_batch["fields"]["responses"][0].tolist() == [20, 21]
+
+    # ... and the failed session writes a masked reward=0 dummy (response_mask=0).
+    dummy_batch = next(b for b in fake_tq.batch_puts if b["keys"] == ["uid-0_1_0"])
+    assert dummy_batch["partition_id"] == "train"
+    assert dummy_batch["fields"]["responses"][0].tolist() == [0]
+    assert dummy_batch["fields"]["response_mask"][0].tolist() == [0]
+    assert dummy_batch["fields"]["rm_scores"][0].tolist() == [0.0]
+    assert dummy_batch["tags"][0]["materialization_reason"] == "session_failed"
+
     assert fake_tq.puts == [{"key": "uid-0", "partition_id": "train", "tag": {"status": "finished"}}]
     assert len(runtime.aborted_sessions) == 1
     assert runtime.aborted_sessions[0].startswith("session-sample-0-rollout-1-")
@@ -1650,6 +1663,76 @@ async def test_generate_sequences_keeps_successful_sessions_when_one_session_fai
 
 @pytest.mark.cpu
 @pytest.mark.level0
+@pytest.mark.asyncio
+async def test_val_failure_writes_reward_zero_trajectory_to_keep_denominator_honest(fake_tq):
+    """A failed val session is aborted (its partial output discarded) and a
+    masked reward=0 dummy is written to the val TQ in its place, so the sample
+    stays in the ``reward/mean@1`` denominator as a zero instead of vanishing
+    and inflating the reported score.
+
+    Mirrors the partial-failure case the fix targets: one session succeeds with
+    a real reward, one crashes mid-rollout — both land in the val TQ and the
+    uid is marked finished so the val scorer still reads it. The dummy carries
+    ``response_mask=0`` so it adds no gradient; val and train handle failures
+    the same way (see the train test above), keeping critic and val consistent.
+    """
+    runtime = _FakeGatewayManager(
+        {
+            # Successful session: real reward, finished.
+            "session-sample-0-rollout-0": [
+                _trajectory(
+                    response_ids=[20, 21],
+                    reward_info={"reward": 0.8, "finished": True},
+                )
+            ],
+            # Failed session: gateway may have produced a partial trajectory, but
+            # the failure path aborts (discards it) and writes a dummy instead.
+            "session-sample-0-rollout-1": [
+                _trajectory(
+                    response_ids=[30, 31, 32],
+                    response_mask=[1, 1, 1],
+                    reward_info={"acc": 0.4, "reward": 0.9, "finished": True},
+                    num_turns=2,
+                )
+            ],
+        }
+    )
+
+    async def agent_runner(*, session, **kwargs):
+        if session.session_id.startswith("session-sample-0-rollout-1-"):
+            raise RuntimeError("runner crashed mid-rollout")
+
+    framework = await _build_framework_with_agent_runners(
+        agent_runners={"runner": _inline_runner_config(agent_runner)},
+        gateway_manager=runtime,
+        n=2,
+        val_n=2,
+    )
+
+    await framework.generate_sequences(_build_prompts(count=1, global_steps=None, validate=True))
+
+    # The successful session's real-reward trajectory ...
+    success_batch = next(b for b in fake_tq.batch_puts if b["keys"] == ["uid-0_0_0"])
+    assert success_batch["partition_id"] == "val"
+    assert success_batch["fields"]["responses"][0].tolist() == [20, 21]
+    assert success_batch["fields"]["rm_scores"][0].tolist() == pytest.approx([0.0, 0.8])
+
+    # ... and the failed session's masked reward=0 dummy both land in the val TQ.
+    dummy_batch = next(b for b in fake_tq.batch_puts if b["keys"] == ["uid-0_1_0"])
+    assert dummy_batch["partition_id"] == "val"
+    assert dummy_batch["fields"]["responses"][0].tolist() == [0]
+    assert dummy_batch["fields"]["response_mask"][0].tolist() == [0]
+    assert dummy_batch["fields"]["rm_scores"][0].tolist() == [0.0]
+    assert dummy_batch["tags"][0]["materialization_reason"] == "session_failed"
+
+    # The failed session was aborted (partial output discarded, not salvaged).
+    assert any(sid.startswith("session-sample-0-rollout-1-") for sid in runtime.aborted_sessions)
+    assert all(not sid.startswith("session-sample-0-rollout-1-") for sid in runtime.finalized_sessions)
+
+    # Partial failure still marks the uid finished so the val scorer reads it.
+    assert fake_tq.puts == [{"key": "uid-0", "partition_id": "val", "tag": {"status": "finished"}}]
+
+
 @pytest.mark.asyncio
 async def test_generate_sequences_marks_prompt_failure_when_all_sessions_fail(fake_tq):
     """Filtering every session to empty marks the uid failed and raises."""
@@ -1722,7 +1805,18 @@ async def test_generate_sequences_keeps_other_prompts_when_one_prompt_fails(fake
 
     await framework.generate_sequences(_build_prompts(count=2, global_steps=11))
 
-    assert [put["keys"] for put in fake_tq.batch_puts] == [["uid-1_0_0"]]
+    # The failed prompt emits a masked reward=0 dummy; the other prompt's
+    # successful session still writes its real trajectory. Order is not fixed
+    # (prompts run concurrently), so look each up by key.
+    dummy_batch = next(b for b in fake_tq.batch_puts if b["keys"] == ["uid-0_0_0"])
+    assert dummy_batch["partition_id"] == "train"
+    assert dummy_batch["fields"]["response_mask"][0].tolist() == [0]
+    assert dummy_batch["fields"]["rm_scores"][0].tolist() == [0.0]
+    assert dummy_batch["tags"][0]["materialization_reason"] == "session_failed"
+
+    success_batch = next(b for b in fake_tq.batch_puts if b["keys"] == ["uid-1_0_0"])
+    assert success_batch["fields"]["responses"][0].tolist() == [20, 21]
+
     assert sorted(fake_tq.puts, key=lambda put: put["key"]) == [
         {"key": "uid-0", "partition_id": "train", "tag": {"status": "failure"}},
         {"key": "uid-1", "partition_id": "train", "tag": {"status": "finished"}},
