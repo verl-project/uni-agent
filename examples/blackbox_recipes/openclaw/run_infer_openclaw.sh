@@ -21,6 +21,12 @@ if [[ ! -x "${PYTHON_BIN}" ]]; then
     echo "专用环境缺少 Python: ${PYTHON_BIN}" >&2
     exit 2
 fi
+export PATH="${CONDA_PREFIX}/bin:${PATH}"
+# Keep the CUDA/NCCL libraries visible to Ray child workers, matching the
+# validated retry30 launcher environment.
+export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib/python3.12/site-packages/nvidia/cu13/lib:${CONDA_PREFIX}/lib/python3.12/site-packages/nvidia/cudnn/lib:${CONDA_PREFIX}/lib:${LD_LIBRARY_PATH:-}"
+export CPATH="${CONDA_PREFIX}/include:${CONDA_PREFIX}/lib/python3.12/site-packages/nvidia/cuda_runtime/include:${CPATH:-}"
+export LIBRARY_PATH="${CONDA_PREFIX}/lib:${CONDA_PREFIX}/lib/python3.12/site-packages/nvidia/cuda_runtime/lib:${LIBRARY_PATH:-}"
 : "${DATA_PATH:?请设置预处理后的 SWE-bench parquet 路径}"
 : "${OUTPUT_DIR:?请设置仓库外的独立输出目录}"
 
