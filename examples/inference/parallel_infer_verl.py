@@ -112,7 +112,7 @@ def init_config(args: argparse.Namespace, *, served_model_name: str):
     rollout.mode = "async"
     # Standalone inference has no trainer to broadcast weights.
     rollout.load_format = "auto"
-    rollout.prompt_length = DEFAULT_PROMPT_LENGTH
+    rollout.prompt_length = args.prompt_length
     rollout.response_length = response_length
     rollout.max_model_len = rollout.prompt_length + rollout.response_length
     rollout.tensor_model_parallel_size = args.tensor_parallel_size
@@ -129,6 +129,18 @@ def init_config(args: argparse.Namespace, *, served_model_name: str):
             getattr(args, "kv_cache_dtype", "auto"),
             force_add=True,
         )
+
+    if args.language_model_only:
+        if args.engine != "vllm":
+            raise ValueError("--language-model-only is supported only with --engine vllm")
+        OmegaConf.update(
+            config,
+            "actor_rollout_ref.rollout.engine_kwargs.vllm.language_model_only",
+            True,
+            force_add=True,
+        )
+    if args.disable_thinking:
+        OmegaConf.update(config, "data.apply_chat_template_kwargs.enable_thinking", False, force_add=True)
 
     # Gateway tool-call parser: the gateway decodes tool calls from raw tokens, so
     # this must match the model's chat template (the analog of vLLM's
@@ -158,7 +170,7 @@ def init_config(args: argparse.Namespace, *, served_model_name: str):
 
     # Data.
     config.data.return_raw_chat = True
-    config.data.max_prompt_length = DEFAULT_PROMPT_LENGTH
+    config.data.max_prompt_length = args.prompt_length
     config.data.max_response_length = response_length
 
     return config
@@ -318,6 +330,12 @@ def main() -> None:
         help="Optional path to write a JSON result file (mean rm_score and per-session scores).",
     )
     parser.add_argument(
+        "--prompt-length",
+        type=int,
+        default=int(os.getenv("PROMPT_LENGTH", DEFAULT_PROMPT_LENGTH)),
+        help="Prompt-token budget passed to the verl rollout and data config.",
+    )
+    parser.add_argument(
         "--limit",
         "--max-samples",
         dest="limit",
@@ -354,6 +372,16 @@ def main() -> None:
         default="vllm",
         choices=["vllm", "sglang"],
         help="Inference engine backend.",
+    )
+    parser.add_argument(
+        "--language-model-only",
+        action="store_true",
+        help="Load only the language-model component (required for text-only Qwen3.5 vLLM runs).",
+    )
+    parser.add_argument(
+        "--disable-thinking",
+        action="store_true",
+        help="Disable thinking in the model chat template.",
     )
     parser.add_argument(
         "--enable-rollout-routing-replay",

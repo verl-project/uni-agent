@@ -33,6 +33,8 @@ CONCURRENCY="${CONCURRENCY:-1}"
 GATEWAY_COUNT="${GATEWAY_COUNT:-1}"
 LOG_DIR="${LOG_DIR:-/tmp/uni_agent_codex_infer_logs}"
 RESULT_PATH="${RESULT_PATH:-/tmp/uni_agent_codex_infer_result.json}"
+PROMPT_LENGTH="${PROMPT_LENGTH:-8192}"
+RESPONSE_LENGTH="${RESPONSE_LENGTH:-122880}"
 
 # `ray job submit` does not forward this shell's environment to the job
 # driver, so pass the provider settings explicitly in the runtime environment.
@@ -57,6 +59,10 @@ JSON
     --data-path "${DATA_PATH}" \
     --model-path "${MODEL_PATH}" \
     --task-config "${TASK_CONFIG}" \
+    --language-model-only \
+    --disable-thinking \
+    --prompt-length "${PROMPT_LENGTH}" \
+    --response-length "${RESPONSE_LENGTH}" \
     --tool-parser "${TOOL_PARSER}" \
     --tensor-parallel-size "${TENSOR_PARALLEL_SIZE}" \
     --nnodes "${NNODES}" \
