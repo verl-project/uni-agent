@@ -16,6 +16,11 @@ if [[ "$(basename "${CONDA_PREFIX}")" != "openclaw-train312-20260907" ]]; then
     echo "必须使用专用环境 openclaw-train312-20260907，当前为 ${CONDA_PREFIX}" >&2
     exit 2
 fi
+PYTHON_BIN="${CONDA_PREFIX}/bin/python"
+if [[ ! -x "${PYTHON_BIN}" ]]; then
+    echo "专用环境缺少 Python: ${PYTHON_BIN}" >&2
+    exit 2
+fi
 : "${DATA_PATH:?请设置预处理后的 SWE-bench parquet 路径}"
 : "${OUTPUT_DIR:?请设置仓库外的独立输出目录}"
 
@@ -61,7 +66,7 @@ echo "================================"
 # Keep the checked-in YAML portable.  The artifact path is run-specific, so
 # write a derived config next to the run outputs instead of hard-coding it in
 # the repository.  The task prompt itself still comes from each data row.
-python - "${TASK_CONFIG}" "${RUNTIME_TASK_CONFIG}" "${TRAJECTORY_DIR}" <<'PY'
+"${PYTHON_BIN}" - "${TASK_CONFIG}" "${RUNTIME_TASK_CONFIG}" "${TRAJECTORY_DIR}" <<'PY'
 import sys
 from pathlib import Path
 
@@ -79,7 +84,7 @@ target.write_text(yaml.safe_dump(raw, allow_unicode=True, sort_keys=False), enco
 PY
 
 if [[ "${DRY_RUN:-0}" == "1" ]]; then
-    printf '%q ' python examples/inference/parallel_infer_verl.py \
+    printf '%q ' "${PYTHON_BIN}" examples/inference/parallel_infer_verl.py \
         --data-path "${DATA_PATH}" --model-path "${MODEL_PATH}" --task-config "${RUNTIME_TASK_CONFIG}" \
         --tool-parser "${TOOL_PARSER}" --engine vllm --nnodes 1 --n-gpus-per-node 8 \
         --tensor-parallel-size 8 --gpu-memory-utilization 0.2 --max-model-len 8192 \
@@ -92,7 +97,7 @@ if [[ "${DRY_RUN:-0}" == "1" ]]; then
     exit 0
 fi
 
-python examples/inference/parallel_infer_verl.py \
+"${PYTHON_BIN}" examples/inference/parallel_infer_verl.py \
     --data-path "${DATA_PATH}" \
     --model-path "${MODEL_PATH}" \
     --task-config "${RUNTIME_TASK_CONFIG}" \
@@ -120,7 +125,7 @@ python examples/inference/parallel_infer_verl.py \
     --result-path "${RESULT_PATH}" \
     --artifact-dir "${TRAJECTORY_DIR}"
 
-python - "${RESULT_PATH}" "${LOG_DIR}" "${TRAJECTORY_DIR}" > "${OUTPUT_DIR}/acceptance.json" <<'PY'
+"${PYTHON_BIN}" - "${RESULT_PATH}" "${LOG_DIR}" "${TRAJECTORY_DIR}" > "${OUTPUT_DIR}/acceptance.json" <<'PY'
 import json
 import sys
 from pathlib import Path
