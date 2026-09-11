@@ -9,5 +9,5 @@
     max_steps: 9
     model:
       temperature: 1.0
-      top_p: 0.7
+      # Inherit top_p from the VERL rollout configuration.
       top_k: -1
