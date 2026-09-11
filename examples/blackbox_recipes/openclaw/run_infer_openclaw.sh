@@ -88,9 +88,10 @@ if [[ "${DRY_RUN:-0}" == "1" ]]; then
         --data-path "${DATA_PATH}" --model-path "${MODEL_PATH}" --task-config "${RUNTIME_TASK_CONFIG}" \
         --tool-parser "${TOOL_PARSER}" --engine vllm --nnodes 1 --n-gpus-per-node 8 \
         --tensor-parallel-size 8 --gpu-memory-utilization 0.2 --max-model-len 8192 \
-        --max-num-seqs 1 --max-num-batched-tokens 8192 --enforce-eager --language-model-only \
+        --max-num-seqs 1 --max-num-batched-tokens 8192 --enforce-eager --enable-chunked-prefill --language-model-only \
         --free-cache-engine --cudagraph-mode NONE --mamba-cache-mode align \
-        --enable-cpu-binding --async-scheduling --limit "${LIMIT}" --n "${N}" \
+        --enable-cpu-binding --async-scheduling --multi-turn --max-assistant-turns 100 \
+        --max-parallel-calls 1 --limit "${LIMIT}" --n "${N}" \
         --gateway-count "${GATEWAY_COUNT}" --concurrency "${CONCURRENCY}" \
         --log-dir "${LOG_DIR}" --result-path "${RESULT_PATH}" --artifact-dir "${TRAJECTORY_DIR}"
     printf '\n'
@@ -111,12 +112,16 @@ fi
     --max-num-seqs 1 \
     --max-num-batched-tokens 8192 \
     --enforce-eager \
+    --enable-chunked-prefill \
     --language-model-only \
     --free-cache-engine \
     --cudagraph-mode NONE \
     --mamba-cache-mode align \
     --enable-cpu-binding \
     --async-scheduling \
+    --multi-turn \
+    --max-assistant-turns 100 \
+    --max-parallel-calls 1 \
     --limit "${LIMIT}" \
     --n "${N}" \
     --gateway-count "${GATEWAY_COUNT}" \
