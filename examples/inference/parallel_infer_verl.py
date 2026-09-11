@@ -78,6 +78,8 @@ def init_config(args: argparse.Namespace, *, served_model_name: str):
     """Compose verl's ``ppo_trainer`` config and override the engine + framework knobs."""
     from hydra import compose, initialize_config_dir
 
+    prompt_length = getattr(args, "prompt_length", DEFAULT_PROMPT_LENGTH)
+
     config_dir = str(Path(verl.__file__).resolve().parent / "trainer" / "config")
     with initialize_config_dir(config_dir=config_dir, version_base=None):
         config = compose(config_name="ppo_trainer")
@@ -112,7 +114,7 @@ def init_config(args: argparse.Namespace, *, served_model_name: str):
     rollout.mode = "async"
     # Standalone inference has no trainer to broadcast weights.
     rollout.load_format = "auto"
-    rollout.prompt_length = args.prompt_length
+    rollout.prompt_length = prompt_length
     rollout.response_length = response_length
     rollout.max_model_len = rollout.prompt_length + rollout.response_length
     rollout.tensor_model_parallel_size = args.tensor_parallel_size
@@ -130,7 +132,7 @@ def init_config(args: argparse.Namespace, *, served_model_name: str):
             force_add=True,
         )
 
-    if args.language_model_only:
+    if getattr(args, "language_model_only", False):
         if args.engine != "vllm":
             raise ValueError("--language-model-only is supported only with --engine vllm")
         OmegaConf.update(
@@ -139,7 +141,7 @@ def init_config(args: argparse.Namespace, *, served_model_name: str):
             True,
             force_add=True,
         )
-    if args.disable_thinking:
+    if getattr(args, "disable_thinking", False):
         OmegaConf.update(config, "data.apply_chat_template_kwargs.enable_thinking", False, force_add=True)
 
     # Gateway tool-call parser: the gateway decodes tool calls from raw tokens, so
@@ -170,7 +172,7 @@ def init_config(args: argparse.Namespace, *, served_model_name: str):
 
     # Data.
     config.data.return_raw_chat = True
-    config.data.max_prompt_length = args.prompt_length
+    config.data.max_prompt_length = prompt_length
     config.data.max_response_length = response_length
 
     return config
