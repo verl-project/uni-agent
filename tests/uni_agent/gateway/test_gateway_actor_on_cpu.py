@@ -159,6 +159,27 @@ async def test_gateway_actor_max_tokens_clamped_to_remaining_trajectory_capacity
 @pytest.mark.cpu
 @pytest.mark.level0
 @pytest.mark.asyncio
+async def test_gateway_actor_responses_endpoint_returns_responses_envelope():
+    from uni_agent.gateway.config import GatewayActorConfig
+    from uni_agent.gateway.gateway import _GatewayActor
+
+    actor = _GatewayActor(GatewayActorConfig(tokenizer=FakeTokenizer()), QueuedBackend(["ANSWER"]))
+    actor._server_base_url = "http://gateway.local"
+    await actor.create_session("responses-direct")
+
+    response = await actor._handle_openai_responses(
+        "responses-direct",
+        {"model": "policy", "input": "inspect the repository"},
+    )
+
+    assert response.status_code == 200
+    body = json.loads(response.body)
+    assert body["object"] == "response"
+    assert body["output_text"] == "ANSWER"
+    assert body["output"][0]["type"] == "message"
+
+
+@pytest.mark.asyncio
 async def test_gateway_actor_exhausted_trajectory_closes_without_backend_call():
     from uni_agent.gateway.config import GatewayActorConfig
     from uni_agent.gateway.gateway import _GatewayActor

@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
+from uni_agent.gateway.message_normalization import canonicalize_messages, coalesce_consecutive_assistant_messages
 from verl.utils.tokenizer import normalize_token_ids
 from verl.utils.tokenizer.chat_template import apply_chat_template as _apply_chat_template
 from verl.utils.tokenizer.chat_template import initialize_turn_separator
@@ -40,6 +41,41 @@ _VLLM_TOOL_PARSER_ALIASES = {
 }
 
 
+def _apply_chat_template_for_model(processing_class, messages: list[dict[str, Any]], **kwargs):
+    """Render a model prompt while handling strict no-user templates locally.
+
+    Clean verl already retries a failed render with a synthetic user message,
+    but that retry prepends the user before a leading system message. Strict
+    templates such as Qwen3.5 reject that ordering. Keep this compatibility at
+    the recipe's model boundary so the pinned verl checkout remains unmodified.
+    """
+    try:
+        return _apply_chat_template(processing_class, messages, **kwargs)
+    except Exception:
+        if any(message.get("role") == "user" for message in messages):
+            raise
+
+        normalized = canonicalize_messages(messages)
+        system_messages = [message for message in normalized if message.get("role") == "system"]
+        if not system_messages:
+            # Preserve clean verl's existing fallback for assistant-only
+            # histories; this compatibility is specifically for a strict
+            # template with a leading system and no user message.
+            raise
+
+        # The wire adapters normally perform this canonicalization. Keep the
+        # codec safe for direct callers as well, without mutating the
+        # caller-owned message history.
+        normalized = [dict(message) for message in normalized]
+        insertion_index = 1
+
+        normalized.insert(
+            insertion_index,
+            {"role": "user", "content": [{"type": "text", "text": ""}]},
+        )
+        return _apply_chat_template(processing_class, normalized, **kwargs)
+
+
 def _canonical_tools_hash(tools: list[dict[str, Any]]) -> str:
     """Return a stable hash for a tool schema independent of dict key order."""
     canonical = json.dumps(tools, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
@@ -49,7 +85,7 @@ def _canonical_tools_hash(tools: list[dict[str, Any]]) -> str:
 def initialize_generation_prompt(processing_class, **apply_chat_template_kwargs) -> list[int]:
     """Initialize the token suffix inserted by ``add_generation_prompt=True``."""
     without_generation_prompt = normalize_token_ids(
-        _apply_chat_template(
+        _apply_chat_template_for_model(
             processing_class,
             [{"role": "user", "content": ""}],
             add_generation_prompt=False,
@@ -57,7 +93,7 @@ def initialize_generation_prompt(processing_class, **apply_chat_template_kwargs)
         )
     )
     with_generation_prompt = normalize_token_ids(
-        _apply_chat_template(
+        _apply_chat_template_for_model(
             processing_class,
             [{"role": "user", "content": ""}],
             add_generation_prompt=True,
@@ -220,7 +256,7 @@ class MessageCodec:
     ) -> list[int]:
         """Encode a full chat history into prompt token IDs."""
         processing_class = self._processor if self._processor is not None else self._tokenizer
-        raw_prompt = _apply_chat_template(
+        raw_prompt = _apply_chat_template_for_model(
             processing_class,
             messages,
             tools=tools,
@@ -240,6 +276,7 @@ class MessageCodec:
         if not messages:
             return []
 
+        messages = coalesce_consecutive_assistant_messages(messages)
         processing_class = self._processor if self._processor is not None else self._tokenizer
         anchor_content = [{"type": "text", "text": ""}] if self._processor is not None else ""
         anchor = [{"role": "user", "content": anchor_content}]
@@ -249,14 +286,14 @@ class MessageCodec:
 
         # TODO: Replace this user/tool empty-user fallback with continuous-token merging.
         # A user -> tool anchor is not valid for every chat template.
-        anchor_prompt = _apply_chat_template(
+        anchor_prompt = _apply_chat_template_for_model(
             processing_class,
             anchor,
             add_generation_prompt=False,
             tokenize=False,
             **self._apply_chat_template_kwargs,
         )
-        full_prompt = _apply_chat_template(
+        full_prompt = _apply_chat_template_for_model(
             processing_class,
             anchor + messages,
             add_generation_prompt=True,
@@ -378,7 +415,8 @@ class MessageCodec:
         stop_reason: str | None = None,
     ) -> tuple[dict[str, Any], str]:
         """Decode model output tokens into an assistant message and finish reason."""
-        if self._tool_parser_name and tools:
+        finish_reason = _FINISH_REASON_MAP.get(stop_reason, stop_reason) if stop_reason else "stop"
+        if self._tool_parser_name and tools and finish_reason != "length":
             content, function_calls = await self._extract_tool_calls(
                 response_ids,
                 tools,
@@ -400,7 +438,6 @@ class MessageCodec:
                 }
                 return message, "tool_calls"
         response_text = self._tokenizer.decode(response_ids, skip_special_tokens=True)
-        finish_reason = _FINISH_REASON_MAP.get(stop_reason, stop_reason) if stop_reason else "stop"
         return {"role": "assistant", "content": response_text}, finish_reason
 
     def canonicalize_message_for_prefix_comparison(self, message: dict[str, Any]) -> dict[str, Any]:

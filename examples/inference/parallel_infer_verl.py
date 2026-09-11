@@ -78,6 +78,11 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
     """Compose verl's ``ppo_trainer`` config and override the engine + framework knobs."""
     from hydra import compose, initialize_config_dir
 
+    prompt_length = getattr(args, "prompt_length", DEFAULT_PROMPT_LENGTH)
+    response_length_override = getattr(args, "response_length", None)
+    temperature_override = getattr(args, "temperature", None)
+    top_p_override = getattr(args, "top_p", None)
+
     config_dir = str(Path(verl.__file__).resolve().parent / "trainer" / "config")
     with initialize_config_dir(config_dir=config_dir, version_base=None):
         config = compose(config_name="ppo_trainer")
@@ -85,8 +90,12 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
     rollout = config.actor_rollout_ref.rollout
 
     model_cfgs = [entry.get("agent", {}).get("model", {}) for entry in task_configs]
-    temperature = model_cfgs[0].get("temperature", DEFAULT_TEMPERATURE)
-    top_p = model_cfgs[0].get("top_p", DEFAULT_TOP_P)
+    temperature = (
+        temperature_override
+        if temperature_override is not None
+        else model_cfgs[0].get("temperature", DEFAULT_TEMPERATURE)
+    )
+    top_p = top_p_override if top_p_override is not None else model_cfgs[0].get("top_p", DEFAULT_TOP_P)
     rollout.temperature = temperature
     rollout.top_p = top_p
     rollout.val_kwargs.temperature = temperature
@@ -98,7 +107,9 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
         (m.get("max_total_tokens", DEFAULT_RESPONSE_LENGTH) for m in model_cfgs),
         default=DEFAULT_RESPONSE_LENGTH,
     )
-    response_length = int(max_total_tokens)
+    response_length = (
+        response_length_override if response_length_override is not None else int(max_total_tokens)
+    )
 
     # Fan-out: the framework runs rollout.n gateway sessions per prompt.
     rollout.n = max(1, args.n)
@@ -116,7 +127,7 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
     rollout.mode = "async"
     # Standalone inference has no trainer to broadcast weights.
     rollout.load_format = "auto"
-    rollout.prompt_length = DEFAULT_PROMPT_LENGTH
+    rollout.prompt_length = prompt_length
     rollout.response_length = response_length
     rollout.tensor_model_parallel_size = args.tensor_parallel_size
     rollout.gpu_memory_utilization = args.gpu_memory_utilization
@@ -125,6 +136,18 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
     rollout.disable_log_stats = False
     rollout.free_cache_engine = False
     OmegaConf.update(config, "actor_rollout_ref.rollout.enable_sleep_mode", False, force_add=True)
+
+    if getattr(args, "language_model_only", False):
+        if args.engine != "vllm":
+            raise ValueError("--language-model-only is supported only with --engine vllm")
+        OmegaConf.update(
+            config,
+            "actor_rollout_ref.rollout.engine_kwargs.vllm.language_model_only",
+            True,
+            force_add=True,
+        )
+    if getattr(args, "disable_thinking", False):
+        OmegaConf.update(config, "data.apply_chat_template_kwargs.enable_thinking", False, force_add=True)
 
     # Gateway tool-call parser: the gateway decodes tool calls from raw tokens, so
     # this must match the model's chat template (the analog of vLLM's
@@ -153,7 +176,7 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
 
     # Data.
     config.data.return_raw_chat = True
-    config.data.max_prompt_length = DEFAULT_PROMPT_LENGTH
+    config.data.max_prompt_length = prompt_length
     config.data.max_response_length = response_length
 
     return config
@@ -313,6 +336,30 @@ def main() -> None:
         help="Optional path to write a JSON result file (mean rm_score and per-session scores).",
     )
     parser.add_argument(
+        "--prompt-length",
+        type=int,
+        default=int(os.getenv("PROMPT_LENGTH", DEFAULT_PROMPT_LENGTH)),
+        help="Prompt-token budget passed to the verl rollout and data config.",
+    )
+    parser.add_argument(
+        "--response-length",
+        type=int,
+        default=None,
+        help="Per-episode response-token budget (defaults to the task model's max_total_tokens).",
+    )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=None,
+        help="Sampling temperature (defaults to the task model setting or 0.8).",
+    )
+    parser.add_argument(
+        "--top-p",
+        type=float,
+        default=None,
+        help="Nucleus sampling probability (defaults to the task model setting or 0.9).",
+    )
+    parser.add_argument(
         "--limit",
         "--max-samples",
         dest="limit",
@@ -331,6 +378,16 @@ def main() -> None:
         default="vllm",
         choices=["vllm", "sglang"],
         help="Inference engine backend.",
+    )
+    parser.add_argument(
+        "--language-model-only",
+        action="store_true",
+        help="Load only the language-model component (required for text-only Qwen3.5 vLLM runs).",
+    )
+    parser.add_argument(
+        "--disable-thinking",
+        action="store_true",
+        help="Disable thinking in the model chat template.",
     )
     parser.add_argument(
         "--enable-rollout-routing-replay",
