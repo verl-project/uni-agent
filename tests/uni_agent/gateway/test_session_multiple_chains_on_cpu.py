@@ -1624,12 +1624,8 @@ def test_message_prefix_hashes_use_canonical_internal_tool_call_arguments():
             ],
         }
 
-    canonical_a = session._extend_message_prefix_hashes(
-        [], [assistant_tool_call({"query": "weather", "limit": 2})]
-    )
-    canonical_b = session._extend_message_prefix_hashes(
-        [], [assistant_tool_call({"limit": 2, "query": "weather"})]
-    )
+    canonical_a = session._extend_message_prefix_hashes([], [assistant_tool_call({"query": "weather", "limit": 2})])
+    canonical_b = session._extend_message_prefix_hashes([], [assistant_tool_call({"limit": 2, "query": "weather"})])
     unnormalized_wire = session._extend_message_prefix_hashes(
         [], [assistant_tool_call('{"query":"weather","limit":2}')]
     )
