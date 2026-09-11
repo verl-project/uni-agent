@@ -61,6 +61,7 @@ JSON
     --data-path "${DATA_PATH}" \
     --model-path "${MODEL_PATH}" \
     --task-config "${TASK_CONFIG}" \
+    --engine vllm \
     --language-model-only \
     --disable-thinking \
     --prompt-length "${PROMPT_LENGTH}" \
