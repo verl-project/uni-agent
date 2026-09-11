@@ -91,6 +91,9 @@ shape before submission. Override `DATA_PATH`, `SAMPLE_INDEX`, `MODEL_PATH`,
 `PROMPT_LENGTH`, `RESPONSE_LENGTH`, `TEMPERATURE`, `TOP_P`,
 `TENSOR_PARALLEL_SIZE`, `LOG_DIR`, or `RESULT_PATH` for a different environment.
 The OpenYuanRong variables are required and are
-passed to the Ray job through its runtime environment. Text-only Qwen3.5 runs
+passed to the Ray job through its runtime environment. The script also passes
+the OpenYuanRong worker's libffi compatibility preload; override
+`AKERNEL_SDK_LD_PRELOAD` only when the worker image supplies an equivalent ABI.
+Text-only Qwen3.5 runs
 enable `language_model_only` and disable thinking to match the training recipe;
 keep the token out of shell history and source control.
