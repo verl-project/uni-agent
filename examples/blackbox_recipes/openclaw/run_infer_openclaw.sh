@@ -22,11 +22,6 @@ if [[ ! -x "${PYTHON_BIN}" ]]; then
     exit 2
 fi
 export PATH="${CONDA_PREFIX}/bin:${PATH}"
-# Keep the CUDA/NCCL libraries visible to Ray child workers, matching the
-# validated retry30 launcher environment.
-export LD_LIBRARY_PATH="${CONDA_PREFIX}/lib/python3.12/site-packages/nvidia/cu13/lib:${CONDA_PREFIX}/lib/python3.12/site-packages/nvidia/cudnn/lib:${CONDA_PREFIX}/lib:${LD_LIBRARY_PATH:-}"
-export CPATH="${CONDA_PREFIX}/include:${CONDA_PREFIX}/lib/python3.12/site-packages/nvidia/cuda_runtime/include:${CPATH:-}"
-export LIBRARY_PATH="${CONDA_PREFIX}/lib:${CONDA_PREFIX}/lib/python3.12/site-packages/nvidia/cuda_runtime/lib:${LIBRARY_PATH:-}"
 : "${DATA_PATH:?请设置预处理后的 SWE-bench parquet 路径}"
 : "${OUTPUT_DIR:?请设置仓库外的独立输出目录}"
 
@@ -50,14 +45,6 @@ export PYTHONPATH="${REPO_ROOT}:${REPO_ROOT}/verl:${PYTHONPATH:-}"
 # under OUTPUT_DIR when the default control plane is confirmed unrelated.
 if [[ -n "${RAY_ADDRESS:-}" ]]; then export RAY_ADDRESS; fi
 if [[ -n "${RAY_TMPDIR:-}" ]]; then export RAY_TMPDIR; fi
-export VERL_DISABLE_PIN_MEMORY="${VERL_DISABLE_PIN_MEMORY:-1}"
-export OPENCLAW_DEBUG_ENGINE="${OPENCLAW_DEBUG_ENGINE:-1}"
-export PYTHONFAULTHANDLER="${PYTHONFAULTHANDLER:-1}"
-export MALLOC_CONF="${MALLOC_CONF:-background_thread:false}"
-export ARROW_DEFAULT_MEMORY_POOL="${ARROW_DEFAULT_MEMORY_POOL:-system}"
-export NCCL_P2P_DISABLE="${NCCL_P2P_DISABLE:-1}"
-export NCCL_SHM_DISABLE="${NCCL_SHM_DISABLE:-1}"
-export VLLM_USE_FLASHINFER_SAMPLER="${VLLM_USE_FLASHINFER_SAMPLER:-0}"
 export PYTHONUNBUFFERED="${PYTHONUNBUFFERED:-1}"
 
 echo "=== OpenClaw verl inference ==="
