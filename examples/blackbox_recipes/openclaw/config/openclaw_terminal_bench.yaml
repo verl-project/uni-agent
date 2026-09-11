@@ -1,4 +1,7 @@
 # Reuses the generic TerminalBenchTask verifier; not an OpenClaw-specific reward.
+# The prompt is data-owned: preprocess emits it as the top-level source prompt,
+# and framework.task_runner injects that raw_prompt into TaskConfig at runtime.
+# Keep it out of this defaults file so it cannot become stale or duplicated.
 - name: terminal_bench
   sandbox:
     provider: docker
