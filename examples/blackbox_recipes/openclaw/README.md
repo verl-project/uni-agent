@@ -22,7 +22,9 @@ config/openclaw_terminal_bench.yaml 使用通用 terminal_bench 任务协议，�
 
 这里没有取消 user prompt。新 Task Config 约定把 prompt 归数据行所有：预处理器把题目放在顶层 `prompt`，`framework.task_runner` 在运行时用 `raw_prompt` 覆盖/注入 `TaskConfig.prompt`；配置 YAML 只保存 task-name 的默认 sandbox/agent 参数，避免重复保存过期题目。OpenClaw 随后仍会校验并提取唯一 user message，写入临时 `task.txt`，通过 `--message-file` 传给 CLI。Codex/Claude Code 和 mini-swe-agent 也执行同一 user-message 校验，只是分别通过 CLI 参数或 base64/stdin 传输。
 
-    CONDA_DEFAULT_ENV=<专用环境> DATA_PATH=<数据.parquet> BASE_URL=<sandbox可访问的v1地址> OUTPUT_DIR=<仓库外新目录> bash examples/blackbox_recipes/openclaw/run_infer.sh
+source <conda安装目录>/etc/profile.d/conda.sh
+conda activate openclaw-train312-20260907
+DATA_PATH=<数据.parquet> OUTPUT_DIR=<仓库外新目录> bash examples/blackbox_recipes/openclaw/run_infer_openclaw.sh
 
 必须实际激活独立 Conda 环境。API_KEY 使用受保护环境变量，不通过 shell 命令字面值传入。文本 Qwen3.5-9B vLLM 服务必须使用 --language-model-only。默认 n=1，不用同题多 rollout 拼接结果。Docker 默认网络不能访问宿主 127.0.0.1，应提供可路由 endpoint 或明确配置网络；host-network 仅用于受控验证，不作为不可信任务的安全隔离承诺。
 
@@ -35,7 +37,7 @@ retry30 是当前唯一的单机八卡 rollout 基线。使用外部任务验证
 - 单样本单并发：`N=1`、`GATEWAY_COUNT=1`、`MAX_CONCURRENT_SESSIONS=1`、`NUM_AGENT_WORKERS=8`；`OFFLOAD=True`、`OFFLOAD_FRACTION=1.0`；PPO mini/micro batch 都是 `1`。
 - `TRAIN_MAX_SAMPLES=1`、`VAL_MAX_SAMPLES=1`、train/val batch 都是 `1`、`TOTAL_TRAINING_STEPS=1`、`VAL_BEFORE_TRAIN=false`，并使用 `actor_rollout_ref.rollout.checkpoint_engine.backend=naive`。
 
-正式入口仍是 `run_train.sh`，由 verl trainer 在 Ray 内部管理 vLLM；不要启动独立 `vllm serve`。如果默认 Ray 控制面被无关集群占用，只能隔离 Ray 端口/临时目录，不能改变上述模型、rollout、并发、长度、offload 和 batch 参数。验收只看题目完成、verifier/reward、`finished=true` 以及单题单 session 单 trajectory。
+PR recipe 接入、remote 复验和最终验收统一使用 `run_infer_openclaw.sh`，由 `parallel_infer_verl.py` 在 verl 的 Ray 进程内管理 vLLM；不要启动独立 `vllm serve`。训练开发路径仍可使用 `run_train.sh`。如果默认 Ray 控制面被无关集群占用，只能隔离 Ray 端口/临时目录，不能改变上述模型、rollout、并发、长度、offload 和 batch 参数。验收只看题目完成、verifier/reward、`finished=true` 以及单题单 session 单 trajectory。
 
 ### SWE-bench Verified 单题验证
 
@@ -56,7 +58,7 @@ remote186 已用公开 `princeton-nlp/SWE-bench_Verified` 的 `astropy__astropy-
 
 ## 单题解题验收入口
 
-单题独立推理可使用 launch_vllm.sh（前台运行；默认 GPU0,1/TP2，始终 language-model-only）。训练路径使用 run_train.sh，由 verl trainer 在 Ray V1 `colocate_async` 内部管理 vLLM，不要另起 `vllm serve`。
+PR recipe 的单题推理和验收使用 `run_infer_openclaw.sh`，由 `parallel_infer_verl.py` 通过 verl 在 Ray 内部管理 vLLM；它会写出单题结果、task log 和 OpenClaw trajectory，并在结束时检查单轨迹/reward/finished。`run_infer.sh` 保留为连接已有 API endpoint 的 API-only 入口，不作为 PR recipe 验收入口。训练路径使用 run_train.sh；两条路径都不要为同一运行另起 `vllm serve`。
 
     python examples/blackbox_recipes/openclaw/dataset.py /outside/task.json
     python examples/blackbox_recipes/openclaw/infer_one.py --task /outside/task.json --base-url http://127.0.0.1:18090/v1 --output /outside/result.json
