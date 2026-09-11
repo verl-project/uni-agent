@@ -86,7 +86,9 @@ bash examples/codex/run_infer_codex.sh
 
 The script defaults to `LIMIT=1`, `N=1`, and `CONCURRENCY=1`, then checks the
 result file for exactly one scored trajectory with reward `1.0`. Override
-`DATA_PATH`, `MODEL_PATH`, `TENSOR_PARALLEL_SIZE`, `LOG_DIR`, or `RESULT_PATH`
-for a different environment. The OpenYuanRong variables are required and are
-passed to the Ray job through its runtime environment; keep the token out of
-shell history and source control.
+`DATA_PATH`, `MODEL_PATH`, `PROMPT_LENGTH`, `RESPONSE_LENGTH`,
+`TENSOR_PARALLEL_SIZE`, `LOG_DIR`, or `RESULT_PATH` for a different environment.
+The OpenYuanRong variables are required and are
+passed to the Ray job through its runtime environment. Text-only Qwen3.5 runs
+enable `language_model_only` and disable thinking to match the training recipe;
+keep the token out of shell history and source control.
