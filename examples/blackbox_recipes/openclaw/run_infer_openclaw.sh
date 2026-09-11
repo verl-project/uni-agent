@@ -39,11 +39,11 @@ RUNTIME_TASK_CONFIG="${OUTPUT_DIR}/task_config.yaml"
 mkdir -p "${OUTPUT_DIR}" "${LOG_DIR}" "${TRAJECTORY_DIR}"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
 export PYTHONPATH="${REPO_ROOT}:${REPO_ROOT}/verl:${PYTHONPATH:-}"
-# Force a private local Ray control plane so an unrelated cluster on the host
-# cannot receive this PR validation job.  The temporary directory is outside
-# the checkout and can be removed after the run.
-export RAY_ADDRESS="${RAY_ADDRESS:-local}"
-export RAY_TMPDIR="${RAY_TMPDIR:-${OUTPUT_DIR}/ray_tmp}"
+# Ray isolation is opt-in after the host's existing cluster has been inspected.
+# For example, an operator may set RAY_ADDRESS=local and RAY_TMPDIR to a path
+# under OUTPUT_DIR when the default control plane is confirmed unrelated.
+if [[ -n "${RAY_ADDRESS:-}" ]]; then export RAY_ADDRESS; fi
+if [[ -n "${RAY_TMPDIR:-}" ]]; then export RAY_TMPDIR; fi
 export VERL_DISABLE_PIN_MEMORY="${VERL_DISABLE_PIN_MEMORY:-1}"
 export OPENCLAW_DEBUG_ENGINE="${OPENCLAW_DEBUG_ENGINE:-1}"
 export PYTHONFAULTHANDLER="${PYTHONFAULTHANDLER:-1}"
