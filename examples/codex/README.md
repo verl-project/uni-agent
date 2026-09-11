@@ -71,3 +71,22 @@ forwards additional arguments to `codex exec`.
 
 A completed rollout with reward and token log probabilities is distinct from a
 successful PPO update; report the training job's final status separately.
+
+## Inference
+
+Run one SWE-bench sample through the same verl-managed rollout path used by
+training:
+
+```bash
+DATA_PATH=/home/zxh/sandbox/swe_bench_verified_openyuanrong.parquet \
+MODEL_PATH=/home/zxh/models/Qwen/Qwen3.5-9B \
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+bash examples/codex/run_infer_codex.sh
+```
+
+The script defaults to `LIMIT=1`, `N=1`, and `CONCURRENCY=1`, then checks the
+result file for exactly one scored trajectory with reward `1.0`. Override
+`DATA_PATH`, `MODEL_PATH`, `TENSOR_PARALLEL_SIZE`, `LOG_DIR`, or `RESULT_PATH`
+for a different environment. The OpenYuanRong variables are required and are
+passed to the Ray job through its runtime environment; keep the token out of
+shell history and source control.
