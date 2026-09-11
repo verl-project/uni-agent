@@ -28,6 +28,8 @@ DATA_PATH=<数据.parquet> OUTPUT_DIR=<仓库外新目录> bash examples/blackbo
 
 必须实际激活独立 Conda 环境。API_KEY 使用受保护环境变量，不通过 shell 命令字面值传入。文本 Qwen3.5-9B vLLM 服务必须使用 --language-model-only。默认 n=1，不用同题多 rollout 拼接结果。Docker 默认网络不能访问宿主 127.0.0.1，应提供可路由 endpoint 或明确配置网络；host-network 仅用于受控验证，不作为不可信任务的安全隔离承诺。
 
+如果主机上已有 Ray 集群，先用 `nvidia-smi`、`ray status` 和进程命令行确认归属；确认是无关集群后，再为本次验收显式设置 `RAY_ADDRESS=local` 与仓库外的 `RAY_TMPDIR`。脚本不会默认接管或停止已有 Ray 集群。
+
 ## 外部数据验证基线
 
 retry30 是当前唯一的单机八卡 rollout 基线。使用外部任务验证时只替换 `TRAIN_DATA`、`VAL_DATA` 和任务产物，保持下面参数不变：
