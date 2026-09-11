@@ -177,7 +177,7 @@ rewritten through the reverse tunnel when `proxy_port` is set).
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `OPENYUANRONG_TUNNEL_SSL_VERIFY` | `0` | TLS verification for the sandbox reverse tunnel |
+| `OPENYUANRONG_TLS` | `1` | TLS for the frontend control plane (`0` for plain HTTP) |
 | `SANDBOX_NAME_PREFIX` | `mini-swe-` | Prefix for created sandbox names |
 
 **Rollout / framework runner**

@@ -149,8 +149,7 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
     Install the sandbox SDK:
 
     ```bash
-    pip install akernel_sdk
-    pip install openyuanrong_sdk
+    pip install openyuanrong-sandbox
     ```
 
     Configure the service endpoint and credentials through environment variables:
@@ -158,8 +157,8 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
     ```bash
     export OPENYUANRONG_SERVER_ADDRESS="<server-address>"
     export OPENYUANRONG_TOKEN="<token>"
-    # Optional: toggle SSL verification on the reverse tunnel (default "0").
-    export OPENYUANRONG_TUNNEL_SSL_VERIFY="0"
+    # Optional: TLS for the frontend (default "1"). Set to "0" for plain HTTP.
+    export OPENYUANRONG_TLS="1"
     ```
 
     Configure the image, lifecycle timeout, and optional resource limits, mounts, and reverse tunnel:

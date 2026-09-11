@@ -134,7 +134,7 @@ RUNNER_ARGS=(
 # in the Task Config (task_config_mini_swe_agent.yaml), not here.
 OPENYUANRONG_SERVER_ADDRESS="${OPENYUANRONG_SERVER_ADDRESS:-}"
 OPENYUANRONG_TOKEN="${OPENYUANRONG_TOKEN:-}"
-OPENYUANRONG_TUNNEL_SSL_VERIFY="${OPENYUANRONG_TUNNEL_SSL_VERIFY:-0}"
+OPENYUANRONG_TLS="${OPENYUANRONG_TLS:-1}"
 SANDBOX_NAME_PREFIX="${SANDBOX_NAME_PREFIX:-mini-swe-}"
 
 # ── Logging & checkpointing ──────────────────────────────────────────────
@@ -156,7 +156,7 @@ RL_INSIGHT_SERVER_URL="${RL_INSIGHT_SERVER_URL:-}"
 
 export OPENYUANRONG_SERVER_ADDRESS
 export OPENYUANRONG_TOKEN
-export OPENYUANRONG_TUNNEL_SSL_VERIFY
+export OPENYUANRONG_TLS
 export SANDBOX_NAME_PREFIX
 export VERL_LOGGING_LEVEL="${VERL_LOGGING_LEVEL:-INFO}"
 export RAY_DEDUP_LOGS="${RAY_DEDUP_LOGS:-0}"
@@ -229,7 +229,7 @@ RAY_INIT_ENV_ARGS=(
     "+ray_kwargs.ray_init.runtime_env.env_vars.RL_INSIGHT_SERVER_URL=\"${RL_INSIGHT_SERVER_URL}\""
     "+ray_kwargs.ray_init.runtime_env.env_vars.OPENYUANRONG_SERVER_ADDRESS=\"${OPENYUANRONG_SERVER_ADDRESS}\""
     "+ray_kwargs.ray_init.runtime_env.env_vars.OPENYUANRONG_TOKEN=\"${OPENYUANRONG_TOKEN}\""
-    "+ray_kwargs.ray_init.runtime_env.env_vars.OPENYUANRONG_TUNNEL_SSL_VERIFY=\"${OPENYUANRONG_TUNNEL_SSL_VERIFY}\""
+    "+ray_kwargs.ray_init.runtime_env.env_vars.OPENYUANRONG_TLS=\"${OPENYUANRONG_TLS}\""
 )
 # TRANSFER_QUEUE_ENABLE is a REQUIRED key here: verl main_ppo overwrites it to
 # "1" itself when transfer_queue.enable=True. It must already exist in the
