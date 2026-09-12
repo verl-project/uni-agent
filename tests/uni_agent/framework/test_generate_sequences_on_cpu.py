@@ -1151,7 +1151,9 @@ async def test_generate_sequences_writes_tq_schema_for_each_session(monkeypatch,
 
     assert fake_tq.batch_puts[0]["keys"] == ["uid-0_0_0"]
     assert fake_tq.batch_puts[1]["keys"] == ["uid-0_1_0"]
-    assert fake_tq.puts == [{"key": "uid-0", "partition_id": "train", "tag": {"status": "finished"}}]
+    assert fake_tq.puts == [
+        {"key": "uid-0", "partition_id": "train", "tag": {"status": status}} for status in ("running", "finished")
+    ]
 
     first = fake_tq.batch_puts[0]
     fields = first["fields"]
@@ -1255,7 +1257,9 @@ async def test_generate_sequences_masks_unfinished_trajectory_without_dropping_i
     assert batch["tags"][0]["status"] == "success"
     assert "finished" not in batch["tags"][0]
     assert "finished" not in batch["fields"].keys()
-    assert fake_tq.puts == [{"key": "uid-0", "partition_id": "train", "tag": {"status": "finished"}}]
+    assert fake_tq.puts == [
+        {"key": "uid-0", "partition_id": "train", "tag": {"status": status}} for status in ("running", "finished")
+    ]
 
 
 @pytest.mark.cpu
@@ -1643,6 +1647,7 @@ async def test_generate_sequences_keeps_successful_sessions_when_one_session_fai
     )
 
     async def agent_runner(*, raw_prompt, session, sample_index, tools_kwargs, **kwargs):
+        assert fake_tq.puts == [{"key": "uid-0", "partition_id": "train", "tag": {"status": "running"}}]
         if session.session_id.startswith("session-sample-0-rollout-1-"):
             raise RuntimeError("gateway failed once")
         return TaskResult()
@@ -1657,7 +1662,9 @@ async def test_generate_sequences_keeps_successful_sessions_when_one_session_fai
     await framework.generate_sequences(_build_prompts(count=1, global_steps=8))
 
     assert fake_tq.batch_puts[0]["keys"] == ["uid-0_0_0"]
-    assert fake_tq.puts == [{"key": "uid-0", "partition_id": "train", "tag": {"status": "finished"}}]
+    assert fake_tq.puts == [
+        {"key": "uid-0", "partition_id": "train", "tag": {"status": status}} for status in ("running", "finished")
+    ]
     assert len(runtime.aborted_sessions) == 1
     assert runtime.aborted_sessions[0].startswith("session-sample-0-rollout-1-")
 
@@ -1686,7 +1693,9 @@ async def test_generate_sequences_marks_prompt_failure_when_all_sessions_fail(fa
         await framework.generate_sequences(_build_prompts(count=1, global_steps=9, validate=True))
 
     assert fake_tq.batch_puts == []
-    assert fake_tq.puts == [{"key": "uid-0", "partition_id": "val", "tag": {"status": "failure"}}]
+    assert fake_tq.puts == [
+        {"key": "uid-0", "partition_id": "val", "tag": {"status": status}} for status in ("running", "failure")
+    ]
 
 
 @pytest.mark.cpu
@@ -1738,8 +1747,9 @@ async def test_generate_sequences_keeps_other_prompts_when_one_prompt_fails(fake
 
     assert [put["keys"] for put in fake_tq.batch_puts] == [["uid-1_0_0"]]
     assert sorted(fake_tq.puts, key=lambda put: put["key"]) == [
-        {"key": "uid-0", "partition_id": "train", "tag": {"status": "failure"}},
-        {"key": "uid-1", "partition_id": "train", "tag": {"status": "finished"}},
+        {"key": uid, "partition_id": "train", "tag": {"status": status}}
+        for uid, terminal in (("uid-0", "failure"), ("uid-1", "finished"))
+        for status in ("running", terminal)
     ]
     assert len(runtime.aborted_sessions) == 1
     assert runtime.aborted_sessions[0].startswith("session-sample-0-rollout-0-")
