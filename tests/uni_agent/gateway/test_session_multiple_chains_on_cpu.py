@@ -45,6 +45,7 @@ def _session(
     response_length: int | None = None,
     sampling_params: dict | None = None,
     enable_last_assistant_rollback: bool = False,
+    coalesce_reserved_exact_requests: bool = False,
     processor=None,
     vision_info_extractor=None,
     tool_parser_name: str | None = None,
@@ -63,6 +64,7 @@ def _session(
         response_length=response_length,
         sampling_params=sampling_params,
         enable_last_assistant_rollback=enable_last_assistant_rollback,
+        coalesce_reserved_exact_requests=coalesce_reserved_exact_requests,
     )
 
 
@@ -898,6 +900,64 @@ async def test_multiple_chains_parallel_new_siblings_reuse_session_request_id():
     assert session.snapshot_state()["active_chain_ids"] == [1, 2, 3]
     trajectories = await session.finalize()
     assert sorted(_decode_response_ids(trajectory.response_ids) for trajectory in trajectories) == ["A", "B", "C"]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_exact_retry_on_reserved_chain_reuses_inflight_generation():
+    """Let an exact in-flight retry reuse the owner result without forking."""
+    session = _session("singleflight", coalesce_reserved_exact_requests=True)
+    first_messages = [{"role": "user", "content": "first turn"}]
+    await _run(session, SequencedBackend(["FIRST"]), first_messages)
+    continuation = [
+        *first_messages,
+        {"role": "assistant", "content": "FIRST"},
+        {"role": "user", "content": "continue"},
+    ]
+    backend = _ControlledParallelBackend(["SECOND"])
+
+    owner = asyncio.create_task(_run(session, backend, continuation))
+    await backend.wait_for_calls(1)
+    duplicate = asyncio.create_task(_run(session, backend, continuation))
+    await asyncio.sleep(0)
+
+    assert len(backend.calls) == 1
+    backend.release_call(0)
+    assert await owner == await duplicate
+    assert session.snapshot_state()["active_chain_ids"] == [1]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_exact_retry_reuses_failure_and_allows_a_later_retry():
+    """Propagate the owner failure, then clear singleflight and reservation state."""
+    session = _session("singleflight-failure", coalesce_reserved_exact_requests=True)
+    first_messages = [{"role": "user", "content": "first turn"}]
+    await _run(session, SequencedBackend(["FIRST"]), first_messages)
+    continuation = [
+        *first_messages,
+        {"role": "assistant", "content": "FIRST"},
+        {"role": "user", "content": "continue"},
+    ]
+    backend = _ControlledParallelBackend([RuntimeError("boom")])
+
+    owner = asyncio.create_task(_run(session, backend, continuation))
+    await backend.wait_for_calls(1)
+    duplicate = asyncio.create_task(_run(session, backend, continuation))
+    await asyncio.sleep(0)
+    backend.release_call(0)
+
+    results = await asyncio.gather(owner, duplicate, return_exceptions=True)
+    assert len(backend.calls) == 1
+    assert all(isinstance(result, HTTPException) and result.status_code == 500 for result in results)
+    assert session.reserved_chain_ids == set()
+    assert session._inflight_exact_requests == {}
+
+    await _run(session, SequencedBackend(["RECOVERED"]), continuation)
+    [trajectory] = await session.finalize()
+    assert _decode_response_ids(trajectory.response_ids).endswith("RECOVERED")
 
 
 @pytest.mark.cpu
