@@ -17,9 +17,10 @@
           PIP_PROGRESS_BAR: "off"
       - name: submit
     model:
-      temperature: 1.0
-      top_p: 1.0
       max_total_tokens: 131072
+  per_task_sampling:
+    temperature: 1.0
+    top_p: 1.0
   prompt_template: &swe_react_prompt
     - role: system
       content: You are a helpful assistant that can interact with a computer to solve tasks.
@@ -119,9 +120,10 @@
           PIP_PROGRESS_BAR: "off"
       - name: submit
     model:
-      temperature: 1.0
-      top_p: 1.0
       max_total_tokens: 131072
+  per_task_sampling:
+    temperature: 1.0
+    top_p: 1.0
   prompt_template: *swe_react_prompt
 
 - name: swe_bench_multilingual
@@ -143,9 +145,10 @@
           PIP_PROGRESS_BAR: "off"
       - name: submit
     model:
-      temperature: 1.0
-      top_p: 1.0
       max_total_tokens: 131072
+  per_task_sampling:
+    temperature: 1.0
+    top_p: 1.0
   prompt_template:
     - role: system
       content: You are a helpful assistant that can interact with a computer to solve tasks.

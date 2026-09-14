@@ -7,7 +7,11 @@
     max_chunks: 8
     max_final_response_length: 1024
     max_steps: 9
+    # Defaults for direct API inference (examples/mem_agent/infer.py).
     model:
       temperature: 1.0
-      # Inherit top_p from the VERL rollout configuration.
       top_k: -1
+  # Session defaults for training through the gateway; omit top_p to inherit rollout.
+  per_task_sampling:
+    temperature: 1.0
+    top_k: -1

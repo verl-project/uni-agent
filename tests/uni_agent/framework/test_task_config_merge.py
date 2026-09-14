@@ -287,3 +287,25 @@ def test_recipe_prompt_template_overrides_sample_template_and_uses_metadata():
         {"role": "system", "content": "Recipe instructions"},
         {"role": "user", "content": "Issue: Metadata problem"},
     ]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize("sampling", [None, {"top_p": 0.9}])
+def test_serialized_task_sampling_inherits_unset_yaml_fields(sampling):
+    task = TaskConfig(name="example", sandbox=_LOCAL_SANDBOX, per_task_sampling=sampling)
+    sample = task.model_dump()
+    resolver = TaskConfigResolver(
+        {
+            "example": {
+                "name": "example",
+                "per_task_sampling": {
+                    "temperature": 0.3,
+                    "top_k": 8,
+                },
+            }
+        }
+    )
+    resolved = resolver.resolve(sample)
+    assert resolved["per_task_sampling"] == {"temperature": 0.3, "top_k": 8, **(sampling or {})}
+    assert sample == task.model_dump()

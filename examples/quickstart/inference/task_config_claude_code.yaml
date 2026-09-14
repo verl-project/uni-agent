@@ -8,9 +8,11 @@
     run_timeout: 4800
     verbose: true
     model:
-      temperature: 1.0
-      top_p: 0.95
+      # parallel_infer_verl.py uses this for its existing rollout response length.
       max_total_tokens: 131072
+  per_task_sampling:
+    temperature: 1.0
+    top_p: 0.95
   prompt_template: &claude_code_prompt
     - role: user
       content: |-
@@ -31,9 +33,11 @@
     run_timeout: 4800
     verbose: true
     model:
-      temperature: 1.0
-      top_p: 0.95
+      # parallel_infer_verl.py uses this for its existing rollout response length.
       max_total_tokens: 131072
+  per_task_sampling:
+    temperature: 1.0
+    top_p: 0.95
   prompt_template:
     - role: user
       content: |-

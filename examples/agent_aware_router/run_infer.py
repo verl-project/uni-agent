@@ -142,13 +142,14 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
 
     rollout = config.actor_rollout_ref.rollout
 
-    model_cfgs = [entry.get("agent", {}).get("model", {}) for entry in task_configs]
-    temperature = model_cfgs[0].get("temperature", DEFAULT_TEMPERATURE)
-    top_p = model_cfgs[0].get("top_p", DEFAULT_TOP_P)
-    rollout.temperature = temperature
-    rollout.top_p = top_p
-    rollout.val_kwargs.temperature = temperature
-    rollout.val_kwargs.top_p = top_p
+    rollout.temperature = args.temperature
+    rollout.top_p = args.top_p
+    rollout.top_k = args.top_k
+    rollout.val_kwargs.temperature = args.temperature
+    rollout.val_kwargs.top_p = args.top_p
+    rollout.val_kwargs.top_k = args.top_k
+    # This inference entry uses the val partition, with optional task-specific sampling.
+    rollout.val_kwargs.do_sample = True
 
     # Fan-out: the framework runs rollout.n gateway sessions per prompt.
     rollout.n = max(1, args.n)
@@ -216,6 +217,7 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
         "agent_runners": {
             "task": {
                 "runner_fqn": "uni_agent.framework.task_runner.run_task",
+                "prepare_sample_fqn": "uni_agent.framework.task_runner.prepare_task",
                 "dispatch_mode": "ray_task",
                 "max_concurrent_sessions": max(0, args.concurrency),
                 "runner_kwargs": {
@@ -233,6 +235,7 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
         task_runner = agent_framework_cfg["agent_runners"]["task"]
         task_runner["runner_fqn"] = args.simulated_runner_fqn
         task_runner["runner_kwargs"] = {}
+        task_runner.pop("prepare_sample_fqn")
     # KV-cache-aware router knobs — the balancer overrides the packaged router
     # YAML with this node at construction (``custom.agent_framework.router``).
     agent_framework_cfg["router"] = {"load_threshold": args.load_threshold}
@@ -391,9 +394,9 @@ def main() -> None:
         "--task-config",
         required=True,
         help="Path to a YAML task config: one ``- name: ...`` entry or a list of them (required). "
-        "run_task routes each row to the entry whose 'name' matches the row's task; all agent/model "
-        "knobs (sampling, max_total_tokens, max_steps, ...) come from it. The endpoint is bound to the "
-        "gateway session.",
+        "run_task routes each row by task name. Root-level per_task_sampling overrides the run's "
+        "sampling defaults for that task; agent.model sampling does not configure the gateway. "
+        "The endpoint is bound to the gateway session.",
     )
     parser.add_argument(
         "--result-path",
@@ -413,7 +416,11 @@ def main() -> None:
         "--n", type=int, default=1, help="Rollout sessions per instance (rollout.n; scores average over all)."
     )
 
-    # Sampling.
+    # Shared rollout defaults; tasks can explicitly override sampling via per_task_sampling.
+    parser.add_argument("--temperature", type=float, default=DEFAULT_TEMPERATURE, help="Default sampling temperature.")
+    parser.add_argument("--top-p", type=float, default=DEFAULT_TOP_P, help="Default nucleus sampling probability.")
+    parser.add_argument("--top-k", type=int, default=-1, help="Default top-k sampling (-1 disables).")
+
     parser.add_argument("--prompt-length", type=int, default=4096, help="Maximum prompt length (tokens).")
     parser.add_argument("--response-length", type=int, default=8192, help="Maximum response length (tokens).")
     parser.add_argument(

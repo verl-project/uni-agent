@@ -84,16 +84,17 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
 
     rollout = config.actor_rollout_ref.rollout
 
-    model_cfgs = [entry.get("agent", {}).get("model", {}) for entry in task_configs]
-    temperature = model_cfgs[0].get("temperature", DEFAULT_TEMPERATURE)
-    top_p = model_cfgs[0].get("top_p", DEFAULT_TOP_P)
-    rollout.temperature = temperature
-    rollout.top_p = top_p
-    rollout.val_kwargs.temperature = temperature
-    rollout.val_kwargs.top_p = top_p
+    rollout.temperature = args.temperature
+    rollout.top_p = args.top_p
+    rollout.top_k = args.top_k
+    rollout.val_kwargs.temperature = args.temperature
+    rollout.val_kwargs.top_p = args.top_p
+    rollout.val_kwargs.top_k = args.top_k
+    # This inference entry uses the val partition, with optional task-specific sampling.
+    rollout.val_kwargs.do_sample = True
 
-    # response_length = the agent's episode token budget (max_total_tokens: the full
-    # prompt+gen context the loop may consume); DEFAULT_RESPONSE_LENGTH is the fallback.
+    # Preserve the existing inference length mapping independently of task sampling.
+    model_cfgs = [entry.get("agent", {}).get("model", {}) for entry in task_configs]
     max_total_tokens = max(
         (m.get("max_total_tokens", DEFAULT_RESPONSE_LENGTH) for m in model_cfgs),
         default=DEFAULT_RESPONSE_LENGTH,
@@ -136,6 +137,7 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
         "agent_runners": {
             "task": {
                 "runner_fqn": "uni_agent.framework.task_runner.run_task",
+                "prepare_sample_fqn": "uni_agent.framework.task_runner.prepare_task",
                 "dispatch_mode": "ray_task",
                 "max_concurrent_sessions": max(0, args.concurrency),
                 "runner_kwargs": {
@@ -303,9 +305,9 @@ def main() -> None:
         "--task-config",
         required=True,
         help="Path to a YAML task config: one ``- name: ...`` entry or a list of them (required). "
-        "run_task routes each row to the entry whose 'name' matches the row's task; all agent/model "
-        "knobs (sampling, max_total_tokens, max_steps, ...) come from it. The endpoint is bound to the "
-        "gateway session.",
+        "run_task routes each row by task name. Root-level per_task_sampling overrides the run's "
+        "sampling defaults for that task; agent.model sampling does not configure the gateway. "
+        "The endpoint is bound to the gateway session.",
     )
     parser.add_argument(
         "--result-path",
@@ -324,6 +326,11 @@ def main() -> None:
     parser.add_argument(
         "--n", type=int, default=1, help="Rollout sessions per instance (rollout.n; scores average over all)."
     )
+
+    # Shared rollout defaults; tasks can explicitly override sampling via per_task_sampling.
+    parser.add_argument("--temperature", type=float, default=DEFAULT_TEMPERATURE, help="Default sampling temperature.")
+    parser.add_argument("--top-p", type=float, default=DEFAULT_TOP_P, help="Default nucleus sampling probability.")
+    parser.add_argument("--top-k", type=int, default=-1, help="Default top-k sampling (-1 disables).")
 
     # Engine / hardware.
     parser.add_argument(

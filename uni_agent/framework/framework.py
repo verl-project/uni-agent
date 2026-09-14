@@ -49,6 +49,7 @@ class _RunnerConfig:
     max_concurrent_sessions: int
     trajectory_selection: str = "all"
     session_timeout_seconds: float | None = None
+    prepare_sample_fqn: str | None = None
 
     def __post_init__(self) -> None:
         if not self.runner_fqn:
@@ -89,6 +90,7 @@ class _RunnerConfig:
                 max_concurrent_sessions=max_concurrent_sessions,
                 trajectory_selection=trajectory_selection,
                 session_timeout_seconds=session_timeout_seconds,
+                prepare_sample_fqn=runner_cfg.get("prepare_sample_fqn"),
             )
         except ValueError as exc:
             raise ValueError(f"agent_runners.{runner_name}: {exc}") from exc
@@ -330,6 +332,11 @@ class GatewayAgentFramework(AgentFramework):
             for runner_name, runner_config in runner_registry.items()
             if runner_config.dispatch_mode == "inline_async"
         }
+        self._sample_preparers = {
+            runner_name: _materialize_runner(runner_config.prepare_sample_fqn, runner_config.runner_kwargs)
+            for runner_name, runner_config in runner_registry.items()
+            if runner_config.prepare_sample_fqn is not None
+        }
         self.reward_loop_worker_handles = list(reward_loop_worker_handles) if reward_loop_worker_handles else None
         self._custom_reward_function_configured = custom_reward_function_configured
         if self.reward_loop_worker_handles is None:
@@ -464,6 +471,7 @@ class GatewayAgentFramework(AgentFramework):
         *,
         partition_id: str,
         sample_fields: dict[str, object],
+        sampling_overrides: dict[str, object] | None = None,
     ) -> dict[str, object]:
         """Build trusted per-session sampling defaults using VERL rollout semantics."""
         config = self._rollout_config
@@ -477,16 +485,18 @@ class GatewayAgentFramework(AgentFramework):
         agent_framework_cfg = config.get("custom", {}).get("agent_framework", {})
         max_tokens_per_turn = agent_framework_cfg.get("max_tokens_per_turn")
         if max_tokens_per_turn is not None:
-            if isinstance(max_tokens_per_turn, bool) or int(max_tokens_per_turn) <= 0:
+            if type(max_tokens_per_turn) is not int or max_tokens_per_turn <= 0:
                 raise ValueError("max_tokens_per_turn must be a positive integer")
-            sampling_params["max_tokens"] = int(max_tokens_per_turn)
+            sampling_params["max_tokens"] = max_tokens_per_turn
         if partition_id == "val":
             sampling_params.update(
                 temperature=config.val_kwargs.temperature,
                 top_p=config.val_kwargs.top_p,
                 top_k=config.val_kwargs.top_k,
             )
-        elif "__do_sample__" in sample_fields and not bool(sample_fields["__do_sample__"]):
+        sampling_params.update(sampling_overrides or {})
+        # An explicit greedy request wins over both partition and task defaults.
+        if "__do_sample__" in sample_fields and not bool(sample_fields["__do_sample__"]):
             sampling_params.update(temperature=0, top_p=1.0, top_k=-1)
         return sampling_params
 
@@ -606,14 +616,41 @@ class GatewayAgentFramework(AgentFramework):
         if uid is None:
             raise ValueError("GatewayAgentFramework requires prompts['uid'] for TransferQueue output")
         uid = str(uid)
-        sampling_params = self._build_session_sampling_params(
-            partition_id=partition_id,
-            sample_fields=sample_fields,
-        )
+        await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "running"})
+        try:
+            if len(self.runner_registry) == 1:
+                runner_name, runner_config = next(iter(self.runner_registry.items()))
+            else:
+                agent_name = sample_fields.get("agent_name")
+                if agent_name is None:
+                    raise ValueError("agent_name is required when multiple agent_runners are configured")
+                if not isinstance(agent_name, str):
+                    raise ValueError(f"agent_name must be a string, got {type(agent_name).__name__}")
+                try:
+                    runner_name = agent_name
+                    runner_config = self.runner_registry[runner_name]
+                except KeyError as exc:
+                    raise ValueError(f"Unknown agent runner: {agent_name}") from exc
+
+            sampling_overrides = None
+            prepare_sample = self._sample_preparers.get(runner_name)
+            if prepare_sample is not None:
+                # Resolve once before rollout.n fanout. The runner receives this same
+                # task snapshot, with session-specific endpoints bound only at execution.
+                sample_fields, sampling_overrides = prepare_sample(sample_fields)
+            sampling_params = self._build_session_sampling_params(
+                partition_id=partition_id,
+                sample_fields=sample_fields,
+                sampling_overrides=sampling_overrides,
+            )
+        except Exception:
+            # Preparation errors happen before a session exists, but the prompt
+            # still needs a terminal status for TQ consumers.
+            await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "failure"})
+            raise
 
         # Prompt layer: rollout.n sessions race independently for the same uid.
         # Successful sessions are written to TQ; failed sessions only affect this uid's stats.
-        await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "running"})
         tasks = [
             self._run_agent_episode_with_concurrency_limit(
                 sample_fields=sample_fields,
@@ -621,6 +658,8 @@ class GatewayAgentFramework(AgentFramework):
                 session_index=session_index,
                 global_steps=global_steps,
                 sampling_params=sampling_params,
+                runner_name=runner_name,
+                runner_config=runner_config,
             )
             for session_index in range(num_sessions)
         ]
@@ -692,6 +731,8 @@ class GatewayAgentFramework(AgentFramework):
         session_index: int,
         global_steps: int | None,
         sampling_params: dict[str, object],
+        runner_name: str,
+        runner_config: _RunnerConfig,
     ) -> tuple[list[Trajectory], dict[str, object]]:
         # Lazy-init semaphores on first use and rebind if the running loop
         # changed: asyncio.Semaphore binds to the loop at construction, but
@@ -700,20 +741,6 @@ class GatewayAgentFramework(AgentFramework):
         if self._semaphore_loop is not loop:
             self._runner_semaphores = {}
             self._semaphore_loop = loop
-
-        if len(self.runner_registry) == 1:
-            runner_name, runner_config = next(iter(self.runner_registry.items()))
-        else:
-            agent_name = sample_fields.get("agent_name")
-            if agent_name is None:
-                raise ValueError("agent_name is required when multiple agent_runners are configured")
-            if not isinstance(agent_name, str):
-                raise ValueError(f"agent_name must be a string, got {type(agent_name).__name__}")
-            try:
-                runner_name = agent_name
-                runner_config = self.runner_registry[runner_name]
-            except KeyError as exc:
-                raise ValueError(f"Unknown agent runner: {agent_name}") from exc
 
         runner_cap = runner_config.max_concurrent_sessions
         if runner_cap <= 0:

@@ -220,9 +220,10 @@ async def test_from_config_warns_for_unsupported_colocated_hybrid_reward(
         "expected_cache",
         "expected_chat_template_kwargs",
         "expected_mm_processor_kwargs",
+        "expected_allowed_keys",
     ),
     [
-        ({}, {}, True, True, {}, {}),
+        ({}, {}, True, True, {}, {}, None),
         (
             {
                 "apply_chat_template_kwargs": {"thinking": True},
@@ -233,8 +234,21 @@ async def test_from_config_warns_for_unsupported_colocated_hybrid_reward(
             True,
             {"thinking": True},
             {"max_pixels": 1024},
+            None,
         ),
-        ({}, {"enable_tool_parser_cache": False}, True, False, {}, {}),
+        ({}, {"enable_tool_parser_cache": False}, True, False, {}, {}, None),
+        ({}, {"allowed_request_sampling_param_keys": None}, True, True, {}, {}, None),
+        ({}, {"allowed_request_sampling_param_keys": []}, True, True, {}, {}, set()),
+        (
+            {},
+            {"allowed_request_sampling_param_keys": ["temperature", "max_tokens"]},
+            True,
+            True,
+            {},
+            {},
+            {"temperature", "max_tokens"},
+        ),
+        ({}, {"allowed_request_sampling_param_keys": "temperature"}, True, True, {}, {}, ValueError),
     ],
 )
 def test_build_gateway_manager_wires_gateway_config_defaults(
@@ -245,6 +259,7 @@ def test_build_gateway_manager_wires_gateway_config_defaults(
     expected_cache,
     expected_chat_template_kwargs,
     expected_mm_processor_kwargs,
+    expected_allowed_keys,
 ):
     from omegaconf import OmegaConf
 
@@ -298,6 +313,11 @@ def test_build_gateway_manager_wires_gateway_config_defaults(
         }
     )
 
+    if expected_allowed_keys is ValueError:
+        with pytest.raises(ValueError, match="allowed_request_sampling_param_keys"):
+            entry_module.build_gateway_manager(config=config, llm_client=llm_client)
+        return
+
     manager = entry_module.build_gateway_manager(config=config, llm_client=llm_client)
 
     assert isinstance(manager, _FakeGatewayManager)
@@ -313,6 +333,8 @@ def test_build_gateway_manager_wires_gateway_config_defaults(
     assert isinstance(captured["gateway_actor_config"].apply_chat_template_kwargs, dict)
     assert captured["gateway_actor_config"].apply_chat_template_kwargs == expected_chat_template_kwargs
     assert captured["gateway_actor_config"].mm_processor_kwargs == expected_mm_processor_kwargs
+
+    assert captured["gateway_actor_config"].allowed_request_sampling_param_keys == expected_allowed_keys
 
 
 class _FakeTransferQueue:
@@ -1095,6 +1117,8 @@ async def test_framework_binds_sampling_defaults_to_gateway_sessions(
         gateway_manager=runtime,
     )
 
+    framework._rollout_config.custom.agent_framework.max_tokens_per_turn = 256
+
     await framework.generate_sequences(
         _build_prompts(
             count=1,
@@ -1103,7 +1127,9 @@ async def test_framework_binds_sampling_defaults_to_gateway_sessions(
         )
     )
 
-    assert [kwargs["sampling_params"] for kwargs in runtime.created_session_kwargs] == [expected_sampling_params]
+    assert [kwargs["sampling_params"] for kwargs in runtime.created_session_kwargs] == [
+        {**expected_sampling_params, "max_tokens": 256}
+    ]
 
 
 @pytest.mark.cpu
@@ -1926,3 +1952,108 @@ async def test_ray_task_termination_cancels_runner_and_aborts_session(monkeypatc
     # so no force-kill escalation happened.
     assert [call["force"] for call in cancel_calls] == [False]
     assert runtime.aborted_sessions, "terminated session must be aborted"
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+@pytest.mark.parametrize("validate,do_sample", [(False, True), (True, True), (True, False)])
+async def test_task_sampling_is_resolved_before_session_creation(monkeypatch, tmp_path, fake_tq, validate, do_sample):
+    from uni_agent.framework import task_runner
+
+    config_path = tmp_path / "tasks.yaml"
+    config_path.write_text("""
+- name: whitebox
+  per_task_sampling: {temperature: 0.3, top_k: 8}
+  agent: {name: react, model: {temperature: 1.9}}
+- name: blackbox
+  per_task_sampling: {temperature: 0.6}
+  agent: {name: claude_code, model: {temperature: 1.8}}
+""")
+    captured = []
+
+    class FakeTask:
+        def __init__(self, config):
+            captured.append(config)
+
+        async def run(self):
+            return TaskResult()
+
+    monkeypatch.setattr(task_runner, "get_task", FakeTask)
+    runtime = _FakeGatewayManager(
+        {f"session-sample-{i}-rollout-{j}": [_trajectory()] for i in range(2) for j in range(2)}
+    )
+    framework = await _build_framework_with_agent_runners(
+        agent_runners={
+            "task": {
+                "runner_fqn": "uni_agent.framework.task_runner.run_task",
+                "prepare_sample_fqn": "uni_agent.framework.task_runner.prepare_task",
+                "runner_kwargs": {"task_config_path": str(config_path)},
+            }
+        },
+        gateway_manager=runtime,
+        n=2,
+        val_n=2,
+    )
+    prompts = _build_prompts(count=2, validate=validate, do_sample=do_sample)
+    tu.assign_non_tensor_stack(
+        prompts,
+        "tools_kwargs",
+        [
+            {"task": {"name": "whitebox", "per_task_sampling": {"top_p": 0.9}}},
+            {"task": {"name": "blackbox"}},
+        ],
+    )
+    await framework.generate_sequences(prompts)
+
+    expected = [
+        {"temperature": 0.3, "top_p": 0.9, "top_k": 8},
+        {"temperature": 0.6, "top_p": 0.95 if validate else 0.8, "top_k": -1 if validate else 20},
+    ]
+    if not do_sample:
+        expected = [{"temperature": 0, "top_p": 1.0, "top_k": -1}] * 2
+    for i, params in enumerate(expected):
+        assert [call["sampling_params"] for call in runtime.created_session_kwargs[i * 2 : i * 2 + 2]] == [
+            {**params, "repetition_penalty": 1.0, "logprobs": True}
+        ] * 2
+    assert len(captured) == 4
+    assert captured[0]["per_task_sampling"] == {"temperature": 0.3, "top_k": 8, "top_p": 0.9}
+    assert captured[2]["agent"]["name"] == "claude_code"
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", [0, 1.5, True])
+async def test_per_turn_token_default_requires_positive_integer(fake_tq, value):
+    framework = await _build_framework_with_agent_runners(
+        agent_runners={"runner": _inline_runner_config(_async_noop_runner)},
+        gateway_manager=_FakeGatewayManager({}),
+    )
+    framework._rollout_config.custom.agent_framework.max_tokens_per_turn = value
+    with pytest.raises(ValueError, match="max_tokens_per_turn must be a positive integer"):
+        framework._build_session_sampling_params(partition_id="train", sample_fields={})
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_invalid_task_sampling_fails_before_opening_session(fake_tq):
+    runtime = _FakeGatewayManager({})
+    framework = await _build_framework_with_agent_runners(
+        agent_runners={
+            "task": {
+                "runner_fqn": "uni_agent.framework.task_runner.run_task",
+                "prepare_sample_fqn": "uni_agent.framework.task_runner.prepare_task",
+            }
+        },
+        gateway_manager=runtime,
+    )
+    prompts = _build_prompts(count=1)
+    tu.assign_non_tensor_stack(
+        prompts, "tools_kwargs", [{"task": {"name": "test_task", "per_task_sampling": {"temperature": -1}}}]
+    )
+    with pytest.raises(RuntimeError, match="All rollouts failed"):
+        await framework.generate_sequences(prompts)
+    assert runtime.created_session_kwargs == []
+    assert fake_tq.puts[-1] == {"key": "uid-0", "partition_id": "train", "tag": {"status": "failure"}}

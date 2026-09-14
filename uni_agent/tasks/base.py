@@ -22,6 +22,8 @@ from pydantic import BaseModel, ConfigDict, Field, SerializeAsAny, field_validat
 from uni_agent.agents import AgentConfig
 from uni_agent.sandbox import SandboxConfig
 
+from .config import PerTaskSamplingConfig
+
 if TYPE_CHECKING:
     from uni_agent.agents import Agent
     from uni_agent.sandbox import Sandbox
@@ -51,6 +53,10 @@ class TaskConfig(BaseModel):
         default=None,
         description="Optional recipe-owned text messages with direct task metadata placeholders.",
         exclude=True,
+    )
+    per_task_sampling: PerTaskSamplingConfig | None = Field(
+        default=None,
+        description="Explicit task overrides of VERL rollout temperature/top_p/top_k; omitted fields inherit rollout.",
     )
     metadata: dict[str, Any] = Field(default_factory=dict)
 
