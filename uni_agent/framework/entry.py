@@ -55,6 +55,11 @@ def build_gateway_manager(*, config, llm_client) -> GatewayManager:
         prompt_length=rollout_config.prompt_length,
         response_length=rollout_config.response_length,
         enable_last_assistant_rollback=af_cfg.get("enable_last_assistant_rollback", True),
+        allowed_request_sampling_param_keys=(
+            None
+            if af_cfg.get("allowed_request_sampling_param_keys") is None
+            else set(af_cfg.get("allowed_request_sampling_param_keys"))
+        ),
     )
 
     return GatewayManager(

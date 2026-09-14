@@ -474,6 +474,12 @@ class GatewayAgentFramework(AgentFramework):
             "repetition_penalty": 1.0,
             "logprobs": config.calculate_log_probs,
         }
+        agent_framework_cfg = config.get("custom", {}).get("agent_framework", {})
+        max_tokens_per_turn = agent_framework_cfg.get("max_tokens_per_turn")
+        if max_tokens_per_turn is not None:
+            if isinstance(max_tokens_per_turn, bool) or int(max_tokens_per_turn) <= 0:
+                raise ValueError("max_tokens_per_turn must be a positive integer")
+            sampling_params["max_tokens"] = int(max_tokens_per_turn)
         if partition_id == "val":
             sampling_params.update(
                 temperature=config.val_kwargs.temperature,
