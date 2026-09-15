@@ -39,10 +39,9 @@ The `react` agent drives a ReAct (reason + act) loop: the model reasons, calls a
           TQDM_DISABLE: "1"
           GIT_PAGER: "cat"
       - name: submit
-    model:
+    sampling_params_override:
       temperature: 0.8
       top_p: 0.9
-      max_total_tokens: 65536
 ```
 
 To use the modal sandbox, configure its service endpoint and credentials — see [Launch a Sandbox](launch-sandbox.md).

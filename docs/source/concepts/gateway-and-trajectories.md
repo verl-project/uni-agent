@@ -295,6 +295,27 @@ Important knobs include:
 - `rollout.multi_turn.format`: model-specific Tool parser.
 - `transfer_queue.enable`: enables asynchronous trajectory storage.
 
+## Sampling configuration
+
+`actor_rollout_ref.rollout.temperature`, `top_p`, and `top_k` provide the Gateway
+session defaults. Agent HTTP requests can override only `max_tokens` and `stop` by default. Configure `allowed_request_sampling_param_keys` to add request keys for a white-box Agent; configured keys are added to the defaults and do not remove `max_tokens` or `stop`:
+
+```yaml
+actor_rollout_ref:
+  rollout:
+    custom:
+      agent_framework:
+        allowed_request_sampling_param_keys: [temperature, top_p, top_k]
+        # Effective allowlist: max_tokens, stop, temperature, top_p, top_k
+```
+
+White-box Agents place explicit request values in
+`agent.sampling_params_override`, whose fields are `temperature`, `top_p`, `top_k`,
+and `max_tokens_per_turn`. Black-box agents such as Claude Code do
+not need sampling fields in their YAML because they do not construct these
+requests. `max_tokens_per_turn` is an Agent-side concern; if a black-box Agent
+needs provider-specific flags, pass them through its `AgentConfig.extra_args`.
+
 ## Extension Boundaries
 
 Customize the layer that owns the behavior:

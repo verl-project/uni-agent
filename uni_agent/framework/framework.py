@@ -480,7 +480,8 @@ class GatewayAgentFramework(AgentFramework):
                 top_p=config.val_kwargs.top_p,
                 top_k=config.val_kwargs.top_k,
             )
-        elif "__do_sample__" in sample_fields and not bool(sample_fields["__do_sample__"]):
+        # An explicit greedy request wins over both partition and task defaults.
+        if "__do_sample__" in sample_fields and not bool(sample_fields["__do_sample__"]):
             sampling_params.update(temperature=0, top_p=1.0, top_k=-1)
         return sampling_params
 
@@ -604,10 +605,10 @@ class GatewayAgentFramework(AgentFramework):
             partition_id=partition_id,
             sample_fields=sample_fields,
         )
+        await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "running"})
 
         # Prompt layer: rollout.n sessions race independently for the same uid.
         # Successful sessions are written to TQ; failed sessions only affect this uid's stats.
-        await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "running"})
         tasks = [
             self._run_agent_episode_with_concurrency_limit(
                 sample_fields=sample_fields,

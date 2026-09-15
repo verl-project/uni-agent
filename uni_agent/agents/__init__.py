@@ -18,13 +18,14 @@ package never forces an agent's optional deps to be installed.
 
 from __future__ import annotations
 
-from .base import Agent, AgentConfig, AgentResult, ModelConfig
+from .base import Agent, AgentConfig, AgentResult, ModelConfig, WhiteBoxSamplingConfig
 from .registry import build_agent, get_agent_cls
 
 __all__ = [
     "Agent",
     "AgentConfig",
     "ModelConfig",
+    "WhiteBoxSamplingConfig",
     "AgentResult",
     "build_agent",
     "get_agent_cls",

@@ -72,10 +72,7 @@ The Quickstart provides separate Task Configs for ReAct and Claude Code. Each re
               TQDM_DISABLE: "1"
               PIP_PROGRESS_BAR: "off"
           - name: submit
-        model:
-          temperature: 1.0
-          top_p: 1.0
-          max_total_tokens: 131072
+        model: {}
 
     - name: swe_rebench
       sandbox:
@@ -95,10 +92,7 @@ The Quickstart provides separate Task Configs for ReAct and Claude Code. Each re
               TQDM_DISABLE: "1"
               PIP_PROGRESS_BAR: "off"
           - name: submit
-        model:
-          temperature: 1.0
-          top_p: 1.0
-          max_total_tokens: 131072
+        model: {}
     ```
 
 === "Claude Code"
@@ -112,10 +106,7 @@ The Quickstart provides separate Task Configs for ReAct and Claude Code. Each re
         name: claude_code
         max_turns: 200
         run_timeout: 4800
-        model:
-          temperature: 1.0
-          top_p: 1.0
-          max_total_tokens: 131072
+        model: {}
 
     - name: swe_rebench
       sandbox:
@@ -125,10 +116,7 @@ The Quickstart provides separate Task Configs for ReAct and Claude Code. Each re
         name: claude_code
         max_turns: 200
         run_timeout: 4800
-        model:
-          temperature: 1.0
-          top_p: 1.0
-          max_total_tokens: 131072
+        model: {}
     ```
 
     !!! warning "Network connectivity"
