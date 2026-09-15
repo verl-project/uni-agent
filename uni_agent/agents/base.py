@@ -23,40 +23,19 @@ class ModelConfig(BaseModel):
         default=None, description="Model name sent to the endpoint (the served model / policy)."
     )
 
-    # During RL, the Gateway session gets these defaults from the rollout config
-    temperature: float | None = Field(
-        default=None,
-        description="Sampling temperature; None inherits the endpoint/session default.",
-    )
-    top_p: float | None = Field(
-        default=None,
-        description="Nucleus-sampling probability mass; None inherits the endpoint/session default.",
-    )
-    top_k: int | None = Field(
-        default=None,
-        description="Top-k sampling; -1 disables it and None inherits the endpoint/session default.",
-    )
-
-    # Generation budget: one turn's generation vs the whole episode's generation.
-    max_total_tokens: int | None = Field(
-        default=None,
-        description="Whole-episode generation budget (sum of completion tokens over all turns)",
+    sampling_params_override: dict[str, float | int] = Field(
+        default_factory=dict,
+        description="Explicit sampling parameters sent by white-box agents on each request.",
     )
     max_tokens_per_turn: int | None = Field(
-        default=None,
-        description="Per-turn generation cap, sent as `max_tokens` on each chat-completions call.",
+        default=None, description="Optional per-turn generation cap for white-box agents."
     )
 
     model_config = ConfigDict(extra="forbid")
 
     def sampling_params(self) -> dict[str, float | int]:
-        """Return only sampling knobs explicitly configured by this Agent."""
-        params = {
-            "temperature": self.temperature,
-            "top_p": self.top_p,
-            "top_k": self.top_k,
-        }
-        return {key: value for key, value in params.items() if value is not None}
+        """Return explicitly configured white-box sampling overrides."""
+        return dict(self.sampling_params_override)
 
 
 class AgentConfig(BaseModel):

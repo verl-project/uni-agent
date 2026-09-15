@@ -128,17 +128,9 @@ class ReActAgent(Agent):
         logger.info(f"{'=' * 25} STEP {info['steps']} {'=' * 25}")
 
         # step 1: query the model
-        max_tokens = cfg.model.max_tokens_per_turn or cfg.model.max_total_tokens
-        if cfg.model.max_total_tokens is not None:
-            remaining = cfg.model.max_total_tokens - info["total_tokens"]
-            if remaining <= 0:
-                logger.info(f"Exit: token budget spent ({info['total_tokens']}/{cfg.model.max_total_tokens}).")
-                return "token_limit"
-            max_tokens = min(max_tokens, remaining)
-
         sampling_params: dict[str, Any] = cfg.model.sampling_params()
-        if max_tokens is not None:  # both budgets unset -> let the server run to EOS
-            sampling_params["max_tokens"] = max_tokens
+        if cfg.model.max_tokens_per_turn is not None:
+            sampling_params["max_tokens"] = cfg.model.max_tokens_per_turn
         content, tool_calls, gen_info = await model.query(transcript, sampling_params=sampling_params)
         info["total_tokens"] = gen_info["prompt_tokens"] + gen_info["completion_tokens"]
         finish_reason = gen_info.get("finish_reason")
@@ -152,10 +144,6 @@ class ReActAgent(Agent):
         if tool_calls:
             assistant_msg["tool_calls"] = tool_calls
         transcript.append(assistant_msg)
-
-        if cfg.model.max_total_tokens is not None and info["total_tokens"] >= cfg.model.max_total_tokens:
-            logger.info(f"Exit: token budget reached ({info['total_tokens']}/{cfg.model.max_total_tokens}).")
-            return "token_limit"
 
         if finish_reason == "length":
             logger.info("Exit: response truncated at a token cap.")

@@ -464,7 +464,6 @@ class GatewayAgentFramework(AgentFramework):
         *,
         partition_id: str,
         sample_fields: dict[str, object],
-        sampling_overrides: dict[str, object] | None = None,
     ) -> dict[str, object]:
         """Build trusted per-session sampling defaults using VERL rollout semantics."""
         config = self._rollout_config
@@ -475,19 +474,12 @@ class GatewayAgentFramework(AgentFramework):
             "repetition_penalty": 1.0,
             "logprobs": config.calculate_log_probs,
         }
-        agent_framework_cfg = config.get("custom", {}).get("agent_framework", {})
-        max_tokens_per_turn = agent_framework_cfg.get("max_tokens_per_turn")
-        if max_tokens_per_turn is not None:
-            if type(max_tokens_per_turn) is not int or max_tokens_per_turn <= 0:
-                raise ValueError("max_tokens_per_turn must be a positive integer")
-            sampling_params["max_tokens"] = max_tokens_per_turn
         if partition_id == "val":
             sampling_params.update(
                 temperature=config.val_kwargs.temperature,
                 top_p=config.val_kwargs.top_p,
                 top_k=config.val_kwargs.top_k,
             )
-        sampling_params.update(sampling_overrides or {})
         # An explicit greedy request wins over both partition and task defaults.
         if "__do_sample__" in sample_fields and not bool(sample_fields["__do_sample__"]):
             sampling_params.update(temperature=0, top_p=1.0, top_k=-1)
@@ -625,20 +617,9 @@ class GatewayAgentFramework(AgentFramework):
                 except KeyError as exc:
                     raise ValueError(f"Unknown agent runner: {agent_name}") from exc
 
-            sampling_overrides = None
-            prepare_sample = None
-            if runner_config.runner_fqn == "uni_agent.framework.task_runner.run_task":
-                from .task_runner import prepare_task
-
-                prepare_sample = partial(prepare_task, **runner_config.runner_kwargs)
-            if prepare_sample is not None:
-                # Resolve once before rollout.n fanout. The runner receives this same
-                # task snapshot, with session-specific endpoints bound only at execution.
-                sample_fields, sampling_overrides = prepare_sample(sample_fields)
             sampling_params = self._build_session_sampling_params(
                 partition_id=partition_id,
                 sample_fields=sample_fields,
-                sampling_overrides=sampling_overrides,
             )
         except Exception:
             # Preparation errors happen before a session exists, but the prompt

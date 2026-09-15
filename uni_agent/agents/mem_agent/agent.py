@@ -280,11 +280,6 @@ class MemAgent(Agent):
         params.update(overrides or {})
 
         max_tokens = params.get("max_tokens", cfg.model.max_tokens_per_turn)
-        if cfg.model.max_total_tokens is not None:
-            remaining = cfg.model.max_total_tokens - self._total_completion_tokens
-            if remaining <= 0:
-                raise RuntimeError(f"MemAgent reached max_total_tokens={cfg.model.max_total_tokens}")
-            max_tokens = min(max_tokens, remaining) if max_tokens is not None else remaining
         if max_tokens is not None:
             params["max_tokens"] = max_tokens
         return params

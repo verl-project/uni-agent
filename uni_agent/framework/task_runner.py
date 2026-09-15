@@ -4,13 +4,12 @@
 from __future__ import annotations
 
 import logging
-from copy import deepcopy
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 from uni_agent.rl_insight.adapter import task_span
 from uni_agent.tasks import TaskConfigResolver, TaskResult, get_task
-from uni_agent.tasks.config import PerTaskSamplingConfig, _deep_merge
+from uni_agent.tasks.config import _deep_merge
 
 if TYPE_CHECKING:
     from uni_agent.gateway.session import SessionHandle
@@ -99,29 +98,6 @@ def score_from_runner_result(
 compute_score = score_from_runner_result
 
 
-def prepare_task(
-    sample_fields: dict[str, Any],
-    *,
-    task_config_path: str | None = None,
-    **_: Any,
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Resolve task defaults before session creation; return explicit sampling overrides.
-
-    Used internally by the built-in ``run_task`` framework path.
-    ModelConfig sampling fields belong to direct API agents and are not overrides.
-    """
-    tools_kwargs = dict(sample_fields.get("tools_kwargs") or {})
-    sample_config = tools_kwargs.get("task")
-    if not isinstance(sample_config, dict):
-        raise ValueError("run_task requires tools_kwargs['task'] (the serialized Task Config)")
-    resolver = TaskConfigResolver.from_file(task_config_path) if task_config_path else TaskConfigResolver()
-    task = resolver.resolve(sample_config)
-    sampling_config = task.get("per_task_sampling")
-    sampling = PerTaskSamplingConfig.model_validate({} if sampling_config is None else sampling_config)
-    tools_kwargs["_resolved_task"] = task
-    return {**sample_fields, "tools_kwargs": tools_kwargs}, sampling.model_dump(exclude_none=True)
-
-
 async def run_task(
     *,
     session: SessionHandle,
@@ -143,18 +119,13 @@ async def run_task(
     ``task_config_path``. ``TaskConfigResolver`` applies that Task Config, the
     sample values, and the live endpoint in order.
     """
-    prepared_task = tools_kwargs.get("_resolved_task") if tools_kwargs else None
-    sample_config = prepared_task if prepared_task is not None else (tools_kwargs.get("task") if tools_kwargs else None)
+    sample_config = tools_kwargs.get("task") if tools_kwargs else None
     if not isinstance(sample_config, dict):
         raise ValueError("run_task requires tools_kwargs['task'] (the serialized Task Config)")
-    sample_config = deepcopy(sample_config)
+    sample_config = dict(sample_config)
     sample_config["prompt"] = raw_prompt
 
-    resolver = (
-        TaskConfigResolver.from_file(task_config_path)
-        if task_config_path and prepared_task is None
-        else TaskConfigResolver()
-    )
+    resolver = TaskConfigResolver.from_file(task_config_path) if task_config_path else TaskConfigResolver()
     task = resolver.resolve(
         sample_config,
         runtime_model={
@@ -163,12 +134,6 @@ async def run_task(
             "model_name": model_name,
         },
     )
-
-    if prepared_task is None and task.get("per_task_sampling"):
-        raise ValueError(
-            "per_task_sampling requires the built-in run_task preparation path so sampling "
-            "is bound before session creation"
-        )
 
     # openyuanrong reverse tunnel: the sandbox config pins the in-sandbox tunnel
     # port (sandbox_kwargs.proxy_port); only the gateway upstream + the agent's

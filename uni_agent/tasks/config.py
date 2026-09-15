@@ -9,18 +9,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
-
-
-class PerTaskSamplingConfig(BaseModel):
-    """Explicit overrides of VERL rollout sampling defaults for one task."""
-
-    model_config = ConfigDict(extra="forbid", strict=True, allow_inf_nan=False)
-
-    temperature: float | None = Field(default=None, ge=0)
-    top_p: float | None = Field(default=None, gt=0, le=1)
-    top_k: int | None = Field(default=None, ge=-1)
-
 
 def _deep_merge(base: dict, overrides: dict) -> dict:
     """Merge ``overrides`` onto ``base`` without mutating either mapping.
@@ -139,17 +127,7 @@ class TaskConfigResolver:
             )
 
         file_defaults = self.defaults_by_name.get(str(task_name), {})
-        sample_values = dict(sample_config)
-        # Typed TaskConfig dumps include None for unset fields. They must not
-        # erase task YAML sampling defaults when passed through a dataset.
-        sample_sampling = sample_values.get("per_task_sampling")
-        if sample_sampling is None:
-            sample_values.pop("per_task_sampling", None)
-        elif isinstance(sample_sampling, dict):
-            sample_values["per_task_sampling"] = {
-                key: value for key, value in sample_sampling.items() if value is not None
-            }
-        resolved = _deep_merge(dict(file_defaults), sample_values)
+        resolved = _deep_merge(dict(file_defaults), dict(sample_config))
         if "prompt_template" in file_defaults:
             resolved["prompt_template"] = file_defaults["prompt_template"]
 

@@ -297,58 +297,24 @@ Important knobs include:
 
 ## Sampling configuration
 
-`actor_rollout_ref.rollout.temperature`, `top_p`, and `top_k` are the run defaults.
-Validation uses `actor_rollout_ref.rollout.val_kwargs` as its baseline. To give a
-task different values, set **only the overrides** at the task root:
+`actor_rollout_ref.rollout.temperature`, `top_p`, and `top_k` provide the Gateway
+session defaults. Agent HTTP requests can override only `max_tokens` and `stop` by
+default. Configure `allowed_request_sampling_param_keys` when a white-box Agent
+must send request-level sampling overrides:
 
 ```yaml
-- name: swe_bench
-  per_task_sampling:
-    temperature: 0.7
-    top_p: 0.95
-  agent:
-    name: claude_code
+actor_rollout_ref:
+  rollout:
+    custom:
+      agent_framework:
+        allowed_request_sampling_param_keys: [temperature, top_p, top_k]
 ```
 
-With no `per_task_sampling` block (or with an empty block), the task inherits the
-partition's rollout defaults. In this example, `top_k` still inherits its rollout
-value. Explicit task fields override both training and validation baselines;
-`__do_sample__: false` in the input sample forces greedy decoding last.
-`per_task_sampling` accepts only `temperature`, `top_p`, and `top_k`. Null values
-are treated as unset, including when merging serialized sample fields over task YAML.
-
-The built-in ``run_task`` path resolves task YAML defaults and sample overrides once,
-before creating any Gateway session. All ``rollout.n`` sessions for that sample use
-the resulting sampling defaults; execution reuses the task snapshot and binds the
-live endpoint. Other custom runners keep the normal framework lifecycle and use
-partition defaults unless they implement their own equivalent behavior.
-
-By default, request bodies can override only `max_tokens` and `stop`.
-`temperature`, `top_p`, and `top_k` in Agent HTTP requests do not override session
-defaults. Advanced integrations can explicitly change this policy via
-`actor_rollout_ref.rollout.custom.agent_framework.allowed_request_sampling_param_keys`:
-omitting it (or setting `null`) keeps the default; `[]` rejects all request
-sampling overrides; an explicit list replaces the allowlist. Allowing distribution
-parameters re-enables request overrides of rollout and task settings.
-
-`custom.agent_framework.max_tokens_per_turn` sets an optional positive integer
-`max_tokens` default for each session. It is a default, not a hard limit: an allowed
-request `max_tokens` takes precedence, and Gateway trajectory capacity still bounds
-generation. The existing prompt/response length capacity mechanism is unchanged.
-
-### Migration
-
-Move Gateway-backed task differences from `agent.model.temperature/top_p/top_k`
-to `per_task_sampling`, and add the preparation hook to custom training launchers.
-`ModelConfig` remains available for agents that call a model API directly, including
-standalone ReAct and MemAgent. Those direct API paths still use `agent.model` and
-do not interpret `per_task_sampling`.
-
-`examples/inference/parallel_infer_verl.py` now takes run-wide defaults through
-`--temperature`, `--top-p`, and `--top-k`; it no longer copies sampling values from
-the first task's `agent.model`. Per-task overrides work through the same Gateway
-session path as training. Its existing `agent.model.max_total_tokens` to rollout
-response-length mapping is retained in this change.
+White-box Agents place explicit request values in
+`agent.model.sampling_params_override`. Black-box agents such as Claude Code do
+not need sampling fields in their YAML because they do not construct these
+requests. `max_tokens_per_turn` is an Agent-side concern; if a black-box Agent
+needs provider-specific flags, pass them through its `AgentConfig.extra_args`.
 
 ## Extension Boundaries
 

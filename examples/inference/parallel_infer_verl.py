@@ -94,12 +94,7 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
     rollout.val_kwargs.do_sample = True
 
     # Preserve the existing inference length mapping independently of task sampling.
-    model_cfgs = [entry.get("agent", {}).get("model", {}) for entry in task_configs]
-    max_total_tokens = max(
-        (m.get("max_total_tokens", DEFAULT_RESPONSE_LENGTH) for m in model_cfgs),
-        default=DEFAULT_RESPONSE_LENGTH,
-    )
-    response_length = int(max_total_tokens)
+    response_length = DEFAULT_RESPONSE_LENGTH
 
     # Fan-out: the framework runs rollout.n gateway sessions per prompt.
     rollout.n = max(1, args.n)
@@ -304,7 +299,7 @@ def main() -> None:
         "--task-config",
         required=True,
         help="Path to a YAML task config: one ``- name: ...`` entry or a list of them (required). "
-        "run_task routes each row by task name. Root-level per_task_sampling overrides the run's "
+        "run_task routes each row by task name. White-box sampling overrides are sent by the agent's "
         "sampling defaults for that task; agent.model sampling does not configure the gateway. "
         "The endpoint is bound to the gateway session.",
     )
@@ -326,7 +321,7 @@ def main() -> None:
         "--n", type=int, default=1, help="Rollout sessions per instance (rollout.n; scores average over all)."
     )
 
-    # Shared rollout defaults; tasks can explicitly override sampling via per_task_sampling.
+    # Shared rollout defaults; white-box agents may override request sampling.
     parser.add_argument("--temperature", type=float, default=DEFAULT_TEMPERATURE, help="Default sampling temperature.")
     parser.add_argument("--top-p", type=float, default=DEFAULT_TOP_P, help="Default nucleus sampling probability.")
     parser.add_argument("--top-k", type=int, default=-1, help="Default top-k sampling (-1 disables).")

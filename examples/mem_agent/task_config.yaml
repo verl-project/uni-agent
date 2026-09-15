@@ -12,6 +12,3 @@
       temperature: 1.0
       top_k: -1
   # Session defaults for training through the gateway; omit top_p to inherit rollout.
-  per_task_sampling:
-    temperature: 1.0
-    top_k: -1

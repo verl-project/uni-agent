@@ -274,7 +274,6 @@ def _per_turn_capped_agent(*, max_tokens_per_turn: int, max_total_tokens: int | 
         base_url="http://gateway:8000/v1",
         model_name="policy",
         max_tokens_per_turn=max_tokens_per_turn,
-        max_total_tokens=max_total_tokens,
     )
     return ReActAgent(ReActConfig(model=model, tools=[], max_steps=2))
 
@@ -290,20 +289,4 @@ async def test_per_turn_cap_truncation_ends_the_episode():
     reason = await agent.step(cfg, model, _StepToolbox(), [], _step_info())
 
     assert model.sampling_params["max_tokens"] == 8
-    assert reason == "token_limit"
-
-
-@pytest.mark.cpu
-@pytest.mark.level0
-@pytest.mark.asyncio
-async def test_max_tokens_is_clamped_to_the_remaining_episode_budget():
-    agent = _per_turn_capped_agent(max_tokens_per_turn=8, max_total_tokens=105)
-    cfg: ReActConfig = agent.config  # type: ignore[assignment]
-    # remaining episode budget (5) is below the per-turn cap (8), so the turn asks
-    # for the smaller of the two.
-    model = _StepModel(finish_reason="length", completion_tokens=5, prompt_tokens=99)
-
-    reason = await agent.step(cfg, model, _StepToolbox(), [], _step_info(total_tokens=100))
-
-    assert model.sampling_params["max_tokens"] == 5
     assert reason == "token_limit"
