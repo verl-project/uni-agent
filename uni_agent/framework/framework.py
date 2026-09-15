@@ -239,6 +239,25 @@ def _list_of_tq_fields_to_tensordict(fields: list[dict[str, object]]) -> TensorD
     return td
 
 
+def _attach_runner_reward_info(trajectories: list[Trajectory], task_result: TaskResult) -> list[Trajectory]:
+    """Preserve runner scoring context separately from final reward metrics."""
+    task_metrics = {} if task_result.accuracy is None else {"acc": task_result.accuracy}
+    return [
+        replace(
+            traj,
+            extra_fields={
+                **traj.extra_fields,
+                "runner_reward_info": {
+                    "reward": task_result.reward,
+                    "metrics": dict(task_metrics),
+                    "reward_context": dict(task_result.extra_info),
+                },
+            },
+        )
+        for traj in trajectories
+    ]
+
+
 def _trajectory_to_reward_dataproto(trajectory, sample_fields, task_result: TaskResult):
     """Build a single-sample DataProto for RewardLoopWorker.compute_score.
 
@@ -336,6 +355,7 @@ class GatewayAgentFramework(AgentFramework):
             logger.info("No streaming reward worker handles; using the non-streaming reward path")
         self._processor = processor
         self._rollout_config = rollout_config
+        self._rollout_tasks: set[asyncio.Task[None]] = set()
         self._runner_semaphores: dict[str, asyncio.Semaphore] = {}
         self._semaphore_loop: asyncio.AbstractEventLoop | None = None
         self._log_dir = log_dir
@@ -484,8 +504,15 @@ class GatewayAgentFramework(AgentFramework):
             sampling_params.update(temperature=0, top_p=1.0, top_k=-1)
         return sampling_params
 
+    async def submit_sessions(self, prompts: TensorDict) -> None:
+        """Wait only for session admission; do not await rollout completion."""
+        await self._generate_sequences(prompts, wait_for_completion=False)
+
     async def generate_sequences(self, prompts: TensorDict) -> None:
         """Run rollout-manager generation and write outputs into TransferQueue."""
+        await self._generate_sequences(prompts, wait_for_completion=True)
+
+    async def _generate_sequences(self, prompts: TensorDict, *, wait_for_completion: bool) -> None:
         if self._rollout_config is None:
             raise RuntimeError("GatewayAgentFramework requires rollout_config for generate_sequences")
 
@@ -505,12 +532,30 @@ class GatewayAgentFramework(AgentFramework):
         if uids is None:
             raise ValueError("GatewayAgentFramework requires prompts['uid'] for TransferQueue output")
 
-        stats = await self._run_batch_rollouts(
+        batch = await self._run_batch_rollouts(
             prompts,
             global_steps=global_steps,
             partition_id=partition_id,
             num_sessions=num_sessions,
         )
+
+        async def finish_batch() -> None:
+            try:
+                await self._finish_generation(batch, global_steps=global_steps)
+            except Exception:
+                if wait_for_completion:
+                    raise
+                logger.exception("Agent framework batch failed after admission")
+            finally:
+                self._rollout_tasks.discard(asyncio.current_task())
+
+        task = asyncio.create_task(finish_batch())
+        self._rollout_tasks.add(task)
+        if wait_for_completion:
+            await task
+
+    async def _finish_generation(self, batch: asyncio.Task[dict], *, global_steps: int | None) -> None:
+        stats = await batch
         logger.info(
             "generate_sequences summary: num_input_prompts=%s num_success_sessions=%s "
             "num_failed_sessions=%s num_success_outputs=%s num_unfinished_episodes=%s "
@@ -537,30 +582,50 @@ class GatewayAgentFramework(AgentFramework):
         global_steps: int | None,
         partition_id: str,
         num_sessions: int = 1,
-    ) -> dict:
-        """Run all prompts in a batch and aggregate prompt/session stats."""
+    ) -> asyncio.Task[dict]:
+        """Submit all prompts in a batch and return their background collection."""
         assert len(prompts) > 0, "generate_sequences requires a non-empty batch"
         if num_sessions <= 0:
             raise ValueError(f"num_sessions must be positive, got {num_sessions}")
 
         # Batch layer: each sample/prompt owns its own group of rollout.n sessions.
         # Prompt tasks are isolated so one prompt failure does not drop the whole batch.
+        # TODO: honor per-prompt ``__rollout_n__`` (verl agent_loop_tq optional hook)
+        # once uni_agent needs sample-level n. Until then, keep main's batch-level n.
         tasks = []
+        outcomes: list[dict | BaseException] = []
         for sample_index in range(len(prompts)):
-            tasks.append(
-                self._run_prompt_rollouts(
-                    sample_fields=self._extract_sample_fields(prompts=prompts, sample_index=sample_index),
-                    sample_index=sample_index,
-                    global_steps=global_steps,
-                    partition_id=partition_id,
-                    num_sessions=num_sessions,
+            sample_fields = self._extract_sample_fields(prompts=prompts, sample_index=sample_index)
+            try:
+                tasks.append(
+                    await self._run_prompt_rollouts(
+                        sample_fields=sample_fields,
+                        sample_index=sample_index,
+                        global_steps=global_steps,
+                        partition_id=partition_id,
+                        num_sessions=num_sessions,
+                    )
                 )
-            )
-        outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+            except Exception as exc:
+                outcomes.append(exc)
+        task = asyncio.create_task(
+            self._collect_batch_rollouts(tasks, outcomes, num_prompts=len(prompts), num_sessions=num_sessions)
+        )
+        return task
+
+    async def _collect_batch_rollouts(
+        self,
+        tasks: list[asyncio.Task[dict]],
+        outcomes: list[dict | BaseException],
+        *,
+        num_prompts: int,
+        num_sessions: int,
+    ) -> dict:
+        outcomes.extend(await asyncio.gather(*tasks, return_exceptions=True))
 
         failure_reasons: list[str] = []
         stats = {
-            "num_input_prompts": len(prompts),
+            "num_input_prompts": num_prompts,
             "num_success_sessions": 0,
             "num_failed_sessions": 0,
             "num_success_outputs": 0,
@@ -594,8 +659,8 @@ class GatewayAgentFramework(AgentFramework):
         global_steps: int | None,
         partition_id: str,
         num_sessions: int,
-    ) -> dict:
-        """Run ``rollout.n`` independent sessions for one prompt and persist their outputs."""
+    ) -> asyncio.Task[dict]:
+        """Submit rollout.n sessions and return their background collection."""
         uid = sample_fields.get("uid")
         if uid is None:
             raise ValueError("GatewayAgentFramework requires prompts['uid'] for TransferQueue output")
@@ -604,20 +669,35 @@ class GatewayAgentFramework(AgentFramework):
             partition_id=partition_id,
             sample_fields=sample_fields,
         )
-
-        # Prompt layer: rollout.n sessions race independently for the same uid.
-        # Successful sessions are written to TQ; failed sessions only affect this uid's stats.
         await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "running"})
-        tasks = [
-            self._run_agent_episode_with_concurrency_limit(
-                sample_fields=sample_fields,
-                sample_index=sample_index,
-                session_index=session_index,
-                global_steps=global_steps,
-                sampling_params=sampling_params,
-            )
-            for session_index in range(num_sessions)
-        ]
+        tasks = []
+        try:
+            for session_index in range(num_sessions):
+                task = await self._submit_agent_episode(
+                    sample_fields=sample_fields,
+                    sample_index=sample_index,
+                    session_index=session_index,
+                    global_steps=global_steps,
+                    sampling_params=sampling_params,
+                )
+                tasks.append(task)
+        except Exception:
+            await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "failure"})
+            raise
+        task = asyncio.create_task(
+            self._collect_prompt_rollouts(uid=uid, tasks=tasks, global_steps=global_steps, partition_id=partition_id)
+        )
+        return task
+
+    async def _collect_prompt_rollouts(
+        self,
+        *,
+        uid: str,
+        tasks: list[asyncio.Task[tuple[list[Trajectory], dict[str, object]]]],
+        global_steps: int | None,
+        partition_id: str,
+    ) -> dict:
+        """Persist successful sessions and aggregate the prompt's result."""
         outcomes = await asyncio.gather(*tasks, return_exceptions=True)
 
         success_sessions = 0
@@ -678,7 +758,7 @@ class GatewayAgentFramework(AgentFramework):
             "failure_reasons": failure_reasons,
         }
 
-    async def _run_agent_episode_with_concurrency_limit(
+    async def _submit_agent_episode(
         self,
         *,
         sample_fields: dict[str, object],
@@ -686,7 +766,7 @@ class GatewayAgentFramework(AgentFramework):
         session_index: int,
         global_steps: int | None,
         sampling_params: dict[str, object],
-    ) -> tuple[list[Trajectory], dict[str, object]]:
+    ) -> asyncio.Task[tuple[list[Trajectory], dict[str, object]]]:
         # Lazy-init semaphores on first use and rebind if the running loop
         # changed: asyncio.Semaphore binds to the loop at construction, but
         # Ray actors may run sessions on a different loop than __init__.
@@ -709,9 +789,16 @@ class GatewayAgentFramework(AgentFramework):
             except KeyError as exc:
                 raise ValueError(f"Unknown agent runner: {agent_name}") from exc
 
-        runner_cap = runner_config.max_concurrent_sessions
-        if runner_cap <= 0:
-            return await self._run_agent_episode(
+        runner_semaphore = None
+        if runner_config.max_concurrent_sessions > 0:
+            runner_semaphore = self._runner_semaphores.get(runner_name)
+            if runner_semaphore is None:
+                runner_semaphore = asyncio.Semaphore(runner_config.max_concurrent_sessions)
+                self._runner_semaphores[runner_name] = runner_semaphore
+            await runner_semaphore.acquire()
+
+        task = asyncio.create_task(
+            self._run_agent_episode(
                 sample_fields=sample_fields,
                 sample_index=sample_index,
                 session_index=session_index,
@@ -720,22 +807,11 @@ class GatewayAgentFramework(AgentFramework):
                 runner_config=runner_config,
                 sampling_params=sampling_params,
             )
-
-        runner_semaphore = self._runner_semaphores.get(runner_name)
-        if runner_semaphore is None:
-            runner_semaphore = asyncio.Semaphore(runner_cap)
-            self._runner_semaphores[runner_name] = runner_semaphore
-
-        async with runner_semaphore:
-            return await self._run_agent_episode(
-                sample_fields=sample_fields,
-                sample_index=sample_index,
-                session_index=session_index,
-                global_steps=global_steps,
-                runner_name=runner_name,
-                runner_config=runner_config,
-                sampling_params=sampling_params,
-            )
+        )
+        if runner_semaphore is not None:
+            # Completion also returns the slot when cancelled before the episode starts.
+            task.add_done_callback(lambda _task: runner_semaphore.release())
+        return task
 
     async def _run_agent_episode(
         self,
@@ -775,11 +851,15 @@ class GatewayAgentFramework(AgentFramework):
         tools_kwargs = sample_fields.get("tools_kwargs")
         tools_kwargs = dict(tools_kwargs or {})
         tools_kwargs["_trace_identity"] = trace_identity
+        # Pin the replica to this batch's trainer step. Validation without
+        # global_steps, or any non-int / negative value, stays unversioned.
+        weight_version = global_steps if type(global_steps) is int and global_steps >= 0 else None
         async with _log_scope(parent_log):
             session = await self.gateway_manager.create_session(
                 session_id,
                 metadata={"_trace_identity": trace_identity},
                 sampling_params=dict(sampling_params),
+                weight_version=weight_version,
             )
             logger.info(
                 "session %s start: runner=%s sample_index=%s session_index=%s global_steps=%s",
@@ -915,6 +995,8 @@ class GatewayAgentFramework(AgentFramework):
                     )
                     for traj, (score, extra) in zip(session_trajectories, annotations, strict=True)
                 ]
+
+            result_trajectories = _attach_runner_reward_info(result_trajectories, task_result)
 
             self._log_trajectory_summary(session_id, result_trajectories)
             if run_dir is not None:

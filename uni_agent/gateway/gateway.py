@@ -230,8 +230,9 @@ class _GatewayActor:
         session_id: str,
         metadata: dict[str, Any] | None = None,
         sampling_params: dict[str, Any] | None = None,
+        weight_version: int | None = None,
     ) -> SessionHandle:
-        """Create an actor-owned session and return its provider-compatible handle."""
+        """Create an actor-owned session, optionally bind its route, and return its handle."""
         self._require_started()
         if session_id in self._sessions:
             raise RuntimeError(f"Session {session_id} already exists")
@@ -248,23 +249,33 @@ class _GatewayActor:
             sampling_params=sampling_params,
             enable_last_assistant_rollback=self._enable_last_assistant_rollback,
             metadata=metadata,
+            weight_version=weight_version,
         )
+        bind_route = getattr(self._backend, "bind_route", None)
+        if bind_route is not None:
+            await bind_route(session_id=session_id, weight_version=weight_version)
         return handle
 
     async def finalize_session(self, session_id: str) -> list[Trajectory]:
         """Finalize a session, remove it from the actor, and return its trajectories."""
         session = self._get_session(session_id)
         trajectories = await session.finalize()
-        self._sessions.pop(session_id, None)
+        await self._remove_session(session_id)
         return trajectories
 
     async def abort_session(self, session_id: str) -> None:
-        """Abort a session and remove it from the actor if it still exists."""
+        """Abort a live session and remove its route even if the session is already gone."""
         session = self._sessions.get(session_id)
-        if session is None:
-            return  # Already finalized or aborted — treat as idempotent.
-        await session.abort()
+        if session is not None:
+            await session.abort()
+        await self._remove_session(session_id)
+
+    async def _remove_session(self, session_id: str) -> None:
         self._sessions.pop(session_id, None)
+
+        release_route = getattr(self._backend, "release_route", None)
+        if release_route is not None:
+            await release_route(session_id=session_id)
 
     async def get_session_state(self, session_id: str) -> dict[str, Any]:
         """Return a snapshot of a live session's state."""
