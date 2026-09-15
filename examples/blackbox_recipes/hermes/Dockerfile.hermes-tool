@@ -1,0 +1,44 @@
+# Pinned Hermes Agent sidecar for the Uni-Agent black-box recipe.
+#
+# The final image is a filesystem payload mounted at /opt/hermes; it is not a
+# standalone task container.  The task image keeps ownership of /testbed and its
+# Python environment.  Hermes' local terminal backend therefore sees the task
+# image's testbed Python through the runner's PATH.
+
+FROM debian:bookworm-slim AS builder
+
+ARG PBS_RELEASE="20260602"
+ARG PBS_PYTHON="3.12.13"
+ARG HERMES_COMMIT="5eb99eb2844b22ebb723711b8e6a0bbb80bb5f04"
+ARG PIP_INDEX_URL=""
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates wget git build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN wget -q \
+    "https://github.com/astral-sh/python-build-standalone/releases/download/${PBS_RELEASE}/cpython-${PBS_PYTHON}%2B${PBS_RELEASE}-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz" \
+    -O /tmp/python.tar.gz \
+    && mkdir -p /opt/hermes \
+    && tar -xzf /tmp/python.tar.gz -C /opt/hermes --strip-components=1 \
+    && rm /tmp/python.tar.gz
+
+RUN git clone --filter=blob:none https://github.com/NousResearch/hermes-agent.git /tmp/hermes-agent \
+    && git -C /tmp/hermes-agent checkout --detach "${HERMES_COMMIT}"
+
+# uv consumes the upstream lockfile so transitive dependencies do not drift.
+RUN if [ -n "${PIP_INDEX_URL}" ]; then export UV_INDEX_URL="${PIP_INDEX_URL}" PIP_INDEX_URL="${PIP_INDEX_URL}"; fi \
+    && /opt/hermes/bin/pip install --no-cache-dir "uv==0.12.14" \
+    && cd /tmp/hermes-agent \
+    && /opt/hermes/bin/uv export --frozen --no-dev --no-emit-project --format requirements.txt -o /tmp/hermes-requirements.txt \
+    && /opt/hermes/bin/uv pip install --python /opt/hermes/bin/python --no-cache --requirement /tmp/hermes-requirements.txt
+
+RUN mkdir -p /opt/hermes/src \
+    && cp -a /tmp/hermes-agent/. /opt/hermes/src/ \
+    && rm -rf /opt/hermes/src/.git /opt/hermes/src/.venv \
+    && printf '%s\n' "${HERMES_COMMIT}" > /opt/hermes/HERMES_COMMIT
+
+COPY run_hermes.py /opt/hermes/bin/run_hermes.py
+
+FROM scratch
+COPY --from=builder /opt/hermes /

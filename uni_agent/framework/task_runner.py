@@ -107,6 +107,7 @@ async def run_task(
     task_config_path: str | None = None,
     api_key: str = "EMPTY",
     model_name: str | None = None,
+    artifact_dir: str | None = None,
     **_: Any,
 ) -> TaskResult:
     """Resolve the sample's task, run it against ``session``, and return its result.
@@ -134,6 +135,12 @@ async def run_task(
             "model_name": model_name,
         },
     )
+
+    # Artifact storage is a trusted run-level binding, never dataset metadata.
+    # It lets black-box agents download diagnostics without changing the shared
+    # task/result contract.
+    if artifact_dir:
+        task = _deep_merge(task, {"agent": {"artifact_dir": artifact_dir}})
 
     # openyuanrong reverse tunnel: the sandbox config pins the in-sandbox tunnel
     # port (sandbox_kwargs.proxy_port); only the gateway upstream + the agent's
