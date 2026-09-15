@@ -46,7 +46,7 @@ def test_inference_sampling_uses_run_options_and_preserves_length_configuration(
 
     config = entrypoint(
         args,
-        task_configs=[{"agent": {"model": {"sampling_params_override": {"temperature": 1.0}}}}],
+        task_configs=[{"agent": {"sampling_params_override": {"temperature": 1.0}}}],
         served_model_name="policy",
     )
 

@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 from uni_agent.agents.react.model import OpenAICompatibleChatModel
 from uni_agent.agents.registry import register_agent
 
-from ..base import Agent, AgentConfig, AgentResult, WhiteBoxModelConfig
+from ..base import Agent, AgentConfig, AgentResult, WhiteBoxSamplingConfig
 
 if TYPE_CHECKING:
     from uni_agent.sandbox import Sandbox
@@ -98,7 +98,7 @@ class MemAgentConfig(AgentConfig):
     """Configuration for chunked-context memory updates."""
 
     name: str = "mem_agent"
-    model: WhiteBoxModelConfig = Field(default_factory=WhiteBoxModelConfig)
+    sampling_params_override: WhiteBoxSamplingConfig = Field(default_factory=WhiteBoxSamplingConfig)
     max_steps: int = Field(default=50, gt=0, description="Maximum model calls across all context segments.")
     max_memorization_length: int = Field(default=1024, gt=0)
     max_chunks: int = Field(default=8, gt=0)
@@ -273,14 +273,14 @@ class MemAgent(Agent):
         self._current_context_step = None
 
     def _default_sampling_params(self) -> dict[str, Any]:
-        return self._mem_agent_config.model.sampling_params_override.sampling_params()
+        return self._mem_agent_config.sampling_params_override.sampling_params()
 
     def _sampling_params_for_step(self, overrides: dict[str, Any] | None) -> dict[str, Any]:
         cfg = self._mem_agent_config
         params = self._default_sampling_params()
         params.update(overrides or {})
 
-        max_tokens = params.get("max_tokens", cfg.model.sampling_params_override.max_tokens_per_turn)
+        max_tokens = params.get("max_tokens", cfg.sampling_params_override.max_tokens_per_turn)
         if max_tokens is not None:
             params["max_tokens"] = max_tokens
         return params

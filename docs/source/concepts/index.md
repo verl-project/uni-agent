@@ -54,10 +54,9 @@ The run-level Task Config defines common behavior such as the Agent, Tools, Sand
       - name: str_replace_editor
       - name: stateful_shell
       - name: submit
-    model:
-      sampling_params_override:
-        temperature: 0.8
-        top_p: 0.9
+    sampling_params_override:
+      temperature: 0.8
+      top_p: 0.9
 ```
 
 Each sample can then provide or override fields such as its prompt, metadata, sandbox image, budgets, or other nested Task settings:

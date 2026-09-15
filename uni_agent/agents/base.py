@@ -48,12 +48,6 @@ class WhiteBoxSamplingConfig(BaseModel):
         }
 
 
-class WhiteBoxModelConfig(ModelConfig):
-    """Endpoint identity plus request controls for a white-box Agent."""
-
-    sampling_params_override: WhiteBoxSamplingConfig = Field(default_factory=WhiteBoxSamplingConfig)
-
-
 class AgentConfig(BaseModel):
     """Base config for a registered agent."""
 

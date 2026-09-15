@@ -74,10 +74,9 @@ The Quickstart includes two ready-to-use configs:
               TQDM_DISABLE: "1"
               GIT_PAGER: "cat"
           - name: submit
-        model:
-          sampling_params_override:
-            temperature: 0.8
-            top_p: 0.9
+        sampling_params_override:
+          temperature: 0.8
+          top_p: 0.9
     ```
 
 Configure the sandbox provider and Agent limits in YAML. Do not hard-code the runtime endpoint there unless every run uses the same service: API mode injects it from `--base-url` and `--model`, while verl mode injects the session Gateway endpoint.

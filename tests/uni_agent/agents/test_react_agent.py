@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 import uni_agent.agents.react.agent as react_module
-from uni_agent.agents.base import AgentResult, WhiteBoxModelConfig
+from uni_agent.agents.base import AgentResult, ModelConfig
 from uni_agent.agents.react.agent import ReActAgent, ReActConfig
 from uni_agent.agents.react.model import OpenAICompatibleChatModel
 from uni_agent.tools import ToolResult
@@ -90,7 +90,7 @@ def _step_info(*, total_tokens: int = 0) -> dict:
 
 
 def _agent() -> ReActAgent:
-    model = WhiteBoxModelConfig(base_url="http://gateway:8000/v1", model_name="policy")
+    model = ModelConfig(base_url="http://gateway:8000/v1", model_name="policy")
     return ReActAgent(ReActConfig(model=model, tools=[], max_steps=1))
 
 
@@ -270,12 +270,18 @@ async def test_truncated_tool_call_is_not_dispatched():
 
 
 def _per_turn_capped_agent(*, max_tokens_per_turn: int) -> ReActAgent:
-    model = WhiteBoxModelConfig(
+    model = ModelConfig(
         base_url="http://gateway:8000/v1",
         model_name="policy",
-        sampling_params_override={"max_tokens_per_turn": max_tokens_per_turn},
     )
-    return ReActAgent(ReActConfig(model=model, tools=[], max_steps=2))
+    return ReActAgent(
+        ReActConfig(
+            model=model,
+            sampling_params_override={"max_tokens_per_turn": max_tokens_per_turn},
+            tools=[],
+            max_steps=2,
+        )
+    )
 
 
 @pytest.mark.cpu

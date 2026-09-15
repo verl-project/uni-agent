@@ -38,8 +38,8 @@ def test_sample_config_overrides_file_defaults_and_runtime_endpoint_wins():
         "agent": {
             "max_steps": 300,
             "tools": [{"name": "submit"}],
+            "sampling_params_override": {"temperature": 0.2, "top_p": 0.9},
             "model": {
-                "sampling_params_override": {"temperature": 0.2, "top_p": 0.9},
                 "base_url": "http://sample.invalid/v1",
                 "api_key": "sample-key",
                 "model_name": "sample-model",
@@ -66,8 +66,8 @@ def test_sample_config_overrides_file_defaults_and_runtime_endpoint_wins():
     }
     assert resolved["agent"]["max_steps"] == 300
     assert resolved["agent"]["tools"] == [{"name": "submit"}]
+    assert resolved["agent"]["sampling_params_override"] == {"temperature": 0.2, "top_p": 0.9}
     assert resolved["agent"]["model"] == {
-        "sampling_params_override": {"temperature": 0.2, "top_p": 0.9},
         "base_url": "http://gateway:8000/sessions/1/v1",
         "api_key": "runtime-key",
         "model_name": "runtime-model",
@@ -78,8 +78,8 @@ def test_sample_config_overrides_file_defaults_and_runtime_endpoint_wins():
     assert sample_config == original_sample
 
     parsed = get_task(resolved).config
-    assert parsed.agent.model.sampling_params_override.temperature == 0.2
-    assert parsed.agent.model.sampling_params_override.top_p == 0.9
+    assert parsed.agent.sampling_params_override.temperature == 0.2
+    assert parsed.agent.sampling_params_override.top_p == 0.9
     assert parsed.agent.model.base_url == "http://gateway:8000/sessions/1/v1"
 
 
@@ -93,9 +93,7 @@ def test_model_fallbacks_do_not_override_task_config_defaults():
                 "sandbox": {"provider": "local"},
                 "agent": {
                     "name": "react",
-                    "model": {
-                        "sampling_params_override": {"temperature": 0.3, "top_p": 0.7, "top_k": 42},
-                    },
+                    "sampling_params_override": {"temperature": 0.3, "top_p": 0.7, "top_k": 42},
                 },
             }
         }
@@ -111,10 +109,10 @@ def test_model_fallbacks_do_not_override_task_config_defaults():
         },
     )
 
-    model = get_task(resolved).config.agent.model
-    assert model.sampling_params_override.temperature == 0.3
-    assert model.sampling_params_override.top_p == 0.7
-    assert model.sampling_params_override.top_k == 42
+    model = get_task(resolved).config.agent.sampling_params_override
+    assert model.temperature == 0.3
+    assert model.top_p == 0.7
+    assert model.top_k == 42
 
 
 @pytest.mark.cpu

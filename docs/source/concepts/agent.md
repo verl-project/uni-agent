@@ -73,10 +73,10 @@ agent:
     - name: str_replace_editor
     - name: stateful_shell
     - name: submit
-  model:
-    sampling_params_override:
-      temperature: 0.8
-      top_p: 0.9
+  model: {}
+  sampling_params_override:
+    temperature: 0.8
+    top_p: 0.9
 ```
 
 Use this style when you need complete control over Tool schemas, observations, transcripts, and stopping behavior.

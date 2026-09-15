@@ -10,7 +10,7 @@ from pydantic import Field
 
 from uni_agent.tools import Toolbox
 
-from ..base import Agent, AgentConfig, AgentResult, WhiteBoxModelConfig
+from ..base import Agent, AgentConfig, AgentResult, WhiteBoxSamplingConfig
 from ..registry import register_agent
 from .model import OpenAICompatibleChatModel
 
@@ -27,7 +27,7 @@ class ReActConfig(AgentConfig):
     """White-box launch params: host-side tools + step / timeout budgets."""
 
     name: str = "react"
-    model: WhiteBoxModelConfig = Field(default_factory=WhiteBoxModelConfig)
+    sampling_params_override: WhiteBoxSamplingConfig = Field(default_factory=WhiteBoxSamplingConfig)
     tools: list[dict] = Field(
         default_factory=lambda: [
             {"name": "str_replace_editor"},
@@ -71,7 +71,7 @@ class ReActAgent(Agent):
             base_url=cfg.model.base_url,
             api_key=cfg.model.api_key,
             model_name=cfg.model.model_name,
-            sampling_params=cfg.model.sampling_params_override.sampling_params(),
+            sampling_params=cfg.sampling_params_override.sampling_params(),
             tools_schemas=toolbox.schemas(),
         )
 
@@ -129,9 +129,9 @@ class ReActAgent(Agent):
         logger.info(f"{'=' * 25} STEP {info['steps']} {'=' * 25}")
 
         # step 1: query the model
-        sampling_params: dict[str, Any] = cfg.model.sampling_params_override.sampling_params()
-        if cfg.model.sampling_params_override.max_tokens_per_turn is not None:
-            sampling_params["max_tokens"] = cfg.model.sampling_params_override.max_tokens_per_turn
+        sampling_params: dict[str, Any] = cfg.sampling_params_override.sampling_params()
+        if cfg.sampling_params_override.max_tokens_per_turn is not None:
+            sampling_params["max_tokens"] = cfg.sampling_params_override.max_tokens_per_turn
         content, tool_calls, gen_info = await model.query(transcript, sampling_params=sampling_params)
         info["total_tokens"] = gen_info["prompt_tokens"] + gen_info["completion_tokens"]
         finish_reason = gen_info.get("finish_reason")
