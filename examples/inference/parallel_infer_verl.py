@@ -121,6 +121,10 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
     rollout.tensor_model_parallel_size = args.tensor_parallel_size
     rollout.gpu_memory_utilization = args.gpu_memory_utilization
     rollout.calculate_log_probs = True
+    if args.language_model_only:
+        OmegaConf.update(
+            config, "actor_rollout_ref.rollout.engine_kwargs.vllm.language_model_only", True, force_add=True
+        )
     rollout.enable_rollout_routing_replay = args.enable_rollout_routing_replay
     rollout.disable_log_stats = False
     rollout.free_cache_engine = False
@@ -141,6 +145,7 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
                 "runner_kwargs": {
                     "task_config_path": args.task_config,
                     "model_name": served_model_name,
+                    "artifact_dir": args.artifact_dir,
                 },
             }
         },
@@ -313,6 +318,16 @@ def main() -> None:
         help="Optional path to write a JSON result file (mean rm_score and per-session scores).",
     )
     parser.add_argument(
+        "--artifact-dir",
+        default=os.getenv("AGENT_ARTIFACT_DIR"),
+        help="Host directory where black-box agents may download per-session diagnostics.",
+    )
+    parser.add_argument(
+        "--language-model-only",
+        action="store_true",
+        help="Set vLLM engine_kwargs.vllm.language_model_only for text-only model checkpoints.",
+    )
+    parser.add_argument(
         "--limit",
         "--max-samples",
         dest="limit",
@@ -369,6 +384,11 @@ def main() -> None:
     args = parser.parse_args()
 
     ray.init()
+
+    # Standalone inference only needs a vLLM server, not trainer-to-rollout
+    # weight synchronization.  The source-archive verl compatibility worker is
+    # enabled in this inference process only; training keeps its default path.
+    os.environ["VERL_STANDALONE_NO_WEIGHT_SYNC"] = "1"
 
     resolver = TaskConfigResolver.from_file(args.task_config)
     served_model_name = args.served_model_name or os.path.basename(os.path.expanduser(args.model_path).rstrip("/"))
