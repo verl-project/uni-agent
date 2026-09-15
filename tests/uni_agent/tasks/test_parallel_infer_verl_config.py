@@ -46,10 +46,7 @@ def test_inference_sampling_uses_run_options_and_preserves_length_configuration(
 
     config = entrypoint(
         args,
-        task_configs=[
-            {"agent": {"model": {"temperature": 1.0, "top_p": 0.95, "max_total_tokens": 8192}}},
-            {"agent": {"model": {"max_total_tokens": 16384}}},
-        ],
+        task_configs=[{"agent": {"model": {"sampling_params_override": {"temperature": 1.0}}}}],
         served_model_name="policy",
     )
 
@@ -60,7 +57,7 @@ def test_inference_sampling_uses_run_options_and_preserves_length_configuration(
         assert sampling.top_k == 20
     assert rollout.val_kwargs.do_sample is True
     expected_prompt_length = args.prompt_length if entrypoint is init_router_config else 4096
-    expected_response_length = args.response_length if entrypoint is init_router_config else 16384
+    expected_response_length = args.response_length if entrypoint is init_router_config else 65536
     assert rollout.prompt_length == config.data.max_prompt_length == expected_prompt_length
     assert rollout.response_length == config.data.max_response_length == expected_response_length
     task_runner = rollout.custom.agent_framework.agent_runners.task

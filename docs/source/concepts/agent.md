@@ -74,9 +74,9 @@ agent:
     - name: stateful_shell
     - name: submit
   model:
-    temperature: 0.8
-    top_p: 0.9
-    max_total_tokens: 65536
+    sampling_params_override:
+      temperature: 0.8
+      top_p: 0.9
 ```
 
 Use this style when you need complete control over Tool schemas, observations, transcripts, and stopping behavior.
@@ -97,10 +97,7 @@ agent:
   name: claude_code
   max_turns: 200
   run_timeout: 4800
-  model:
-    temperature: 1.0
-    top_p: 0.95
-    max_total_tokens: 131072
+  model: {}
 ```
 
 Claude Code speaks the Anthropic Messages protocol. Uni-Agent sets `ANTHROPIC_BASE_URL` to either a direct model endpoint or a session-scoped Gateway endpoint.

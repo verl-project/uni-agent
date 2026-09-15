@@ -50,10 +50,7 @@ The Quickstart includes two ready-to-use configs:
         max_turns: 200
         run_timeout: 4800
         verbose: true
-        model:
-          temperature: 1.0
-          top_p: 0.95
-          max_total_tokens: 131072
+        model: {}
     ```
 
 === "ReAct"
@@ -78,9 +75,9 @@ The Quickstart includes two ready-to-use configs:
               GIT_PAGER: "cat"
           - name: submit
         model:
-          temperature: 0.8
-          top_p: 0.9
-          max_total_tokens: 65536
+          sampling_params_override:
+            temperature: 0.8
+            top_p: 0.9
     ```
 
 Configure the sandbox provider and Agent limits in YAML. Do not hard-code the runtime endpoint there unless every run uses the same service: API mode injects it from `--base-url` and `--model`, while verl mode injects the session Gateway endpoint.

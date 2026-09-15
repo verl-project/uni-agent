@@ -269,7 +269,7 @@ async def test_truncated_tool_call_is_not_dispatched():
     assert toolbox.calls == []
 
 
-def _per_turn_capped_agent(*, max_tokens_per_turn: int, max_total_tokens: int | None = None) -> ReActAgent:
+def _per_turn_capped_agent(*, max_tokens_per_turn: int) -> ReActAgent:
     model = ModelConfig(
         base_url="http://gateway:8000/v1",
         model_name="policy",

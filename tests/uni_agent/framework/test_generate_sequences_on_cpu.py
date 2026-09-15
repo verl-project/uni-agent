@@ -222,7 +222,7 @@ async def test_from_config_warns_for_unsupported_colocated_hybrid_reward(
         "expected_mm_processor_kwargs",
     ),
     [
-        ({}, {}, True, True, {}, {}, None),
+        ({}, {}, True, True, {}, {}),
         (
             {
                 "apply_chat_template_kwargs": {"thinking": True},
@@ -233,9 +233,8 @@ async def test_from_config_warns_for_unsupported_colocated_hybrid_reward(
             True,
             {"thinking": True},
             {"max_pixels": 1024},
-            None,
         ),
-        ({}, {"enable_tool_parser_cache": False}, True, False, {}, {}, None),
+        ({}, {"enable_tool_parser_cache": False}, True, False, {}, {}),
     ],
 )
 def test_build_gateway_manager_wires_gateway_config_defaults(
@@ -1180,8 +1179,6 @@ async def test_framework_binds_sampling_defaults_to_gateway_sessions(
         gateway_manager=runtime,
     )
 
-    framework._rollout_config.custom.agent_framework.max_tokens_per_turn = 256
-
     await framework.generate_sequences(
         _build_prompts(
             count=1,
@@ -1190,9 +1187,7 @@ async def test_framework_binds_sampling_defaults_to_gateway_sessions(
         )
     )
 
-    assert [kwargs["sampling_params"] for kwargs in runtime.created_session_kwargs] == [
-        {**expected_sampling_params, "max_tokens": 256}
-    ]
+    assert [kwargs["sampling_params"] for kwargs in runtime.created_session_kwargs] == [expected_sampling_params]
 
 
 @pytest.mark.cpu
