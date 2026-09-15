@@ -104,12 +104,33 @@ class ClaudeCodeAgent(Agent):
         base_url = cfg.model.base_url
         if not base_url:
             raise ValueError("claude_code: config.model.base_url is not set (the gateway/vLLM policy endpoint)")
-        user_messages = [message.get("content") for message in messages if message.get("role") == "user"]
-        if len(user_messages) != 1:
-            raise ValueError("claude_code requires exactly one 'user' message")
-        user_prompt = user_messages[0]
-        if not isinstance(user_prompt, str) or not user_prompt.strip():
+        user_parts = []
+        for message in messages:
+            if message.get("role") != "user" or message.get("content") is None:
+                continue
+            content = message["content"]
+            if not isinstance(content, str):
+                raise ValueError("claude_code requires text user messages")
+            if content.strip():
+                user_parts.append(content)
+        user_prompt = "\n\n".join(user_parts)
+        if not user_prompt:
             raise ValueError("claude_code requires a non-empty user prompt")
+
+        system_parts = []
+        for message in messages:
+            if message.get("role") != "system" or message.get("content") is None:
+                continue
+            content = message["content"]
+            if not isinstance(content, str):
+                raise ValueError("claude_code requires text system messages")
+            if content.strip():
+                system_parts.append(content)
+        system_prompt = "\n\n".join(system_parts)
+        if system_prompt and any(
+            arg.split("=", 1)[0] in {"--system-prompt", "--system-prompt-file"} for arg in cfg.extra_args
+        ):
+            raise ValueError("claude_code system messages conflict with system prompt overrides in extra_args")
 
         await self._ensure_claude(sandbox)
         # Let the agent's git commands trust the repo even if it's owned by another uid.
@@ -117,7 +138,7 @@ class ClaudeCodeAgent(Agent):
 
         # Point claude at the Anthropic endpoint (gateway session or vLLM) and run it.
         endpoint = _strip_v1(base_url)
-        argv = self._claude_argv(user_prompt)
+        argv = self._claude_argv(user_prompt, system_prompt=system_prompt)
         env = self._claude_env(endpoint)
         logger.info("claude_code: launch with user_prompt:\n%s", user_prompt)
         proc = await sandbox.exec(argv, env=env, timeout=cfg.run_timeout, workdir=workdir)
@@ -158,7 +179,7 @@ class ClaudeCodeAgent(Agent):
             raise RuntimeError("claude_code: installation finished but claude is not available on PATH")
         logger.info("claude_code: installation completed")
 
-    def _claude_argv(self, user_prompt: str) -> list[str]:
+    def _claude_argv(self, user_prompt: str, *, system_prompt: str | None = None) -> list[str]:
         cfg: ClaudeCodeConfig = self.config  # type: ignore[assignment]
         model = cfg.model.model_name
         if not model:
@@ -172,6 +193,8 @@ class ClaudeCodeAgent(Agent):
             "--permission-mode",
             "bypassPermissions",
         ]
+        if system_prompt and system_prompt.strip():
+            argv += ["--system-prompt", system_prompt]
         if cfg.disable_slash_commands:
             argv.append("--disable-slash-commands")
         disallowed_tools = ["AskUserQuestion"]

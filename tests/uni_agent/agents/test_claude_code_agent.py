@@ -130,7 +130,18 @@ def test_ensure_claude_requires_binary_on_path_after_install():
 
 @pytest.mark.cpu
 @pytest.mark.level0
-def test_run_forwards_workdir():
+@pytest.mark.parametrize(
+    "system_contents,expected_system_prompt",
+    [
+        ([], ""),
+        ([None], ""),
+        ([""], ""),
+        ([" \n"], ""),
+        (["Follow the task rules."], "Follow the task rules."),
+        (["First", "Second"], "First\n\nSecond"),
+    ],
+)
+def test_run_forwards_workdir(system_contents, expected_system_prompt):
     config = ClaudeCodeConfig(
         model=ModelConfig(
             base_url="https://ark.example/api/compatible",
@@ -145,7 +156,7 @@ def test_run_forwards_workdir():
         ClaudeCodeAgent(config).run(
             sandbox=sandbox,
             messages=[
-                {"role": "system", "content": "ignored system prompt"},
+                *[{"role": "system", "content": content} for content in system_contents],
                 {"role": "user", "content": "fix the bug"},
             ],
             workdir="/testbed",
@@ -159,6 +170,11 @@ def test_run_forwards_workdir():
     argv = sandbox.exec_calls[0]["argv"]
     assert argv[:2] == ["claude", "-p"]
     assert argv[2] == "fix the bug"
+    if expected_system_prompt:
+        assert argv.count("--system-prompt") == 1
+        assert argv[argv.index("--system-prompt") + 1] == expected_system_prompt
+    else:
+        assert "--system-prompt" not in argv
     assert argv[argv.index("--model") + 1] == "policy"
     assert argv[argv.index("--permission-mode") + 1] == "bypassPermissions"
     assert "--bare" not in argv
@@ -180,9 +196,11 @@ def test_run_forwards_workdir():
 
 @pytest.mark.cpu
 @pytest.mark.level0
-def test_run_accepts_user_only_message_without_rewriting():
+@pytest.mark.parametrize("extra_args", [[], ["--system-prompt", "Explicit override"]])
+def test_run_accepts_user_only_message_without_rewriting(extra_args):
     config = ClaudeCodeConfig(
         model=ModelConfig(base_url="http://gateway:8000/v1", model_name="policy"),
+        extra_args=extra_args,
     )
     sandbox = _FakeSandbox(probe_results=[0])
     prompt = (
@@ -199,23 +217,95 @@ def test_run_accepts_user_only_message_without_rewriting():
     )
 
     assert sandbox.exec_calls[0]["argv"][2] == prompt
+    if extra_args:
+        assert sandbox.exec_calls[0]["argv"][-len(extra_args) :] == extra_args
 
 
 @pytest.mark.cpu
 @pytest.mark.level0
-def test_run_requires_exactly_one_user_message():
+@pytest.mark.parametrize(
+    "content,extra_args,error",
+    [
+        ([], [], "text system messages"),
+        ("Rules", ["--system-prompt", "Other"], "conflict"),
+        ("Rules", ["--system-prompt-file=rules.txt"], "conflict"),
+    ],
+)
+def test_run_rejects_invalid_system_prompt(content, extra_args, error):
+    config = ClaudeCodeConfig(
+        model=ModelConfig(base_url="http://gateway/v1", model_name="policy"), extra_args=extra_args
+    )
+    sandbox = _FakeSandbox(probe_results=[])
+    with pytest.raises(ValueError, match=error):
+        asyncio.run(
+            ClaudeCodeAgent(config).run(
+                sandbox=sandbox,
+                messages=[{"role": "system", "content": content}, {"role": "user", "content": "Fix the bug"}],
+            )
+        )
+    assert not sandbox.calls and not sandbox.exec_calls
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_run_joins_user_messages_in_order_without_rewriting():
+    config = ClaudeCodeConfig(
+        model=ModelConfig(base_url="http://gateway:8000/v1", model_name="policy"),
+    )
+    sandbox = _FakeSandbox(probe_results=[0])
+
+    asyncio.run(
+        ClaudeCodeAgent(config).run(
+            sandbox=sandbox,
+            messages=[
+                {"role": "user", "content": "  Inspect the repository.\n"},
+                {"role": "system", "content": "Follow the task rules."},
+                {"role": "user"},
+                {"role": "user", "content": None},
+                {"role": "user", "content": ""},
+                {"role": "user", "content": " \n"},
+                {"role": "user", "content": "Fix the bug.\nRun the tests.  "},
+                {"role": "system", "content": "Report the result."},
+            ],
+        )
+    )
+
+    argv = sandbox.exec_calls[0]["argv"]
+    assert argv[:3] == ["claude", "-p", "  Inspect the repository.\n\n\nFix the bug.\nRun the tests.  "]
+    assert argv[argv.index("--system-prompt") + 1] == "Follow the task rules.\n\nReport the result."
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize(
+    "user_messages,error",
+    [
+        ([], "non-empty user prompt"),
+        (
+            [{"role": "user"}, *[{"role": "user", "content": content} for content in (None, "", " \n")]],
+            "non-empty user prompt",
+        ),
+        ([{"role": "user", "content": []}], "text user messages"),
+        (
+            [{"role": "user", "content": "Fix the bug"}, {"role": "user", "content": 123}],
+            "text user messages",
+        ),
+    ],
+)
+def test_run_rejects_invalid_user_prompt(user_messages, error):
     config = ClaudeCodeConfig(
         model=ModelConfig(base_url="http://gateway:8000/v1", model_name="policy"),
     )
     sandbox = _FakeSandbox(probe_results=[])
 
-    with pytest.raises(ValueError, match="exactly one 'user' message"):
+    with pytest.raises(ValueError, match=error):
         asyncio.run(
             ClaudeCodeAgent(config).run(
                 sandbox=sandbox,
-                messages=[{"role": "system", "content": "system prompt"}],
+                messages=[{"role": "system", "content": "system prompt"}, *user_messages],
             )
         )
+    assert not sandbox.calls and not sandbox.exec_calls
 
 
 @pytest.mark.cpu
