@@ -601,31 +601,11 @@ class GatewayAgentFramework(AgentFramework):
         if uid is None:
             raise ValueError("GatewayAgentFramework requires prompts['uid'] for TransferQueue output")
         uid = str(uid)
+        sampling_params = self._build_session_sampling_params(
+            partition_id=partition_id,
+            sample_fields=sample_fields,
+        )
         await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "running"})
-        try:
-            if len(self.runner_registry) == 1:
-                runner_name, runner_config = next(iter(self.runner_registry.items()))
-            else:
-                agent_name = sample_fields.get("agent_name")
-                if agent_name is None:
-                    raise ValueError("agent_name is required when multiple agent_runners are configured")
-                if not isinstance(agent_name, str):
-                    raise ValueError(f"agent_name must be a string, got {type(agent_name).__name__}")
-                try:
-                    runner_name = agent_name
-                    runner_config = self.runner_registry[runner_name]
-                except KeyError as exc:
-                    raise ValueError(f"Unknown agent runner: {agent_name}") from exc
-
-            sampling_params = self._build_session_sampling_params(
-                partition_id=partition_id,
-                sample_fields=sample_fields,
-            )
-        except Exception:
-            # Preparation errors happen before a session exists, but the prompt
-            # still needs a terminal status for TQ consumers.
-            await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "failure"})
-            raise
 
         # Prompt layer: rollout.n sessions race independently for the same uid.
         # Successful sessions are written to TQ; failed sessions only affect this uid's stats.
@@ -636,8 +616,6 @@ class GatewayAgentFramework(AgentFramework):
                 session_index=session_index,
                 global_steps=global_steps,
                 sampling_params=sampling_params,
-                runner_name=runner_name,
-                runner_config=runner_config,
             )
             for session_index in range(num_sessions)
         ]
@@ -709,8 +687,6 @@ class GatewayAgentFramework(AgentFramework):
         session_index: int,
         global_steps: int | None,
         sampling_params: dict[str, object],
-        runner_name: str,
-        runner_config: _RunnerConfig,
     ) -> tuple[list[Trajectory], dict[str, object]]:
         # Lazy-init semaphores on first use and rebind if the running loop
         # changed: asyncio.Semaphore binds to the loop at construction, but
@@ -719,6 +695,20 @@ class GatewayAgentFramework(AgentFramework):
         if self._semaphore_loop is not loop:
             self._runner_semaphores = {}
             self._semaphore_loop = loop
+
+        if len(self.runner_registry) == 1:
+            runner_name, runner_config = next(iter(self.runner_registry.items()))
+        else:
+            agent_name = sample_fields.get("agent_name")
+            if agent_name is None:
+                raise ValueError("agent_name is required when multiple agent_runners are configured")
+            if not isinstance(agent_name, str):
+                raise ValueError(f"agent_name must be a string, got {type(agent_name).__name__}")
+            try:
+                runner_name = agent_name
+                runner_config = self.runner_registry[runner_name]
+            except KeyError as exc:
+                raise ValueError(f"Unknown agent runner: {agent_name}") from exc
 
         runner_cap = runner_config.max_concurrent_sessions
         if runner_cap <= 0:
