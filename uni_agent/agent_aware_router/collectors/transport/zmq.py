@@ -21,6 +21,7 @@ live events, and delivers raw payloads to the handler callback.
 from __future__ import annotations
 
 import asyncio
+import logging
 from dataclasses import dataclass
 from typing import Callable
 
@@ -28,9 +29,8 @@ import zmq
 import zmq.asyncio
 
 from ...collectors.transport.base import Transport
-from ...logging import get_router_logger
 
-logger = get_router_logger("zmq-transport")
+logger = logging.getLogger(__name__)
 
 
 @dataclass

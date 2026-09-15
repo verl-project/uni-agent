@@ -20,15 +20,16 @@ Store writes are handled by Collector via DataStore.
 
 from __future__ import annotations
 
+import logging
+
 import msgpack
 
 from ....collectors.parse import KVCacheUpdate, Parser
 from ....collectors.parse.vllm.kv_event import KVCacheEvent
-from ....logging import get_router_logger
 from ....types import Layer
 from ....utils.hash import compute_hash
 
-logger = get_router_logger("vllm-kv")
+logger = logging.getLogger(__name__)
 
 
 class VLLMKVParser(Parser):

@@ -25,6 +25,7 @@ Protocol via structural subtyping.
 
 from __future__ import annotations
 
+import logging
 import time
 from typing import Any, Callable, Optional
 
@@ -33,7 +34,6 @@ from omegaconf import DictConfig, OmegaConf
 
 from .collectors import CollectorManager
 from .config import KVCAwareConfig
-from .logging import get_router_logger
 from .store import DataStore
 from .strategies import (
     ReplicaInfo,
@@ -41,7 +41,7 @@ from .strategies import (
     route,
 )
 
-logger = get_router_logger("balancer")
+logger = logging.getLogger(__name__)
 
 
 class KVCAwareBalancer:
@@ -306,7 +306,7 @@ class KVCAwareBalancer:
             f"route={dt_ms:.2f}ms, strategy=[{self._strategy_summary}])"
         )
         if self._route_calls % self._ROUTE_LOG_EVERY == 0:
-            logger.info(
+            logger.debug(
                 f"route-stats: calls={self._ROUTE_LOG_EVERY} total={self._route_time_total_s:.3f}s "
                 f"mean={self._route_time_total_s * 1000 / max(self._route_calls, 1):.2f}ms "
                 f"max={self._route_time_max_ms:.2f}ms (flushed every {self._ROUTE_LOG_EVERY} calls) "

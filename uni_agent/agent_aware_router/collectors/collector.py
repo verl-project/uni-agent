@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
 import time
 from collections import defaultdict
@@ -26,14 +27,13 @@ from typing import Any
 from ..config.collector import CollectorConfig
 from ..debug import get_debug_var, is_debug_enabled
 from ..insight import WriteEvent, WriteKind, emitter
-from ..logging import get_router_logger
 from ..store.data_store import DataStore
 from ..types import EmitKey, MetricKey
 from ..utils.knob import coerce_knob_value
 from .parse import KVCacheUpdate, MetricsUpdate, Parser, StickyUpdate
 from .transport.base import Transport
 
-logger = get_router_logger("collector")
+logger = logging.getLogger(__name__)
 
 
 DEFAULT_COLLECTOR_KNOBS: dict[str, float | int] = {
@@ -189,7 +189,7 @@ class Collector:
         total = sum(self._kv_event_counts.values())
         if total - self._kv_last_logged_total >= _KV_EVENT_LOG_INTERVAL_S:
             self._kv_last_logged_total = total
-            logger.info(
+            logger.debug(
                 f"kv-events tally: events={dict(self._kv_event_counts)} "
                 f"blocks={dict(self._kv_block_counts)} (total_events={total}) | "
                 f"retained_blocks/replica={self._data_store.per_replica_block_counts()}"
@@ -355,7 +355,7 @@ class Collector:
         kv_str = f"{kv:.3f}" if isinstance(kv, float) else kv
         usage_str = f"{float(usage_raw):.3f}" if usage_raw is not None else "-"
         hit_str = f"{cache_hit_pct:.1f}" if cache_hit_pct == cache_hit_pct else "-"
-        logger.info(
+        logger.debug(
             f"vllm-evidence replica={node_id} kv={kv_str} usage={usage_str} run={run} wait={wait} | "
             f"TTFT={_ms(ttft_avg)}ms queue={_ms(queue_avg)}ms prefillT={_ms(prefill_t)}ms TPOT={_ms(tpot_avg)}ms | "
             f"prefill={int(d_prefill)} cached={int(d_cached)} (hit={hit_str}%) "

@@ -16,6 +16,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import msgpack
 import pytest
 
@@ -88,21 +90,24 @@ def test_parse_failure_surfaces_exception_not_swallowed():
     so the warning rendered the literal text ``"{exc}"`` and the actual parse
     error was silently lost.
     """
-    from loguru import logger as loguru_logger
-
     parser = VLLMKVParser()
     # 0xc1 is a reserved/invalid msgpack byte → unpackb raises UnpackException,
     # exercising the failed-to-parse branch (not the unexpected-format branch).
     garbage = b"\xc1\xc1\xc1"
-    msgs: list[str] = []
-    sink_id = loguru_logger.add(msgs.append, level="WARNING", format="{message}")
+
+    records: list[logging.LogRecord] = []
+    capture = logging.Handler()
+    capture.emit = records.append  # type: ignore[method-assign]
+    capture.setLevel(logging.WARNING)
+    module_logger = logging.getLogger(VLLMKVParser.__module__)
+    module_logger.addHandler(capture)
     try:
         update = parser.parse(garbage, "node1")
     finally:
-        loguru_logger.remove(sink_id)
+        module_logger.removeHandler(capture)
 
     assert update is None
-    text = "\n".join(msgs)
+    text = "\n".join(record.getMessage() for record in records)
     assert "{exc}" not in text  # placeholder must be gone
     assert "node1" in text  # node_id must interpolate
     assert "len=" in text and "head=c1c1c1" in text  # diagnostic preview present

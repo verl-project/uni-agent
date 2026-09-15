@@ -42,7 +42,7 @@ _STOP = object()
 
 
 class _LogFileDispatch(logging.Handler):
-    """Single root-logger handler: resolve each record's log ID and format it on the
+    """Single mount-point handler: resolve each record's log ID and format it on the
     *calling* thread (cheap, and required while the ContextVar is visible), then
     enqueue all file I/O to a background writer thread. This keeps slow sinks (e.g. an HDFS
     FUSE mount, where every write is a network round-trip) off the asyncio event loop; the
@@ -247,16 +247,26 @@ class _ConsoleFilter(logging.Filter):
 
 _console_handler: logging.Handler | None = None
 
+# Namespace mount point: all uni_agent.* loggers bubble here, and propagate=False
+# keeps every record inside our namespace instead of reaching the host's root logger.
+_MOUNT_NAME = "uni_agent"
 
-def _install_console_sink() -> None:
-    """Install the filtered INFO console handler once per process."""
+
+def _mount() -> logging.Logger:
+    return logging.getLogger(_MOUNT_NAME)
+
+
+def _install_console_sink(level: int = logging.INFO) -> None:
+    """Install the filtered console handler on the ``uni_agent`` mount point once
+    per process."""
     global _console_handler
-    root = logging.getLogger()
-    if _console_handler is not None and _console_handler in root.handlers:
+    mount = _mount()
+    if _console_handler is not None and _console_handler in mount.handlers:
+        _console_handler.setLevel(level)
         return
     handler = logging.StreamHandler(sys.stdout)
-    handler.setLevel(logging.INFO)
+    handler.setLevel(level)
     handler.setFormatter(_formatter)
     handler.addFilter(_ConsoleFilter())
-    root.addHandler(handler)
+    mount.addHandler(handler)
     _console_handler = handler
