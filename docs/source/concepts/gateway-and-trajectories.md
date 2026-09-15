@@ -294,6 +294,10 @@ Important knobs include:
 - `rollout.n`: sessions per prompt.
 - `rollout.multi_turn.format`: model-specific Tool parser.
 - `transfer_queue.enable`: enables asynchronous trajectory storage.
+- `rollout.response_length`: caps output tokens per Gateway generation call. The Gateway
+forwards the minimum of the client's `max_tokens`, the configured `response_length`,
+and the remaining chain capacity (`prompt_length + response_length - context_tokens`),
+considering only configured limits.
 
 ## Extension Boundaries
 

@@ -136,8 +136,8 @@ async def test_gateway_actor_max_tokens_clamped_to_remaining_trajectory_capacity
         first_messages = [{"role": "user", "content": "hi"}]
         await actor._handle_openai_chat_completions("s1", {"messages": first_messages})
         total_capacity = 2048 + 100
-        assert backend.calls[-1]["sampling_params"]["max_tokens"] == total_capacity - len(
-            backend.calls[-1]["prompt_ids"]
+        assert backend.calls[-1]["sampling_params"]["max_tokens"] == min(
+            100, total_capacity - len(backend.calls[-1]["prompt_ids"])
         )
 
         await actor._handle_openai_chat_completions(
@@ -148,8 +148,8 @@ async def test_gateway_actor_max_tokens_clamped_to_remaining_trajectory_capacity
             },
         )
 
-        assert backend.calls[-1]["sampling_params"]["max_tokens"] == total_capacity - len(
-            backend.calls[-1]["prompt_ids"]
+        assert backend.calls[-1]["sampling_params"]["max_tokens"] == min(
+            100, total_capacity - len(backend.calls[-1]["prompt_ids"])
         )
         assert backend.calls[-1]["sampling_params"]["top_p"] == 0.8
     finally:

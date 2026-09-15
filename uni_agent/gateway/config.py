@@ -35,8 +35,9 @@ class GatewayActorConfig:
         vision_info_extractor: Optional async extractor for image/video inputs.
         vision_info_extractor_kwargs: Static kwargs forwarded to the extractor.
         prompt_length: Optional prompt component of the total trajectory capacity.
-        response_length: Optional response component of the total trajectory capacity.
-            The gateway enforces their sum when both values are set.
+        response_length: Optional per-call output token limit, also used as the
+            response component of the total trajectory capacity. The gateway
+            enforces prompt_length + response_length when both values are set.
         enable_last_assistant_rollback: Whether latest-assistant rewrites may
             rollback and reuse an existing chain. Enabled by default.
     """

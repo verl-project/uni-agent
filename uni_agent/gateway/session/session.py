@@ -197,6 +197,7 @@ class GatewaySession:
         self._codec = codec
         # Provider adapters merge these trusted defaults before calling the
         # session; the total trajectory capacity is enforced during preparation.
+        self._response_length = response_length
         self._trajectory_capacity = (
             prompt_length + response_length if prompt_length is not None and response_length is not None else None
         )
@@ -541,6 +542,10 @@ class GatewaySession:
                 rollback_dropped_trainable_tokens=rollback_dropped_trainable_tokens,
             )
 
+        if self._response_length is not None:
+            sampling_params["max_tokens"] = min(
+                sampling_params.get("max_tokens", self._response_length), self._response_length
+            )
         remaining_trajectory_capacity = (
             self._trajectory_capacity - len(context_ids) if self._trajectory_capacity is not None else None
         )

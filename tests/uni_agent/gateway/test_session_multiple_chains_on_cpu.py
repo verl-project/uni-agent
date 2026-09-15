@@ -1149,14 +1149,26 @@ async def test_multiple_chains_exactly_exhausted_chain_skips_new_media_extractio
 @pytest.mark.cpu
 @pytest.mark.level0
 @pytest.mark.asyncio
-async def test_multiple_chains_does_not_enforce_response_length_without_prompt_length():
-    """Do not treat response_length alone as a response-only token budget."""
-    session = _session("response-length-only", response_length=10)
+@pytest.mark.parametrize(
+    "response_length,remaining,requested,expected",
+    [
+        (10, None, None, 10),
+        (10, None, 20, 10),
+        (10, 20, 4, 4),
+        (10, 3, 20, 3),
+        (None, None, 20, 20),
+        (None, None, None, None),
+    ],
+)
+async def test_multiple_chains_clamps_per_call_output(response_length, remaining, requested, expected):
+    messages = [{"role": "user", "content": "use session budget"}]
+    prompt_length = None if remaining is None else _prompt_length(messages) + remaining - response_length
+    session = _session("response-limit", prompt_length=prompt_length, response_length=response_length)
     backend = SequencedBackend(["A"])
 
-    await _run(session, backend, [{"role": "user", "content": "use session budget"}])
+    await _run(session, backend, messages, **({} if requested is None else {"max_tokens": requested}))
 
-    assert "max_tokens" not in backend.calls[0]["sampling_params"]
+    assert backend.calls[0]["sampling_params"].get("max_tokens") == expected
 
 
 @pytest.mark.cpu
@@ -1167,7 +1179,7 @@ async def test_multiple_chains_uses_total_trajectory_capacity_instead_of_respons
     session = _session(
         "total-capacity-allows-continuation",
         prompt_length=256,
-        response_length=len("FIRST"),
+        response_length=len("SECOND"),
     )
     backend = SequencedBackend(["FIRST", "SECOND"])
     first_messages = [{"role": "user", "content": "first"}]
@@ -1183,6 +1195,7 @@ async def test_multiple_chains_uses_total_trajectory_capacity_instead_of_respons
 
     assert outcome.finish_reason == "stop"
     assert len(backend.calls) == 2
+    assert [call["sampling_params"]["max_tokens"] for call in backend.calls] == [6, 6]
     assert _decode_response_ids(trajectories[0].response_ids).endswith("SECOND")
 
 
