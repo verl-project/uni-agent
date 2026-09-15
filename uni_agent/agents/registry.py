@@ -26,6 +26,7 @@ AGENT_MODULES: dict[str, str] = {
     "mem_agent": "uni_agent.agents.mem_agent.agent",
     "deepeyes": "uni_agent.agents.deepeyes.agent",
     "deepseek_harness": "uni_agent.agents.deepseek_harness.agent",
+    "hermes": "uni_agent.agents.hermes.agent",
 }
 
 
