@@ -317,28 +317,11 @@ value. Explicit task fields override both training and validation baselines;
 `per_task_sampling` accepts only `temperature`, `top_p`, and `top_k`. Null values
 are treated as unset, including when merging serialized sample fields over task YAML.
 
-For the built-in task runner, configure preparation alongside execution:
-
-```yaml
-actor_rollout_ref:
-  rollout:
-    custom:
-      agent_framework:
-        agent_runners:
-          task:
-            runner_fqn: uni_agent.framework.task_runner.run_task
-            prepare_sample_fqn: uni_agent.framework.task_runner.prepare_task
-            runner_kwargs:
-              task_config_path: path/to/tasks.yaml
-```
-
-The supplied training scripts and VERL inference launcher already include this
-hook. It resolves task YAML defaults and sample overrides once, before creating
-any Gateway session. All `rollout.n` sessions for that sample use the resulting
-sampling defaults; execution reuses the task snapshot and binds the live endpoint.
-Custom runners can provide a synchronous `prepare_sample_fqn` callable accepting
-the sample fields and `runner_kwargs` and returning `(prepared_sample_fields,
-sampling_overrides)`. Runners without a hook keep the partition defaults.
+The built-in ``run_task`` path resolves task YAML defaults and sample overrides once,
+before creating any Gateway session. All ``rollout.n`` sessions for that sample use
+the resulting sampling defaults; execution reuses the task snapshot and binds the
+live endpoint. Other custom runners keep the normal framework lifecycle and use
+partition defaults unless they implement their own equivalent behavior.
 
 By default, request bodies can override only `max_tokens` and `stop`.
 `temperature`, `top_p`, and `top_k` in Agent HTTP requests do not override session

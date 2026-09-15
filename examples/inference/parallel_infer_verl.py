@@ -137,7 +137,6 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
         "agent_runners": {
             "task": {
                 "runner_fqn": "uni_agent.framework.task_runner.run_task",
-                "prepare_sample_fqn": "uni_agent.framework.task_runner.prepare_task",
                 "dispatch_mode": "ray_task",
                 "max_concurrent_sessions": max(0, args.concurrency),
                 "runner_kwargs": {

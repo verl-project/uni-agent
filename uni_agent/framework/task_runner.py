@@ -107,7 +107,7 @@ def prepare_task(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Resolve task defaults before session creation; return explicit sampling overrides.
 
-    Configure this as the runner's ``prepare_sample_fqn`` alongside ``run_task``.
+    Used internally by the built-in ``run_task`` framework path.
     ModelConfig sampling fields belong to direct API agents and are not overrides.
     """
     tools_kwargs = dict(sample_fields.get("tools_kwargs") or {})
@@ -166,8 +166,8 @@ async def run_task(
 
     if prepared_task is None and task.get("per_task_sampling"):
         raise ValueError(
-            "per_task_sampling requires agent_runners.<name>.prepare_sample_fqn="
-            "uni_agent.framework.task_runner.prepare_task so sampling is bound before session creation"
+            "per_task_sampling requires the built-in run_task preparation path so sampling "
+            "is bound before session creation"
         )
 
     # openyuanrong reverse tunnel: the sandbox config pins the in-sandbox tunnel

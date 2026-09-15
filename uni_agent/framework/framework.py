@@ -49,7 +49,6 @@ class _RunnerConfig:
     max_concurrent_sessions: int
     trajectory_selection: str = "all"
     session_timeout_seconds: float | None = None
-    prepare_sample_fqn: str | None = None
 
     def __post_init__(self) -> None:
         if not self.runner_fqn:
@@ -90,7 +89,6 @@ class _RunnerConfig:
                 max_concurrent_sessions=max_concurrent_sessions,
                 trajectory_selection=trajectory_selection,
                 session_timeout_seconds=session_timeout_seconds,
-                prepare_sample_fqn=runner_cfg.get("prepare_sample_fqn"),
             )
         except ValueError as exc:
             raise ValueError(f"agent_runners.{runner_name}: {exc}") from exc
@@ -331,11 +329,6 @@ class GatewayAgentFramework(AgentFramework):
             runner_name: _materialize_runner(runner_config.runner_fqn, runner_config.runner_kwargs)
             for runner_name, runner_config in runner_registry.items()
             if runner_config.dispatch_mode == "inline_async"
-        }
-        self._sample_preparers = {
-            runner_name: _materialize_runner(runner_config.prepare_sample_fqn, runner_config.runner_kwargs)
-            for runner_name, runner_config in runner_registry.items()
-            if runner_config.prepare_sample_fqn is not None
         }
         self.reward_loop_worker_handles = list(reward_loop_worker_handles) if reward_loop_worker_handles else None
         self._custom_reward_function_configured = custom_reward_function_configured
@@ -633,7 +626,11 @@ class GatewayAgentFramework(AgentFramework):
                     raise ValueError(f"Unknown agent runner: {agent_name}") from exc
 
             sampling_overrides = None
-            prepare_sample = self._sample_preparers.get(runner_name)
+            prepare_sample = None
+            if runner_config.runner_fqn == "uni_agent.framework.task_runner.run_task":
+                from .task_runner import prepare_task
+
+                prepare_sample = partial(prepare_task, **runner_config.runner_kwargs)
             if prepare_sample is not None:
                 # Resolve once before rollout.n fanout. The runner receives this same
                 # task snapshot, with session-specific endpoints bound only at execution.

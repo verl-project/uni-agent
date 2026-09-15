@@ -1987,7 +1987,6 @@ async def test_task_sampling_is_resolved_before_session_creation(monkeypatch, tm
         agent_runners={
             "task": {
                 "runner_fqn": "uni_agent.framework.task_runner.run_task",
-                "prepare_sample_fqn": "uni_agent.framework.task_runner.prepare_task",
                 "runner_kwargs": {"task_config_path": str(config_path)},
             }
         },
@@ -2044,7 +2043,6 @@ async def test_invalid_task_sampling_fails_before_opening_session(fake_tq):
         agent_runners={
             "task": {
                 "runner_fqn": "uni_agent.framework.task_runner.run_task",
-                "prepare_sample_fqn": "uni_agent.framework.task_runner.prepare_task",
             }
         },
         gateway_manager=runtime,

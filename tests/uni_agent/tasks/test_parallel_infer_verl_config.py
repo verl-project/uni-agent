@@ -66,8 +66,6 @@ def test_inference_sampling_uses_run_options_and_preserves_length_configuration(
     task_runner = rollout.custom.agent_framework.agent_runners.task
     if simulated_runner:
         assert task_runner.runner_fqn == simulated_runner
-        assert task_runner.get("prepare_sample_fqn") is None
         assert not task_runner.runner_kwargs
     else:
-        assert task_runner.prepare_sample_fqn == "uni_agent.framework.task_runner.prepare_task"
         assert task_runner.runner_kwargs.task_config_path == args.task_config
