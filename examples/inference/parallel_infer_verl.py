@@ -28,6 +28,7 @@ endpoint is the gateway session, bound by the runner, not a flag.
 """
 
 import argparse
+import copy
 import json
 import logging
 import os
@@ -50,8 +51,11 @@ except ImportError:  # fall back to verl's shim (mock raises a clear error if TQ
 
 from uni_agent.framework.entry import AgentFrameworkRolloutAdapter
 from uni_agent.tasks import TaskConfigResolver
+from verl.single_controller.base import Worker
+from verl.single_controller.ray import RayClassWithInitArgs
 from verl.utils import tensordict_utils as tu
 from verl.workers.rollout.llm_server import LLMServerManager
+from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMReplica
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 logger = logging.getLogger(__name__)
@@ -64,6 +68,42 @@ DEFAULT_TEMPERATURE = 0.8
 DEFAULT_TOP_P = 0.9
 DEFAULT_RESPONSE_LENGTH = 65536
 DEFAULT_PROMPT_LENGTH = 4096
+
+
+class InferenceRolloutWorker(Worker):
+    """Minimal standalone worker used by inference-only vLLM replicas.
+
+    ``LLMServerManager``'s regular standalone path imports
+    ``CheckpointEngineWorker`` in each Ray child.  That worker initializes a
+    training checkpoint process group and is unnecessary when no update is
+    performed; this lightweight worker only supplies the Ray GPU identity that
+    ``vLLMHttpServer`` needs to launch its internal engine.
+    """
+
+    def __init__(self, rollout_config=None, model_config=None, replica_rank: int = 0, *args, **kwargs):
+        super().__init__()
+        self.rollout_config = rollout_config
+        self.model_config = model_config
+        self.replica_rank = replica_rank
+
+
+class InferenceVLLMReplica(vLLMReplica):
+    """vLLM replica that avoids the training-only checkpoint worker import."""
+
+    def get_ray_class_with_init_args(self) -> RayClassWithInitArgs:
+        rollout_worker_actor_cls = ray.remote(InferenceRolloutWorker)
+        return RayClassWithInitArgs(
+            cls=rollout_worker_actor_cls,
+            rollout_config=self.config,
+            model_config=self.model_config,
+            replica_rank=self.replica_rank,
+        )
+
+
+class InferenceLLMServerManager(LLMServerManager):
+    """Standalone manager for inference-only runs (no checkpoint/update path)."""
+
+    rollout_replica_class = InferenceVLLMReplica
 
 
 def _rule(text: str = "", width: int = 50, ch: str = "-") -> str:
@@ -87,10 +127,14 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
     model_cfgs = [entry.get("agent", {}).get("model", {}) for entry in task_configs]
     temperature = model_cfgs[0].get("temperature", DEFAULT_TEMPERATURE)
     top_p = model_cfgs[0].get("top_p", DEFAULT_TOP_P)
+    top_k = model_cfgs[0].get("top_k", -1)
     rollout.temperature = temperature
     rollout.top_p = top_p
+    rollout.top_k = top_k
     rollout.val_kwargs.temperature = temperature
     rollout.val_kwargs.top_p = top_p
+    rollout.val_kwargs.top_k = top_k
+    rollout.val_kwargs.do_sample = True
 
     # response_length = the agent's episode token budget (max_total_tokens: the full
     # prompt+gen context the loop may consume); DEFAULT_RESPONSE_LENGTH is the fallback.
@@ -120,11 +164,80 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
     rollout.response_length = response_length
     rollout.tensor_model_parallel_size = args.tensor_parallel_size
     rollout.gpu_memory_utilization = args.gpu_memory_utilization
+    if args.max_model_len is not None:
+        rollout.max_model_len = args.max_model_len
+    if args.max_num_seqs is not None:
+        rollout.max_num_seqs = args.max_num_seqs
+    if args.max_num_batched_tokens is not None:
+        rollout.max_num_batched_tokens = args.max_num_batched_tokens
+    if args.enforce_eager:
+        rollout.enforce_eager = True
+    if args.enable_chunked_prefill:
+        rollout.enable_chunked_prefill = True
     rollout.calculate_log_probs = True
     rollout.enable_rollout_routing_replay = args.enable_rollout_routing_replay
     rollout.disable_log_stats = False
-    rollout.free_cache_engine = False
+    rollout.free_cache_engine = args.free_cache_engine
+    if args.checkpoint_engine_backend is not None:
+        OmegaConf.update(
+            config,
+            "actor_rollout_ref.rollout.checkpoint_engine.backend",
+            args.checkpoint_engine_backend,
+            force_add=True,
+        )
     OmegaConf.update(config, "actor_rollout_ref.rollout.enable_sleep_mode", False, force_add=True)
+
+    if args.language_model_only:
+        OmegaConf.update(
+            config,
+            "actor_rollout_ref.rollout.engine_kwargs.vllm.language_model_only",
+            True,
+            force_add=True,
+        )
+    if args.cudagraph_mode is not None:
+        OmegaConf.update(
+            config,
+            "actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode",
+            args.cudagraph_mode,
+            force_add=True,
+        )
+    if args.mamba_cache_mode is not None:
+        OmegaConf.update(
+            config,
+            "actor_rollout_ref.rollout.engine_kwargs.vllm.mamba_cache_mode",
+            args.mamba_cache_mode,
+            force_add=True,
+        )
+    if args.enable_cpu_binding:
+        OmegaConf.update(
+            config,
+            "actor_rollout_ref.rollout.engine_kwargs.vllm.additional_config.enable_cpu_binding",
+            True,
+            force_add=True,
+        )
+    if args.async_scheduling:
+        OmegaConf.update(
+            config,
+            "actor_rollout_ref.rollout.engine_kwargs.vllm.async_scheduling",
+            True,
+            force_add=True,
+        )
+    if args.multi_turn:
+        OmegaConf.update(config, "actor_rollout_ref.rollout.multi_turn.enable", True, force_add=True)
+        if args.max_assistant_turns is not None:
+            OmegaConf.update(
+                config,
+                "actor_rollout_ref.rollout.multi_turn.max_assistant_turns",
+                args.max_assistant_turns,
+                force_add=True,
+            )
+        if args.max_parallel_calls is not None:
+            OmegaConf.update(
+                config,
+                "actor_rollout_ref.rollout.multi_turn.max_parallel_calls",
+                args.max_parallel_calls,
+                force_add=True,
+            )
 
     # Gateway tool-call parser: the gateway decodes tool calls from raw tokens, so
     # this must match the model's chat template (the analog of vLLM's
@@ -159,13 +272,22 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
     return config
 
 
-def _build_prompts(samples: list, uids: list):
+def _build_prompts(samples: list, uids: list, *, artifact_dir: str | None = None):
     """Assemble the TensorDict batch the framework's ``generate_sequences`` expects."""
+    tools_kwargs = []
+    for sample in samples:
+        sample_tools_kwargs = copy.deepcopy(sample["extra_info"]["tools_kwargs"])
+        task = sample_tools_kwargs.get("task")
+        if artifact_dir and isinstance(task, dict):
+            agent = task.get("agent")
+            if isinstance(agent, dict) and agent.get("name") == "openclaw":
+                agent["artifact_dir"] = artifact_dir
+        tools_kwargs.append(sample_tools_kwargs)
     return tu.get_tensordict(
         tensor_dict={
             "raw_prompt": [sample.get("prompt") for sample in samples],
             "uid": list(uids),
-            "tools_kwargs": [sample["extra_info"]["tools_kwargs"] for sample in samples],
+            "tools_kwargs": tools_kwargs,
         },
         non_tensor_dict={"global_steps": None, "validate": True},
     )
@@ -343,6 +465,48 @@ def main() -> None:
         "--tensor-parallel-size", "--tp", dest="tensor_parallel_size", type=int, default=4, help="Tensor parallel size."
     )
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.9, help="Engine GPU memory fraction.")
+    parser.add_argument("--max-model-len", type=int, default=None, help="Optional vLLM max model length.")
+    parser.add_argument("--max-num-seqs", type=int, default=None, help="Optional vLLM max concurrent sequences.")
+    parser.add_argument(
+        "--max-num-batched-tokens", type=int, default=None, help="Optional vLLM max batched tokens."
+    )
+    parser.add_argument(
+        "--enforce-eager", action="store_true", help="Disable torch.compile and CUDA graphs in vLLM."
+    )
+    parser.add_argument(
+        "--enable-chunked-prefill", action="store_true", help="Enable vLLM chunked prefill."
+    )
+    parser.add_argument(
+        "--language-model-only", action="store_true", help="Enable text-only vLLM language-model mode."
+    )
+    parser.add_argument(
+        "--free-cache-engine", action="store_true", help="Free the rollout cache engine between requests."
+    )
+    parser.add_argument(
+        "--checkpoint-engine-backend",
+        default="naive",
+        help="Checkpoint engine backend for standalone inference (default: naive; no weight update is performed).",
+    )
+    parser.add_argument("--cudagraph-mode", default=None, help="Optional vLLM cudagraph mode.")
+    parser.add_argument("--mamba-cache-mode", default=None, help="Optional vLLM mamba cache mode.")
+    parser.add_argument(
+        "--enable-cpu-binding", action="store_true", help="Enable vLLM CPU binding in additional_config."
+    )
+    parser.add_argument(
+        "--async-scheduling", action="store_true", help="Enable vLLM async scheduling in additional_config."
+    )
+    parser.add_argument("--multi-turn", action="store_true", help="Enable verl multi-turn tool rollout.")
+    parser.add_argument(
+        "--max-assistant-turns", type=int, default=None, help="Optional multi-turn assistant turn limit."
+    )
+    parser.add_argument(
+        "--max-parallel-calls", type=int, default=None, help="Optional maximum parallel tool calls per turn."
+    )
+    parser.add_argument(
+        "--artifact-dir",
+        default=None,
+        help="Optional host directory for exported OpenClaw trajectory.json files.",
+    )
     parser.add_argument(
         "--gateway-count",
         type=int,
@@ -390,7 +554,7 @@ def main() -> None:
     logger.info("initializing configuration, TransferQueue, and LLMServerManager...")
     config = init_config(args, task_configs=task_configs, served_model_name=served_model_name)
     tq.init(config.transfer_queue)
-    llm_server_manager = LLMServerManager.create(config=config)
+    llm_server_manager = InferenceLLMServerManager.create(config=config)
 
     # 2. Framework rollout adapter over the engine.
     adapter = AgentFrameworkRolloutAdapter.create(
@@ -400,7 +564,10 @@ def main() -> None:
 
     # 3. Submit the batch and wait for every trajectory to land in TQ.
     uids = [str(uuid4()) for _ in samples]
-    prompts = _build_prompts(samples, uids)
+    artifact_dir = os.path.expanduser(args.artifact_dir) if args.artifact_dir else None
+    if artifact_dir:
+        os.makedirs(artifact_dir, exist_ok=True)
+    prompts = _build_prompts(samples, uids, artifact_dir=artifact_dir)
     logger.info("starting inference...")
     begin_time = time.time()
     adapter.generate_sequences_and_wait(prompts)
