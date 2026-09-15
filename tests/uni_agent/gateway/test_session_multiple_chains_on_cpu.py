@@ -131,6 +131,7 @@ class _VersionedBackend:
     def __init__(self, steps):
         # steps: list of (text, min_global_steps, max_global_steps)
         self.steps = list(steps)
+        self.calls = []
 
     async def generate(
         self,
@@ -141,7 +142,9 @@ class _VersionedBackend:
         image_data=None,
         video_data=None,
         mm_processor_kwargs=None,
+        weight_version=None,
     ):
+        self.calls.append({"request_id": request_id, "weight_version": weight_version})
         text, min_steps, max_steps = self.steps.pop(0)
         token_ids = _ids(text)
         return TokenOutput(
@@ -1936,3 +1939,69 @@ async def test_weight_versions_absent_when_backend_omits_them():
     [trajectory] = await session.finalize()
 
     assert trajectory.extra_fields == {}
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_session_rejects_backend_version_conflicting_with_weight_version():
+    session = GatewaySession(
+        SessionHandle(session_id="session-version-conflict"),
+        MessageCodec(FakeTokenizer()),
+        weight_version=3,
+    )
+
+    with pytest.raises(RuntimeError, match="backend generation version conflicts with session weight_version"):
+        await _run(
+            session,
+            _VersionedBackend([("OK", 4, 4)]),
+            [{"role": "user", "content": "hello"}],
+        )
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_versioned_sibling_chains_share_session_route_and_version():
+    session = GatewaySession(
+        SessionHandle(session_id="session-versioned-siblings"),
+        MessageCodec(FakeTokenizer()),
+        weight_version=3,
+    )
+    backend = _VersionedBackend(
+        [
+            ("FIRST", 3, 3),
+            ("SIBLING", 3, 3),
+            ("FIRST-NEXT", 3, 3),
+            ("SIBLING-NEXT", 3, 3),
+        ]
+    )
+    prompt = [{"role": "user", "content": "same prompt"}]
+
+    await _run(session, backend, prompt)
+    await _run(session, backend, prompt)
+    await _run(
+        session,
+        backend,
+        [*prompt, {"role": "assistant", "content": "FIRST"}, {"role": "user", "content": "continue first"}],
+    )
+    await _run(
+        session,
+        backend,
+        [
+            *prompt,
+            {"role": "assistant", "content": "SIBLING"},
+            {"role": "user", "content": "continue sibling"},
+        ],
+    )
+
+    assert backend.calls == [{"request_id": "session-versioned-siblings", "weight_version": 3}] * 4
+    trajectories = await session.finalize()
+    decoded = [_decode_response_ids(trajectory.response_ids) for trajectory in trajectories]
+    assert len(decoded) == 2
+    assert any(text.startswith("FIRST") and text.endswith("FIRST-NEXT") for text in decoded)
+    assert any(text.startswith("SIBLING") and text.endswith("SIBLING-NEXT") for text in decoded)
+    assert {
+        (trajectory.extra_fields["min_global_steps"], trajectory.extra_fields["max_global_steps"])
+        for trajectory in trajectories
+    } == {(3, 3)}

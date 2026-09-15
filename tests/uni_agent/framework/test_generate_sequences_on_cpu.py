@@ -740,6 +740,11 @@ async def test_reward_worker_processes_runner_reward_info_and_owns_final_metrics
     ]
     assert trajectories[0].reward_score == 0.42
     assert trajectories[0].reward_metrics == {"acc": 0.25, "format": 0.8}
+    assert trajectories[0].extra_fields["runner_reward_info"] == {
+        "reward": 0.5,
+        "metrics": {"acc": 1.0},
+        "reward_context": {"case_id": "case-1", "nested": {"values": [1]}},
+    }
     assert trajectories[0].finished is True
 
 
@@ -1104,6 +1109,7 @@ async def test_framework_binds_sampling_defaults_to_gateway_sessions(
     )
 
     assert [kwargs["sampling_params"] for kwargs in runtime.created_session_kwargs] == [expected_sampling_params]
+    assert [kwargs.get("weight_version") for kwargs in runtime.created_session_kwargs] == [7]
 
 
 @pytest.mark.cpu
@@ -1371,7 +1377,83 @@ async def test_tq_nests_acc_under_reward_extra_info(fake_tq):
     fields = fake_tq.batch_puts[0]["fields"]
     assert "reward_extra_info" not in fields.keys()
     extra_fields = tu.get(fields, "extra_fields")
-    assert extra_fields == [{"reward_extra_info": {"acc": 1.0}}]
+    assert extra_fields == [
+        {
+            "reward_extra_info": {"acc": 1.0},
+            "runner_reward_info": {"reward": 0.5, "metrics": {"acc": 1.0}, "reward_context": {}},
+        }
+    ]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+@pytest.mark.parametrize("validate", [False, True])
+@pytest.mark.parametrize("mask_unfinished", [False, True])
+async def test_runner_reward_context_survives_tq_without_changing_training_fields(fake_tq, validate, mask_unfinished):
+    context = {
+        "eval_completed": False,
+        "eval_exit_code": 1,
+        "eval_execution_time": 2.5,
+        "eval_report": {
+            "found_eval_status": True,
+            "status_map": {"test_fix": "FAILED", "test_existing": "PASSED"},
+            "resolved": False,
+        },
+        "agent_error": "RuntimeError: agent upload failed",
+    }
+
+    async def scored_runner(**kwargs):
+        return TaskResult(reward=0.75, accuracy=0.5, finished=False, extra_info=context)
+
+    gateway_extra = {"runner_reward_info": {"reward_context": {"eval_completed": True}}, "gateway_field": 17}
+    trajectories = [
+        _trajectory(response_ids=[30, 31, 32], response_mask=[1, 0, 1], extra_fields=gateway_extra),
+        _trajectory(response_ids=[40, 41], response_mask=[1, 1], extra_fields=gateway_extra),
+    ]
+    runtime = _FakeGatewayManager({"session-sample-0-rollout-0": trajectories})
+    framework = await _build_framework_with_agent_runners(
+        agent_runners={"runner": _inline_runner_config(scored_runner)},
+        gateway_manager=runtime,
+        mask_unfinished_episode=mask_unfinished,
+    )
+
+    await framework.generate_sequences(_build_prompts(count=1, global_steps=7, validate=validate))
+
+    assert len(fake_tq.batch_puts) == 1
+    batch = fake_tq.batch_puts[0]
+    assert batch["partition_id"] == ("val" if validate else "train")
+    assert batch["keys"] == ["uid-0_0_0", "uid-0_0_1"]
+    assert [tag["uid"] for tag in batch["tags"]] == ["uid-0", "uid-0"]
+    assert tu.get(batch["fields"], "session_id") == [0, 0]
+    for index, trajectory in enumerate(trajectories):
+        fields = batch["fields"]
+        assert fields["rm_scores"][index].tolist() == [0.0] * (len(trajectory.response_ids) - 1) + [0.75]
+        expected_mask = [0] * len(trajectory.response_ids) if mask_unfinished else trajectory.response_mask
+        assert fields["response_mask"][index].tolist() == expected_mask
+        assert fields["loss_mask"][index].tolist() == expected_mask
+    for extra in tu.get(batch["fields"], "extra_fields"):
+        assert extra["runner_reward_info"] == {
+            "reward": 0.75,
+            "metrics": {"acc": 0.5},
+            "reward_context": context,
+        }
+        assert extra["reward_extra_info"] == {"acc": 0.5}
+        assert extra["gateway_field"] == 17
+    assert gateway_extra["runner_reward_info"] == {"reward_context": {"eval_completed": True}}
+    assert fake_tq.puts == [
+        {
+            "key": "uid-0",
+            "partition_id": "val" if validate else "train",
+            "tag": {"status": "running"},
+        },
+        {
+            "key": "uid-0",
+            "partition_id": "val" if validate else "train",
+            "tag": {"status": "finished"},
+        },
+    ]
+    assert "runner_reward_info" not in framework._trajectory_meta(trajectories[0])
 
 
 @pytest.mark.cpu
@@ -1672,6 +1754,76 @@ async def test_generate_sequences_keeps_successful_sessions_when_one_session_fai
 @pytest.mark.cpu
 @pytest.mark.level0
 @pytest.mark.asyncio
+async def test_generate_sequences_keeps_successful_sessions_when_tq_write_fails(monkeypatch, fake_tq):
+    runtime = _FakeGatewayManager(
+        {
+            "session-sample-0-rollout-0": [_trajectory()],
+            "session-sample-0-rollout-1": [_trajectory()],
+        }
+    )
+    original_batch_put = fake_tq.async_kv_batch_put
+
+    async def fail_second_session(*, keys, fields, tags, partition_id):
+        if keys == ["uid-0_1_0"]:
+            raise OSError("trajectory sink unavailable")
+        await original_batch_put(keys=keys, fields=fields, tags=tags, partition_id=partition_id)
+
+    monkeypatch.setattr(fake_tq, "async_kv_batch_put", fail_second_session)
+    framework = await _build_framework_with_agent_runners(
+        agent_runners={"runner": _inline_runner_config(_async_noop_runner)},
+        gateway_manager=runtime,
+        n=2,
+        val_n=2,
+    )
+
+    await framework.generate_sequences(_build_prompts(count=1, global_steps=8))
+
+    assert [put["keys"] for put in fake_tq.batch_puts] == [["uid-0_0_0"]]
+    assert fake_tq.puts == [
+        {"key": "uid-0", "partition_id": "train", "tag": {"status": "running"}},
+        {
+            "key": "uid-0",
+            "partition_id": "train",
+            "tag": {"status": "finished"},
+        },
+    ]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_generate_sequences_keeps_other_prompts_when_terminal_write_fails(monkeypatch, fake_tq):
+    runtime = _FakeGatewayManager(
+        {
+            "session-sample-0-rollout-0": [_trajectory()],
+            "session-sample-1-rollout-0": [_trajectory()],
+        }
+    )
+    original_put = fake_tq.async_kv_put
+
+    async def fail_first_prompt(*, key, partition_id, tag):
+        if key == "uid-0" and tag["status"] == "finished":
+            raise OSError("terminal sink unavailable")
+        await original_put(key=key, partition_id=partition_id, tag=tag)
+
+    monkeypatch.setattr(fake_tq, "async_kv_put", fail_first_prompt)
+    framework = await _build_framework_with_agent_runners(
+        agent_runners={"runner": _inline_runner_config(_async_noop_runner)},
+        gateway_manager=runtime,
+    )
+
+    await framework.generate_sequences(_build_prompts(count=2, global_steps=8))
+
+    assert fake_tq.puts == [
+        {"key": "uid-0", "partition_id": "train", "tag": {"status": "running"}},
+        {"key": "uid-1", "partition_id": "train", "tag": {"status": "running"}},
+        {"key": "uid-1", "partition_id": "train", "tag": {"status": "finished"}},
+    ]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
 async def test_generate_sequences_marks_prompt_failure_when_all_sessions_fail(fake_tq):
     """Filtering every session to empty marks the uid failed and raises."""
     runtime = _FakeGatewayManager(
@@ -1926,3 +2078,375 @@ async def test_ray_task_termination_cancels_runner_and_aborts_session(monkeypatc
     # so no force-kill escalation happened.
     assert [call["force"] for call in cancel_calls] == [False]
     assert runtime.aborted_sessions, "terminated session must be aborted"
+
+
+def _admission_worker(framework):
+    from uni_agent.framework.entry import AgentFrameworkWorker
+
+    worker_class = AgentFrameworkWorker.__ray_metadata__.modified_class
+    worker = worker_class.__new__(worker_class)
+    worker.framework = framework
+    return worker
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dispatch_mode", ["inline_async", "ray_task"])
+async def test_admission_starts_sessions_incrementally_when_batch_exceeds_cap(monkeypatch, fake_tq, dispatch_mode):
+    from uni_agent.framework import framework as framework_module
+
+    started = asyncio.Queue()
+
+    async def runner(**_kwargs):
+        release = asyncio.Event()
+        started.put_nowait(release)
+        await release.wait()
+        return TaskResult(reward=1.0)
+
+    if dispatch_mode == "ray_task":
+        monkeypatch.setattr(
+            framework_module._run_agent_runner_ray_task,
+            "remote",
+            lambda **kwargs: asyncio.create_task(runner(**kwargs)),
+        )
+    runtime = _FakeGatewayManager({"session-sample-0": [_trajectory()]})
+    framework = await _build_framework_with_agent_runners(
+        agent_runners={
+            "runner": {**_inline_runner_config(runner, dispatch_mode=dispatch_mode), "max_concurrent_sessions": 1}
+        },
+        gateway_manager=runtime,
+        n=3,
+    )
+    worker = _admission_worker(framework)
+    submit = asyncio.create_task(worker.submit_sessions(_build_prompts(count=1)))
+    for _ in range(2):
+        release = await asyncio.wait_for(started.get(), 2)
+        assert not submit.done(), "the remaining sessions have not acquired their permits"
+        release.set()
+
+    release = await asyncio.wait_for(started.get(), 2)
+    await asyncio.wait_for(submit, 2)
+    assert len(runtime.created_sessions) == 3
+    assert len(runtime.finalized_sessions) == 2
+    assert not fake_tq.batch_puts, "admission must not wait for the complete prompt group"
+    assert len(framework._rollout_tasks) == 1
+    release.set()
+    await asyncio.wait_for(asyncio.gather(*framework._rollout_tasks), 2)
+    assert len(fake_tq.batch_puts) == 3
+    assert framework._runner_semaphores["runner"]._value == 1
+    assert not framework._rollout_tasks
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_failed_session_settles_admission_before_other_session_finishes(fake_tq):
+    release = asyncio.Event()
+
+    async def runner(**_kwargs):
+        await release.wait()
+        return TaskResult(reward=1.0)
+
+    class FailingGateway(_FakeGatewayManager):
+        async def create_session(self, session_id, **kwargs):
+            if "rollout-0-" in session_id:
+                raise RuntimeError("cannot create first session")
+            return await super().create_session(session_id, **kwargs)
+
+    runtime = FailingGateway({"session-sample-0": [_trajectory()]})
+    framework = await _build_framework_with_agent_runners(
+        agent_runners={"runner": {**_inline_runner_config(runner), "max_concurrent_sessions": 1}},
+        gateway_manager=runtime,
+        n=2,
+    )
+    worker = _admission_worker(framework)
+    await asyncio.wait_for(worker.submit_sessions(_build_prompts(count=1)), 2)
+    assert not runtime.finalized_sessions
+    release.set()
+    await asyncio.wait_for(asyncio.gather(*framework._rollout_tasks), 2)
+    assert len(fake_tq.batch_puts) == 1
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_admission_propagates_errors_before_sessions_are_expanded(fake_tq):
+    framework = await _build_framework_with_agent_runners(
+        agent_runners={"runner": _inline_runner_config(_async_noop_runner)},
+        gateway_manager=_FakeGatewayManager({}),
+    )
+    worker = _admission_worker(framework)
+    with pytest.raises(ValueError, match="global_steps"):
+        await asyncio.wait_for(worker.submit_sessions(_build_prompts(count=1, global_steps=None)), 2)
+    assert not framework._rollout_tasks
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_background_failure_after_admission_is_consumed_and_logged(fake_tq, caplog):
+    release = asyncio.Event()
+
+    async def runner(**_kwargs):
+        await release.wait()
+        raise RuntimeError("runner failed")
+
+    framework = await _build_framework_with_agent_runners(
+        agent_runners={"runner": _inline_runner_config(runner)},
+        gateway_manager=_FakeGatewayManager({}),
+    )
+    worker = _admission_worker(framework)
+    await asyncio.wait_for(worker.submit_sessions(_build_prompts(count=1)), 2)
+    pending = list(framework._rollout_tasks)
+    with caplog.at_level(logging.ERROR, logger="uni_agent.framework.framework"):
+        release.set()
+        await asyncio.wait_for(asyncio.gather(*pending, return_exceptions=True), 2)
+    failures = [record for record in caplog.records if "batch failed after admission" in record.getMessage()]
+    assert len(failures) == 1
+    assert failures[0].exc_info[0] is RuntimeError
+    assert "All rollouts failed" in str(failures[0].exc_info[1])
+    assert failures[0].exc_info[2] is not None
+    assert not framework._rollout_tasks
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_session_submission_returns_before_gateway_creation(fake_tq):
+    creating = asyncio.Event()
+    allow_create = asyncio.Event()
+    allow_finish = asyncio.Event()
+
+    class BlockingGateway(_FakeGatewayManager):
+        async def create_session(self, session_id, **kwargs):
+            creating.set()
+            await allow_create.wait()
+            return await super().create_session(session_id, **kwargs)
+
+    async def runner(**_kwargs):
+        await allow_finish.wait()
+        return TaskResult(reward=1.0)
+
+    runtime = BlockingGateway({"session-sample-0": [_trajectory()]})
+    framework = await _build_framework_with_agent_runners(
+        agent_runners={"runner": {**_inline_runner_config(runner), "max_concurrent_sessions": 1}},
+        gateway_manager=runtime,
+    )
+    submit = asyncio.create_task(framework.submit_sessions(_build_prompts(count=1)))
+    await asyncio.wait_for(creating.wait(), 2)
+    await asyncio.wait_for(submit, 2)
+    assert not runtime.created_sessions
+    allow_create.set()
+    assert not runtime.finalized_sessions
+    allow_finish.set()
+    await asyncio.wait_for(asyncio.gather(*framework._rollout_tasks), 2)
+    assert len(runtime.created_sessions) == 1
+    assert len(fake_tq.batch_puts) == 1
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_session_capacity_is_held_through_scoring(monkeypatch, fake_tq):
+    scoring = asyncio.Queue()
+
+    async def score(trajectories, *_args):
+        release = asyncio.Event()
+        scoring.put_nowait(release)
+        await release.wait()
+        return [(1.0, {}) for _ in trajectories]
+
+    runtime = _FakeGatewayManager({"session-sample-0": [_trajectory()]})
+    framework = await _build_framework_with_agent_runners(
+        agent_runners={"runner": {**_inline_runner_config(_async_noop_runner), "max_concurrent_sessions": 1}},
+        gateway_manager=runtime,
+        reward_loop_worker_handles=[object()],
+    )
+    monkeypatch.setattr(framework, "_score_trajectories", score)
+    await asyncio.wait_for(framework.submit_sessions(_build_prompts(count=1)), 2)
+    first_release = await asyncio.wait_for(scoring.get(), 2)
+    second = asyncio.create_task(framework.submit_sessions(_build_prompts(count=1)))
+    done, _ = await asyncio.wait((second,), timeout=0.01)
+    assert not done
+    assert len(runtime.created_sessions) == 1
+    assert len(runtime.finalized_sessions) == 1
+    first_release.set()
+    second_release = await asyncio.wait_for(scoring.get(), 2)
+    await asyncio.wait_for(second, 2)
+    second_release.set()
+    await asyncio.wait_for(asyncio.gather(*framework._rollout_tasks), 2)
+    assert len(fake_tq.batch_puts) == 2
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_stage", ["sampling", "runner"])
+async def test_invalid_prompt_does_not_block_other_prompt_admission(monkeypatch, fake_tq, failure_stage):
+    release = asyncio.Event()
+    started = asyncio.Queue()
+
+    async def runner(**_kwargs):
+        started.put_nowait(True)
+        await release.wait()
+        return TaskResult(reward=1.0)
+
+    runtime = _FakeGatewayManager({"session-sample-1": [_trajectory()]})
+    framework = await _build_framework_with_agent_runners(
+        agent_runners={"runner": _inline_runner_config(runner)},
+        gateway_manager=runtime,
+        n=2,
+    )
+    build_params = framework._build_session_sampling_params
+
+    def sampling_params(*, partition_id, sample_fields):
+        if sample_fields["uid"] == "uid-0":
+            raise ValueError("invalid prompt sampling parameters")
+        return build_params(partition_id=partition_id, sample_fields=sample_fields)
+
+    if failure_stage == "sampling":
+        monkeypatch.setattr(framework, "_build_session_sampling_params", sampling_params)
+    else:
+        submit_episode = framework._submit_agent_episode
+
+        async def invalid_runner(**kwargs):
+            if kwargs["sample_fields"]["uid"] == "uid-0":
+                raise ValueError("Unknown agent runner")
+            return await submit_episode(**kwargs)
+
+        monkeypatch.setattr(framework, "_submit_agent_episode", invalid_runner)
+    await asyncio.wait_for(framework.submit_sessions(_build_prompts(count=2)), 2)
+    for _ in range(2):
+        await asyncio.wait_for(started.get(), 2)
+    assert len(runtime.created_sessions) == 2
+    assert all(session.startswith("session-sample-1-") for session in runtime.created_sessions)
+    assert not fake_tq.batch_puts
+    if failure_stage == "runner":
+        assert any(put["key"] == "uid-0" and put["tag"] == {"status": "failure"} for put in fake_tq.puts)
+    release.set()
+    await asyncio.wait_for(asyncio.gather(*framework._rollout_tasks), 2)
+    assert len(fake_tq.batch_puts) == 2
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_all_prompt_failures_settle_submission_but_full_generation_raises(monkeypatch, fake_tq, caplog):
+    framework = await _build_framework_with_agent_runners(
+        agent_runners={"runner": _inline_runner_config(_async_noop_runner)},
+        gateway_manager=_FakeGatewayManager({}),
+    )
+
+    def invalid_sampling_params(**_kwargs):
+        raise ValueError("invalid prompt sampling parameters")
+
+    monkeypatch.setattr(framework, "_build_session_sampling_params", invalid_sampling_params)
+    with caplog.at_level(logging.ERROR, logger="uni_agent.framework.framework"):
+        await asyncio.wait_for(framework.submit_sessions(_build_prompts(count=1)), 2)
+        await asyncio.wait_for(asyncio.gather(*framework._rollout_tasks), 2)
+    failures = [record for record in caplog.records if "batch failed after admission" in record.getMessage()]
+    assert len(failures) == 1
+    assert failures[0].exc_info[0] is RuntimeError
+    with pytest.raises(RuntimeError, match="All rollouts failed"):
+        await framework.generate_sequences(_build_prompts(count=1))
+    assert not framework._rollout_tasks
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_full_capacity_blocks_submission_before_creating_more_episode_tasks(monkeypatch, fake_tq):
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def runner(**_kwargs):
+        started.set()
+        await release.wait()
+        return TaskResult(reward=1.0)
+
+    runtime = _FakeGatewayManager({"session-sample-0": [_trajectory()]})
+    framework = await _build_framework_with_agent_runners(
+        agent_runners={"runner": {**_inline_runner_config(runner), "max_concurrent_sessions": 1}},
+        gateway_manager=runtime,
+        n=3,
+    )
+    scheduled = []
+    run_episode = framework._run_agent_episode
+
+    def record_episode(**kwargs):
+        scheduled.append(kwargs["session_index"])
+        return run_episode(**kwargs)
+
+    monkeypatch.setattr(framework, "_run_agent_episode", record_episode)
+    submit = asyncio.create_task(framework.submit_sessions(_build_prompts(count=1)))
+    await asyncio.wait_for(started.wait(), 2)
+    assert scheduled == [0]
+    semaphore = framework._runner_semaphores["runner"]
+    assert len(semaphore._waiters) == 1
+    release.set()
+    await asyncio.wait_for(submit, 2)
+    await asyncio.wait_for(asyncio.gather(*framework._rollout_tasks), 2)
+    assert scheduled == [0, 1, 2]
+    assert len(fake_tq.batch_puts) == 3
+    assert semaphore._value == 1
+    assert not framework._rollout_tasks
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_session_cancelled_before_first_execution_releases_its_slot(monkeypatch, fake_tq):
+    runtime = _FakeGatewayManager({})
+    framework = await _build_framework_with_agent_runners(
+        agent_runners={"runner": {**_inline_runner_config(_async_noop_runner), "max_concurrent_sessions": 1}},
+        gateway_manager=runtime,
+    )
+    collect = framework._collect_prompt_rollouts
+
+    def cancel_before_collecting(*, tasks, **kwargs):
+        assert framework._runner_semaphores["runner"]._value == 0
+        assert not runtime.created_sessions
+        tasks[0].cancel()
+        return collect(tasks=tasks, **kwargs)
+
+    monkeypatch.setattr(framework, "_collect_prompt_rollouts", cancel_before_collecting)
+    with pytest.raises(asyncio.CancelledError):
+        await framework.generate_sequences(_build_prompts(count=1))
+    assert not runtime.created_sessions
+    assert framework._runner_semaphores["runner"]._value == 1
+    assert not framework._rollout_tasks
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_cancelled_waiting_submission_keeps_other_batch_running(fake_tq):
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def runner(**_kwargs):
+        started.set()
+        await release.wait()
+        return TaskResult(reward=1.0)
+
+    runtime = _FakeGatewayManager({"session-sample-0": [_trajectory()]})
+    framework = await _build_framework_with_agent_runners(
+        agent_runners={"runner": {**_inline_runner_config(runner), "max_concurrent_sessions": 1}},
+        gateway_manager=runtime,
+    )
+    await framework.submit_sessions(_build_prompts(count=1))
+    await asyncio.wait_for(started.wait(), 2)
+    waiting = asyncio.create_task(framework.submit_sessions(_build_prompts(count=1)))
+    done, _ = await asyncio.wait((waiting,), timeout=0.01)
+    assert not done
+    waiting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiting
+    assert not runtime.aborted_sessions
+    assert len(runtime.created_sessions) == 1
+    assert framework._runner_semaphores["runner"]._value == 0
+    release.set()
+    await asyncio.wait_for(asyncio.gather(*framework._rollout_tasks), 2)
+    assert len(fake_tq.batch_puts) == 1
+    assert framework._runner_semaphores["runner"]._value == 1

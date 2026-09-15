@@ -302,6 +302,7 @@ class MessageCodec:
 
             parser_cls = ToolParserManager.get_tool_parser(parser_name)
             parser_parameters = inspect.signature(parser_cls).parameters
+            # TODO: Avoid unused Qwen3 streaming argument deltas when parsing complete responses.
             if "tools" in parser_parameters:
                 parser = parser_cls(self._tokenizer, tools=vllm_tools)
             else:

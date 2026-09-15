@@ -289,7 +289,20 @@ Important knobs include:
 - `agent_runners`: Runner import paths and arguments. With multiple entries, each
   registry key must match the sample's `agent_name`.
 - `dispatch_mode`: inline async execution or Ray tasks.
-- `max_concurrent_sessions`: per-Runner concurrency limit.
+- `max_concurrent_sessions`: per-Runner concurrency limit. This is a wide
+  worker-side safety net. `AgentFrameworkWorker` derives its Ray
+  `max_concurrency` as the larger of 1000 (Ray's async default) and the sum
+  of positive Runner limits; each Runner's semaphore still enforces its own
+  session limit. Ray counts
+  unfinished batch RPCs, and a batch can remain live for one slow session,
+  so this value is not divided by batch size or `rollout.n`.
+  An omitted or zero limit keeps that Runner's
+  sessions unbounded and adds nothing to the derived RPC limit; it does not
+  make Ray RPC concurrency unlimited.
+  Async-RL dispatch pause is owned by Laminar: `LLMServerStateTracker` snapshots replica
+  `kv_cache_usage`, and `RolloutDispatcher` skips new batches when every
+  replica is at/above the KV threshold. Slight overshoot from the ~1s poll
+  lag is expected. Do not add a driver-side inflight cap in this adapter.
 - `log_dir`: runtime log root. Sessions with a global step write `framework.log`, `task.log`, and trajectory artifacts under `step_<global_step>/<log_id>/`; Sessions whose `global_steps` is `None` write directly under `<log_id>/`.
 - `rollout.n`: sessions per prompt.
 - `rollout.multi_turn.format`: model-specific Tool parser.
