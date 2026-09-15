@@ -298,9 +298,7 @@ Important knobs include:
 ## Sampling configuration
 
 `actor_rollout_ref.rollout.temperature`, `top_p`, and `top_k` provide the Gateway
-session defaults. Agent HTTP requests can override only `max_tokens` and `stop` by
-default. Configure `allowed_request_sampling_param_keys` when a white-box Agent
-must send request-level sampling overrides:
+session defaults. Agent HTTP requests can override only `max_tokens` and `stop` by default. Configure `allowed_request_sampling_param_keys` to add request keys for a white-box Agent; configured keys are added to the defaults and do not remove `max_tokens` or `stop`:
 
 ```yaml
 actor_rollout_ref:
@@ -308,6 +306,7 @@ actor_rollout_ref:
     custom:
       agent_framework:
         allowed_request_sampling_param_keys: [temperature, top_p, top_k]
+        # Effective allowlist: max_tokens, stop, temperature, top_p, top_k
 ```
 
 White-box Agents place explicit request values in

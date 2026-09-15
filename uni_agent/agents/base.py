@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 
 class ModelConfig(BaseModel):
-    """The OpenAI-compatible LLM endpoint the agent's policy talks to, plus sampling knobs."""
+    """The endpoint and model identity used by an Agent."""
 
     base_url: str | None = Field(
         default=None, description="Endpoint URL; the runner fills this in (in RL, the current policy server)."
@@ -23,14 +23,16 @@ class ModelConfig(BaseModel):
         default=None, description="Model name sent to the endpoint (the served model / policy)."
     )
 
+    model_config = ConfigDict(extra="forbid")
+
+
+class WhiteBoxSamplingConfig(BaseModel):
+    """Sampling controls for Agents that construct model requests themselves."""
+
     sampling_params_override: dict[str, float | int] = Field(
         default_factory=dict,
         description="Explicit sampling parameters sent by white-box agents on each request.",
     )
-    max_tokens_per_turn: int | None = Field(
-        default=None, description="Optional per-turn generation cap for white-box agents."
-    )
-
     model_config = ConfigDict(extra="forbid")
 
     def sampling_params(self) -> dict[str, float | int]:
@@ -38,13 +40,19 @@ class ModelConfig(BaseModel):
         return dict(self.sampling_params_override)
 
 
+class WhiteBoxModelConfig(ModelConfig, WhiteBoxSamplingConfig):
+    """Endpoint identity plus request controls for a white-box Agent."""
+
+    max_tokens_per_turn: int | None = Field(
+        default=None, description="Optional per-turn generation cap for white-box agents."
+    )
+
+
 class AgentConfig(BaseModel):
     """Base config for a registered agent."""
 
     name: str = Field(default="", description="Registered agent name (key in AGENT_REGISTRY).")
-    model: ModelConfig = Field(
-        default_factory=ModelConfig, description="LLM endpoint + sampling params for the policy."
-    )
+    model: ModelConfig = Field(default_factory=ModelConfig, description="LLM endpoint and model identity.")
 
     model_config = ConfigDict(extra="forbid", protected_namespaces=())
 

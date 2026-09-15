@@ -76,10 +76,8 @@ class _GatewayActor:
             apply_chat_template_kwargs=config.apply_chat_template_kwargs,
             mm_processor_kwargs=config.mm_processor_kwargs,
         )
-        self._allowed_request_sampling_param_keys = (
-            DEFAULT_ALLOWED_REQUEST_SAMPLING_KEYS
-            if config.allowed_request_sampling_param_keys is None
-            else frozenset(config.allowed_request_sampling_param_keys)
+        self._allowed_request_sampling_param_keys = frozenset(DEFAULT_ALLOWED_REQUEST_SAMPLING_KEYS).union(
+            config.allowed_request_sampling_param_keys or ()
         )
         self._prompt_length = config.prompt_length
         self._response_length = config.response_length

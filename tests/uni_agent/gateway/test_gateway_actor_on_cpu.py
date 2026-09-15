@@ -1123,9 +1123,8 @@ async def test_gateway_actor_session_sampling_defaults_are_isolated_and_request_
         },
     ]
 
-    if allowed_keys is None or "max_tokens" in allowed_keys:
-        expected[0].update(max_tokens=128, stop=["END"])
-        expected[1]["max_tokens"] = 64
+    expected[0].update(max_tokens=128, stop=["END"])
+    expected[1]["max_tokens"] = 64
     if allowed_keys and "temperature" in allowed_keys:
         expected[0].update(temperature=0.7, top_p=0.8, top_k=5)
     assert [call["sampling_params"] for call in backend.calls] == expected

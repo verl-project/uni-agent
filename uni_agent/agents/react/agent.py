@@ -10,7 +10,7 @@ from pydantic import Field
 
 from uni_agent.tools import Toolbox
 
-from ..base import Agent, AgentConfig, AgentResult
+from ..base import Agent, AgentConfig, AgentResult, WhiteBoxModelConfig
 from ..registry import register_agent
 from .model import OpenAICompatibleChatModel
 
@@ -27,6 +27,7 @@ class ReActConfig(AgentConfig):
     """White-box launch params: host-side tools + step / timeout budgets."""
 
     name: str = "react"
+    model: WhiteBoxModelConfig = Field(default_factory=WhiteBoxModelConfig)
     tools: list[dict] = Field(
         default_factory=lambda: [
             {"name": "str_replace_editor"},
