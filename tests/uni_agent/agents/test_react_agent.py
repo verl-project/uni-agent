@@ -273,7 +273,7 @@ def _per_turn_capped_agent(*, max_tokens_per_turn: int) -> ReActAgent:
     model = WhiteBoxModelConfig(
         base_url="http://gateway:8000/v1",
         model_name="policy",
-        max_tokens_per_turn=max_tokens_per_turn,
+        sampling_params_override={"max_tokens_per_turn": max_tokens_per_turn},
     )
     return ReActAgent(ReActConfig(model=model, tools=[], max_steps=2))
 

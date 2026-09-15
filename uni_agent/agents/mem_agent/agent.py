@@ -273,14 +273,14 @@ class MemAgent(Agent):
         self._current_context_step = None
 
     def _default_sampling_params(self) -> dict[str, Any]:
-        return self._mem_agent_config.model.sampling_params()
+        return self._mem_agent_config.model.sampling_params_override.sampling_params()
 
     def _sampling_params_for_step(self, overrides: dict[str, Any] | None) -> dict[str, Any]:
         cfg = self._mem_agent_config
         params = self._default_sampling_params()
         params.update(overrides or {})
 
-        max_tokens = params.get("max_tokens", cfg.model.max_tokens_per_turn)
+        max_tokens = params.get("max_tokens", cfg.model.sampling_params_override.max_tokens_per_turn)
         if max_tokens is not None:
             params["max_tokens"] = max_tokens
         return params

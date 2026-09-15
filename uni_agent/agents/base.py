@@ -29,23 +29,29 @@ class ModelConfig(BaseModel):
 class WhiteBoxSamplingConfig(BaseModel):
     """Sampling controls for Agents that construct model requests themselves."""
 
-    sampling_params_override: dict[str, float | int] = Field(
-        default_factory=dict,
-        description="Explicit sampling parameters sent by white-box agents on each request.",
-    )
+    temperature: float | None = None
+    top_p: float | None = None
+    top_k: int | None = None
+    max_tokens_per_turn: int | None = None
     model_config = ConfigDict(extra="forbid")
 
     def sampling_params(self) -> dict[str, float | int]:
-        """Return explicitly configured white-box sampling overrides."""
-        return dict(self.sampling_params_override)
+        """Return configured white-box sampling overrides."""
+        return {
+            key: value
+            for key, value in {
+                "temperature": self.temperature,
+                "top_p": self.top_p,
+                "top_k": self.top_k,
+            }.items()
+            if value is not None
+        }
 
 
-class WhiteBoxModelConfig(ModelConfig, WhiteBoxSamplingConfig):
+class WhiteBoxModelConfig(ModelConfig):
     """Endpoint identity plus request controls for a white-box Agent."""
 
-    max_tokens_per_turn: int | None = Field(
-        default=None, description="Optional per-turn generation cap for white-box agents."
-    )
+    sampling_params_override: WhiteBoxSamplingConfig = Field(default_factory=WhiteBoxSamplingConfig)
 
 
 class AgentConfig(BaseModel):

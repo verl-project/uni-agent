@@ -310,7 +310,8 @@ actor_rollout_ref:
 ```
 
 White-box Agents place explicit request values in
-`agent.model.sampling_params_override`. Black-box agents such as Claude Code do
+`agent.model.sampling_params_override`, whose fields are `temperature`, `top_p`, `top_k`,
+and `max_tokens_per_turn`. Black-box agents such as Claude Code do
 not need sampling fields in their YAML because they do not construct these
 requests. `max_tokens_per_turn` is an Agent-side concern; if a black-box Agent
 needs provider-specific flags, pass them through its `AgentConfig.extra_args`.
