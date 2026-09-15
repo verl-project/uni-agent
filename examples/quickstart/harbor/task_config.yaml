@@ -1,0 +1,8 @@
+- name: harbor
+  agent:
+    name: terminus-2
+    kwargs:
+      temperature: 0.0
+      max_turns: 50
+  harbor_env: modal
+  timeout_multiplier: 1.0

@@ -1,0 +1,47 @@
+name: docs
+
+on:
+  pull_request:
+    paths:
+      - "docs/**"
+      - "*.md"
+      - "mkdocs.yml"
+      - ".readthedocs.yaml"
+      - ".github/workflows/docs.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "docs/**"
+      - "*.md"
+      - "mkdocs.yml"
+      - ".readthedocs.yaml"
+      - ".github/workflows/docs.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  docs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install docs dependencies
+        run: python -m pip install --upgrade pip -r docs/requirements.txt
+
+      - name: Build docs
+        run: make -C docs clean html SPHINXOPTS="--keep-going -W"

@@ -1,0 +1,112 @@
+name: Feature request
+description: Propose a new capability or an improvement to Uni-Agent
+title: "[Feature] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Start with the user problem and desired outcome. A proposed implementation is useful, but it should respect the ownership boundaries between Task, Agent, Tool, Sandbox, Gateway, and the training framework.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What workflow is difficult or impossible today, and who is affected?
+      placeholder: I cannot reuse the same Task across ... because ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Desired behavior
+      description: Describe the capability and the user-visible outcome without assuming a specific implementation.
+      placeholder: Uni-Agent should allow ...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Owning component
+      description: Which layer should own this behavior?
+      options:
+        - Agent or agent harness
+        - Framework or rollout orchestration
+        - Gateway, model protocol, or trajectory capture
+        - Sandbox
+        - Task, reward, or dataset
+        - Tool or Toolbox
+        - Logging or observability
+        - Training or verl integration
+        - App or external integration
+        - Documentation or examples
+        - Installation, build, or dependencies
+        - Cross-cutting or not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: execution_path
+    attributes:
+      label: Target execution path
+      options:
+        - Standalone inference with an external model API
+        - verl-managed inference
+        - RL training
+        - All inference and training paths
+        - Sandbox or Tool usage without an Agent
+        - Other or not applicable
+    validations:
+      required: true
+
+  - type: textarea
+    id: use_case
+    attributes:
+      label: Example use case
+      description: Show a concrete workflow, config, API call, or input/output example.
+    validations:
+      required: true
+
+  - type: textarea
+    id: design
+    attributes:
+      label: Proposed design
+      description: If you have an implementation in mind, describe the API, config, lifecycle, and the component that owns each behavior.
+      placeholder: |
+        Python API:
+        Task or Agent config:
+        Runtime flow:
+
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility and migration
+      description: Note any impact on public Python APIs, Task or Sample Config, datasets, trajectories, checkpoints, or existing recipes.
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Describe current workarounds or other designs you evaluated.
+
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation
+      description: How would we know this feature works? Include expected tests, metrics, or benchmark evidence when relevant.
+
+  - type: textarea
+    id: references
+    attributes:
+      label: Additional context
+      description: Link related issues, PRs, papers, repositories, benchmarks, or documentation.
+
+  - type: checkboxes
+    id: contribution
+    attributes:
+      label: Contribution
+      options:
+        - label: I am willing to help implement this feature.
+        - label: I am willing to help test or validate this feature.

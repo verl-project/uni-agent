@@ -1,0 +1,188 @@
+# Agent
+
+An Agent defines who solves a Task and how the solving loop runs. Every Agent receives a started Sandbox, an OpenAI-style message list, and a runtime-injected model endpoint.
+
+Uni-Agent supports two integration styles:
+
+- **White-box Agent:** Uni-Agent owns the interaction loop, model calls, Tool dispatch, and transcript.
+- **Black-box Agent:** an external harness owns the loop and runs as a process inside the Sandbox.
+
+## Configuration
+
+All Agent configurations inherit from `AgentConfig`:
+
+```python
+class AgentConfig(BaseModel):
+    name: str
+    model: ModelConfig
+```
+
+`ModelConfig` contains the model endpoint and identity: `base_url`, `api_key`,
+and `model_name`. Runners normally inject these fields, so Task YAML can omit
+`model`. Custom callers can supply them when binding an external endpoint.
+
+White-box Agents such as ReAct and MemAgent expose
+`agent.sampling_params_override`, with optional `temperature`, `top_p`, `top_k`,
+and `max_tokens_per_turn` fields. Omitted values use the endpoint or Gateway
+session defaults. Gateway runs require explicit
+[request-key permission](gateway-and-trajectories.md#sampling-configuration)
+for request-level `temperature`, `top_p`, and `top_k` overrides.
+
+Black-box Agents delegate sampling to their harness. Claude Code receives model
+connection settings through environment variables and accepts harness options
+through `ClaudeCodeConfig.extra_args`.
+
+## Agent Contract
+
+Every Agent implements:
+
+```python
+async def run(
+    *,
+    sandbox: Sandbox,
+    messages: list[dict],
+    workdir: str | None = None,
+) -> AgentResult:
+    ...
+```
+
+The Task has already started the Sandbox. The Agent must not stop it. `workdir` optionally selects the Agent's working directory inside the Sandbox.
+
+`AgentResult` can carry:
+
+- `output`: final structured output.
+- `transcript`: messages and Tool observations produced by a white-box loop.
+- `info`: implementation-specific metadata such as token counts or process status.
+- `finished`: whether the episode completed normally. Defaults to `null`, meaning the Agent does not report a completion state; such episodes stay trainable.
+
+The Task decides how the resulting Sandbox state and AgentResult are scored.
+
+## White-Box Agent
+
+The built-in ReAct Agent demonstrates the white-box pattern:
+
+1. Build a Toolbox from configured Tool specs.
+2. Send messages and Tool schemas to an OpenAI-compatible model endpoint.
+3. Execute returned Tool calls.
+4. Append Tool observations to the transcript.
+5. Stop on `submit`/`finish`, token limit, timeout budget, or max steps.
+
+ReAct configuration exposes the loop:
+
+```yaml
+agent:
+  name: react
+  max_steps: 200
+  action_timeout: 300
+  tools:
+    - name: str_replace_editor
+    - name: stateful_shell
+    - name: submit
+  sampling_params_override:
+    temperature: 0.8
+    top_p: 0.9
+```
+
+Use this style when you need complete control over Tool schemas, observations, transcripts, and stopping behavior.
+
+## Black-Box Agent
+
+The Claude Code Agent demonstrates the black-box pattern:
+
+1. Ensure the external CLI is installed inside the Sandbox.
+2. Convert `ModelConfig` into the environment variables expected by the harness.
+3. Launch the harness through `sandbox.exec()`.
+4. Return process metadata while the Task evaluates the modified Sandbox.
+
+Claude Code sets `AgentResult.finished=true` when the process exits with code `0`.
+
+```yaml
+agent:
+  name: claude_code
+  max_turns: 200
+  run_timeout: 4800
+```
+
+Claude Code speaks the Anthropic Messages protocol. Uni-Agent sets `ANTHROPIC_BASE_URL` to either a direct model endpoint or a session-scoped Gateway endpoint.
+
+Use this style when an existing Agent Harness already owns its loop and Tools.
+
+### Claude Code Prompt Handling
+
+The Claude Code Agent requires exactly one non-blank user message and allows at most one system message; a second message of either role raises an error. Non-null content must be text. The user text is passed to `claude -p`; non-blank system text is passed to `--system-prompt`, replacing Claude Code's default system prompt. Missing, null, empty, or whitespace-only system content adds no system-prompt flag, retaining the default prompt unless `extra_args` explicitly overrides it. A non-blank system message conflicts with `--system-prompt` or `--system-prompt-file` in `extra_args`; append flags remain explicitly controlled through `extra_args`.
+
+System messages can come from the dataset prompt or the existing Task `prompt_template`:
+
+```yaml
+prompt_template:
+  - role: system
+    content: "Follow these task rules: {task_rules}"
+  - role: user
+    content: "Resolve this issue: {problem_statement}"
+agent:
+  name: claude_code
+```
+
+Template placeholders use Task metadata. A configured template replaces the input prompt, so a user-only template does not inherit dataset system messages.
+
+## Custom Agent
+
+Create an Agent-specific configuration and implementation:
+
+```python
+from typing import Any
+
+from pydantic import Field
+
+from uni_agent.agents.base import Agent, AgentConfig, AgentResult
+from uni_agent.agents.registry import register_agent
+
+
+class MyAgentConfig(AgentConfig):
+    name: str = "my_agent"
+    run_timeout: float = Field(default=1800)
+
+
+@register_agent("my_agent")
+class MyAgent(Agent):
+    config_model = MyAgentConfig
+
+    async def run(
+        self,
+        *,
+        sandbox,
+        messages: list[dict[str, Any]],
+        workdir: str | None = None,
+    ) -> AgentResult:
+        config: MyAgentConfig = self.config
+        result = await sandbox.exec(
+            ["my-agent", "--endpoint", config.model.base_url],
+            timeout=config.run_timeout,
+            workdir=workdir,
+        )
+        return AgentResult(
+            info={
+                "exit_code": result.exit_code,
+                "stdout": result.stdout,
+                "stderr": result.stderr,
+            }
+        )
+```
+
+Register the lazy module:
+
+```python
+AGENT_MODULES["my_agent"] = "my_package.agent"
+```
+
+`TaskConfig` resolves an Agent mapping through this registry, so Agent-specific fields remain typed and validated.
+
+## Implementation Rules
+
+- Validate required model endpoint fields before starting work.
+- Treat the Sandbox as already started and Task-owned.
+- Return `AgentResult` even when the Task primarily scores filesystem changes.
+- Keep Agent-specific launch settings in the Agent config; keep task metadata and reward logic in the Task.
+- For white-box loops, use Toolbox lifecycle management and preserve a useful transcript.
+- For black-box harnesses, map model settings explicitly and enforce process timeouts.
+- Register the class and add a lazy module entry so optional dependencies remain isolated.

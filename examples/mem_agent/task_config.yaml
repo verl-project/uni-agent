@@ -1,0 +1,14 @@
+- name: hotpotqa
+  sandbox:
+    provider: local
+  agent:
+    name: mem_agent
+    max_memorization_length: 1024
+    max_chunks: 8
+    max_final_response_length: 1024
+    max_steps: 9
+    # Explicit request overrides for direct API inference and Gateway training.
+    sampling_params_override:
+      temperature: 1.0
+      # Omit top_p to inherit the endpoint / rollout default.
+      top_k: -1

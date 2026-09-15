@@ -1,0 +1,87 @@
+# ruff: noqa: E501
+"""Preprocess SWE-bench Verified into the new-framework SWE task format.
+
+Provider-agnostic on purpose: the row only carries the canonical *open-source*
+image ref (the published ``swebench/sweb.eval.x86_64.<id>``); mapping that to a
+service-provider image is the sandbox provider's job (e.g. ``_to_vefaas_image``),
+decided at run time, not baked into the dataset.
+
+Example::
+
+    python -m uni_agent.tasks.swe_bench.preprocess --local-save-dir ~/data/swe_agent
+"""
+
+import argparse
+import os
+
+from datasets import load_dataset
+
+
+def get_image_name(instance_id: str) -> str:
+    """Canonical open-source image ref (mirrors swebench's ``instance_image_key``).
+
+    Provider-agnostic; a provider maps this to its own registry at run time.
+    """
+    return f"swebench/sweb.eval.x86_64.{instance_id.lower().replace('__', '_1776_')}"
+
+
+def build_swe_bench_verified(max_instances: int | None = None):
+    def process(example):
+        instance_id = example["instance_id"]
+
+        metadata = {
+            "instance_id": instance_id,
+            "repo": example["repo"],
+            "version": str(example["version"]),
+            "base_commit": example["base_commit"],
+            "patch": example["patch"],
+            "test_patch": example["test_patch"],
+            "problem_statement": example["problem_statement"],
+            "FAIL_TO_PASS": example["FAIL_TO_PASS"],
+            "PASS_TO_PASS": example["PASS_TO_PASS"],
+        }
+        task_config = {
+            "name": "swe_bench",
+            "sandbox": {"image": get_image_name(instance_id)},
+            "metadata": metadata,
+        }
+
+        return {
+            "data_source": "princeton-nlp/SWE-bench_Verified",
+            "prompt": [{"role": "user", "content": example["problem_statement"]}],
+            "extra_info": {
+                "tools_kwargs": {"task": task_config},
+            },
+        }
+
+    data_source = "princeton-nlp/SWE-bench_Verified"
+    print(f"Loading the {data_source} dataset from huggingface...", flush=True)
+    dataset = load_dataset(data_source, split="test")
+    print(f"Loaded {len(dataset)} raw instances", flush=True)
+
+    if max_instances is not None and max_instances >= 0:
+        dataset = dataset.select(range(min(max_instances, len(dataset))))
+        print(f"Capped to {len(dataset)} instances", flush=True)
+
+    dataset = dataset.map(process, remove_columns=dataset.column_names)
+    return dataset
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--local-save-dir", default="~/data/swe_agent")
+    parser.add_argument(
+        "--max-instances",
+        type=int,
+        default=None,
+        help="Optional cap on the number of instances kept (smoke testing).",
+    )
+    args = parser.parse_args()
+
+    save_dir = os.path.expanduser(args.local_save_dir)
+    os.makedirs(save_dir, exist_ok=True)
+
+    dataset = build_swe_bench_verified(max_instances=args.max_instances)
+    out_path = f"{save_dir}/swe_bench_verified.parquet"
+    dataset.to_parquet(out_path)
+    print(f"Wrote {len(dataset)} instances to {out_path}", flush=True)

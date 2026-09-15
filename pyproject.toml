@@ -1,0 +1,120 @@
+# -------------------------------
+# build-system
+# -------------------------------
+[build-system]
+requires = [
+    "setuptools>=77.0",
+    "wheel"
+]
+build-backend = "setuptools.build_meta"
+
+# -------------------------------
+# project (PEP 621 metadata)
+# -------------------------------
+[project]
+name = "uni-agent"
+dynamic = ["version"]
+
+description = "Uni-Agent: Train Long-Horizon Agents at Scale"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+readme = {file = "README.md", content-type = "text/markdown"}
+requires-python = ">=3.10,<3.13"
+
+[project.urls]
+Documentation = "https://uni-agent.readthedocs.io/"
+Repository = "https://github.com/verl-project/uni-agent"
+Issues = "https://github.com/verl-project/uni-agent/issues"
+
+# -------------------------------
+# tool.ruff - Linting configuration
+# -------------------------------
+[tool.ruff]
+line-length = 120
+exclude = ["verl"]
+
+[tool.ruff.lint]
+isort = {known-first-party = ["verl"]}
+# c.f. https://github.com/vllm-project/vllm/blob/ce8d6b75fc0586045df75ee1568a5b5f9957251b/pyproject.toml
+select = [
+    # pycodestyle
+    "E",
+    # Pyflakes
+    "F",
+    # pyupgrade
+    "UP",
+    # flake8-bugbear
+    "B",
+    # isort
+    "I",
+    "G",
+]
+ignore = [
+    # star imports
+    "F405", "F403",
+    # lambda expression assignment
+    "E731",
+    # Loop control variable not used within loop body
+    "B007",
+    # f-string format
+    "UP032",
+    # `.log()` statement uses f-string
+    "G004",
+    # X | None for type annotations
+    "UP045",
+    # deprecated import
+    "UP035",
+]
+
+# -------------------------------
+# tool.mypy - typechecking config
+# -------------------------------
+[tool.mypy]
+pretty            = true
+ignore_missing_imports = true
+explicit_package_bases = true
+follow_imports = "skip"
+exclude = '(^|/)(verl)(/|$)'
+
+# Blanket silence
+ignore_errors = true
+
+[[tool.mypy.overrides]]
+module = [
+"verl.trainer.config.algorithm",
+"verl.trainer.ppo.core_algos",
+"verl.trainer.ppo.reward",
+"verl.workers.reward_manager",
+"verl.workers.reward_manager.*",
+]
+ignore_errors = false
+
+# -------------------------------
+# tool.setuptools - Additional config
+# -------------------------------
+[tool.setuptools]
+include-package-data = true
+
+[tool.setuptools.dynamic]
+version = {file = "uni_agent/version/version"}
+
+[tool.setuptools.package-dir]
+"" = "."
+
+[tool.setuptools.packages.find]
+include = ["uni_agent*"]
+
+[tool.setuptools.package-data]
+uni_agent = ["version/*"]
+"uni_agent.agent_aware_router" = [
+  "configs/*.yaml",
+]
+
+[tool.pytest.ini_options]
+markers = [
+    "cpu: run on cpu backend",
+    "gpu: run on gpu backend",
+    "npu: run on npu backend",
+    "level0: mark level0 case, always run in CI",
+    "level1: mark level1 case, full test, not included in CI"
+]

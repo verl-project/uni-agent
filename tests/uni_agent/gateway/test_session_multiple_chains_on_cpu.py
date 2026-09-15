@@ -1,0 +1,2141 @@
+import asyncio
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
+from fastapi import HTTPException
+
+from tests.uni_agent.support import (
+    FakeProcessor,
+    FakeTokenizer,
+    SequencedBackend,
+    fake_vision_info_extractor,
+)
+from uni_agent.gateway.adapters.openai import openai_to_internal
+from uni_agent.gateway.session import GatewaySession, MessageCodec, SessionHandle
+from verl.workers.rollout.replica import TokenOutput
+
+HELPFUL_SYS = {"role": "system", "content": "You are helpful."}
+SUBAGENT_SYS = {"role": "system", "content": "You are a focused subagent."}
+ALLOWED_SAMPLING_KEYS = frozenset({"temperature", "top_p", "top_k", "max_tokens", "stop"})
+
+
+async def _fake_tool_call_dispatch(self, response_ids, tools, parser_name):
+    text = self._tokenizer.decode(response_ids, skip_special_tokens=False)
+    if "<tool_call>" not in text:
+        return text, []
+    return "", [SimpleNamespace(name="search", arguments='{"query":"weather"}')]
+
+
+def _ids(text: str) -> list[int]:
+    return [ord(char) for char in text]
+
+
+def _decode_response_ids(response_ids: list[int]) -> str:
+    return FakeTokenizer().decode(response_ids)
+
+
+def _prompt_length(messages: list[dict]) -> int:
+    return len(MessageCodec(FakeTokenizer()).build_initial_tokens(messages))
+
+
+def _session(
+    session_id: str,
+    *,
+    prompt_length: int | None = None,
+    response_length: int | None = None,
+    sampling_params: dict | None = None,
+    enable_last_assistant_rollback: bool = False,
+    coalesce_reserved_exact_requests: bool = True,
+    processor=None,
+    vision_info_extractor=None,
+    tool_parser_name: str | None = None,
+    mm_processor_kwargs: dict | None = None,
+) -> GatewaySession:
+    return GatewaySession(
+        SessionHandle(session_id=session_id),
+        MessageCodec(
+            FakeTokenizer(),
+            processor=processor,
+            vision_info_extractor=vision_info_extractor,
+            tool_parser_name=tool_parser_name,
+            mm_processor_kwargs=mm_processor_kwargs,
+        ),
+        prompt_length=prompt_length,
+        response_length=response_length,
+        sampling_params=sampling_params,
+        enable_last_assistant_rollback=enable_last_assistant_rollback,
+        coalesce_reserved_exact_requests=coalesce_reserved_exact_requests,
+    )
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize("response_length", [0, -1])
+def test_gateway_session_rejects_non_positive_response_length(response_length):
+    """Reject non-positive session response budgets during construction."""
+    with pytest.raises(ValueError, match="response_length must be positive"):
+        _session("invalid-response-length", response_length=response_length)
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize("prompt_length", [0, -1])
+def test_gateway_session_rejects_non_positive_prompt_length(prompt_length):
+    """Reject non-positive session prompt capacity during construction."""
+    with pytest.raises(ValueError, match="prompt_length must be positive"):
+        _session("invalid-prompt-length", prompt_length=prompt_length)
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_gateway_session_enables_rollback_and_coalescing_by_default():
+    session = GatewaySession(
+        SessionHandle(session_id="rollback-default"),
+        MessageCodec(FakeTokenizer()),
+    )
+
+    assert session._enable_last_assistant_rollback is True
+    assert session._coalesce_reserved_exact_requests is True
+
+
+async def _run(session: GatewaySession, backend: SequencedBackend, messages: list[dict], **payload_extra):
+    request = openai_to_internal(
+        {"model": "dummy-model", "messages": messages, **payload_extra},
+        base_sampling_params=session.sampling_params,
+        allowed_sampling_keys=ALLOWED_SAMPLING_KEYS,
+    )
+    return await session.run_generation(request, backend)
+
+
+class _LogprobBackend:
+    def __init__(self, steps):
+        self.steps = list(steps)
+
+    async def generate(
+        self,
+        request_id,
+        *,
+        prompt_ids,
+        sampling_params,
+        image_data=None,
+        video_data=None,
+        mm_processor_kwargs=None,
+    ):
+        text, log_probs = self.steps.pop(0)
+        token_ids = _ids(text)
+        if log_probs == "full":
+            log_probs = [-0.1] * len(token_ids)
+        elif log_probs == "short":
+            log_probs = [-0.1]
+        return TokenOutput(token_ids=token_ids, log_probs=log_probs, stop_reason="completed")
+
+
+class _VersionedBackend:
+    def __init__(self, steps):
+        # steps: list of (text, min_global_steps, max_global_steps)
+        self.steps = list(steps)
+
+    async def generate(
+        self,
+        request_id,
+        *,
+        prompt_ids,
+        sampling_params,
+        image_data=None,
+        video_data=None,
+        mm_processor_kwargs=None,
+    ):
+        text, min_steps, max_steps = self.steps.pop(0)
+        token_ids = _ids(text)
+        return TokenOutput(
+            token_ids=token_ids,
+            log_probs=[-0.1] * len(token_ids),
+            stop_reason="completed",
+            extra_fields={"min_global_steps": min_steps, "max_global_steps": max_steps},
+        )
+
+
+class _ControlledParallelBackend:
+    def __init__(self, steps):
+        self.steps = list(steps)
+        self.calls = []
+        self._call_added = asyncio.Event()
+
+    async def generate(
+        self,
+        request_id,
+        *,
+        prompt_ids,
+        sampling_params,
+        image_data=None,
+        video_data=None,
+        mm_processor_kwargs=None,
+    ):
+        step = self.steps.pop(0)
+        call = {
+            "request_id": request_id,
+            "prompt_ids": list(prompt_ids),
+            "sampling_params": dict(sampling_params),
+            "image_data": image_data,
+            "video_data": video_data,
+            "release": asyncio.Event(),
+            "step": step,
+        }
+        self.calls.append(call)
+        self._call_added.set()
+        self._call_added = asyncio.Event()
+        await call["release"].wait()
+        if isinstance(step, Exception):
+            raise step
+        token_ids = _ids(step)
+        return TokenOutput(token_ids=token_ids, log_probs=[-0.1] * len(token_ids), stop_reason="completed")
+
+    async def wait_for_calls(self, count: int) -> None:
+        while len(self.calls) < count:
+            await asyncio.wait_for(self._call_added.wait(), timeout=5)
+
+    def release_call(self, index: int) -> None:
+        self.calls[index]["release"].set()
+
+
+def _image_message(url: str, text: str) -> dict:
+    return {
+        "role": "user",
+        "content": [
+            {"type": "image_url", "image_url": {"url": url}},
+            {"type": "text", "text": text},
+        ],
+    }
+
+
+def _video_message(url: str, text: str) -> dict:
+    return {
+        "role": "user",
+        "content": [
+            {"type": "video_url", "video_url": {"url": url}},
+            {"type": "text", "text": text},
+        ],
+    }
+
+
+async def _codec_compatible_video_extractor(messages, image_patch_size, config=None):
+    images, videos = await fake_vision_info_extractor(messages, image_patch_size=image_patch_size, config=config)
+    if videos is not None:
+        videos = [(video, {"url": video}) for video in videos]
+    return images, videos
+
+
+def _assert_active_chain_tip_hashes_match_history(session: GatewaySession) -> None:
+    state = session.snapshot_state()
+    for chain in session.active_chains:
+        expected_tip_hash = session._extend_message_prefix_hashes([], chain.message_history)[-1]
+        assert chain.message_tip_hash == expected_tip_hash
+        assert state["active_chain_tip_hashes"][chain.chain_id] == expected_tip_hash
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_multiple_chains_linear_conversation_stays_single_chain():
+    """Continue a linear conversation on one active chain and trajectory."""
+    session = _session("linear")
+    backend = SequencedBackend(["FIRST", "SECOND"])
+    first_messages = [{"role": "user", "content": "first turn"}]
+    second_messages = [
+        {"role": "user", "content": "first turn"},
+        {"role": "assistant", "content": "FIRST"},
+        {"role": "user", "content": "follow up"},
+    ]
+
+    await _run(session, backend, first_messages, temperature=0.2)
+    await _run(session, backend, second_messages, temperature=0.3)
+    chain_trajectories = await session.finalize()
+
+    assert len(chain_trajectories) == 1
+    assert 0 in chain_trajectories[0].response_mask
+    assert chain_trajectories[0].response_mask[-len("SECOND") :] == [1] * len("SECOND")
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_multiple_chains_subagent_system_split_returns_to_main_chain():
+    """Split subagent history into a sibling and later resume the main chain."""
+    session = _session("subagent-return")
+    backend = SequencedBackend(["Mango", "Blue", "Apple"])
+    main_first = [HELPFUL_SYS, {"role": "user", "content": "name a fruit"}]
+    subagent = [SUBAGENT_SYS, {"role": "user", "content": "name a color"}]
+    main_continuation = [
+        HELPFUL_SYS,
+        {"role": "user", "content": "name a fruit"},
+        {"role": "assistant", "content": "Mango"},
+        {"role": "user", "content": "name another fruit"},
+    ]
+
+    await _run(session, backend, main_first)
+    await _run(session, backend, subagent)
+    await _run(session, backend, main_continuation)
+
+    state = session.snapshot_state()
+    assert state["active_chain_ids"] == [1, 2]
+
+    trajectories = await session.finalize()
+
+    assert len(trajectories) == 2
+    decoded = [_decode_response_ids(t.response_ids) for t in trajectories]
+    assert "Blue" in decoded[0]
+    assert "Mango" in decoded[1]
+    assert "Apple" in decoded[1]
+    assert "Blue" not in decoded[1]
+    assert 0 in trajectories[1].response_mask
+    assert trajectories[1].response_mask[-len("Apple") :] == [1] * len("Apple")
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_multiple_chains_context_compaction_starts_new_chain():
+    """Start a new chain when compacted context no longer matches a stored prefix."""
+    session = _session("compaction")
+    backend = SequencedBackend(["DETAILED", "AFTER_SUMMARY"])
+
+    await _run(session, backend, [HELPFUL_SYS, {"role": "user", "content": "produce a detailed answer"}])
+    await _run(
+        session,
+        backend,
+        [
+            {"role": "system", "content": "Summary so far: the detailed answer was compacted."},
+            {"role": "user", "content": "continue from the summary"},
+        ],
+    )
+    trajectories = await session.finalize()
+
+    decoded = [_decode_response_ids(t.response_ids) for t in trajectories]
+    assert len(trajectories) == 2
+    assert decoded == ["DETAILED", "AFTER_SUMMARY"]
+    assert all(t.response_mask == [1] * len(t.response_ids) for t in trajectories)
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_first_assistant_rewrite_reuses_chain_without_stale_response():
+    """Replace a first assistant in place when no earlier response tokens exist."""
+    session = _session(
+        "rollback-token-truth",
+        sampling_params={"logprobs": True},
+        enable_last_assistant_rollback=True,
+    )
+    first_messages = [{"role": "user", "content": "run mini-swe"}]
+    rewrite_messages = [
+        *first_messages,
+        {"role": "user", "content": "user_error: missing import"},
+    ]
+    codec = session._codec
+    backend = SequencedBackend(["FORMAT_ERROR", "FIXED"])
+
+    await _run(session, backend, first_messages)
+    await _run(session, backend, rewrite_messages)
+
+    state = session.snapshot_state()
+    assert state["active_chain_ids"] == [1]
+    assert state["rollback_count"] == 1
+    assert state["rollback_dropped_trainable_tokens_total"] == len("FORMAT_ERROR")
+    chain = session.active_chains[0]
+    expected_prompt_ids = codec.build_initial_tokens(first_messages)
+    del expected_prompt_ids[-len(codec.turn_separator) - len(codec.generation_prompt) :]
+    expected_context_ids = codec.build_initial_tokens(rewrite_messages)
+    assert expected_context_ids[: len(expected_prompt_ids)] == expected_prompt_ids
+    incremental_ids = expected_context_ids[len(expected_prompt_ids) :]
+    assert backend.calls[1]["prompt_ids"] == expected_context_ids
+    assert chain.buffer.prompt_ids == expected_prompt_ids
+    assert chain.buffer.response_ids == incremental_ids + _ids("FIXED")
+    assert chain.buffer.response_mask == [0] * len(incremental_ids) + [1] * len("FIXED")
+    assert chain.buffer.response_logprobs == [0.0] * len(incremental_ids) + [-0.1] * len("FIXED")
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_first_assistant_rollback_failure_preserves_original_chain():
+    """Keep the original first-turn chain when replacement generation fails."""
+    session = _session("rollback-first-failure", enable_last_assistant_rollback=True)
+    first_messages = [{"role": "user", "content": "run mini-swe"}]
+    rewrite_messages = [
+        *first_messages,
+        {"role": "user", "content": "user_error: missing import"},
+    ]
+    backend = SequencedBackend(["FORMAT_ERROR", RuntimeError("boom")])
+
+    await _run(session, backend, first_messages)
+    with pytest.raises(HTTPException, match="RuntimeError: boom"):
+        await _run(session, backend, rewrite_messages)
+
+    state = session.snapshot_state()
+    assert state["active_chain_ids"] == [1]
+    assert state["rollback_count"] == 0
+    assert _decode_response_ids(session.active_chains[0].buffer.response_ids) == "FORMAT_ERROR"
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_first_assistant_rollback_drops_chain_when_replacement_exceeds_capacity():
+    """Drop the empty-prefix chain when the replacement prompt cannot fit."""
+    first_messages = [{"role": "user", "content": "run mini-swe"}]
+    rewrite_messages = [
+        *first_messages,
+        {"role": "user", "content": "user_error: missing import"},
+    ]
+    total_capacity = _prompt_length(rewrite_messages) - 1
+    session = _session(
+        "rollback-first-capacity",
+        prompt_length=1,
+        response_length=total_capacity - 1,
+        enable_last_assistant_rollback=True,
+    )
+    backend = SequencedBackend(["FORMAT_ERROR", "SHOULD_NOT_RUN"])
+
+    await _run(session, backend, first_messages)
+    outcome = await _run(session, backend, rewrite_messages)
+
+    assert outcome.finish_reason == "length"
+    assert len(backend.calls) == 1
+    state = session.snapshot_state()
+    assert state["active_chain_ids"] == []
+    assert state["rollback_count"] == 1
+    assert state["rollback_dropped_trainable_tokens_total"] == len("FORMAT_ERROR")
+    assert await session.finalize() == []
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_first_assistant_rewrite_with_assistant_tool_context_reuses_chain():
+    """Replace a first-turn assistant/tool context in the existing chain."""
+    session = _session("rollback-first-assistant-tool", enable_last_assistant_rollback=True)
+    first_messages = [{"role": "user", "content": "run task"}]
+    rewrite_messages = [
+        *first_messages,
+        {"role": "assistant", "content": "NEW", "tool_calls": []},
+        {"role": "tool", "content": "OBS", "tool_call_id": "call_1"},
+    ]
+    backend = SequencedBackend(["BAD", "FIXED"])
+
+    await _run(session, backend, first_messages)
+    await _run(session, backend, rewrite_messages)
+
+    assert [chain.chain_id for chain in session.active_chains] == [1]
+    chain = session.active_chains[0]
+    codec = session._codec
+    assert backend.calls[1]["prompt_ids"] == codec.build_initial_tokens(rewrite_messages)
+    assert chain.buffer.response_ids[-len("FIXED") :] == _ids("FIXED")
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_later_assistant_rollback_removes_only_the_response_side_gp():
+    """Preserve earlier trainable output while removing the latest stale GP."""
+    session = _session("rollback-later-gp", enable_last_assistant_rollback=True)
+    backend = SequencedBackend(["A1", "A2", "FIXED"])
+    first_messages = [{"role": "user", "content": "start"}]
+    second_messages = [
+        *first_messages,
+        {"role": "assistant", "content": "A1"},
+        {"role": "user", "content": "second"},
+    ]
+    rewrite_messages = [
+        *second_messages[:2],
+        second_messages[2],
+        {"role": "user", "content": "replacement"},
+    ]
+
+    await _run(session, backend, first_messages)
+    await _run(session, backend, second_messages)
+    await _run(session, backend, rewrite_messages)
+
+    [chain] = session.active_chains
+    committed_before_replacement = chain.buffer.prompt_ids + chain.buffer.response_ids[: -len("FIXED")]
+    assert backend.calls[2]["prompt_ids"] == committed_before_replacement
+    assert _decode_response_ids(chain.buffer.response_ids) == ("A1user:second\nuser:replacement\nassistant:FIXED")
+    assert chain.buffer.response_mask == (
+        [1] * len("A1") + [0] * len("user:second\nuser:replacement\nassistant:") + [1] * len("FIXED")
+    )
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_later_assistant_rollback_rejects_misaligned_assistant_prefix():
+    """Fail closed when the stored turn separator no longer matches the codec."""
+    session = _session("rollback-prefix-assert", enable_last_assistant_rollback=True)
+    codec = session._codec
+    codec._turn_separator = _ids("\n")
+    backend = SequencedBackend(["A1", "A2", "FIXED"])
+    first_messages = [{"role": "user", "content": "start"}]
+    continuation = [
+        *first_messages,
+        {"role": "assistant", "content": "A1"},
+        {"role": "user", "content": "second"},
+    ]
+    rewrite_messages = [*continuation, {"role": "user", "content": "replacement"}]
+
+    await _run(session, backend, first_messages)
+    await _run(session, backend, continuation)
+    [chain] = session.active_chains
+    snapshot = chain.last_assistant_start
+    separator_end = snapshot.response_ids_len - len(codec.generation_prompt)
+    chain.buffer.response_ids[separator_end - 1] += 1
+
+    with pytest.raises(ValueError, match="assistant prefix"):
+        await _run(session, backend, rewrite_messages)
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_last_assistant_rollback_splits_when_history_changes_before_boundary():
+    """Split when request drift starts before the latest assistant boundary."""
+    session = _session("rollback-split-before-boundary", enable_last_assistant_rollback=True)
+    backend = SequencedBackend(["A1", "A2", "A3"])
+    first_messages = [{"role": "user", "content": "start"}]
+    second_messages = [
+        *first_messages,
+        {"role": "assistant", "content": "A1"},
+        {"role": "user", "content": "original tool result"},
+    ]
+    edited_messages = [
+        *first_messages,
+        {"role": "assistant", "content": "A1"},
+        {"role": "user", "content": "edited tool result"},
+        {"role": "assistant", "content": "A2"},
+        {"role": "user", "content": "continue"},
+    ]
+
+    await _run(session, backend, first_messages)
+    await _run(session, backend, second_messages)
+    await _run(session, backend, edited_messages)
+
+    state = session.snapshot_state()
+    assert state["active_chain_ids"] == [1, 2]
+    assert state["rollback_count"] == 0
+    chains_by_id = {chain.chain_id: chain for chain in session.active_chains}
+    assert chains_by_id[1].message_history[2]["content"] == "original tool result"
+    assert chains_by_id[2].message_history[2]["content"] == "edited tool result"
+    assert _decode_response_ids(chains_by_id[1].buffer.response_ids).endswith("A2")
+    assert _decode_response_ids(chains_by_id[2].buffer.response_ids) == "A3"
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_last_assistant_rollback_ambiguous_deepest_boundary_splits_over_shallower_exact():
+    """Do not fall back to a shallower exact chain when the deepest rewrite is ambiguous."""
+    session = _session("rollback-ambiguous-deepest", enable_last_assistant_rollback=True)
+    prompt = [{"role": "user", "content": "same prompt"}]
+    continuation = [
+        *prompt,
+        {"role": "assistant", "content": "A1"},
+        {"role": "user", "content": "second turn"},
+    ]
+    rewrite = [*continuation, {"role": "user", "content": "user_error"}]
+    backend = SequencedBackend(["A1", "A1", "A1", "A2A", "A2B", "FIXED"])
+
+    await _run(session, backend, prompt)
+    await _run(session, backend, prompt)
+    await _run(session, backend, prompt)
+    await _run(session, backend, continuation)
+    await _run(session, backend, continuation)
+    await _run(session, backend, rewrite)
+
+    state = session.snapshot_state()
+    assert state["active_chain_ids"] == [1, 2, 3, 4]
+    assert state["rollback_count"] == 0
+    chains_by_id = {chain.chain_id: chain for chain in session.active_chains}
+    assert _decode_response_ids(chains_by_id[1].buffer.response_ids) == "A1"
+    assert _decode_response_ids(chains_by_id[4].buffer.response_ids) == "FIXED"
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_last_assistant_rollback_ignores_shallower_candidate_for_unique_deepest_boundary():
+    """Rollback the unique deepest match even when a shallower rewrite also matches."""
+    session = _session("rollback-deepest", enable_last_assistant_rollback=True)
+    prompt = [{"role": "user", "content": "same prompt"}]
+    continuation = [
+        *prompt,
+        {"role": "assistant", "content": "A1"},
+        {"role": "user", "content": "second turn"},
+    ]
+    rewrite = [*continuation, {"role": "user", "content": "user_error"}]
+
+    await _run(session, SequencedBackend(["SHALLOW"]), prompt)
+    await _run(session, SequencedBackend(["A1"]), prompt)
+    await _run(session, SequencedBackend(["A2"]), continuation)
+    await _run(session, SequencedBackend(["FIXED"]), rewrite)
+
+    state = session.snapshot_state()
+    assert state["active_chain_ids"] == [1, 2]
+    assert state["rollback_count"] == 1
+    chains_by_id = {chain.chain_id: chain for chain in session.active_chains}
+    assert _decode_response_ids(chains_by_id[1].buffer.response_ids) == "SHALLOW"
+    deep_text = _decode_response_ids(chains_by_id[2].buffer.response_ids)
+    assert deep_text.startswith("A1")
+    assert deep_text.endswith("FIXED")
+    assert "A2" not in deep_text
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_last_assistant_rollback_excludes_reserved_candidate():
+    """Do not select an in-flight chain as a rollback target."""
+    session = _session("rollback-reserved", enable_last_assistant_rollback=True)
+    prompt = [{"role": "user", "content": "same prompt"}]
+    rewrite_messages = [
+        *prompt,
+        {"role": "user", "content": "user_error while busy"},
+    ]
+
+    await _run(session, SequencedBackend(["BAD"]), prompt)
+    session.reserved_chain_ids.add(1)
+    await _run(session, SequencedBackend(["FIXED"]), rewrite_messages)
+
+    state = session.snapshot_state()
+    assert state["active_chain_ids"] == [1, 2]
+    assert state["rollback_count"] == 0
+    chains_by_id = {chain.chain_id: chain for chain in session.active_chains}
+    assert _decode_response_ids(chains_by_id[1].buffer.response_ids) == "BAD"
+    assert _decode_response_ids(chains_by_id[2].buffer.response_ids) == "FIXED"
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_last_assistant_rollback_prefers_longer_service_chain_over_exact_short_chain():
+    """Rollback the deeper live chain instead of continuing its exact prefix sibling."""
+    session = _session("rollback-longest-service", enable_last_assistant_rollback=True)
+    prompt = [{"role": "user", "content": "same prompt"}]
+    continuation = [
+        *prompt,
+        {"role": "assistant", "content": "A1"},
+        {"role": "user", "content": "second turn"},
+    ]
+    rewrite_messages = [
+        *continuation,
+        {"role": "user", "content": "user_error replaces old assistant"},
+    ]
+
+    await _run(session, SequencedBackend(["A1"]), prompt)
+    await _run(session, SequencedBackend(["A1"]), prompt)
+    await _run(session, SequencedBackend(["A2"]), continuation)
+    await _run(session, SequencedBackend(["FIXED"]), rewrite_messages)
+
+    state = session.snapshot_state()
+    assert state["active_chain_ids"] == [1, 2]
+    assert state["rollback_count"] == 1
+    chains_by_id = {chain.chain_id: chain for chain in session.active_chains}
+    assert _decode_response_ids(chains_by_id[1].buffer.response_ids) == "A1"
+    long_chain_text = _decode_response_ids(chains_by_id[2].buffer.response_ids)
+    assert long_chain_text.startswith("A1")
+    assert long_chain_text.endswith("FIXED")
+    assert "A2" not in long_chain_text
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_last_assistant_rollback_tie_prefers_exact_chain_without_drop():
+    """Continue the exact chain when its service value ties a rollback candidate."""
+    session = _session("rollback-exact-tie", enable_last_assistant_rollback=True)
+    prompt = [{"role": "user", "content": "same prompt"}]
+    echoed_assistant = [*prompt, {"role": "assistant", "content": "A1"}]
+    rewrite_messages = [
+        *echoed_assistant,
+        {"role": "user", "content": "replace the newer assistant"},
+    ]
+
+    await _run(session, SequencedBackend(["A1"]), prompt)
+    await _run(session, SequencedBackend(["A1"]), prompt)
+    await _run(session, SequencedBackend(["A2"]), echoed_assistant)
+    await _run(session, SequencedBackend(["FIXED"]), rewrite_messages)
+
+    state = session.snapshot_state()
+    assert state["active_chain_ids"] == [1, 2]
+    assert state["rollback_count"] == 0
+    chains_by_id = {chain.chain_id: chain for chain in session.active_chains}
+    assert _decode_response_ids(chains_by_id[1].buffer.response_ids).endswith("FIXED")
+    assert _decode_response_ids(chains_by_id[2].buffer.response_ids).endswith("A2")
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_chain_prefix_hash_match_accepts_empty_history_for_any_request():
+    """Document the current empty-history wildcard behavior without changing it."""
+    session = _session("empty-history-prefix")
+    incoming_hashes = session._extend_message_prefix_hashes(
+        [],
+        [{"role": "user", "content": "any request"}],
+    )
+    empty_chain = SimpleNamespace(message_history=[], message_tip_hash="unused")
+
+    assert session._is_chain_prefix_hash_match(
+        chain=empty_chain,
+        incoming_message_prefix_hashes=incoming_hashes,
+    )
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_later_assistant_rollback_rejects_misaligned_stored_logprobs():
+    """Fail loudly instead of slicing a chain whose token truth is already corrupt."""
+    session = _session(
+        "rollback-logprob-assert",
+        sampling_params={"logprobs": True},
+        enable_last_assistant_rollback=True,
+    )
+    prompt = [{"role": "user", "content": "run"}]
+    continuation = [*prompt, {"role": "assistant", "content": "A1"}, {"role": "user", "content": "continue"}]
+    rewrite_messages = [*continuation, {"role": "user", "content": "user_error"}]
+
+    backend = _LogprobBackend([("A1", "full"), ("A2", "full"), ("FIXED", "full")])
+    await _run(session, backend, prompt)
+    await _run(session, backend, continuation)
+    session.active_chains[0].buffer.response_logprobs.pop()
+
+    with pytest.raises(AssertionError, match="response_logprobs must be empty or aligned"):
+        await _run(session, backend, rewrite_messages)
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_last_assistant_rollback_disabled_splits_rewritten_assistant():
+    """Allow explicit opt-out so rewritten assistants still split trajectories."""
+    session = _session("rollback-disabled", enable_last_assistant_rollback=False)
+    prompt = [{"role": "user", "content": "run mini-swe"}]
+    rewrite = [*prompt, {"role": "user", "content": "user_error"}]
+    backend = SequencedBackend(["BAD", "FIXED"])
+
+    await _run(session, backend, prompt)
+    await _run(session, backend, rewrite)
+
+    state = session.snapshot_state()
+    assert state["active_chain_ids"] == [1, 2]
+    assert state["rollback_count"] == 0
+    chains_by_id = {chain.chain_id: chain for chain in session.active_chains}
+    assert _decode_response_ids(chains_by_id[1].buffer.response_ids) == "BAD"
+    assert _decode_response_ids(chains_by_id[2].buffer.response_ids) == "FIXED"
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_multiple_chains_repeated_same_prompt_creates_siblings_and_continues_latest():
+    """Create siblings for repeated prompts and continue the most recently updated one."""
+    session = _session("siblings")
+    backend = SequencedBackend(["SAME", "SAME", "SAME", "NEXT"])
+    prompt = [{"role": "user", "content": "try the same prompt"}]
+
+    await _run(session, backend, prompt)
+    await _run(session, backend, prompt)
+    await _run(session, backend, prompt)
+    await _run(
+        session,
+        backend,
+        [
+            {"role": "user", "content": "try the same prompt"},
+            {"role": "assistant", "content": "SAME"},
+            {"role": "user", "content": "continue the latest sibling"},
+        ],
+    )
+    trajectories = await session.finalize()
+
+    decoded = [_decode_response_ids(t.response_ids) for t in trajectories]
+    assert len(trajectories) == 3
+    assert decoded.count("SAME") == 2
+    assert decoded[-1].startswith("SAME")
+    assert decoded[-1].endswith("NEXT")
+    assert trajectories[-1].response_mask[-len("NEXT") :] == [1] * len("NEXT")
+    assert 0 in trajectories[-1].response_mask
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+@pytest.mark.parametrize("assistant_content", ["OLD", "EDITED"])
+async def test_chain_selection_excludes_positive_assistant_span(assistant_content):
+    session = _session("assistant-span", enable_last_assistant_rollback=True)
+    backend = SequencedBackend(["OLD", "NEW"])
+    incoming = [
+        {"role": "user", "content": "start"},
+        {"role": "assistant", "content": assistant_content},
+        {"role": "user", "content": "continue"},
+        {"role": "assistant", "content": "external"},
+        {"role": "user", "content": "next"},
+    ]
+
+    await _run(session, backend, incoming[:1])
+    await _run(session, backend, incoming)
+
+    assert [chain.buffer.response_ids for chain in session.active_chains] == [_ids("OLD"), _ids("NEW")]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_multiple_chains_distinct_sibling_continuation_matches_older_assistant_prefix():
+    """Select an older sibling when its assistant prefix uniquely matches the request."""
+    session = _session("distinct-sibling")
+    backend = SequencedBackend(["OLDER", "NEWER", "CONT"])
+    prompt = [{"role": "user", "content": "same prompt"}]
+
+    await _run(session, backend, prompt)
+    await _run(session, backend, prompt)
+    before_continuation = session.snapshot_state()
+
+    await _run(
+        session,
+        backend,
+        [
+            {"role": "user", "content": "same prompt"},
+            {"role": "assistant", "content": "OLDER"},
+            {"role": "user", "content": "continue older sibling"},
+        ],
+    )
+
+    assert before_continuation["active_chain_ids"] == [1, 2]
+    chains_by_id = {chain.chain_id: chain for chain in session.active_chains}
+    assert chains_by_id[1].message_history[1]["content"] == "OLDER"
+    assert chains_by_id[1].message_history[-1]["content"] == "CONT"
+    assert chains_by_id[2].message_history == [
+        {"role": "user", "content": "same prompt"},
+        {"role": "assistant", "content": "NEWER"},
+    ]
+    assert chains_by_id[1].updated_seq > chains_by_id[2].updated_seq
+
+    trajectories = await session.finalize()
+    decoded = [_decode_response_ids(trajectory.response_ids) for trajectory in trajectories]
+    assert decoded == ["NEWER", "OLDERuser:continue older sibling\nassistant:CONT"]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_multiple_chains_reserved_siblings_fall_back_before_starting_new_chain():
+    """Reserve matching siblings newest-first, then full-encode when all are busy."""
+    session = _session("reserved-siblings", coalesce_reserved_exact_requests=False)
+    prompt = [{"role": "user", "content": "same prompt"}]
+    for _ in range(3):
+        await _run(session, SequencedBackend(["SAME"]), prompt)
+
+    continuation = [
+        *prompt,
+        {"role": "assistant", "content": "SAME"},
+        {"role": "user", "content": "continue"},
+    ]
+    backend = _ControlledParallelBackend(["CHAIN3", "CHAIN2", "CHAIN1", "NEW"])
+    tasks = []
+    for call_count in range(1, 5):
+        tasks.append(asyncio.create_task(_run(session, backend, continuation)))
+        await backend.wait_for_calls(call_count)
+
+    assert session.snapshot_state()["active_chain_ids"] == [1, 2, 3]
+    assert [call["request_id"] for call in backend.calls] == ["reserved-siblings"] * 4
+
+    for index in (3, 2, 1, 0):
+        backend.release_call(index)
+    await asyncio.gather(*tasks)
+
+    chains_by_id = {chain.chain_id: chain for chain in session.active_chains}
+    assert set(chains_by_id) == {1, 2, 3, 4}
+    assert _decode_response_ids(chains_by_id[3].buffer.response_ids).endswith("CHAIN3")
+    assert _decode_response_ids(chains_by_id[2].buffer.response_ids).endswith("CHAIN2")
+    assert _decode_response_ids(chains_by_id[1].buffer.response_ids).endswith("CHAIN1")
+    assert all(0 in chains_by_id[chain_id].buffer.response_mask for chain_id in (1, 2, 3))
+
+    new_chain = chains_by_id[4]
+    assert new_chain.buffer.prompt_ids == session._codec.build_initial_tokens(continuation)
+    assert new_chain.buffer.response_ids == _ids("NEW")
+    assert new_chain.buffer.response_mask == [1] * len("NEW")
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_multiple_chains_parallel_different_chains_commit_in_place():
+    """Commit parallel generations in place when they target distinct live chains."""
+    session = _session("parallel-different-chains")
+    backend = SequencedBackend(["MAIN1", "SUB1"])
+    main_first = [HELPFUL_SYS, {"role": "user", "content": "main"}]
+    subagent = [SUBAGENT_SYS, {"role": "user", "content": "sub"}]
+    await _run(session, backend, main_first)
+    await _run(session, backend, subagent)
+
+    main_continuation = [
+        *main_first,
+        {"role": "assistant", "content": "MAIN1"},
+        {"role": "user", "content": "main next"},
+    ]
+    subagent_continuation = [
+        *subagent,
+        {"role": "assistant", "content": "SUB1"},
+        {"role": "user", "content": "sub next"},
+    ]
+    parallel_backend = _ControlledParallelBackend(["MAIN2", "SUB2"])
+
+    main_task = asyncio.create_task(_run(session, parallel_backend, main_continuation))
+    sub_task = asyncio.create_task(_run(session, parallel_backend, subagent_continuation))
+    await parallel_backend.wait_for_calls(2)
+    parallel_backend.release_call(1)
+    await sub_task
+    parallel_backend.release_call(0)
+    await main_task
+
+    assert session.snapshot_state()["active_chain_ids"] == [1, 2]
+    trajectories = await session.finalize()
+    decoded = [_decode_response_ids(trajectory.response_ids) for trajectory in trajectories]
+    assert any(text.startswith("MAIN1") and text.endswith("MAIN2") for text in decoded)
+    assert any(text.startswith("SUB1") and text.endswith("SUB2") for text in decoded)
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_multiple_chains_parallel_new_siblings_reuse_session_request_id():
+    """Retain concurrent first-turn siblings while reusing the sticky session id."""
+    session = _session("parallel-new-siblings", coalesce_reserved_exact_requests=False)
+    backend = _ControlledParallelBackend(["A", "B", "C"])
+    prompt = [{"role": "user", "content": "same first turn"}]
+
+    tasks = [asyncio.create_task(_run(session, backend, prompt)) for _ in range(3)]
+    await backend.wait_for_calls(3)
+    for index in (2, 0, 1):
+        backend.release_call(index)
+    await asyncio.gather(*tasks)
+
+    request_ids = [call["request_id"] for call in backend.calls]
+    assert request_ids == ["parallel-new-siblings"] * 3
+    assert session.snapshot_state()["active_chain_ids"] == [1, 2, 3]
+    trajectories = await session.finalize()
+    assert sorted(_decode_response_ids(trajectory.response_ids) for trajectory in trajectories) == ["A", "B", "C"]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+@pytest.mark.parametrize("chain_path", ["first", "existing", "new"])
+async def test_exact_retry_reuses_inflight_generation(chain_path):
+    """Let an exact in-flight retry reuse the owner result without forking."""
+    session = _session("singleflight", coalesce_reserved_exact_requests=True)
+    first_messages = [{"role": "user", "content": "first turn"}]
+    if chain_path != "first":
+        await _run(session, SequencedBackend(["FIRST"]), first_messages)
+    continuation = [
+        *first_messages,
+        {"role": "assistant", "content": "FIRST"},
+        {"role": "user", "content": "continue"},
+    ]
+    if chain_path == "first":
+        continuation = first_messages
+    elif chain_path == "new":
+        continuation = [{"role": "user", "content": "unrelated prompt"}]
+    backend = _ControlledParallelBackend(["SECOND"])
+
+    owner = asyncio.create_task(_run(session, backend, continuation))
+    await backend.wait_for_calls(1)
+    duplicate = asyncio.create_task(_run(session, backend, continuation))
+    await asyncio.sleep(0)
+
+    assert len(backend.calls) == 1
+    backend.release_call(0)
+    assert await owner == await duplicate
+    trajectories = await session.finalize()
+    assert len(trajectories) == (2 if chain_path == "new" else 1)
+    assert sum(_decode_response_ids(t.response_ids).endswith("SECOND") for t in trajectories) == 1
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+@pytest.mark.parametrize("existing_chain", [False, True])
+async def test_exact_retry_reuses_failure_and_allows_a_later_retry(existing_chain):
+    """Propagate the owner failure, then clear singleflight and reservation state."""
+    session = _session("singleflight-failure", coalesce_reserved_exact_requests=True)
+    first_messages = [{"role": "user", "content": "first turn"}]
+    if existing_chain:
+        await _run(session, SequencedBackend(["FIRST"]), first_messages)
+    continuation = [
+        *first_messages,
+        {"role": "assistant", "content": "FIRST"},
+        {"role": "user", "content": "continue"},
+    ]
+    backend = _ControlledParallelBackend([RuntimeError("boom"), "UNEXPECTED"])
+    if not existing_chain:
+        continuation = first_messages
+
+    owner = asyncio.create_task(_run(session, backend, continuation))
+    await backend.wait_for_calls(1)
+    duplicate = asyncio.create_task(_run(session, backend, continuation))
+    await asyncio.sleep(0)
+    backend.release_call(0)
+
+    results = await asyncio.gather(owner, duplicate, return_exceptions=True)
+    assert len(backend.calls) == 1
+    assert all(isinstance(result, HTTPException) and result.status_code == 500 for result in results)
+    assert session.reserved_chain_ids == set()
+    assert session._inflight_exact_requests == {}
+
+    await _run(session, SequencedBackend(["RECOVERED"]), continuation)
+    [trajectory] = await session.finalize()
+    assert _decode_response_ids(trajectory.response_ids).endswith("RECOVERED")
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_owner", [False, True], ids=["waiter", "owner"])
+async def test_first_turn_coalescing_cancellation(cancel_owner):
+    session = _session("cancel-singleflight")
+    prompt = [{"role": "user", "content": "first turn"}]
+    backend = _ControlledParallelBackend(["FIRST"])
+    owner = asyncio.create_task(_run(session, backend, prompt))
+    await backend.wait_for_calls(1)
+    waiter = asyncio.create_task(_run(session, backend, prompt))
+    await asyncio.sleep(0)
+
+    if cancel_owner:
+        owner.cancel()
+        results = await asyncio.wait_for(asyncio.gather(owner, waiter, return_exceptions=True), timeout=5)
+        assert all(isinstance(result, asyncio.CancelledError) for result in results)
+        await _run(session, SequencedBackend(["RECOVERED"]), prompt)
+        expected = "RECOVERED"
+    else:
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        assert not owner.done()
+        backend.release_call(0)
+        await owner
+        expected = "FIRST"
+
+    assert len(backend.calls) == 1
+    assert session.reserved_chain_ids == set()
+    assert session._inflight_exact_requests == {}
+    [trajectory] = await session.finalize()
+    assert _decode_response_ids(trajectory.response_ids) == expected
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["sampling", "session", "completed"])
+async def test_exact_request_coalescing_keeps_independent_generations(boundary):
+    session = _session("independent")
+    other_session = _session("other") if boundary == "session" else session
+    prompt = [{"role": "user", "content": "same prompt"}]
+    backend = _ControlledParallelBackend(["FIRST", "SECOND"])
+    owner = asyncio.create_task(_run(session, backend, prompt, temperature=0.5))
+    await backend.wait_for_calls(1)
+    if boundary == "completed":
+        backend.release_call(0)
+        await owner
+    second = asyncio.create_task(
+        _run(other_session, backend, prompt, temperature=0.8 if boundary == "sampling" else 0.5)
+    )
+    await backend.wait_for_calls(2)
+    backend.release_call(0)
+    backend.release_call(1)
+    first_result, second_result = await asyncio.gather(owner, second)
+    assert first_result.assistant_msg != second_result.assistant_msg
+    trajectories = await session.finalize()
+    if other_session is not session:
+        trajectories += await other_session.finalize()
+    assert sorted(_decode_response_ids(t.response_ids) for t in trajectories) == ["FIRST", "SECOND"]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_multiple_chains_tools_gate_chain_reuse():
+    """Start a sibling chain when a continuation changes the available tools."""
+    search_tool = [{"type": "function", "function": {"name": "search", "parameters": {"type": "object"}}}]
+    lookup_tool = [{"type": "function", "function": {"name": "lookup", "parameters": {"type": "object"}}}]
+
+    session = _session("tools-gate")
+    backend = SequencedBackend(["SEARCH", "LOOKUP"])
+    await _run(session, backend, [{"role": "user", "content": "use a tool"}], tools=search_tool)
+    await _run(
+        session,
+        backend,
+        [
+            {"role": "user", "content": "use a tool"},
+            {"role": "assistant", "content": "SEARCH"},
+            {"role": "user", "content": "continue with a renamed tool"},
+        ],
+        tools=lookup_tool,
+    )
+    trajectories = await session.finalize()
+    assert [_decode_response_ids(t.response_ids) for t in trajectories] == ["SEARCH", "LOOKUP"]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_multiple_chains_committed_assistant_tip_hash_round_trips_through_echoed_request():
+    """Match a continuation that echoes the canonical committed assistant message."""
+    session = _session("hash-round-trip")
+    backend = SequencedBackend(["FIRST", "SECOND"])
+
+    await _run(session, backend, [{"role": "user", "content": "first turn"}])
+    state_after_first = session.snapshot_state()
+    active_chain_ids = state_after_first["active_chain_ids"]
+    tip_hashes = state_after_first["active_chain_tip_hashes"]
+
+    assert len(active_chain_ids) == 1
+    assert len(tip_hashes) == 1
+    assert all(isinstance(tip_hash, str) and len(tip_hash) == 64 for tip_hash in tip_hashes.values())
+
+    await _run(
+        session,
+        backend,
+        [
+            {"role": "user", "content": "first turn"},
+            {"role": "assistant", "content": "FIRST"},
+            {"role": "user", "content": "second turn"},
+        ],
+    )
+    state_after_second = session.snapshot_state()
+    trajectories = await session.finalize()
+
+    assert state_after_second["active_chain_ids"] == active_chain_ids
+    assert state_after_second["active_chain_tip_hashes"] != tip_hashes
+    assert len(trajectories) == 1
+    assert trajectories[0].response_ids[: len("FIRST")] == _ids("FIRST")
+    assert trajectories[0].response_ids[-len("SECOND") :] == _ids("SECOND")
+    assert 0 in trajectories[0].response_mask
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_multiple_chains_backend_failure_releases_reserved_chain_for_retry():
+    """Release an existing-chain reservation when backend generation fails."""
+    session = _session("backend-failure")
+    first_messages = [{"role": "user", "content": "first turn"}]
+    continuation = [
+        *first_messages,
+        {"role": "assistant", "content": "FIRST"},
+        {"role": "user", "content": "follow up"},
+    ]
+
+    await _run(session, SequencedBackend(["FIRST"]), first_messages)
+    with pytest.raises(HTTPException, match="RuntimeError: boom"):
+        await _run(session, SequencedBackend([RuntimeError("boom")]), continuation)
+
+    await _run(session, SequencedBackend(["SECOND"]), continuation)
+    assert session.snapshot_state()["active_chain_ids"] == [1]
+    trajectories = await session.finalize()
+
+    assert len(trajectories) == 1
+    assert _decode_response_ids(trajectories[0].response_ids).endswith("SECOND")
+    assert 0 in trajectories[0].response_mask
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_multiple_chains_new_chain_backend_failure_does_not_leave_partial_chain():
+    """Avoid creating partial state when a new-chain backend request fails."""
+    session = _session("new-chain-backend-failure")
+    backend = SequencedBackend(["MAIN", RuntimeError("boom")])
+    main_messages = [HELPFUL_SYS, {"role": "user", "content": "main request"}]
+    split_messages = [SUBAGENT_SYS, {"role": "user", "content": "independent subtask"}]
+
+    await _run(session, backend, main_messages)
+    before_failure = session.snapshot_state()
+
+    with pytest.raises(HTTPException, match="RuntimeError: boom"):
+        await _run(session, backend, split_messages)
+    after_failure = session.snapshot_state()
+    trajectories = await session.finalize()
+
+    assert before_failure["active_chain_ids"] == [1]
+    assert after_failure["active_chain_ids"] == before_failure["active_chain_ids"]
+    assert after_failure["active_chain_tip_hashes"] == before_failure["active_chain_tip_hashes"]
+    assert after_failure["num_active_chains"] == before_failure["num_active_chains"]
+    assert after_failure["num_trajectories"] == before_failure["num_trajectories"] == 0
+    assert len(trajectories) == 1
+    assert _decode_response_ids(trajectories[0].response_ids) == "MAIN"
+    assert trajectories[0].response_mask == [1] * len("MAIN")
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_multiple_chains_length_exhaustion_closes_selected_chain_and_orders_it_last():
+    """Close and order the selected chain when its trajectory capacity is exhausted."""
+    main_first = [HELPFUL_SYS, {"role": "user", "content": "main"}]
+    subagent = [SUBAGENT_SYS, {"role": "user", "content": "sub"}]
+    session = _session(
+        "length-close",
+        prompt_length=max(_prompt_length(main_first), _prompt_length(subagent)),
+        response_length=len("MAIN1") + 1,
+    )
+    backend = SequencedBackend(["MAIN1", "SUB"])
+    main_too_long = [
+        HELPFUL_SYS,
+        {"role": "user", "content": "main"},
+        {"role": "assistant", "content": "MAIN1"},
+        {"role": "user", "content": "too long"},
+    ]
+
+    await _run(session, backend, main_first)
+    await _run(session, backend, subagent)
+    outcome = await _run(session, backend, main_too_long)
+    trajectories = await session.finalize()
+
+    assert outcome.finish_reason == "length"
+    assert backend.steps == []
+    assert len(trajectories) == 2
+    assert _decode_response_ids(trajectories[0].response_ids) == "SUB"
+    assert _decode_response_ids(trajectories[1].response_ids) == "MAIN1"
+    assert trajectories[1].extra_fields["materialization_reason"] == "max_trajectory_length"
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_multiple_chains_exactly_exhausted_chain_closes_without_backend_call():
+    """Close an exhausted chain even when the repeated request has no incremental tail."""
+    first_messages = [{"role": "user", "content": "fill the response budget"}]
+    session = _session(
+        "chain-budget-exhausted",
+        prompt_length=_prompt_length(first_messages),
+        response_length=len("NORMAL"),
+    )
+    backend = SequencedBackend(["NORMAL", "SHOULD_NOT_RUN"])
+    repeated_history = [
+        *first_messages,
+        {"role": "assistant", "content": "NORMAL"},
+    ]
+
+    await _run(session, backend, first_messages)
+    outcome = await _run(session, backend, repeated_history)
+    trajectories = await session.finalize()
+
+    assert outcome.finish_reason == "length"
+    assert len(backend.calls) == 1
+    assert backend.steps == ["SHOULD_NOT_RUN"]
+    assert len(trajectories) == 1
+    assert trajectories[0].extra_fields["materialization_reason"] == "max_trajectory_length"
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_multiple_chains_length_exhaustion_orders_before_later_fresh_chain():
+    """Order a closed length trajectory before a later normal trajectory."""
+    first_messages = [{"role": "user", "content": "fill the response budget"}]
+    session = _session(
+        "length-before-fresh",
+        prompt_length=_prompt_length(first_messages),
+        response_length=len("FULL"),
+    )
+    backend = SequencedBackend(["FULL", "NEW"])
+    repeated_history = [
+        *first_messages,
+        {"role": "assistant", "content": "FULL"},
+    ]
+
+    await _run(session, backend, first_messages)
+    length_outcome = await _run(session, backend, repeated_history)
+    await _run(session, backend, [{"role": "user", "content": "start a fresh chain"}])
+    trajectories = await session.finalize()
+
+    assert length_outcome.finish_reason == "length"
+    assert len(backend.calls) == 2
+    assert backend.steps == []
+    assert [_decode_response_ids(trajectory.response_ids) for trajectory in trajectories] == ["FULL", "NEW"]
+    assert trajectories[0].extra_fields == {"materialization_reason": "max_trajectory_length"}
+    assert trajectories[1].extra_fields == {}
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_multiple_chains_exactly_exhausted_chain_skips_new_media_extraction():
+    """Do not parse unused incremental media after trajectory capacity is full."""
+    extractor_calls = 0
+
+    async def forbidden_extractor(*args, **kwargs):
+        nonlocal extractor_calls
+        extractor_calls += 1
+        raise AssertionError("media extractor must not run for an exhausted chain")
+
+    first_messages = [{"role": "user", "content": "fill the response budget"}]
+    session = _session(
+        "exhausted-skips-media",
+        prompt_length=_prompt_length(first_messages),
+        response_length=len("FULL"),
+        processor=FakeProcessor(),
+        vision_info_extractor=forbidden_extractor,
+    )
+    backend = SequencedBackend(["FULL", "SHOULD_NOT_RUN"])
+    continuation = [
+        *first_messages,
+        {"role": "assistant", "content": "FULL"},
+        _image_message("image://unused.png", "unused media"),
+    ]
+
+    await _run(session, backend, first_messages)
+    outcome = await _run(session, backend, continuation)
+    trajectories = await session.finalize()
+
+    assert outcome.finish_reason == "length"
+    assert extractor_calls == 0
+    assert len(backend.calls) == 1
+    assert backend.steps == ["SHOULD_NOT_RUN"]
+    assert trajectories[0].multi_modal_data is None
+    assert trajectories[0].extra_fields == {"materialization_reason": "max_trajectory_length"}
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_multiple_chains_does_not_enforce_response_length_without_prompt_length():
+    """Do not treat response_length alone as a response-only token budget."""
+    session = _session("response-length-only", response_length=10)
+    backend = SequencedBackend(["A"])
+
+    await _run(session, backend, [{"role": "user", "content": "use session budget"}])
+
+    assert "max_tokens" not in backend.calls[0]["sampling_params"]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_multiple_chains_uses_total_trajectory_capacity_instead_of_response_only_budget():
+    """Allow response tokens to use unused prompt capacity across turns."""
+    session = _session(
+        "total-capacity-allows-continuation",
+        prompt_length=256,
+        response_length=len("FIRST"),
+    )
+    backend = SequencedBackend(["FIRST", "SECOND"])
+    first_messages = [{"role": "user", "content": "first"}]
+    continuation = [
+        *first_messages,
+        {"role": "assistant", "content": "FIRST"},
+        {"role": "user", "content": "continue"},
+    ]
+
+    await _run(session, backend, first_messages)
+    outcome = await _run(session, backend, continuation)
+    trajectories = await session.finalize()
+
+    assert outcome.finish_reason == "stop"
+    assert len(backend.calls) == 2
+    assert _decode_response_ids(trajectories[0].response_ids).endswith("SECOND")
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_multiple_chains_closes_when_continuation_fills_total_trajectory_capacity(caplog):
+    """Count prompt, generated, and continuation-context tokens against one capacity."""
+    first_messages = [{"role": "user", "content": "first"}]
+    continuation_messages = [
+        {"role": "assistant", "content": "FIRST"},
+        {"role": "user", "content": "continue"},
+    ]
+    codec = MessageCodec(FakeTokenizer())
+    prompt_length = len(codec.build_initial_tokens(first_messages))
+    previous_messages = [*first_messages, continuation_messages[0]]
+    runtime_ids = codec.build_initial_tokens(first_messages) + _ids("FIRST")
+    merged_ids, _, _ = codec.merge_context_tokens(
+        previous_messages,
+        [*first_messages, *continuation_messages],
+        runtime_ids,
+        [1] * len("FIRST"),
+    )
+    incremental_length = len(merged_ids) - len(runtime_ids)
+    session = _session(
+        "total-capacity-exhausted",
+        prompt_length=prompt_length,
+        response_length=len("FIRST") + incremental_length,
+    )
+    backend = SequencedBackend(["FIRST", "SHOULD_NOT_RUN"])
+
+    await _run(session, backend, first_messages)
+    outcome = await _run(session, backend, [*first_messages, *continuation_messages])
+    trajectories = await session.finalize()
+
+    assert outcome.finish_reason == "length"
+    assert len(backend.calls) == 1
+    assert backend.steps == ["SHOULD_NOT_RUN"]
+    assert trajectories[0].extra_fields == {"materialization_reason": "max_trajectory_length"}
+    assert "Trajectory capacity prevents generation" in caplog.text
+    assert "session=total-capacity-exhausted" in caplog.text
+    assert "backend_called=false" in caplog.text
+    assert "CLAUDE_CODE_MAX_OUTPUT_TOKENS alone will not help" in caplog.text
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_multiple_chains_returns_length_when_initial_context_fills_total_trajectory_capacity(caplog):
+    """Return a normal length stop when a fresh prompt leaves no generation room."""
+    messages = [{"role": "user", "content": "initial prompt"}]
+    context_length = _prompt_length(messages)
+    session = _session(
+        "initial-context-exhausted",
+        prompt_length=context_length - 1,
+        response_length=1,
+    )
+    backend = SequencedBackend(["SHOULD_NOT_RUN"])
+
+    outcome = await _run(session, backend, messages)
+
+    assert outcome.assistant_msg == {"role": "assistant", "content": ""}
+    assert outcome.finish_reason == "length"
+    assert outcome.completion_tokens == 0
+    assert backend.steps == ["SHOULD_NOT_RUN"]
+    assert session.active_chains == []
+    assert await session.finalize() == []
+    assert "Trajectory capacity prevents generation" in caplog.text
+    assert "effective_max_tokens=0 completion_tokens=0 backend_called=false" in caplog.text
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "remaining_capacity, requested_max_tokens, stop_reason, warns",
+    [
+        pytest.param(4, 32, "length", True, id="trajectory-limit"),
+        pytest.param(8, 4, "length", False, id="generation-limit"),
+        pytest.param(8, 32, "completed", False, id="clamped-but-completed"),
+        pytest.param(None, 4, "length", False, id="unbounded-trajectory"),
+    ],
+)
+async def test_generation_warns_only_when_length_stop_reaches_trajectory_capacity(
+    caplog, remaining_capacity, requested_max_tokens, stop_reason, warns
+):
+    messages = [{"role": "user", "content": "hello"}]
+    session = _session(
+        "capacity-warning",
+        prompt_length=_prompt_length(messages),
+        response_length=remaining_capacity,
+    )
+    backend = SimpleNamespace(
+        generate=AsyncMock(return_value=TokenOutput(token_ids=_ids("FULL"), stop_reason=stop_reason))
+    )
+
+    outcome = await _run(session, backend, messages, max_tokens=requested_max_tokens)
+
+    assert outcome.finish_reason == ("stop" if stop_reason == "completed" else "length")
+    assert outcome.completion_tokens == 4
+    assert ("Generation reached trajectory capacity" in caplog.text) is warns
+    if warns:
+        assert "session=capacity-warning chain_id=1" in caplog.text
+        assert "requested_max_tokens=32 effective_max_tokens=4 completion_tokens=4 backend_called=true" in caplog.text
+        assert "prompt_length + response_length" in caplog.text
+        assert "CLAUDE_CODE_MAX_OUTPUT_TOKENS alone will not help" in caplog.text
+    else:
+        assert "CLAUDE_CODE_MAX_OUTPUT_TOKENS" not in caplog.text
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_multimodal_processor_kwargs_stay_aligned_across_gateway_paths():
+    processor = FakeProcessor()
+    mm_processor_kwargs = {"max_pixels": 1024}
+    session = _session(
+        "mm-processor-kwargs",
+        processor=processor,
+        vision_info_extractor=fake_vision_info_extractor,
+        mm_processor_kwargs=mm_processor_kwargs,
+    )
+    backend = SequencedBackend(["DONE"])
+
+    await _run(session, backend, [_image_message("image://a.png", "describe")])
+    [trajectory] = await session.finalize()
+
+    assert processor.last_processor_call["extra_kwargs"] == mm_processor_kwargs
+    assert backend.calls[0]["mm_processor_kwargs"] == mm_processor_kwargs
+    assert trajectory.extra_fields["mm_processor_kwargs"] == mm_processor_kwargs
+
+
+@pytest.mark.asyncio
+async def test_multiple_chains_multimodal_media_stays_chain_local():
+    """Keep image media isolated between independently selected chains."""
+    session = _session(
+        "mm-chain-local",
+        processor=FakeProcessor(),
+        vision_info_extractor=fake_vision_info_extractor,
+    )
+    backend = SequencedBackend(["MAIN1", "SUB", "MAIN2"])
+    main_first = [HELPFUL_SYS, _image_message("image://main-a.png", "describe main")]
+    subagent = [SUBAGENT_SYS, _image_message("image://sub-b.png", "describe sub")]
+    main_continuation = [
+        HELPFUL_SYS,
+        _image_message("image://main-a.png", "describe main"),
+        {"role": "assistant", "content": "MAIN1"},
+        {"role": "user", "content": "continue main"},
+    ]
+
+    await _run(session, backend, main_first)
+    await _run(session, backend, subagent)
+    await _run(session, backend, main_continuation)
+    trajectories = await session.finalize()
+
+    assert [call["image_data"] for call in backend.calls] == [
+        ["image://main-a.png"],
+        ["image://sub-b.png"],
+        ["image://main-a.png"],
+    ]
+    assert len(trajectories) == 2
+    decoded = [_decode_response_ids(t.response_ids) for t in trajectories]
+    assert decoded[0] == "SUB"
+    assert decoded[1].startswith("MAIN1")
+    assert decoded[1].endswith("MAIN2")
+    assert trajectories[0].multi_modal_data == {"images": ["image://sub-b.png"]}
+    assert trajectories[1].multi_modal_data == {"images": ["image://main-a.png"]}
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_multiple_chains_video_media_stays_chain_local():
+    """Keep video media and metadata isolated between sibling chains."""
+    session = _session(
+        "video-chain-local",
+        processor=FakeProcessor(),
+        vision_info_extractor=_codec_compatible_video_extractor,
+    )
+    backend = SequencedBackend(["MAIN1", "SUB", "MAIN2"])
+    main_video = ("video://main-a.mp4", {"url": "video://main-a.mp4"})
+    subagent_video = ("video://sub-b.mp4", {"url": "video://sub-b.mp4"})
+    main_first = [HELPFUL_SYS, _video_message("video://main-a.mp4", "describe main video")]
+    subagent = [SUBAGENT_SYS, _video_message("video://sub-b.mp4", "describe sub video")]
+    main_continuation = [
+        HELPFUL_SYS,
+        _video_message("video://main-a.mp4", "describe main video"),
+        {"role": "assistant", "content": "MAIN1"},
+        {"role": "user", "content": "continue main"},
+    ]
+
+    await _run(session, backend, main_first)
+    await _run(session, backend, subagent)
+    await _run(session, backend, main_continuation)
+    trajectories = await session.finalize()
+
+    assert [call["video_data"] for call in backend.calls] == [
+        [main_video],
+        [subagent_video],
+        [main_video],
+    ]
+    assert len(trajectories) == 2
+    decoded = [_decode_response_ids(t.response_ids) for t in trajectories]
+    assert decoded[0] == "SUB"
+    assert decoded[1].startswith("MAIN1")
+    assert decoded[1].endswith("MAIN2")
+    assert trajectories[0].multi_modal_data == {"videos": [subagent_video]}
+    assert trajectories[1].multi_modal_data == {"videos": [main_video]}
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize(
+    ("media_kind", "message_factory", "extractor", "sent_url", "unsent_url", "backend_field", "trajectory_key"),
+    [
+        (
+            "image",
+            _image_message,
+            fake_vision_info_extractor,
+            "image://sent-a.png",
+            "image://unsent-b.png",
+            "image_data",
+            "images",
+        ),
+        (
+            "video",
+            _video_message,
+            _codec_compatible_video_extractor,
+            "video://sent-a.mp4",
+            "video://unsent-b.mp4",
+            "video_data",
+            "videos",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_multiple_chains_rejects_incremental_media_without_mutating_stored_media(
+    media_kind, message_factory, extractor, sent_url, unsent_url, backend_field, trajectory_key
+):
+    """Reject unsupported CT media without mutating the selected chain."""
+    first_messages = [message_factory(sent_url, "describe first")]
+    continuation_messages = [
+        *first_messages,
+        {"role": "assistant", "content": "FIRST"},
+        message_factory(unsent_url, "new incremental media"),
+    ]
+    expected_sent = [sent_url] if media_kind == "image" else [(sent_url, {"url": sent_url})]
+    session = _session(
+        f"incremental-media-{media_kind}",
+        processor=FakeProcessor(),
+        vision_info_extractor=extractor,
+    )
+    backend = SequencedBackend(["FIRST", "SHOULD_NOT_RUN"])
+
+    await _run(session, backend, first_messages)
+    with pytest.raises(ValueError, match="does not currently support incremental image or video data"):
+        await _run(session, backend, continuation_messages)
+    trajectories = await session.finalize()
+
+    assert len(backend.calls) == 1
+    assert backend.steps == ["SHOULD_NOT_RUN"]
+    assert backend.calls[0][backend_field] == expected_sent
+    assert len(trajectories) == 1
+    assert trajectories[0].multi_modal_data == {trajectory_key: expected_sent}
+    assert trajectories[0].extra_fields == {}
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_multiple_chains_abort_clears_length_materialized_trajectories():
+    """Clear length-materialized trajectories when the session is aborted."""
+    first_messages = [{"role": "user", "content": "first turn"}]
+    session = _session(
+        "abort-clears-materialized",
+        prompt_length=_prompt_length(first_messages),
+        response_length=len("FIRST") + 1,
+    )
+    backend = SequencedBackend(["FIRST", "SHOULD_NOT_RUN"])
+    exhausted_messages = [
+        *first_messages,
+        {"role": "assistant", "content": "FIRST"},
+        {"role": "user", "content": "this continuation exhausts the length budget"},
+    ]
+
+    await _run(session, backend, first_messages)
+    outcome = await _run(session, backend, exhausted_messages)
+
+    assert outcome.finish_reason == "length"
+    assert session.snapshot_state()["num_trajectories"] == 1
+
+    await session.abort()
+
+    state = session.snapshot_state()
+    assert state["phase"] == "ABORTED"
+    assert state["num_trajectories"] == 0
+    assert state["num_active_chains"] == 0
+    with pytest.raises(RuntimeError, match="aborted"):
+        await session.finalize()
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+@pytest.mark.parametrize("terminal_action", ["finalize", "abort"])
+async def test_multiple_chains_terminal_state_rejects_late_commit(terminal_action):
+    """Reject a backend result that arrives after finalization or abort."""
+    session = _session(f"parallel-late-{terminal_action}")
+    await _run(session, SequencedBackend(["FIRST"]), [{"role": "user", "content": "first turn"}])
+    pending_backend = _ControlledParallelBackend(["SECOND"])
+    pending_task = asyncio.create_task(
+        _run(
+            session,
+            pending_backend,
+            [
+                {"role": "user", "content": "first turn"},
+                {"role": "assistant", "content": "FIRST"},
+                {"role": "user", "content": "follow up"},
+            ],
+        )
+    )
+    await pending_backend.wait_for_calls(1)
+
+    if terminal_action == "finalize":
+        terminal_result = await session.finalize()
+        assert [_decode_response_ids(trajectory.response_ids) for trajectory in terminal_result] == ["FIRST"]
+    else:
+        await session.abort()
+
+    pending_backend.release_call(0)
+    with pytest.raises(HTTPException) as exc_info:
+        await pending_task
+    assert exc_info.value.status_code == 409
+    assert session.snapshot_state()["active_chain_ids"] == []
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_multiple_chains_oversized_split_returns_length_without_closing_reserved_chain():
+    """Return a length stop without closing the chain reserved by another request."""
+    first_messages = [{"role": "user", "content": "base"}]
+    session = _session(
+        "reserved-length",
+        prompt_length=_prompt_length(first_messages),
+        response_length=len("BASE") + 1,
+    )
+    await _run(session, SequencedBackend(["BASE"]), first_messages)
+    pending_backend = _ControlledParallelBackend(["CONT"])
+    pending_messages = list(session.active_chains[0].message_history)
+    pending_task = asyncio.create_task(_run(session, pending_backend, pending_messages))
+    await pending_backend.wait_for_calls(1)
+
+    split_backend = SequencedBackend(["SHOULD_NOT_RUN"])
+    split_outcome = await _run(
+        session,
+        split_backend,
+        [
+            {"role": "user", "content": "base"},
+            {"role": "assistant", "content": "BASE"},
+            {"role": "user", "content": "this continuation is long enough to close the chain"},
+        ],
+    )
+    assert split_outcome.assistant_msg == {"role": "assistant", "content": ""}
+    assert split_outcome.finish_reason == "length"
+    assert split_outcome.completion_tokens == 0
+    assert split_backend.steps == ["SHOULD_NOT_RUN"]
+    assert session.snapshot_state()["active_chain_ids"] == [1]
+    assert session.snapshot_state()["num_trajectories"] == 0
+
+    pending_backend.release_call(0)
+    await pending_task
+    assert session.snapshot_state()["active_chain_ids"] == [1]
+
+    trajectories = await session.finalize()
+    decoded = [_decode_response_ids(trajectory.response_ids) for trajectory in trajectories]
+    assert len(trajectories) == 1
+    assert all("materialization_reason" not in trajectory.extra_fields for trajectory in trajectories)
+    assert decoded[0].endswith("CONT")
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_multiple_chains_decode_failure_releases_reserved_chain_for_retry(monkeypatch):
+    """Release an existing-chain reservation when response decoding fails."""
+    session = _session("decode-failure")
+    first_messages = [{"role": "user", "content": "first turn"}]
+    continuation = [
+        *first_messages,
+        {"role": "assistant", "content": "FIRST"},
+        {"role": "user", "content": "follow up"},
+    ]
+    await _run(session, SequencedBackend(["FIRST"]), first_messages)
+
+    async def decode_response_raises(*args, **kwargs):
+        raise RuntimeError("decode boom")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(session._codec, "decode_response", decode_response_raises)
+        with pytest.raises(RuntimeError, match="decode boom"):
+            await _run(session, SequencedBackend(["IGNORED"]), continuation)
+
+    await _run(session, SequencedBackend(["SECOND"]), continuation)
+    assert session.snapshot_state()["active_chain_ids"] == [1]
+    trajectories = await session.finalize()
+    assert len(trajectories) == 1
+    assert _decode_response_ids(trajectories[0].response_ids).endswith("SECOND")
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_multiple_chains_cancelled_generation_releases_reserved_chain_for_retry():
+    """Release an existing-chain reservation when generation is cancelled."""
+    session = _session("cancelled")
+    first_messages = [{"role": "user", "content": "first turn"}]
+    continuation = [
+        *first_messages,
+        {"role": "assistant", "content": "FIRST"},
+        {"role": "user", "content": "follow up"},
+    ]
+    await _run(session, SequencedBackend(["FIRST"]), first_messages)
+    pending_backend = _ControlledParallelBackend(["SECOND"])
+    pending_task = asyncio.create_task(_run(session, pending_backend, continuation))
+    await pending_backend.wait_for_calls(1)
+
+    pending_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await pending_task
+
+    await _run(session, SequencedBackend(["RETRY"]), continuation)
+    assert session.snapshot_state()["active_chain_ids"] == [1]
+    trajectories = await session.finalize()
+    assert len(trajectories) == 1
+    assert _decode_response_ids(trajectories[0].response_ids).endswith("RETRY")
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_multiple_chains_prefix_content_change_does_not_reuse_chain_and_hashes_match_history():
+    """Split on changed prefix content and keep stored hashes aligned with history."""
+    session = _session("hash-prefix-content")
+    backend = SequencedBackend(["FIRST", "SECOND"])
+
+    await _run(session, backend, [{"role": "user", "content": "same length a"}])
+    _assert_active_chain_tip_hashes_match_history(session)
+    await _run(
+        session,
+        backend,
+        [
+            {"role": "user", "content": "same length b"},
+            {"role": "assistant", "content": "FIRST"},
+            {"role": "user", "content": "follow up should split"},
+        ],
+    )
+    _assert_active_chain_tip_hashes_match_history(session)
+    trajectories = await session.finalize()
+
+    assert len(trajectories) == 2
+    assert [_decode_response_ids(t.response_ids) for t in trajectories] == ["FIRST", "SECOND"]
+    assert all(t.response_mask == [1] * len(t.response_ids) for t in trajectories)
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_message_prefix_hashes_use_canonical_internal_tool_call_arguments():
+    """Hash canonical dict arguments by value without reparsing wire strings."""
+    session = _session("hash-tool-arguments")
+
+    def assistant_tool_call(arguments) -> dict:
+        return {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_search",
+                    "type": "function",
+                    "function": {"name": "search", "arguments": arguments},
+                }
+            ],
+        }
+
+    canonical_a = session._extend_message_prefix_hashes([], [assistant_tool_call({"query": "weather", "limit": 2})])
+    canonical_b = session._extend_message_prefix_hashes([], [assistant_tool_call({"limit": 2, "query": "weather"})])
+    unnormalized_wire = session._extend_message_prefix_hashes(
+        [], [assistant_tool_call('{"query":"weather","limit":2}')]
+    )
+
+    assert canonical_a == canonical_b
+    assert canonical_a != unnormalized_wire
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_message_prefix_hashes_ignore_renamed_and_swapped_tool_call_ids():
+    """Ignore call IDs, including whole renames and exchanged result IDs."""
+    session = _session("hash-tool-call-ids")
+
+    def history(call_ids: tuple[str, str], result_ids: tuple[str, str]) -> list[dict]:
+        return [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": call_ids[0],
+                        "type": "function",
+                        "function": {"name": "weather", "arguments": {"city": "Paris"}},
+                    },
+                    {
+                        "id": call_ids[1],
+                        "type": "function",
+                        "function": {"name": "stocks", "arguments": {"ticker": "ACME"}},
+                    },
+                ],
+            },
+            {"role": "tool", "tool_call_id": result_ids[0], "content": "sunny"},
+            {"role": "tool", "tool_call_id": result_ids[1], "content": "up"},
+        ]
+
+    original = session._extend_message_prefix_hashes([], history(("call_a", "call_b"), ("call_a", "call_b")))
+    renamed = session._extend_message_prefix_hashes([], history(("call_x", "call_y"), ("call_x", "call_y")))
+    swapped_results = session._extend_message_prefix_hashes([], history(("call_x", "call_y"), ("call_y", "call_x")))
+
+    assert original == renamed
+    assert original == swapped_results
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rewrite_fresh_tool_result_id", [False, True], ids=["matching-id", "rewritten-fresh-id"])
+async def test_multiple_chains_tool_call_echo_reuses_chain_despite_fresh_tool_result_id(
+    rewrite_fresh_tool_result_id, monkeypatch
+):
+    """Match on the committed prefix; a fresh tool-result ID is outside that boundary."""
+    import uni_agent.gateway.session.codec as codec_mod
+
+    monkeypatch.setattr(codec_mod.MessageCodec, "_extract_tool_calls", _fake_tool_call_dispatch)
+    session = _session("tool-call-echo", tool_parser_name="hermes")
+    tools = [{"type": "function", "function": {"name": "search", "parameters": {"type": "object"}}}]
+    tool_call_text = '<tool_call>\n{"name": "search", "arguments": {"query": "weather"}}\n</tool_call>'
+    backend = SequencedBackend([tool_call_text, "FINAL"])
+
+    first = await _run(
+        session,
+        backend,
+        [{"role": "user", "content": "what is the weather?"}],
+        tools=tools,
+    )
+    first_chain_ids = session.snapshot_state()["active_chain_ids"]
+    assert first.finish_reason == "tool_calls"
+    assert first.assistant_msg["tool_calls"][0]["function"]["name"] == "search"
+    tool_result_id = (
+        "call_rewritten_fresh_tail" if rewrite_fresh_tool_result_id else first.assistant_msg["tool_calls"][0]["id"]
+    )
+
+    await _run(
+        session,
+        backend,
+        [
+            {"role": "user", "content": "what is the weather?"},
+            {"role": "assistant", "content": None, "tool_calls": first.assistant_msg["tool_calls"]},
+            {
+                "role": "tool",
+                "tool_call_id": tool_result_id,
+                "content": "sunny and warm",
+            },
+        ],
+        tools=tools,
+    )
+    _assert_active_chain_tip_hashes_match_history(session)
+    trajectories = await session.finalize()
+
+    assert session.snapshot_state()["active_chain_ids"] == []
+    assert len(trajectories) == 1
+    assert first_chain_ids == [1]
+    decoded = _decode_response_ids(trajectories[0].response_ids)
+    assert decoded.startswith(tool_call_text)
+    assert decoded.endswith("FINAL")
+    assert 0 in trajectories[0].response_mask
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_multiple_chains_tool_call_id_rewrite_reuses_chain(monkeypatch):
+    """Reuse a chain when committed tool-call IDs are rewritten."""
+    import uni_agent.gateway.session.codec as codec_mod
+
+    monkeypatch.setattr(codec_mod.MessageCodec, "_extract_tool_calls", _fake_tool_call_dispatch)
+    session = _session("tool-call-id-rewrite", tool_parser_name="hermes")
+    tools = [{"type": "function", "function": {"name": "search", "parameters": {"type": "object"}}}]
+    tool_call_text = '<tool_call>\n{"name": "search", "arguments": {"query": "weather"}}\n</tool_call>'
+    backend = SequencedBackend([tool_call_text, "AFTER_TOOL", "FINAL"])
+
+    first = await _run(
+        session,
+        backend,
+        [{"role": "user", "content": "what is the weather?"}],
+        tools=tools,
+    )
+    assert session.snapshot_state()["active_chain_ids"] == [1]
+    committed_id = first.assistant_msg["tool_calls"][0]["id"]
+
+    await _run(
+        session,
+        backend,
+        [
+            {"role": "user", "content": "what is the weather?"},
+            {"role": "assistant", "content": None, "tool_calls": first.assistant_msg["tool_calls"]},
+            {"role": "tool", "tool_call_id": committed_id, "content": "sunny and warm"},
+        ],
+        tools=tools,
+    )
+
+    assert committed_id != "call_rewritten"
+    rewritten_tool_calls = [{**first.assistant_msg["tool_calls"][0], "id": "call_rewritten"}]
+    await _run(
+        session,
+        backend,
+        [
+            {"role": "user", "content": "what is the weather?"},
+            {"role": "assistant", "content": None, "tool_calls": rewritten_tool_calls},
+            {"role": "tool", "tool_call_id": "call_rewritten", "content": "sunny and warm"},
+            {"role": "assistant", "content": "AFTER_TOOL"},
+            {"role": "user", "content": "summarize"},
+        ],
+        tools=tools,
+    )
+
+    assert session.snapshot_state()["active_chain_ids"] == [1]
+    trajectories = await session.finalize()
+    assert len(trajectories) == 1
+    decoded = _decode_response_ids(trajectories[0].response_ids)
+    assert decoded.startswith(tool_call_text)
+    assert decoded.endswith("FINAL")
+    assert 0 in trajectories[0].response_mask
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_multiple_chains_requested_response_logprobs_stay_aligned():
+    """Collect requested logprobs and zero-fill continuation context tokens."""
+    session = _session("logprobs-aligned", sampling_params={"logprobs": True})
+    backend = _LogprobBackend([("FIRST", "full"), ("SECOND", "full")])
+
+    await _run(session, backend, [{"role": "user", "content": "first turn"}])
+    await _run(
+        session,
+        backend,
+        [
+            {"role": "user", "content": "first turn"},
+            {"role": "assistant", "content": "FIRST"},
+            {"role": "user", "content": "follow up"},
+        ],
+    )
+    [trajectory] = await session.finalize()
+
+    assert trajectory.response_logprobs is not None
+    assert len(trajectory.response_logprobs) == len(trajectory.response_ids)
+    assert 0.0 in trajectory.response_logprobs
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_multiple_chains_unrequested_response_logprobs_are_ignored():
+    """Ignore backend logprobs unless the effective sampling params request them."""
+    session = _session("logprobs-not-requested")
+
+    await _run(session, _LogprobBackend([("FIRST", "full")]), [{"role": "user", "content": "first turn"}])
+    [trajectory] = await session.finalize()
+
+    assert trajectory.response_logprobs is None
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("backend_logprobs", "error_match"),
+    [
+        (None, "backend omitted logprobs when requested"),
+        ("short", "backend logprobs must align with token_ids: got 1 logprobs for 5 tokens"),
+    ],
+)
+async def test_multiple_chains_requested_response_logprobs_reject_invalid_backend_output(
+    backend_logprobs,
+    error_match,
+):
+    """Reject missing or misaligned requested logprobs without creating a chain."""
+    session = _session("logprobs-invalid", sampling_params={"logprobs": True})
+
+    with pytest.raises(RuntimeError, match=error_match):
+        await _run(
+            session,
+            _LogprobBackend([("FIRST", backend_logprobs)]),
+            [{"role": "user", "content": "first turn"}],
+        )
+
+    state = session.snapshot_state()
+    assert state["active_chain_ids"] == []
+    assert state["num_active_chains"] == 0
+    assert state["num_trajectories"] == 0
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_multiple_chains_invalid_continuation_logprobs_release_chain_for_retry():
+    """Keep the selected chain unchanged and reusable after logprob validation fails."""
+    session = _session("logprobs-retry", sampling_params={"logprobs": True})
+    first_messages = [{"role": "user", "content": "first turn"}]
+    continuation = [
+        *first_messages,
+        {"role": "assistant", "content": "FIRST"},
+        {"role": "user", "content": "follow up"},
+    ]
+
+    await _run(session, _LogprobBackend([("FIRST", "full")]), first_messages)
+    state_before_failure = session.snapshot_state()
+
+    with pytest.raises(RuntimeError, match="backend omitted logprobs when requested"):
+        await _run(session, _LogprobBackend([("SECOND", None)]), continuation)
+
+    state_after_failure = session.snapshot_state()
+    assert state_after_failure["active_chain_ids"] == state_before_failure["active_chain_ids"]
+    assert state_after_failure["active_chain_tip_hashes"] == state_before_failure["active_chain_tip_hashes"]
+
+    await _run(session, _LogprobBackend([("RETRY", "full")]), continuation)
+    [trajectory] = await session.finalize()
+
+    assert _decode_response_ids(trajectory.response_ids).endswith("RETRY")
+    assert "SECOND" not in _decode_response_ids(trajectory.response_ids)
+    assert trajectory.response_logprobs is not None
+    assert len(trajectory.response_logprobs) == len(trajectory.response_ids)
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_weight_versions_span_every_generation_in_a_chain():
+    """Report the full weight-version span a multi-turn chain was generated across."""
+    session = _session("versions-multi-turn")
+    first_messages = [{"role": "user", "content": "first turn"}]
+    continuation = [
+        *first_messages,
+        {"role": "assistant", "content": "FIRST"},
+        {"role": "user", "content": "follow up"},
+    ]
+
+    # Second generation resumed across versions 4-5 (partial rollout).
+    await _run(session, _VersionedBackend([("FIRST", 3, 3)]), first_messages)
+    await _run(session, _VersionedBackend([("SECOND", 4, 5)]), continuation)
+    [trajectory] = await session.finalize()
+
+    assert trajectory.extra_fields["min_global_steps"] == 3
+    assert trajectory.extra_fields["max_global_steps"] == 5
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_weight_versions_stay_independent_across_split_chains():
+    """Keep each chain's version span separate when a request splits a new chain."""
+    session = _session("versions-split")
+    first_messages = [{"role": "user", "content": "base"}]
+
+    await _run(session, _VersionedBackend([("BASE", 3, 3)]), first_messages)
+    await _run(session, _VersionedBackend([("FRESH", 7, 7)]), first_messages)
+    assert session.snapshot_state()["active_chain_ids"] == [1, 2]
+    trajectories = await session.finalize()
+
+    spans = {
+        _decode_response_ids(trajectory.response_ids): (
+            trajectory.extra_fields["min_global_steps"],
+            trajectory.extra_fields["max_global_steps"],
+        )
+        for trajectory in trajectories
+    }
+    assert spans == {"BASE": (3, 3), "FRESH": (7, 7)}
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_weight_versions_absent_when_backend_omits_them():
+    """Omit the version keys rather than materializing None for version-less backends."""
+    session = _session("versions-absent")
+
+    await _run(session, SequencedBackend(["ONLY"]), [{"role": "user", "content": "base"}])
+    [trajectory] = await session.finalize()
+
+    assert trajectory.extra_fields == {}

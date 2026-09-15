@@ -1,0 +1,5 @@
+- name: harbor
+  agent:
+    name: oracle
+  harbor_env: modal
+  timeout_multiplier: 1.0

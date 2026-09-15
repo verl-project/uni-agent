@@ -1,0 +1,45 @@
+- name: swe_bench
+  sandbox:
+    provider: modal
+    runtime_timeout: 7200
+  agent:
+    name: claude_code
+    max_turns: 200
+    run_timeout: 4800
+  prompt_template: &swe_claude_prompt
+    - role: user
+      content: |-
+        Read the following task description and resolve the issue in the current directory.
+
+        Task description:
+        {problem_statement}
+
+        Inspect the relevant code, make the minimal correct changes, and verify the result with appropriate tests or checks. Do not modify tests or commit changes. When finished, briefly summarize what changed and how it was verified.
+
+- name: swe_rebench
+  sandbox:
+    provider: modal
+    runtime_timeout: 7200
+  agent:
+    name: claude_code
+    max_turns: 200
+    run_timeout: 4800
+  prompt_template: *swe_claude_prompt
+
+- name: swe_bench_multilingual
+  sandbox:
+    provider: modal
+    runtime_timeout: 7200
+  agent:
+    name: claude_code
+    max_turns: 200
+    run_timeout: 4800
+  prompt_template:
+    - role: user
+      content: |-
+        Read the following task description and resolve the issue in the current directory (primary language: {language}).
+
+        Task description:
+        {problem_statement}
+
+        Inspect the relevant code, make the minimal correct changes, and verify the result with appropriate tests or checks. Do not modify tests or commit changes. When finished, briefly summarize what changed and how it was verified.

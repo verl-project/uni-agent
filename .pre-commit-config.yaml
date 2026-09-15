@@ -1,0 +1,25 @@
+exclude: ^(verl/|uni_agent/tools/)
+
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: "v0.12.2"
+    hooks:
+      - id: ruff
+        args: ["--fix", "--show-fixes", "--output-format=full"]
+        exclude: ^(verl/|.*\.(ipynb)$)
+      - id: ruff-format
+        exclude: ^verl/
+
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: 'v1.17.0'
+    hooks:
+      - id: mypy
+        exclude: ^verl/
+
+  - repo: local
+    hooks:
+      - id: compileall
+        name: Compile all python files
+        entry: sh -c 'PYTHONWARNINGS=error python3 -m compileall -q . -x "(^|[\\/])(\.venv|venv|\.git|verl|uni_agent[\\/]tools)([\\/]|$)"'
+        language: python
+        pass_filenames: false

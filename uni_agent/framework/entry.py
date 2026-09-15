@@ -1,0 +1,178 @@
+"""Factory entry + trainer-facing adapter for the agent framework stack.
+
+`build_gateway_manager` owns gateway-universal wiring (driver-side); the trainer
+adapter creates the manager and injects it so the framework only handles its own
+agent runner, reward dispatch, and framework-specific config fields.
+
+`AgentFrameworkRolloutAdapter` satisfies the trainer's
+`agent_loop_manager_class` extension-point contract; recipes wire it in via
+yaml without authoring per-recipe glue:
+
+    actor_rollout_ref.rollout.agent.agent_loop_manager_class:
+        uni_agent.framework.entry.AgentFrameworkRolloutAdapter
+"""
+
+from __future__ import annotations
+
+import ray
+from omegaconf import OmegaConf
+
+from uni_agent.framework.base import AgentFramework
+from uni_agent.gateway.config import GatewayActorConfig
+from uni_agent.gateway.manager import GatewayManager
+from uni_agent.rl_insight.adapter import init_rollout_trace_config
+from verl.utils.config import omega_conf_to_dataclass
+from verl.utils.import_utils import load_class_from_fqn
+from verl.utils.transferqueue_utils import tq
+from verl.workers.config import HFModelConfig, RolloutConfig
+
+_DEFAULT_FRAMEWORK_CLASS = "uni_agent.framework.framework.GatewayAgentFramework"
+
+
+def build_gateway_manager(*, config, llm_client) -> GatewayManager:
+    """Spawn the gateway actor pool (driver-side, driver-owned) and return its manager."""
+    # TODO(phase-b): switch this to actor_rollout_ref.rollout.agent_framework.*
+    data_cfg = config.data
+    model_cfg = config.actor_rollout_ref.model
+    rollout_cfg = config.actor_rollout_ref.rollout
+    af_cfg = rollout_cfg.custom.agent_framework
+
+    apply_chat_template_kwargs = data_cfg.get("apply_chat_template_kwargs", {})
+    mm_processor_kwargs = data_cfg.get("mm_processor_kwargs", {})
+    allowed_sampling_keys = af_cfg.get("allowed_request_sampling_param_keys")
+    if allowed_sampling_keys is not None:
+        if not isinstance(allowed_sampling_keys, list | tuple) and not OmegaConf.is_list(allowed_sampling_keys):
+            raise ValueError("allowed_request_sampling_param_keys must be a list of strings or null")
+        if any(not isinstance(key, str) for key in allowed_sampling_keys):
+            raise ValueError("allowed_request_sampling_param_keys must be a list of strings or null")
+        allowed_sampling_keys = set(allowed_sampling_keys)
+
+    # Match AgentLoopWorker pattern: self-load tokenizer/processor via HFModelConfig.
+    rollout_config: RolloutConfig = omega_conf_to_dataclass(rollout_cfg)
+    model_config: HFModelConfig = omega_conf_to_dataclass(model_cfg)
+    gateway_actor_config = GatewayActorConfig(
+        tokenizer=model_config.tokenizer,
+        processor=model_config.processor,
+        tool_parser_name=rollout_config.multi_turn.format,
+        rollout_backend=rollout_config.name,
+        enable_tool_parser_cache=af_cfg.get("enable_tool_parser_cache", True),
+        hf_model_type=getattr(model_config.hf_config, "model_type", None),
+        apply_chat_template_kwargs=dict(apply_chat_template_kwargs),
+        mm_processor_kwargs=dict(mm_processor_kwargs),
+        prompt_length=rollout_config.prompt_length,
+        response_length=rollout_config.response_length,
+        enable_last_assistant_rollback=af_cfg.get("enable_last_assistant_rollback", True),
+        allowed_request_sampling_param_keys=allowed_sampling_keys,
+        coalesce_reserved_exact_requests=af_cfg.get("coalesce_reserved_exact_requests", True),
+    )
+
+    return GatewayManager(
+        llm_client=llm_client,
+        gateway_count=int(af_cfg["gateway_count"]),
+        gateway_actor_config=gateway_actor_config,
+    )
+
+
+def build_agent_framework(
+    *,
+    config,
+    gateway_manager,
+    reward_loop_worker_handles=None,
+) -> AgentFramework:
+    """Wire the configured framework subclass over an injected gateway manager."""
+    # TODO(phase-b): switch this to actor_rollout_ref.rollout.agent_framework.*
+    af_cfg = OmegaConf.select(config, "actor_rollout_ref.rollout.custom.agent_framework", default={}) or {}
+    model_config: HFModelConfig = omega_conf_to_dataclass(config.actor_rollout_ref.model)
+
+    framework_cls = load_class_from_fqn(str(af_cfg.get("framework_class_fqn", _DEFAULT_FRAMEWORK_CLASS)))
+    return framework_cls.from_config(
+        config=config,
+        gateway_manager=gateway_manager,
+        processor=model_config.processor,
+        reward_loop_worker_handles=reward_loop_worker_handles,
+    )
+
+
+@ray.remote
+class AgentFrameworkWorker:
+    """Ray actor host: initializes TQ in this process and owns one AgentFramework.
+
+    Construction is synchronous (no async setup round-trip); the gateway manager
+    is created driver-side and injected so its actors are not owned by this worker.
+    """
+
+    def __init__(self, *, config, gateway_manager, reward_loop_worker_handles=None) -> None:
+        tq.init()
+        init_rollout_trace_config(config)
+        self.framework = build_agent_framework(
+            config=config,
+            gateway_manager=gateway_manager,
+            reward_loop_worker_handles=reward_loop_worker_handles,
+        )
+
+    async def generate_sequences(self, prompts) -> None:
+        await self.framework.generate_sequences(prompts)
+
+
+class AgentFrameworkRolloutAdapter:
+    """Trainer-facing adapter satisfying the `agent_loop_manager_class` contract.
+
+    Holds zero recipe-specific logic; every agent-framework recipe wires the
+    same class in yaml. The adapter owns the gateway manager (driver-side) and
+    injects it into the framework worker.
+    """
+
+    def __init__(self) -> None:
+        self.framework_worker = None
+        # Driver-owned so the gateway actors outlive the framework worker; also
+        # the handle through which teardown can be driven once a call site exists.
+        self.gateway_manager = None
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        config,
+        llm_client,
+        teacher_client=None,
+        reward_loop_worker_handles=None,
+        **_,
+    ) -> AgentFrameworkRolloutAdapter:
+        if teacher_client is not None:
+            raise ValueError(
+                "AgentFrameworkRolloutAdapter does not support teacher_client yet; "
+                "disable teacher policy/distillation or use an AgentLoopManager that supports it."
+            )
+
+        gateway_manager = build_gateway_manager(config=config, llm_client=llm_client)
+        framework_worker = AgentFrameworkWorker.remote(
+            config=config,
+            gateway_manager=gateway_manager,
+            reward_loop_worker_handles=reward_loop_worker_handles,
+        )
+
+        instance = cls()
+        instance.framework_worker = framework_worker
+        instance.gateway_manager = gateway_manager
+        return instance
+
+    def generate_sequences(self, prompts) -> None:
+        """Submit a TQ batch generation task without waiting for rollout results."""
+        if self.framework_worker is None:
+            raise RuntimeError("framework must be initialized before generate_sequences")
+
+        self.framework_worker.generate_sequences.remote(prompts)
+        return None
+
+    def generate_sequences_and_wait(self, prompts) -> None:
+        """Blocking variant of :meth:`generate_sequences` for standalone (non-trainer) runs.
+
+        :meth:`generate_sequences` is fire-and-forget (the trainer consumes TQ asynchronously
+        via its ReplayBuffer); this awaits the framework worker so the caller knows every
+        session's trajectory has landed in TQ, and re-raises any worker-side error.
+        """
+        if self.framework_worker is None:
+            raise RuntimeError("framework must be initialized before generate_sequences")
+
+        ray.get(self.framework_worker.generate_sequences.remote(prompts))
+        return None

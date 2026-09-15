@@ -1,0 +1,241 @@
+# Simulated sandbox observation templates.
+#
+# Structure: route_key -> list of {weight, text}. Sampling is weighted.
+#
+# Purpose: exercise the e2e pipeline (router dispatch, KV/prefix traffic,
+# trajectory write-out) with structurally correct but generic tool output.
+# Texts keep the SHAPE of each tool's real output (pytest banner, traceback,
+# file listing) so parsing and token volume behave realistically, but carry
+# no project-specific names — replaceable placeholders only (module_a,
+# tests/test_case_*.py).
+#
+# Weight notes:
+# - test_output is weighted toward success (~8:2) so agent loops reach
+#   `submit` instead of spinning to max_turns — keeps e2e wall time bounded.
+# - A few diverse entries per key avoid identical token blocks across
+#   sessions (prefix-cache hit rate stays meaningful without being pinned).
+# - observation_scale multiplies every entry's length globally.
+
+# ---------------------------------------------------------------------------
+# pytest runs — mostly passing so loops reach submit.
+# ---------------------------------------------------------------------------
+test_output:
+  - weight: 6
+    text: |-
+      ============================= test session starts ==============================
+      platform linux -- Python 3.11.0, pytest-8.0.0, pluggy-1.2.0
+      rootdir: /workspace
+      collecting ... collected 5 items
+
+      tests/test_case_one.py .....                                           [100%]
+
+      =============================== 5 passed in 1.02s ===============================
+  - weight: 5
+    text: |-
+      ============================= test session starts ==============================
+      platform linux -- Python 3.11.0, pytest-8.0.0
+      rootdir: /workspace
+      collecting ... collected 12 items
+
+      tests/test_case_two.py ............                                    [100%]
+
+      ============================== 12 passed in 1.84s ==============================
+  - weight: 3
+    text: |-
+      ============================= test session starts ==============================
+      collecting ... collected 3 items
+
+      tests/test_case_three.py ...                                          [100%]
+
+      =============================== 3 passed in 0.51s ===============================
+  - weight: 3
+    text: |-
+      ============================= test session starts ==============================
+      collecting ... collected 6 items
+
+      tests/test_case_four.py ....s.                                        [100%]
+      ========================= 5 passed, 1 skipped in 0.93s ========================
+  - weight: 2
+    text: |-
+      ============================= test session starts ==============================
+      collecting ... collected 4 items
+
+      tests/test_case_five.py F...                                          [100%]
+      =================================== FAILURES ===================================
+      ______________________ test_case_five_check _________________________
+          assert result == expected
+      E   assert 3 == 4
+      =========================== 1 failed, 3 passed in 1.10s ===========================
+  - weight: 1
+    text: |-
+      ============================= test session starts ==============================
+      collecting ... collected 7 items
+
+      tests/test_case_six.py FF.....                                        [100%]
+      =================================== FAILURES ===================================
+      ______________________ test_case_six_parse __________________________
+          parsed = parse(sample)
+      E   ValueError: malformed input
+      =========================== 2 failed, 5 passed in 1.37s ===========================
+
+# ---------------------------------------------------------------------------
+# python script runs — stdout plus occasional traceback.
+# ---------------------------------------------------------------------------
+python_script:
+  - weight: 5
+    text: |-
+      ok
+      count=3
+  - weight: 3
+    text: |-
+      entries:
+        - id: 1
+        - id: 2
+      total: 2
+  - weight: 2
+    text: |-
+      Traceback (most recent call last):
+        File "script.py", line 8, in <module>
+          main()
+        File "script.py", line 21, in main
+          process(record)
+      KeyError: 'field'
+
+# ---------------------------------------------------------------------------
+# directory listings.
+# ---------------------------------------------------------------------------
+listing:
+  - weight: 5
+    text: |-
+      /workspace
+      /workspace/module_a.py
+      /workspace/module_b.py
+      /workspace/tests
+      /workspace/tests/test_case_one.py
+      /workspace/tests/test_case_two.py
+  - weight: 3
+    text: |-
+      /workspace/module_a.py
+      /workspace/module_b.py
+      /workspace/module_c.py
+      /workspace/README.md
+  - weight: 2
+    text: |-
+      .:
+      module_a.py
+      tests/
+      config.json
+
+# ---------------------------------------------------------------------------
+# grep / search results.
+# ---------------------------------------------------------------------------
+search:
+  - weight: 5
+    text: |-
+      /workspace/module_a.py:12:    def process(self, item):
+      /workspace/module_a.py:40:    return self.process(item)
+  - weight: 3
+    text: |-
+      /workspace/module_b.py:8:value = compute(input)
+      /workspace/module_c.py:15:other = compute(value)
+  - weight: 2
+    text: "(no matches)"
+
+# ---------------------------------------------------------------------------
+# cat / head / tail file views.
+# ---------------------------------------------------------------------------
+file_view:
+  - weight: 4
+    text: |-
+      1  import os
+      2
+      3
+      4  class Service:
+      5      def __init__(self, config):
+      6          self.config = config
+      7
+      8      def run(self, task):
+      9          return self.process(task)
+  - weight: 3
+    text: |-
+      1  DEFAULTS = {
+      2      "timeout": 30,
+      3      "retries": 3,
+      4  }
+  - weight: 2
+    text: |-
+      1
+      2
+      3
+      4
+  - weight: 1
+    text: |-
+      1  class Model:
+      2      objects = None
+      3
+      4      def save(self):
+      5          raise NotImplementedError
+      100	  placeholder line for long-file views
+
+# ---------------------------------------------------------------------------
+# str_replace_editor views (cat -n style with padded line numbers).
+# ---------------------------------------------------------------------------
+"editor:view":
+  - weight: 5
+    text: |-
+      Here's the result of running `cat -n` on /workspace/module_a.py:
+           1	import os
+           2
+           3
+           4	class Service:
+           5	    def __init__(self, config):
+           6	        self.config = config
+      (Open file: /workspace/module_a.py)
+  - weight: 3
+    text: |-
+      Here's the result of running `cat -n` on /workspace/module_b.py:
+           1	DEFAULTS = {
+           2	    "timeout": 30,
+           3	}
+      (Open file: /workspace/module_b.py)
+
+"editor:create":
+  - weight: 6
+    text: "File created successfully at: /workspace/new_module.py"
+  - weight: 2
+    text: "File created successfully at: /workspace/tests/test_new_case.py"
+  - weight: 1
+    text: "ERROR: file already exists at /workspace/new_module.py. Use str_replace to edit it."
+
+"editor:str_replace":
+  - weight: 7
+    text: "The file /workspace/module_a.py has been edited."
+  - weight: 2
+    text: "The file /workspace/module_b.py has been edited."
+  - weight: 1
+    text: "ERROR: old_content not found in /workspace/module_a.py."
+
+"editor:insert":
+  - weight: 7
+    text: "The insertion point at line 10 was found; /workspace/module_a.py has been edited."
+  - weight: 1
+    text: "ERROR: line 99 not present in /workspace/module_a.py."
+
+"editor:undo_edit":
+  - weight: 8
+    text: "Last edit to /workspace/module_a.py was undone."
+  - weight: 1
+    text: "ERROR: no edit to undo in /workspace/module_a.py."
+
+# ---------------------------------------------------------------------------
+# generic catch-all.
+# ---------------------------------------------------------------------------
+default:
+  - weight: 5
+    text: "(command completed with no output)"
+  - weight: 3
+    text: "done"
+  - weight: 2
+    text: |-
+      usage: tool [-h] {run,check} ...
+      tool: error: unrecognized arguments

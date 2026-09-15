@@ -1,0 +1,126 @@
+name: Bug report
+description: Report incorrect or unexpected Uni-Agent behavior
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve Uni-Agent. Please search existing issues and include the smallest reproduction you can provide.
+
+        Do not include API keys, access tokens, private model responses, proprietary datasets, or other sensitive information.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What failed, and what impact did it have?
+      placeholder: A task using the ReAct agent stops after the first tool call when ...
+    validations:
+      required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Affected component
+      description: Choose the layer that owns the failing behavior.
+      options:
+        - Agent or agent harness
+        - Framework or rollout orchestration
+        - Gateway, model protocol, or trajectory capture
+        - Sandbox
+        - Task, reward, or dataset
+        - Tool or Toolbox
+        - Logging or observability
+        - Training or verl integration
+        - App or external integration
+        - Documentation or examples
+        - Installation, build, or dependencies
+        - Other or not sure
+    validations:
+      required: true
+
+  - type: dropdown
+    id: execution_path
+    attributes:
+      label: Execution path
+      description: Where does the problem occur?
+      options:
+        - Standalone inference with an external model API
+        - verl-managed inference
+        - RL training
+        - Sandbox or Tool usage without an Agent
+        - Documentation, installation, or build
+        - Other or not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Provide exact commands and the smallest config or sample that reproduces the problem. For intermittent failures, include frequency and timing.
+      placeholder: |
+        1. Install commit ...
+        2. Run `python ... --task-config ...`
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: observed
+    attributes:
+      label: Observed behavior
+      description: Include the complete error, relevant stack trace, exit code, or incorrect output.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What should have happened instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: configuration
+    attributes:
+      label: Relevant configuration
+      description: Include the Task Config, Sample Config, Agent, Sandbox provider, model backend, and important CLI flags. Remove secrets.
+      render: yaml
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Paste the smallest relevant log excerpt as text. Include session or trajectory identifiers when applicable.
+      render: shell
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Provide versions relevant to the failing execution path.
+      placeholder: |
+        Uni-Agent commit:
+        verl commit (if applicable):
+        OS:
+        Python:
+        CUDA / accelerator:
+        Model backend and version:
+        Agent:
+        Task:
+        Sandbox provider:
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues and did not find a duplicate.
+          required: true
+        - label: I removed credentials, private data, and other sensitive information.
+          required: true

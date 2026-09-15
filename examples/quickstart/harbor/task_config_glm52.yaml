@@ -1,0 +1,19 @@
+- name: harbor
+  agent:
+    name: terminus-2
+    timeout_sec: 14400
+    kwargs:
+      parser_name: json
+      temperature: 1.0
+      max_turns: 500
+      suppress_max_turns_warning: true
+      model_info:
+        max_input_tokens: 262144
+        max_output_tokens: 49152
+      llm_call_kwargs:
+        top_p: 1.0
+        max_tokens: 49152
+  harbor_env: modal
+  timeout_multiplier: 1.0
+  override_cpus: 4
+  override_memory_mb: 8192
