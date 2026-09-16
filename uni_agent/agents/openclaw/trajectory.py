@@ -7,13 +7,12 @@ from __future__ import annotations
 
 import argparse
 from contextlib import closing
-import hashlib
 import json
 from pathlib import Path
 import sqlite3
 
 
-def audit_state(state_dir: str, session_id: str, model: str, export_path: str | None = None) -> dict:
+def audit_state(state_dir: str, session_id: str, model: str) -> dict:
     errors = []
     databases = []
     windows, nodes, records = [], [], []
@@ -109,13 +108,8 @@ def audit_state(state_dir: str, session_id: str, model: str, export_path: str | 
             errors.append("missing_initial_user")
         if not messages or messages[-1].get("role") != "assistant" or messages[-1].get("stopReason") != "stop" or pending:
             errors.append("unfinished_trajectory")
-        if export_path is not None:
-            with Path(export_path).open("x", encoding="utf-8") as stream:
-                json.dump({"session_id": session_id, "events": events}, stream, ensure_ascii=False)
-        digest = hashlib.sha256(json.dumps(events, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         return {"verified": not errors, "errors": sorted(set(errors)), "session_id": session_id,
-                "event_count": len(events), "message_count": len(messages), "tool_calls": len(calls),
-                "run_ids": sorted(runs), "events_sha256": digest, "databases": databases}
+                "event_count": len(events), "message_count": len(messages), "tool_calls": len(calls)}
     except (OSError, sqlite3.Error, ValueError, KeyError, TypeError) as exc:
         return {"verified": False, "errors": ["audit_failed:" + type(exc).__name__], "session_id": session_id}
 
@@ -125,8 +119,7 @@ if __name__ == "__main__":
     parser.add_argument("state_dir")
     parser.add_argument("session_id")
     parser.add_argument("model")
-    parser.add_argument("--export")
     args = parser.parse_args()
-    result = audit_state(args.state_dir, args.session_id, args.model, args.export)
+    result = audit_state(args.state_dir, args.session_id, args.model)
     print(json.dumps(result))
     raise SystemExit(0 if result["verified"] else 1)

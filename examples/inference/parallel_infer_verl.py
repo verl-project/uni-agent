@@ -272,17 +272,11 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
     return config
 
 
-def _build_prompts(samples: list, uids: list, *, artifact_dir: str | None = None):
+def _build_prompts(samples: list, uids: list):
     """Assemble the TensorDict batch the framework's ``generate_sequences`` expects."""
     tools_kwargs = []
     for sample in samples:
-        sample_tools_kwargs = copy.deepcopy(sample["extra_info"]["tools_kwargs"])
-        task = sample_tools_kwargs.get("task")
-        if artifact_dir and isinstance(task, dict):
-            agent = task.get("agent")
-            if isinstance(agent, dict) and agent.get("name") == "openclaw":
-                agent["artifact_dir"] = artifact_dir
-        tools_kwargs.append(sample_tools_kwargs)
+        tools_kwargs.append(copy.deepcopy(sample["extra_info"]["tools_kwargs"]))
     return tu.get_tensordict(
         tensor_dict={
             "raw_prompt": [sample.get("prompt") for sample in samples],
@@ -503,11 +497,6 @@ def main() -> None:
         "--max-parallel-calls", type=int, default=None, help="Optional maximum parallel tool calls per turn."
     )
     parser.add_argument(
-        "--artifact-dir",
-        default=None,
-        help="Optional host directory for exported OpenClaw trajectory.json files.",
-    )
-    parser.add_argument(
         "--gateway-count",
         type=int,
         default=4,
@@ -564,10 +553,7 @@ def main() -> None:
 
     # 3. Submit the batch and wait for every trajectory to land in TQ.
     uids = [str(uuid4()) for _ in samples]
-    artifact_dir = os.path.expanduser(args.artifact_dir) if args.artifact_dir else None
-    if artifact_dir:
-        os.makedirs(artifact_dir, exist_ok=True)
-    prompts = _build_prompts(samples, uids, artifact_dir=artifact_dir)
+    prompts = _build_prompts(samples, uids)
     logger.info("starting inference...")
     begin_time = time.time()
     adapter.generate_sequences_and_wait(prompts)

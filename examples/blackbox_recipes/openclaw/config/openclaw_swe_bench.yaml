@@ -8,14 +8,14 @@
     provider: docker
     runtime_timeout: 7200
     sandbox_kwargs:
-      pull_policy: never
+      # Host networking currently lets the task reach the gateway at its Ray node address.
+      # This is a controlled-deployment constraint, not a network isolation boundary.
       run_args: ["--network", "host"]
   agent:
     name: openclaw
     tool_command: /opt/openclaw/bin/openclaw
     run_timeout: 600
     cli_timeout_seconds: 540
-    strict_single_trajectory: true
     model:
       temperature: 1.0
       top_p: 1.0

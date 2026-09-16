@@ -7,12 +7,16 @@ import sqlite3
 import tempfile
 import unittest
 
+import pytest
+
 MODULE = Path(__file__).resolve().parents[3] / "uni_agent/agents/openclaw/trajectory.py"
 spec = importlib.util.spec_from_file_location("openclaw_trajectory", MODULE)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 class TrajectoryTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
