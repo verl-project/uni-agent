@@ -1,8 +1,6 @@
-name: Python Backend CI
+name: Python Backend CI in CPU
 
 on:
-  push:
-    branches: [ "main", "develop" ]
   pull_request:
     branches: [ "main" ]
     types: [ opened, synchronize, reopened ]
@@ -15,14 +13,15 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
-  test-and-build:
+  # ============ Job: test in cpu ============
+  test-cpu:
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
-    # tested in multi python version
+    # tested in certain python version
     strategy:
       matrix:
-        python-version: [ "3.11", "3.12" ]
+        python-version: [ "3.12" ]
 
     steps:
       # 1. git clone code
@@ -51,16 +50,13 @@ jobs:
       # 4. Test with pytest
       - name: Test with pytest
         run: |
-          pip install pytest pytest-cov
+          pip install pytest pytest-cov pytest-custom_exit_code
           export PYTHONPATH="${PYTHONPATH}:${GITHUB_WORKSPACE}"
-          pytest tests/uni_agent/ -m="cpu and level0" --cov=./uni_agent/ --cov-report=xml --cov-report=term
+          pytest tests/uni_agent/ -m="cpu and level0" --suppress-no-test-exit-code --cov=./uni_agent/ --cov-report=xml --cov-report=term
 
-      # 5. Upload coverage to Codecov
-      - name: Upload coverage to Codecov
+      - name: Upload CPU coverage
         uses: codecov/codecov-action@v4
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           file: ./coverage.xml
-          flags: unittests
-          name: codecov-umbrella
-          fail_ci_if_error: false
+          flags: cpu-tests

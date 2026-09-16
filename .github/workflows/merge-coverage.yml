@@ -1,0 +1,38 @@
+name: Python Backend CI in CPU
+
+on:
+  pull_request:
+    branches: [ "main" ]
+    types: [ opened, synchronize, reopened ]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  # ============ Job: merge-coverage ============
+  merge-coverage:
+    needs: [ test-gpu, test-cpu ]
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Download all coverage reports
+        uses: actions/download-artifact@v4
+        with:
+          path: ./coverage-reports
+
+      - name: Merge coverage reports
+        run: |
+          pip install coverage
+          coverage combine ./coverage-reports/
+          coverage xml -o ./merged-coverage.xml
+
+      - name: Upload merged coverage
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          file: ./merged-coverage.xml
+          flags: merged
