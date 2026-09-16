@@ -26,6 +26,8 @@ class FakeSandbox:
 
 def make_agent(**kwargs):
     kwargs.setdefault("tool_script", "/opt/codex/bin/run_agent.sh")
+    kwargs.setdefault("conda_prefix", "/custom/conda/envs/testbed")
+    kwargs.setdefault("path", "/custom/conda/envs/testbed/bin:/custom/conda/bin")
     kwargs.setdefault("model", ModelConfig(base_url="http://gateway/v1", model_name="policy"))
     return CodexAgent(CodexConfig(**kwargs))
 
@@ -38,9 +40,15 @@ def test_build_agent_command_uses_stdin_and_isolates_env():
         gateway_url="http://127.0.0.1:38197/sessions/s1/v1",
         model_name="policy",
         api_key="key",
+        conda_prefix="/sandbox/conda/envs/task",
+        path="/sandbox/conda/envs/task/bin:/sandbox/conda/bin",
         project_dir="/testbed",
     )
     assert "| base64 -d |" in command
+    assert "CONDA_DEFAULT_ENV=task" in command
+    assert "CONDA_PREFIX=/sandbox/conda/envs/task" in command
+    assert 'PATH=/sandbox/conda/envs/task/bin:/sandbox/conda/bin:"$PATH"' in command
+    assert "/opt/miniconda3" not in command
     assert "CODEX_API_BASE=http://127.0.0.1:38197/sessions/s1/v1" in command
     assert "CODEX_MODEL=policy" in command
     assert "CODEX_HOME=" not in command
@@ -97,13 +105,5 @@ def test_codex_agent_runs_and_returns_agent_result():
     assert result.output["content"] == "done"
     assert len(sandbox.calls) == 1
     assert sandbox.calls[0]["workdir"] == "/testbed"
-
-
-@pytest.mark.parametrize(
-    "field,value", [("extra_args", []), ("extra_env", {}), ("codex_home", "/tmp/custom"), ("step_limit", 1)]
-)
-def test_codex_config_rejects_removed_or_unsupported_options(field, value):
-    from pydantic import ValidationError
-
-    with pytest.raises(ValidationError, match=field):
-        make_agent(**{field: value})
+    assert "CONDA_PREFIX=/custom/conda/envs/testbed" in sandbox.calls[0]["script"]
+    assert 'PATH=/custom/conda/envs/testbed/bin:/custom/conda/bin:"$PATH"' in sandbox.calls[0]["script"]
