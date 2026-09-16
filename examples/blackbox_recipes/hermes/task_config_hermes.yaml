@@ -18,8 +18,6 @@
       idle_timeout: 7200
       proxy_port: 38197
       tunnel_connect_timeout: 60
-      sdk_mode: legacy
-      legacy_python: /home/zxh/miniconda3/envs/uni-agent/bin/python
       mounts:
         - target: /opt/hermes
           image_url: swr.cn-east-3.myhuaweicloud.com/openyuanrong/hermes-agent-tool:20260915
@@ -29,7 +27,7 @@
     run_budget_seconds: 6600
     run_timeout: 7200
     terminal_timeout: 600
-    conda_env: testbed
+    environment_prefix: /opt/miniconda3/envs/testbed
     tool_python: /opt/hermes/bin/python
     runner_script: /opt/hermes/bin/run_hermes.py
     approval_mode: "off"

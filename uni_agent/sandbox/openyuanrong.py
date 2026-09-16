@@ -7,16 +7,11 @@ Wraps remote sandbox lifecycle (create, run commands, cleanup and etc.)"""
 from __future__ import annotations
 
 import asyncio
-import base64
-import json
 import logging
 import os
 import shlex
-import subprocess
-import threading
 import uuid
 from pathlib import Path
-from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 from .base import ExecResult, Sandbox, _to_str
@@ -83,183 +78,6 @@ def _connection_config(sdk: Any) -> Any:
     if tunnel_ssl_verify:
         os.environ["YR_TUNNEL_SSL_VERIFY"] = tunnel_ssl_verify
     return sdk.ConnectionConfig(**kwargs)
-
-
-def _legacy_sdk_requested(extra_kwargs: dict[str, Any]) -> bool:
-    value = extra_kwargs.get("sdk_mode") or os.getenv("OPENYUANRONG_SDK_MODE")
-    if value is None and os.getenv("USE_OPENYUANRONG_SDK") == "0":
-        value = "legacy"
-    return str(value or "").strip().lower() in {"legacy", "akernel", "old", "v0"}
-
-
-class _LegacyRPC:
-    """Serialize legacy ``akernel_sdk`` calls through its Python 3.11 runtime."""
-
-    def __init__(self, python_path: str) -> None:
-        worker_path = Path(__file__).with_name("legacy_openyuanrong_worker.py")
-        if not worker_path.is_file():
-            raise FileNotFoundError(f"legacy OpenYuanRong worker is missing: {worker_path}")
-        env = os.environ.copy()
-        env["PYTHONUNBUFFERED"] = "1"
-        self._process = subprocess.Popen(
-            [python_path, str(worker_path)],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            bufsize=1,
-            env=env,
-        )
-        self._lock = threading.RLock()
-        self._request_id = 0
-
-    def call(self, op: str, **fields: Any) -> Any:
-        with self._lock:
-            if self._process.poll() is not None or self._process.stdin is None or self._process.stdout is None:
-                raise RuntimeError("legacy OpenYuanRong worker exited before the RPC completed")
-            self._request_id += 1
-            request = {"id": self._request_id, "op": op, **fields}
-            self._process.stdin.write(json.dumps(request, ensure_ascii=False, separators=(",", ":")) + "\n")
-            self._process.stdin.flush()
-            while True:
-                line = self._process.stdout.readline()
-                if not line:
-                    raise RuntimeError("legacy OpenYuanRong worker closed its RPC stream")
-                try:
-                    response = json.loads(line)
-                except json.JSONDecodeError:
-                    # Older yr dependencies may print a diagnostic during an
-                    # RPC. The helper redirects normal noise, but tolerate one
-                    # stray line without desynchronizing the protocol.
-                    continue
-                if response.get("id") != self._request_id:
-                    continue
-                break
-            if not response.get("ok"):
-                raise RuntimeError(str(response.get("error") or "legacy OpenYuanRong RPC failed"))
-            return response.get("result")
-
-    def close(self) -> None:
-        with self._lock:
-            if self._process.poll() is None:
-                self._process.terminate()
-                try:
-                    self._process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    self._process.kill()
-                    self._process.wait(timeout=5)
-            for stream in (self._process.stdin, self._process.stdout):
-                if stream is not None:
-                    stream.close()
-
-
-class _LegacyCommands:
-    def __init__(self, rpc: _LegacyRPC) -> None:
-        self._rpc = rpc
-
-    def run(
-        self, command: str, *, envs: dict[str, str] | None = None, cwd: str | None = None, timeout: int = 60
-    ) -> Any:
-        result = self._rpc.call("exec_shell", command=command, env=envs, workdir=cwd, timeout=timeout)
-        return SimpleNamespace(**result)
-
-    def run_argv(
-        self,
-        argv: list[str],
-        *,
-        envs: dict[str, str] | None = None,
-        cwd: str | None = None,
-        timeout: int = 60,
-    ) -> Any:
-        result = self._rpc.call("exec", argv=argv, env=envs, workdir=cwd, timeout=timeout)
-        return SimpleNamespace(**result)
-
-
-class _LegacyFilesystem:
-    def __init__(self, rpc: _LegacyRPC) -> None:
-        self._rpc = rpc
-
-    def read(self, path: str, format: str = "text") -> str | bytes:
-        result = self._rpc.call("read_file", path=path)
-        data = base64.b64decode(result["data"])
-        return data if format == "bytes" else data.decode("utf-8")
-
-    def write(self, path: str, data: str | bytes) -> Any:
-        raw = data.encode("utf-8") if isinstance(data, str) else data
-        return self._rpc.call("write_file", path=path, data=base64.b64encode(raw).decode("ascii"))
-
-    def copy_from_local(self, local_path: str, remote_path: str) -> Any:
-        return self._rpc.call("upload", local_path=local_path, remote_path=remote_path)
-
-    def copy_to_local(self, remote_path: str, local_path: str) -> Any:
-        return self._rpc.call("download", remote_path=remote_path, local_path=local_path)
-
-
-class _LegacyShell:
-    def __init__(self, rpc: _LegacyRPC, shell_id: str) -> None:
-        self._rpc = rpc
-        self._shell_id = shell_id
-
-    async def run(
-        self,
-        command: str,
-        *,
-        envs: dict[str, str] | None = None,
-        cwd: str | None = None,
-        timeout: int = 60,
-    ) -> Any:
-        result = await asyncio.to_thread(
-            self._rpc.call,
-            "shell_run",
-            shell_id=self._shell_id,
-            command=command,
-            env=envs,
-            workdir=cwd,
-            timeout=timeout,
-        )
-        return SimpleNamespace(**result)
-
-    async def kill(self) -> None:
-        await asyncio.to_thread(self._rpc.call, "shell_close", shell_id=self._shell_id)
-
-
-class _LegacyShells:
-    def __init__(self, rpc: _LegacyRPC) -> None:
-        self._rpc = rpc
-
-    async def create(self, *, cwd: str | None = None, envs: dict[str, str] | None = None) -> _LegacyShell:
-        result = await asyncio.to_thread(self._rpc.call, "shell_create", cwd=cwd, env=envs)
-        return _LegacyShell(self._rpc, result["shell_id"])
-
-
-class _LegacySandboxProxy:
-    """Old-SDK-shaped object consumed by the provider's existing data plane."""
-
-    def __init__(self, python_path: str) -> None:
-        self._rpc = _LegacyRPC(python_path)
-        self.commands = _LegacyCommands(self._rpc)
-        self.files = _LegacyFilesystem(self._rpc)
-        self.shells = _LegacyShells(self._rpc)
-        self.sandbox_id = ""
-
-    def start(self, kwargs: dict[str, Any]) -> None:
-        result = self._rpc.call("start", kwargs=kwargs)
-        self.sandbox_id = str(result.get("sandbox_id") or "")
-
-    def is_running(self) -> bool:
-        return bool(self._rpc.call("is_alive"))
-
-    def get_port_url(self, port: int) -> str:
-        return str(self._rpc.call("get_port_url", port=port))
-
-    def get_tunnel_url(self) -> str:
-        return str(self._rpc.call("get_tunnel_url"))
-
-    def kill(self) -> None:
-        try:
-            self._rpc.call("stop")
-        finally:
-            self._rpc.close()
 
 
 class _OpenyuanrongShell:
@@ -344,7 +162,7 @@ class OpenyuanrongSandbox(Sandbox):
     async def start(self) -> None:
         if self._sandbox is not None:
             return
-        legacy = _legacy_sdk_requested(self.extra_kwargs)
+        sdk = _load_sdk()
         sb_kwargs: dict[str, Any] = {
             "image": self.image,
             "cpu": self.cpu,
@@ -354,9 +172,7 @@ class OpenyuanrongSandbox(Sandbox):
             "idle_timeout": self.idle_timeout,
         }
         if self.mounts:
-            sb_kwargs["mounts"] = (
-                list(self.mounts) if legacy else [self._coerce_mount(m, _load_sdk()) for m in self.mounts]
-            )
+            sb_kwargs["mounts"] = [self._coerce_mount(m, sdk) for m in self.mounts]
         if self.env:
             sb_kwargs["env"] = self.env
         if self.cwd:
@@ -370,28 +186,6 @@ class OpenyuanrongSandbox(Sandbox):
         name = _resolve_sandbox_name()
         if name is not None:
             sb_kwargs["name"] = name
-        if legacy:
-            legacy_python = str(
-                self.extra_kwargs.get("legacy_python")
-                or os.getenv("OPENYUANRONG_LEGACY_PYTHON")
-                or "/home/zxh/miniconda3/envs/uni-agent/bin/python"
-            )
-            sb_kwargs.update(
-                {key: value for key, value in self.extra_kwargs.items() if key not in {"sdk_mode", "legacy_python"}}
-            )
-            proxy = _LegacySandboxProxy(legacy_python)
-            try:
-                await asyncio.to_thread(proxy.start, sb_kwargs)
-            except BaseException:
-                try:
-                    proxy.kill()
-                except BaseException:
-                    pass
-                raise
-            self._sandbox = proxy
-            return
-
-        sdk = _load_sdk()
         sb_kwargs.update(self.extra_kwargs)
         # An explicit ``connection`` in sandbox_kwargs wins over the env-derived one.
         if "connection" not in sb_kwargs:
@@ -513,25 +307,6 @@ class OpenyuanrongSandbox(Sandbox):
         """Run ``argv`` once via openyuanrong_sandbox ``Commands.run``."""
         sb = self._require()
         timeout_i = int(timeout) if timeout else 60
-        if isinstance(sb, _LegacySandboxProxy):
-            if (path_setup := self._path_setup_command()) is not None:
-                argv = ["bash", "-c", f"{path_setup}; {shlex.join(argv)}"]
-            result = await asyncio.to_thread(
-                sb.commands.run_argv,
-                argv,
-                envs=env,
-                cwd=workdir,
-                timeout=timeout_i,
-            )
-            exit_code = int(getattr(result, "exit_code", -1))
-            stdout = _to_str(getattr(result, "stdout", ""))
-            stderr = _to_str(getattr(result, "stderr", ""))
-            if exit_code == -1 and "timed out" in stderr:
-                raise TimeoutError(stderr)
-            if exit_code != 0:
-                raise RuntimeError(stderr or f"command exited with {exit_code}")
-            return ExecResult(exit_code=0, stdout=stdout, stderr=stderr)
-
         command = shlex.join(argv)
         if (path_setup := self._path_setup_command()) is not None:
             command = f"{path_setup}; {command}"

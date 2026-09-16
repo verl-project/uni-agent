@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import pytest
+
 from examples.blackbox_recipes.hermes.run_hermes import _recipe_config, map_hermes_result
+
+pytestmark = [pytest.mark.cpu, pytest.mark.level0]
 
 
 def test_recipe_config_disables_non_episode_state():
