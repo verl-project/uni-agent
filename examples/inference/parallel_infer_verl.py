@@ -273,6 +273,9 @@ def init_config(args: argparse.Namespace, *, served_model_name: str):
 
 def _build_prompts(samples: list, uids: list):
     """Assemble the TensorDict batch the framework's ``generate_sequences`` expects."""
+    tools_kwargs = []
+    for sample in samples:
+        tools_kwargs.append(copy.deepcopy(sample["extra_info"]["tools_kwargs"]))
     return tu.get_tensordict(
         tensor_dict={
             "raw_prompt": [sample.get("prompt") for sample in samples],

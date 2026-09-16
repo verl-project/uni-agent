@@ -9,7 +9,6 @@ stdin), then converts the CLI JSON envelope into ``AgentResult``.
 from __future__ import annotations
 
 import json
-import hashlib
 import logging
 import re
 import shlex
@@ -167,18 +166,8 @@ class OpenClawConfig(AgentConfig):
     cli_timeout_seconds: int = Field(default=1700, gt=0, description="OpenClaw --timeout deadline; must be below run_timeout.")
     agent_id: str = Field(default="main", min_length=1)
     tool_command: str = Field(default="/opt/openclaw/bin/openclaw")
-    artifact_dir: str | None = Field(default=None, description="Host artifact directory outside the checkout.")
     state_root: str = Field(default="/tmp/uni-agent-openclaw")
     max_prompt_bytes: int = Field(default=4 * 1024 * 1024, ge=1)
-    strict_single_trajectory: bool = Field(
-        default=True,
-        description="Reject an output showing a model fallback. Compaction/recovery is additionally audited by task logs.",
-    )
-    agent_max_turns: int | None = Field(
-        default=None,
-        ge=1,
-        description="Reserved rollout policy limit. OpenClaw 2026.9.2 has no public agent --local max-turns control.",
-    )
 
 
 @register_agent("openclaw")
@@ -194,8 +183,6 @@ class OpenClawAgent(Agent):
             raise ValueError("openclaw requires config.model.base_url and config.model.model_name")
         if cfg.cli_timeout_seconds >= cfg.run_timeout:
             raise ValueError("openclaw cli_timeout_seconds must be lower than run_timeout")
-        if cfg.agent_max_turns is not None:
-            raise ValueError("OpenClaw 2026.9.2 cannot enforce agent_max_turns; refusing an unsupported limit")
         prompt = _extract_user_prompt(messages)
         if len(prompt.encode("utf-8")) > cfg.max_prompt_bytes:
             raise ValueError(f"openclaw prompt exceeds max_prompt_bytes={cfg.max_prompt_bytes}")
@@ -219,7 +206,6 @@ class OpenClawAgent(Agent):
             return AgentResult(finished=False, info={"error_kind": "startup_failure", "session_id": episode_id})
         failure = None
         cleanup_error = None
-        artifact_info = {}
         try:
             await sandbox.write_file(config_path, json.dumps(config, separators=(",", ":")))
             launch_prompt = (
@@ -260,8 +246,6 @@ class OpenClawAgent(Agent):
             audit_path = f"{root}/audit_trajectory.py"
             await sandbox.write_file(audit_path, Path(__file__).with_name("trajectory.py").read_text(encoding="utf-8"))
             audit_argv = ["python3", audit_path, state_dir, episode_id, model.model_name]
-            if cfg.artifact_dir:
-                audit_argv += ["--export", f"{root}/trajectory.json"]
             audit_proc = await sandbox.exec(audit_argv, timeout=60, workdir=workspace)
             audit_result = parse_openclaw_result(audit_proc.stdout or "")
             if audit_proc.exit_code != 0 or not isinstance(audit_result, dict):
@@ -280,21 +264,6 @@ class OpenClawAgent(Agent):
             except Exception as exc:
                 cleanup_error = type(exc).__name__
 
-        if cfg.artifact_dir and failure is None:
-            try:
-                raw = await sandbox.read_file(f"{root}/trajectory.json")
-                exported = _redact(json.loads(raw), model.api_key)
-                directory = Path(cfg.artifact_dir).resolve() / episode_id
-                directory.mkdir(mode=0o700, parents=True, exist_ok=False)
-                saved = json.dumps(exported, ensure_ascii=False, sort_keys=True).encode()
-                path = directory / "trajectory.json"
-                with path.open("xb") as stream:
-                    stream.write(saved)
-                path.chmod(0o600)
-                artifact_info = {"trajectory_path": str(path), "trajectory_sha256": hashlib.sha256(saved).hexdigest()}
-            except Exception as exc:
-                failure = {"error_kind": "artifact_failure", "error_type": type(exc).__name__,
-                           "session_id": episode_id, "state_dir": state_dir}
         if failure is not None:
             failure["cleanup_error"] = cleanup_error
             return AgentResult(finished=False, info=failure)
@@ -305,20 +274,18 @@ class OpenClawAgent(Agent):
             "stdout_tail": _diagnostic(proc.stdout, model.api_key),
             "stderr_tail": _diagnostic(proc.stderr, model.api_key),
             "cleanup_error": cleanup_error,
-            **artifact_info,
             "session_id": episode_id,
             "state_dir": state_dir,
-            "agent_max_turns": cfg.agent_max_turns,
         }
         if payload is not None:
             info["openclaw"] = payload
         meta = payload.get("meta") if isinstance(payload, dict) else None
         trace = meta.get("executionTrace") if isinstance(meta, dict) else None
         fallback_used = trace.get("fallbackUsed") if isinstance(trace, dict) else None
-        if cfg.strict_single_trajectory and fallback_used is True:
+        if fallback_used is True:
             info["trajectory_rejected"] = "model_fallback"
         info["trajectory_audit"] = audit_result
-        if cfg.strict_single_trajectory and audit_result.get("verified") is not True:
+        if audit_result.get("verified") is not True:
             info.setdefault("trajectory_rejected", "sqlite_audit_failed")
         finished = (
             proc.exit_code == 0
