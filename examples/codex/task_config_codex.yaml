@@ -1,13 +1,13 @@
 # Codex task configuration for the updated agents/sandbox/tasks architecture.
 # The task layer owns sandbox lifecycle and reward; the Codex Agent owns only
 # the sidecar launch and result normalization.
-- name: swe_rebench
+- name: swe_bench
   sandbox:
     provider: openyuanrong
     runtime_timeout: 7200
     image_map:
-      - from: "swerebench/sweb.eval.x86_64.**"
-        to: "swr.cn-east-3.myhuaweicloud.com/openyuanrong/swe-rebench/**:latest"
+      - from: "swebench/**"
+        to: "swr.cn-east-3.myhuaweicloud.com/openyuanrong/swe-bench-verified/**:v2"
     sandbox_kwargs:
       proxy_port: 38197
       mounts:
@@ -16,9 +16,10 @@
   agent:
     name: codex
     run_timeout: 7200
-    conda_env: testbed
+    conda_prefix: /opt/miniconda3/envs/testbed
+    path: /opt/miniconda3/envs/testbed/bin:/opt/miniconda3/bin
     tool_script: /opt/codex/bin/run_agent.sh
-  prompt_template: &swe_codex_prompt
+  prompt_template:
     - role: user
       content: |-
         You are a senior software engineer fixing a bug in the repository at /testbed.
@@ -41,22 +42,3 @@
         - Do not install or modify packages.
         - Do not modify, remove, or add test files.
         - Work only inside /testbed.
-
-- name: swe_bench
-  sandbox:
-    provider: openyuanrong
-    runtime_timeout: 7200
-    image_map:
-      - from: "swebench/**"
-        to: "swr.cn-east-3.myhuaweicloud.com/openyuanrong/swe-bench-verified/**:v2"
-    sandbox_kwargs:
-      proxy_port: 38197
-      mounts:
-        - target: /opt/codex
-          image_url: swr.cn-east-3.myhuaweicloud.com/openyuanrong/codex-tool:0.147.0-direct-stdin
-  agent:
-    name: codex
-    run_timeout: 7200
-    conda_env: testbed
-    tool_script: /opt/codex/bin/run_agent.sh
-  prompt_template: *swe_codex_prompt

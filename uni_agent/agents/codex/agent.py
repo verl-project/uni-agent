@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import posixpath
 import shlex
 import uuid
 from typing import TYPE_CHECKING, Any
@@ -33,8 +34,9 @@ def build_agent_command(
     gateway_url: str,
     model_name: str,
     api_key: str,
+    conda_prefix: str,
+    path: str,
     project_dir: str = "/testbed",
-    conda_env: str = "testbed",
 ) -> str:
     """Build the shell command that pipes a task into the Codex sidecar.
 
@@ -42,11 +44,11 @@ def build_agent_command(
     hazards. Gateway and process settings are passed as environment variables
     consumed by the sidecar entrypoint.
     """
-    conda_prefix = f"/opt/miniconda3/envs/{conda_env}"
+    conda_env = posixpath.basename(conda_prefix.rstrip("/"))
     env = (
         f"CONDA_DEFAULT_ENV={shlex.quote(conda_env)} "
         f"CONDA_PREFIX={shlex.quote(conda_prefix)} "
-        f"PATH={shlex.quote(conda_prefix + '/bin')}:/opt/miniconda3/bin:$PATH "
+        f"PATH={shlex.quote(path)}:\"$PATH\" "
         f"CODEX_API_BASE={shlex.quote(gateway_url)} "
         f"CODEX_MODEL={shlex.quote(model_name)} "
         f"CODEX_API_KEY={shlex.quote(api_key)} "
@@ -121,7 +123,8 @@ class CodexConfig(AgentConfig):
 
     name: str = "codex"
     run_timeout: float = Field(default=7200.0, description="Maximum wall-clock time for one Codex episode.")
-    conda_env: str = Field(default="testbed", description="Conda environment used by repository tools.")
+    conda_prefix: str = Field(description="Full path to the repository's Conda environment.")
+    path: str = Field(description="Colon-separated PATH entries to prepend inside the task sandbox.")
     tool_script: str = Field(description="Sidecar entrypoint, normally /opt/codex/bin/run_agent.sh.")
 
 
@@ -164,7 +167,8 @@ class CodexAgent(Agent):
             model_name=model_name,
             api_key=api_key,
             project_dir=project_dir,
-            conda_env=cfg.conda_env,
+            conda_prefix=cfg.conda_prefix,
+            path=cfg.path,
         )
 
         logger.info("codex: launch in %s", project_dir)
