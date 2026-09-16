@@ -318,6 +318,11 @@ def main() -> None:
         help="Optional path to write a JSON result file (mean rm_score and per-session scores).",
     )
     parser.add_argument(
+        "--language-model-only",
+        action="store_true",
+        help="Set vLLM engine_kwargs.vllm.language_model_only for text-only model checkpoints.",
+    )
+    parser.add_argument(
         "--limit",
         "--max-samples",
         dest="limit",

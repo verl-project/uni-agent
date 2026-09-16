@@ -51,10 +51,6 @@ class FakeSandbox:
                 "stats": {"api_calls": 3},
             }
             self.files[result_path] = json.dumps(envelope).encode()
-            messages_path = re.search(r"--messages-path (\S+)", script).group(1).strip("'")
-            log_path = re.search(r"--log-path (\S+)", script).group(1).strip("'")
-            self.files[messages_path] = b"[]"
-            self.files[log_path] = b"runner log"
         return ExecResult(exit_code=self.exit_code, stdout="noise", stderr=self.stderr)
 
 
@@ -84,10 +80,9 @@ def test_command_does_not_contain_prompt_or_key():
     command = build_runner_command(
         input_path="/tmp/hermes/run/input.json",
         result_path="/tmp/hermes/run/result.json",
-        messages_path="/tmp/hermes/run/messages.json",
         log_path="/tmp/hermes/run/runner.log",
         hermes_home="/tmp/hermes/run/home",
-        conda_env="testbed",
+        environment_prefix="/custom env/testbed",
         tool_python="/opt/hermes/bin/python",
         runner_script="/opt/hermes/bin/run_hermes.py",
         terminal_timeout=600,
@@ -100,6 +95,8 @@ def test_command_does_not_contain_prompt_or_key():
     assert "HERMES_YOLO_MODE=1" in command
     assert "TERMINAL_TIMEOUT=600" in command
     assert "TERMINAL_TIMEOUT=600.0" not in command
+    assert "'/custom env/testbed/bin'" in command
+    assert "/opt/miniconda3" not in command
 
 
 @pytest.mark.cpu
@@ -111,22 +108,21 @@ def test_parse_and_validate_marked_result():
     assert parse_result_stdout(json.dumps(result)) is None
     with pytest.raises(ValueError, match="mismatch"):
         validate_result(result, run_id="other")
+    with pytest.raises(ValueError, match="agree"):
+        validate_result({**result, "status": "timeout"}, run_id="run-1")
 
 
 @pytest.mark.cpu
 @pytest.mark.level0
-def test_run_reads_result_and_downloads_diagnostics(tmp_path):
+def test_run_reads_result_and_preserves_endpoint_and_messages():
     sandbox = FakeSandbox()
-    agent = _agent(artifact_dir=str(tmp_path))
+    agent = _agent()
     messages = [{"role": "system", "content": "rules"}, {"role": "user", "content": "fix it"}]
     result = asyncio.run(agent.run(sandbox=sandbox, messages=messages, workdir="/testbed"))
     assert result.finished is True
     assert result.output["status"] == "completed"
     assert result.transcript == messages
     assert len(sandbox.commands) == 1
-    artifact_dirs = list(tmp_path.iterdir())
-    assert len(artifact_dirs) == 1
-    assert {path.name for path in artifact_dirs[0].iterdir()} == {"result.json", "messages.json", "runner.log"}
     payload = json.loads(next(iter(sandbox.files.values())))
     assert payload["model"]["endpoint"] == "http://gateway/sessions/s/v1"
     assert payload["messages"] == messages

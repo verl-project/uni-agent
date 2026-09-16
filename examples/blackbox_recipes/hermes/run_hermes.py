@@ -1,7 +1,7 @@
 """Run the pinned Hermes ``AIAgent`` inside the sidecar image.
 
 The input is a recipe-owned JSON object on stdin.  Human-readable output and a
-full Hermes message snapshot are written to files; stdout contains only one
+runner log are written to files; stdout contains only one
 marked JSON envelope so the host can parse it deterministically.
 """
 
@@ -56,8 +56,6 @@ def _load_input() -> dict[str, Any]:
         raise ValueError("runner input run_id must be a non-empty string")
     if not isinstance(value["workdir"], str) or not value["workdir"].startswith("/"):
         raise ValueError("runner input workdir must be an absolute path")
-    if value["workdir"] != "/testbed":
-        raise ValueError("runner input workdir must be /testbed")
     if value["approval_mode"] not in {"off", "default"}:
         raise ValueError("runner input approval_mode must be 'off' or 'default'")
     if not isinstance(value["messages"], list) or not value["messages"]:
@@ -172,43 +170,10 @@ def map_hermes_result(raw: object) -> dict[str, Any]:
         "error": str(error)[:4000] if error else None,
         "hermes_commit": HERMES_COMMIT,
         "stop_reason": reason or None,
-        "stats": {
-            key: result.get(key)
-            for key in (
-                "api_calls",
-                "turn_id",
-                "current_turn_user_idx",
-                "session_total_tokens",
-                "session_prompt_tokens",
-                "session_completion_tokens",
-            )
-            if isinstance(result.get(key), str | int | float | bool)
-        },
     }
 
 
-def _message_snapshot(raw: object, agent: object | None) -> object:
-    if isinstance(raw, dict) and isinstance(raw.get("messages"), list):
-        return raw["messages"]
-    messages = getattr(agent, "_session_messages", None)
-    return messages if isinstance(messages, list) else []
-
-
-def _append_runtime_logs(log, home: Path) -> None:
-    """Copy Hermes' file-handler logs into the recipe-owned diagnostic stream."""
-
-    for relative in ("logs/agent.log", "logs/errors.log"):
-        source = home / relative
-        try:
-            content = source.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        if content:
-            log.write(f"\n===== Hermes {relative} =====\n{content}")
-    log.flush()
-
-
-def run(input_data: dict[str, Any], *, result_path: str, messages_path: str, log_path: str) -> dict[str, Any]:
+def run(input_data: dict[str, Any], *, result_path: str, log_path: str) -> dict[str, Any]:
     model = input_data["model"]
     workdir = input_data["workdir"]
     limits = input_data["limits"]
@@ -228,7 +193,6 @@ def run(input_data: dict[str, Any], *, result_path: str, messages_path: str, log
 
     agent = None
     raw_result: object = None
-    snapshot: object = []
     secrets = [model["endpoint"], model["api_key"]]
     with (
         Path(log_path).open("w", encoding="utf-8") as log,
@@ -273,7 +237,6 @@ def run(input_data: dict[str, Any], *, result_path: str, messages_path: str, log
                 task_id=run_id,
             )
             envelope = map_hermes_result(raw_result)
-            snapshot = _message_snapshot(raw_result, agent)
         except BaseException as exc:
             log.write(_safe_error(exc, secrets) + "\n")
             redacted_traceback = traceback.format_exc()
@@ -290,7 +253,6 @@ def run(input_data: dict[str, Any], *, result_path: str, messages_path: str, log
                 "error": _safe_error(exc, secrets),
                 "hermes_commit": HERMES_COMMIT,
                 "stop_reason": None,
-                "stats": {},
             }
         finally:
             if agent is not None:
@@ -300,8 +262,6 @@ def run(input_data: dict[str, Any], *, result_path: str, messages_path: str, log
                     close_error = _safe_error(exc, secrets)
                     envelope.setdefault("cleanup_errors", []).append(close_error)
         envelope["run_id"] = run_id
-        _append_runtime_logs(log, home)
-        _write_json(messages_path, snapshot)
         _write_json(result_path, envelope)
     return envelope
 
@@ -309,7 +269,6 @@ def run(input_data: dict[str, Any], *, result_path: str, messages_path: str, log
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run the pinned Hermes agent for one Uni-Agent episode.")
     parser.add_argument("--result-path", required=True)
-    parser.add_argument("--messages-path", required=True)
     parser.add_argument("--log-path", required=True)
     args = parser.parse_args(argv)
     try:
@@ -317,7 +276,6 @@ def main(argv: list[str] | None = None) -> int:
         envelope = run(
             input_data,
             result_path=args.result_path,
-            messages_path=args.messages_path,
             log_path=args.log_path,
         )
     except BaseException as exc:
@@ -330,7 +288,6 @@ def main(argv: list[str] | None = None) -> int:
             "error": _safe_error(exc),
             "hermes_commit": HERMES_COMMIT,
             "stop_reason": None,
-            "stats": {},
         }
         try:
             _write_json(args.result_path, envelope)

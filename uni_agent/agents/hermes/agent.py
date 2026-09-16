@@ -12,7 +12,6 @@ import logging
 import re
 import shlex
 import uuid
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import Field
@@ -39,10 +38,9 @@ class HermesConfig(AgentConfig):
     run_budget_seconds: float = Field(default=6600.0, gt=0)
     run_timeout: float = Field(default=7200.0, gt=0)
     terminal_timeout: int = Field(default=600, ge=1)
-    conda_env: str = Field(default="testbed", min_length=1)
+    environment_prefix: str | None = Field(default=None, description="Absolute task environment prefix, if needed.")
     tool_python: str = Field(default="/opt/hermes/bin/python", min_length=1)
     runner_script: str = Field(default="/opt/hermes/bin/run_hermes.py", min_length=1)
-    artifact_dir: str | None = Field(default=None, description="Host directory for downloaded Hermes diagnostics.")
     approval_mode: Literal["off", "default"] = Field(
         default="off",
         description="Sandbox-scoped approval policy. off is the explicit unattended recipe policy.",
@@ -100,10 +98,9 @@ def build_runner_command(
     *,
     input_path: str,
     result_path: str,
-    messages_path: str,
     log_path: str,
     hermes_home: str,
-    conda_env: str,
+    environment_prefix: str | None,
     tool_python: str,
     runner_script: str,
     terminal_timeout: int,
@@ -116,7 +113,9 @@ def build_runner_command(
     """
 
     q = shlex.quote
-    conda_prefix = f"/opt/miniconda3/envs/{conda_env}"
+    if environment_prefix is not None and not environment_prefix.startswith("/"):
+        raise ValueError("environment_prefix must be an absolute sandbox path")
+    path_setup = f'export PATH={q(environment_prefix + "/bin")}:"${{PATH:-}}"; ' if environment_prefix else ""
     yolo = "1" if approval_mode == "off" else "0"
     assignments = " ".join(
         [
@@ -124,7 +123,6 @@ def build_runner_command(
             "HERMES_INTERACTIVE=0",
             f"HERMES_YOLO_MODE={yolo}",
             "TERMINAL_ENV=local",
-            "TERMINAL_CWD=/testbed",
             f"TERMINAL_TIMEOUT={q(str(terminal_timeout))}",
             "PYTHONUNBUFFERED=1",
             "HTTP_PROXY=",
@@ -137,9 +135,9 @@ def build_runner_command(
     )
     return (
         f"umask 077; mkdir -p {q(hermes_home)}; "
-        f'export PATH={q(conda_prefix + "/bin")}:/opt/miniconda3/bin:"${{PATH:-}}"; '
+        f"{path_setup}"
         f"env {assignments} {q(tool_python)} {q(runner_script)} "
-        f"--result-path {q(result_path)} --messages-path {q(messages_path)} --log-path {q(log_path)} "
+        f"--result-path {q(result_path)} --log-path {q(log_path)} "
         f"< {q(input_path)}"
     )
 
@@ -180,6 +178,8 @@ def validate_result(value: object, *, run_id: str) -> dict[str, Any]:
         raise ValueError("Hermes runner result status must be a string")
     if type(value.get("finished")) is not bool:
         raise ValueError("Hermes runner result finished must be a bool")
+    if value["finished"] != (value["status"] == "completed"):
+        raise ValueError("Hermes runner finished must agree with status")
     return value
 
 
@@ -195,11 +195,6 @@ def _model_payload(cfg: HermesConfig) -> dict[str, Any]:
         "name": cfg.model.model_name,
         "api_key": cfg.model.api_key,
     }
-
-
-def _write_artifact(path: Path, data: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(data)
 
 
 @register_agent("hermes")
@@ -222,7 +217,6 @@ class HermesAgent(Agent):
         remote_root = f"/tmp/hermes-{run_id}"
         input_path = f"{remote_root}/input.json"
         result_path = f"{remote_root}/result.json"
-        messages_path = f"{remote_root}/messages.json"
         log_path = f"{remote_root}/runner.log"
         hermes_home = f"{remote_root}/home"
         payload = {
@@ -244,10 +238,9 @@ class HermesAgent(Agent):
         command = build_runner_command(
             input_path=input_path,
             result_path=result_path,
-            messages_path=messages_path,
             log_path=log_path,
             hermes_home=hermes_home,
-            conda_env=cfg.conda_env,
+            environment_prefix=cfg.environment_prefix,
             tool_python=cfg.tool_python,
             runner_script=cfg.runner_script,
             terminal_timeout=cfg.terminal_timeout,
@@ -301,28 +294,11 @@ class HermesAgent(Agent):
                 "error": str(exc),
             }
 
-        artifact_path: str | None = None
-        if cfg.artifact_dir:
-            artifact_root = Path(cfg.artifact_dir).expanduser() / run_id
-            artifact_root.mkdir(parents=True, exist_ok=True)
-            artifact_path = str(artifact_root)
-            for filename, remote_path in (
-                ("result.json", result_path),
-                ("messages.json", messages_path),
-                ("runner.log", log_path),
-            ):
-                try:
-                    _write_artifact(artifact_root / filename, await sandbox.read_file(remote_path))
-                except Exception:
-                    logger.debug("hermes: optional artifact %s unavailable", remote_path, exc_info=True)
-
         info = {
             "run_id": run_id,
             "status": envelope.get("status"),
             "process_exit_code": process.exit_code,
-            "artifact_path": artifact_path,
             "stop_reason": envelope.get("stop_reason"),
-            "stats": envelope.get("stats", {}),
         }
         return AgentResult(
             output=envelope,
