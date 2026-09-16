@@ -763,6 +763,32 @@ async def test_multiple_chains_repeated_same_prompt_creates_siblings_and_continu
 @pytest.mark.cpu
 @pytest.mark.level0
 @pytest.mark.asyncio
+@pytest.mark.parametrize("same_boundary", [True, False])
+async def test_fresh_boundary_prevents_shallower_rollback(same_boundary):
+    session = _session("fresh-boundary", enable_last_assistant_rollback=True)
+    backend = SequencedBackend(["OLD", "DEEP", "NEW"])
+    prompt = [{"role": "user", "content": "start"}]
+    boundary = [*prompt, {"role": "user", "content": "retry"}]
+    await _run(session, backend, prompt)
+    session.reserved_chain_ids.add(1)
+    await _run(session, backend, boundary)
+    session.reserved_chain_ids.clear()
+    original_chains = list(session.active_chains)
+    incoming = boundary if same_boundary else [*prompt, {"role": "user", "content": "changed"}]
+
+    await _run(session, backend, incoming)
+
+    assert len(session.active_chains) == (3 if same_boundary else 2)
+    assert session.snapshot_state()["rollback_count"] == (0 if same_boundary else 1)
+    if same_boundary:
+        assert session.active_chains[:2] == original_chains
+        assert backend.calls[-1]["prompt_ids"] == session._codec.build_initial_tokens(incoming)
+        assert session.active_chains[-1].buffer.response_ids == _ids("NEW")
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
 async def test_multiple_chains_distinct_sibling_continuation_matches_older_assistant_prefix():
     """Select an older sibling when its assistant prefix uniquely matches the request."""
     session = _session("distinct-sibling")
