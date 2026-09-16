@@ -39,6 +39,9 @@ class GatewayActorConfig:
             The gateway enforces their sum when both values are set.
         enable_last_assistant_rollback: Whether latest-assistant rewrites may
             rollback and reuse an existing chain. Enabled by default.
+        coalesce_reserved_exact_requests: Whether an exact duplicate of a request
+            already generating against a reserved chain should await and reuse that
+            in-flight result instead of creating a sibling sample.
     """
 
     tokenizer: Any
@@ -55,6 +58,7 @@ class GatewayActorConfig:
     prompt_length: int | None = None
     response_length: int | None = None
     enable_last_assistant_rollback: bool = True
+    coalesce_reserved_exact_requests: bool = False
 
     def __post_init__(self) -> None:
         if type(self.enable_tool_parser_cache) is not bool:
@@ -65,6 +69,11 @@ class GatewayActorConfig:
             raise ValueError(
                 "enable_last_assistant_rollback must be a bool, "
                 f"got {type(self.enable_last_assistant_rollback).__name__}"
+            )
+        if type(self.coalesce_reserved_exact_requests) is not bool:
+            raise ValueError(
+                "coalesce_reserved_exact_requests must be a bool, "
+                f"got {type(self.coalesce_reserved_exact_requests).__name__}"
             )
         if self.prompt_length is not None and self.prompt_length <= 0:
             raise ValueError(f"prompt_length must be positive when set, got {self.prompt_length}")
