@@ -19,6 +19,7 @@ def test_inference_sampling_uses_run_options_and_preserves_length_configuration(
         temperature=0.4,
         top_p=0.85,
         top_k=20,
+        allowed_request_sampling_param_keys=["temperature", "top_p", "top_k"],
         n=2,
         nnodes=1,
         n_gpus_per_node=1,
@@ -57,9 +58,10 @@ def test_inference_sampling_uses_run_options_and_preserves_length_configuration(
         assert sampling.top_k == 20
     assert rollout.val_kwargs.do_sample is True
     expected_prompt_length = args.prompt_length if entrypoint is init_router_config else 4096
-    expected_response_length = args.response_length if entrypoint is init_router_config else 65536
+    expected_response_length = args.response_length
     assert rollout.prompt_length == config.data.max_prompt_length == expected_prompt_length
     assert rollout.response_length == config.data.max_response_length == expected_response_length
+    assert rollout.custom.agent_framework.allowed_request_sampling_param_keys == ["temperature", "top_p", "top_k"]
     task_runner = rollout.custom.agent_framework.agent_runners.task
     if simulated_runner:
         assert task_runner.runner_fqn == simulated_runner

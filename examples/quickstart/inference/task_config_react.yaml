@@ -14,7 +14,7 @@
           TQDM_DISABLE: "1"
           GIT_PAGER: "cat"
       - name: submit
-    model:
+    sampling_params_override:
       temperature: 0.8
       top_p: 0.9
   prompt_template:
@@ -113,7 +113,7 @@
           TQDM_DISABLE: "1"
           GIT_PAGER: "cat"
       - name: submit
-    model:
+    sampling_params_override:
       temperature: 0.8
       top_p: 0.9
   prompt_template:

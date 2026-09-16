@@ -19,7 +19,6 @@
     name: claude_code
     max_turns: 200
     run_timeout: 4800
-    model:
   prompt_template: &swe_claude_prompt
     - role: user
       content: |-
@@ -48,5 +47,4 @@
     name: claude_code
     max_turns: 200
     run_timeout: 4800
-    model:
   prompt_template: *swe_claude_prompt

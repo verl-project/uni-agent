@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from pathlib import Path
 
 import pytest
+import yaml
 
+from uni_agent.agents.registry import AGENT_MODULES, get_agent_cls
 from uni_agent.tasks import TaskConfig, TaskConfigResolver, get_task
 
 _LOCAL_SANDBOX = {"provider": "local"}
@@ -276,3 +279,20 @@ def test_recipe_prompt_template_overrides_sample_template_and_uses_metadata():
         {"role": "system", "content": "Recipe instructions"},
         {"role": "user", "content": "Issue: Metadata problem"},
     ]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_example_task_agents_validate_against_registered_configs():
+    examples = Path(__file__).resolve().parents[3] / "examples"
+    for path in sorted(examples.rglob("task_config*.yaml")):
+        entries = yaml.safe_load(path.read_text())
+        for entry in entries if isinstance(entries, list) else [entries]:
+            agent = entry.get("agent", {})
+            name = agent.get("name")
+            if name in AGENT_MODULES:
+                # Parse real examples before runtime endpoint injection can mask a null model.
+                try:
+                    get_agent_cls(name).config_model.model_validate(agent)
+                except ValueError as exc:
+                    pytest.fail(f"{path.relative_to(examples)} ({entry['name']}): {exc}")

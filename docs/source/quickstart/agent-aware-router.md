@@ -61,6 +61,7 @@ bash examples/quickstart/agent_aware_router/run_infer.sh \
     --model-path /path/to/Qwen3-8B \
     --data-path /path/to/swe_agent/swe_bench_verified.parquet \
     --task-config examples/quickstart/agent_aware_router/task_config_react.yaml \
+    --allowed-request-sampling-param-keys temperature top_p top_k \
     --max-samples 1 \
     --concurrency 4
 ```
@@ -74,6 +75,7 @@ bash examples/quickstart/agent_aware_router/run_infer.sh \
     --model-path /path/to/Qwen3-8B \
     --data-path /path/to/swe_agent/swe_bench_verified.parquet \
     --task-config examples/quickstart/agent_aware_router/task_config_react.yaml \
+    --allowed-request-sampling-param-keys temperature top_p top_k \
     --tensor-parallel-size 2 --n-gpus-per-node 8 \
     --load-threshold 0.9
 ```

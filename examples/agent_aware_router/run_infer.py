@@ -148,7 +148,7 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
     rollout.val_kwargs.temperature = args.temperature
     rollout.val_kwargs.top_p = args.top_p
     rollout.val_kwargs.top_k = args.top_k
-    # This inference entry uses the val partition, with optional task-specific sampling.
+    # Use the configured sampling values in the validation partition used by inference.
     rollout.val_kwargs.do_sample = True
 
     # Fan-out: the framework runs rollout.n gateway sessions per prompt.
@@ -168,7 +168,7 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
     rollout.agent.num_workers = args.num_workers
     rollout.tensor_model_parallel_size = args.tensor_parallel_size
     rollout.gpu_memory_utilization = args.gpu_memory_utilization
-    # Cap the engine context. Must be >= the agent's per-episode token budget,
+    # Cap the engine context to accommodate the transcript required by the agent,
     # else vLLM rejects the request (HTTP 400, transcript overruns the limit).
     rollout.max_model_len = args.max_model_len
     # kvcaware additions: engine concurrency + expose metrics on /metrics for the
@@ -214,6 +214,7 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
 
     agent_framework_cfg = {
         "gateway_count": args.gateway_count,
+        "allowed_request_sampling_param_keys": args.allowed_request_sampling_param_keys,
         "agent_runners": {
             "task": {
                 "runner_fqn": "uni_agent.framework.task_runner.run_task",
@@ -392,8 +393,8 @@ def main() -> None:
         "--task-config",
         required=True,
         help="Path to a YAML task config: one ``- name: ...`` entry or a list of them (required). "
-        "run_task routes each row by task name. White-box sampling overrides are sent by the agent's "
-        "sampling defaults for that task; agent.model sampling does not configure the gateway. "
+        "run_task routes each row by task name. White-box agents use agent.sampling_params_override; "
+        "allow extra request keys with --allowed-request-sampling-param-keys. "
         "The endpoint is bound to the gateway session.",
     )
     parser.add_argument(
@@ -418,6 +419,12 @@ def main() -> None:
     parser.add_argument("--temperature", type=float, default=DEFAULT_TEMPERATURE, help="Default sampling temperature.")
     parser.add_argument("--top-p", type=float, default=DEFAULT_TOP_P, help="Default nucleus sampling probability.")
     parser.add_argument("--top-k", type=int, default=-1, help="Default top-k sampling (-1 disables).")
+    parser.add_argument(
+        "--allowed-request-sampling-param-keys",
+        nargs="+",
+        default=[],
+        help="Extra request sampling keys allowed in addition to max_tokens and stop.",
+    )
 
     parser.add_argument("--prompt-length", type=int, default=4096, help="Maximum prompt length (tokens).")
     parser.add_argument("--response-length", type=int, default=8192, help="Maximum response length (tokens).")

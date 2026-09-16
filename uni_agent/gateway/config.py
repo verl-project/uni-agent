@@ -30,8 +30,9 @@ class GatewayActorConfig:
         apply_chat_template_kwargs: Default kwargs passed to chat-template rendering.
         mm_processor_kwargs: Static multimodal processor kwargs used by the
             Continuous Token builder.
-        allowed_request_sampling_param_keys: Request sampling keys accepted by the
-            provider adapters when merging payload sampling params.
+        allowed_request_sampling_param_keys: Extra request sampling keys accepted by
+            provider adapters in addition to the default max_tokens and stop.
+            None or an empty set keeps those defaults; this setting cannot remove them.
         vision_info_extractor: Optional async extractor for image/video inputs.
         vision_info_extractor_kwargs: Static kwargs forwarded to the extractor.
         prompt_length: Optional prompt component of the total trajectory capacity.

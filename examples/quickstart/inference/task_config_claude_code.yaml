@@ -7,8 +7,6 @@
     max_turns: 200
     run_timeout: 4800
     verbose: true
-    model:
-      # parallel_infer_verl.py uses this for its existing rollout response length.
   prompt_template: &claude_code_prompt
     - role: user
       content: |-
@@ -28,8 +26,6 @@
     max_turns: 200
     run_timeout: 4800
     verbose: true
-    model:
-      # parallel_infer_verl.py uses this for its existing rollout response length.
   prompt_template:
     - role: user
       content: |-

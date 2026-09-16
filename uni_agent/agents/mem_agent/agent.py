@@ -118,7 +118,6 @@ class MemAgent(Agent):
         self._current_context_step: ContextStepOutput | None = None
         self._global_step_idx = 0
         self._step_idx = 0
-        self._total_completion_tokens = 0
         self._interaction_start = 0.0
         self._context_session_active = False
         self._context_manager_result: ContextManagerResult | None = None
@@ -139,7 +138,6 @@ class MemAgent(Agent):
         self._current_context_step = None
         self._global_step_idx = 0
         self._step_idx = 0
-        self._total_completion_tokens = 0
         self._context_manager_result = None
         self.messages = []
 
@@ -221,7 +219,6 @@ class MemAgent(Agent):
             self.messages,
             sampling_params=params,
         )
-        self._total_completion_tokens += generation_info["completion_tokens"]
 
         self.messages.append({"role": "assistant", "content": content})
 

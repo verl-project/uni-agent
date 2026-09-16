@@ -17,15 +17,29 @@ class AgentConfig(BaseModel):
     model: ModelConfig
 ```
 
-`ModelConfig` contains:
+`ModelConfig` contains only `base_url`, `api_key`, and `model_name`. The live
+runner injects these connection fields last, so the provided Task YAML examples
+omit `model`. Custom callers can still supply it when binding an external endpoint.
 
-- `base_url`, `api_key`, and `model_name`.
-- Optional `temperature`, `top_p`, and `top_k` overrides.
-- Per-turn and episode token budgets.
+ReAct and MemAgent expose `agent.sampling_params_override`, a
+`WhiteBoxSamplingConfig` with optional `temperature`, `top_p`, `top_k`, and
+`max_tokens_per_turn` fields. Omitted values inherit the endpoint default.
+During Gateway training or inference, `temperature`, `top_p`, and `top_k` also
+require explicit [request-key permission](gateway-and-trajectories.md#sampling-configuration).
+`max_tokens_per_turn` becomes the request's `max_tokens`; it does not change the
+Gateway context capacity. MemAgent's built-in loop uses `max_memorization_length`
+and `max_final_response_length` for its respective calls, overriding that fallback.
 
-The model endpoint is runtime state. Dataset rows and Task YAML may override sampling behavior; omitted sampling
-fields inherit the endpoint default (the rollout configuration during RL training). The live runner or Gateway
-injects `base_url`, credentials, and served model name last.
+Black-box Agents do not expose this sampling block. Claude Code receives its
+connection fields through environment variables; harness-specific CLI options
+can be passed via `ClaudeCodeConfig.extra_args`.
+
+Migration: move white-box sampling fields from `agent.model` into
+`agent.sampling_params_override`. Remove `max_total_tokens`; it is no longer an
+Agent budget. Gateway capacity remains controlled by the rollout lengths and
+model context limit. This does not replace MemAgent's removed cumulative
+completion budget across context segments. Old sampling fields under `model`
+fail validation.
 
 ## Agent Contract
 
@@ -73,7 +87,6 @@ agent:
     - name: str_replace_editor
     - name: stateful_shell
     - name: submit
-  model: {}
   sampling_params_override:
     temperature: 0.8
     top_p: 0.9
@@ -97,7 +110,6 @@ agent:
   name: claude_code
   max_turns: 200
   run_timeout: 4800
-  model: {}
 ```
 
 Claude Code speaks the Anthropic Messages protocol. Uni-Agent sets `ANTHROPIC_BASE_URL` to either a direct model endpoint or a session-scoped Gateway endpoint.
