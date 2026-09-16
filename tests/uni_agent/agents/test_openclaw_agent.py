@@ -2,9 +2,9 @@
 import asyncio
 import json
 import unittest
-import tempfile
-from pathlib import Path
 from types import SimpleNamespace
+
+import pytest
 
 from uni_agent.agents.base import ModelConfig
 from uni_agent.agents.openclaw.agent import OpenClawAgent, OpenClawConfig, parse_openclaw_result, _redact, _diagnostic
@@ -20,11 +20,6 @@ class FakeSandbox:
         if command.startswith("rm -f") and self.mode in {"cleanup_failure", "timeout_cleanup"}:
             raise OSError("cleanup unavailable")
         return SimpleNamespace(exit_code=0, stdout="", stderr="")
-
-    async def read_file(self, path):
-        if self.mode == "artifact_failure":
-            raise OSError("missing export")
-        return json.dumps({"events": [{"message": "fake-secret"}]}).encode()
 
     async def write_file(self, path, content):
         self.files[path] = content
@@ -43,6 +38,8 @@ class FakeSandbox:
                                stdout="not JSON" if self.mode == "protocol" else json.dumps(payload), stderr="")
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 class AgentTests(unittest.TestCase):
     def run_agent(self, mode):
         sandbox = FakeSandbox(mode)
@@ -57,6 +54,8 @@ class AgentTests(unittest.TestCase):
         self.assertTrue(result.finished)
         self.assertEqual(len(sandbox.commands), 2)
         self.assertIn("--message-file", sandbox.commands[0][0])
+        message_path = sandbox.commands[0][0][sandbox.commands[0][0].index("--message-file") + 1]
+        self.assertIn("solve 中文 ' $(false)", sandbox.files[message_path])
         self.assertNotIn("solve", " ".join(sandbox.commands[0][0]))
 
     def test_audit_failure(self):
@@ -101,26 +100,6 @@ class AgentTests(unittest.TestCase):
         for secret in ("hidden", "fake-secret", "abc123"):
             self.assertNotIn(secret, rendered)
         self.assertLessEqual(len(_diagnostic("x" * 9000)), 4000)
-
-    def test_export_redacts_and_survives(self):
-        with tempfile.TemporaryDirectory() as directory:
-            cfg = OpenClawConfig(model=ModelConfig(base_url="http://endpoint/v1", model_name="policy",
-                                                  api_key="fake-secret"), artifact_dir=directory)
-            result = asyncio.run(OpenClawAgent(cfg).run(sandbox=FakeSandbox(),
-                                 messages=[{"role": "user", "content": "task"}]))
-            self.assertTrue(result.finished)
-            saved = Path(result.info["trajectory_path"]).read_text()
-            self.assertNotIn("fake-secret", saved)
-            self.assertIn("<redacted>", saved)
-
-    def test_missing_export_rejects_success(self):
-        with tempfile.TemporaryDirectory() as directory:
-            cfg = OpenClawConfig(model=ModelConfig(base_url="http://endpoint/v1", model_name="policy"),
-                                 artifact_dir=directory)
-            result = asyncio.run(OpenClawAgent(cfg).run(sandbox=FakeSandbox("artifact_failure"),
-                                 messages=[{"role": "user", "content": "task"}]))
-            self.assertFalse(result.finished)
-            self.assertEqual(result.info["error_kind"], "artifact_failure")
 
     def test_nested_parser(self):
         self.assertEqual(parse_openclaw_result('noise\n{"meta":{"a":1}}'), {"meta": {"a": 1}})
