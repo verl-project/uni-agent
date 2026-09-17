@@ -6,9 +6,8 @@ from tests.uni_agent.support import FakeTokenizer
 from uni_agent.gateway.adapters.responses import responses_build_response, responses_to_internal
 from uni_agent.gateway.session.codec import MessageCodec
 
-pytestmark = [pytest.mark.cpu, pytest.mark.level0]
-
-
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_responses_input_lowering():
     internal = responses_to_internal(
         {
@@ -40,6 +39,8 @@ def test_responses_input_lowering():
     ]
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_responses_continuation_coalesces_reasoning_and_function_call():
     internal = responses_to_internal(
         {
@@ -67,6 +68,8 @@ def test_responses_continuation_coalesces_reasoning_and_function_call():
     MessageCodec(FakeTokenizer()).encode_incremental(continuation)
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_responses_canonicalizes_developer_and_late_system_messages():
     internal = responses_to_internal(
         {
@@ -83,6 +86,8 @@ def test_responses_canonicalizes_developer_and_late_system_messages():
     assert internal["messages"][0]["content"] == "base system\nlate system"
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_responses_build_response_for_text_and_tool_call():
     text = responses_build_response(
         SimpleNamespace(

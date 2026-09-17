@@ -5,9 +5,6 @@ import pytest
 from uni_agent.gateway.adapters.responses import responses_to_internal
 from uni_agent.gateway.adapters.types import MalformedRequestError
 
-pytestmark = [pytest.mark.cpu, pytest.mark.level0]
-
-
 def _request(arguments):
     return {
         "instructions": "system",
@@ -23,6 +20,8 @@ def _request(arguments):
     }
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_responses_function_call_arguments_are_lowered_to_mapping():
     internal = responses_to_internal(
         _request('{"cmd":"true"}'),
@@ -34,6 +33,8 @@ def test_responses_function_call_arguments_are_lowered_to_mapping():
     assert arguments == {"cmd": "true"}
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.parametrize("arguments", ["not-json", "[]", "null", 1])
 def test_responses_rejects_non_object_function_call_arguments(arguments):
     with pytest.raises(MalformedRequestError, match="function_call.arguments"):

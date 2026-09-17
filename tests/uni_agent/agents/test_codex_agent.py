@@ -10,9 +10,6 @@ from uni_agent.agents.base import AgentResult, ModelConfig
 from uni_agent.agents.codex.agent import CodexAgent, CodexConfig, build_agent_command, parse_agent_result
 from uni_agent.sandbox.base import ExecResult
 
-pytestmark = [pytest.mark.cpu, pytest.mark.level0]
-
-
 class FakeSandbox:
     def __init__(self, stdout: str = "", exit_code: int = 0):
         self.stdout = stdout
@@ -32,6 +29,8 @@ def make_agent(**kwargs):
     return CodexAgent(CodexConfig(**kwargs))
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_build_agent_command_uses_stdin_and_isolates_env():
     task = base64.b64encode(b"fix 'this'").decode()
     command = build_agent_command(
@@ -57,22 +56,27 @@ def test_build_agent_command_uses_stdin_and_isolates_env():
     assert "fix 'this'" not in command
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_parse_agent_result_jsonl():
     stdout = "\n".join(
         [
             json.dumps({"type": "thread.started", "thread_id": "t"}),
             json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "fixed"}}),
             json.dumps({"type": "turn.completed"}),
+            json.dumps({"type": "process.completed", "exit_code": 0}),
         ]
     )
     assert parse_agent_result(stdout, 0) == {
         "exit_status": "ok",
         "ok": True,
         "content": "fixed",
-        "event_count": 3,
+        "event_count": 4,
     }
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_parse_agent_result_timeout_and_failure():
     timeout = parse_agent_result("", -1)
     assert timeout["exit_status"] == "timeout"
@@ -81,6 +85,8 @@ def test_parse_agent_result_timeout_and_failure():
     assert failed["error"] == "bad"
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_parse_agent_result_honors_wrapper_process_exit_event():
     stdout = "\n".join(
         [
@@ -94,9 +100,31 @@ def test_parse_agent_result_honors_wrapper_process_exit_event():
     assert failed["error"] == "codex exited with code 17"
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize(
+    "stdout",
+    [
+        "",
+        "diagnostic output",
+        json.dumps({"type": "thread.started", "thread_id": "t"}),
+    ],
+)
+def test_parse_agent_result_rejects_missing_completion_events(stdout):
+    result = parse_agent_result(stdout, 0)
+    assert result["ok"] is False
+    assert result["exit_status"] == "error"
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_codex_agent_runs_and_returns_agent_result():
     sandbox = FakeSandbox(
         stdout=json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "done"}})
+        + "\n"
+        + json.dumps({"type": "turn.completed"})
+        + "\n"
+        + json.dumps({"type": "process.completed", "exit_code": 0})
     )
     agent = make_agent()
     result = asyncio.run(agent.run(sandbox=sandbox, messages=[{"role": "user", "content": "fix bug"}]))
