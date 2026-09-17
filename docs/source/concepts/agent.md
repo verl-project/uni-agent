@@ -17,29 +17,20 @@ class AgentConfig(BaseModel):
     model: ModelConfig
 ```
 
-`ModelConfig` contains only `base_url`, `api_key`, and `model_name`. The live
-runner injects these connection fields last, so the provided Task YAML examples
-omit `model`. Custom callers can still supply it when binding an external endpoint.
+`ModelConfig` contains the model endpoint and identity: `base_url`, `api_key`,
+and `model_name`. Runners normally inject these fields, so Task YAML can omit
+`model`. Custom callers can supply them when binding an external endpoint.
 
-ReAct and MemAgent expose `agent.sampling_params_override`, a
-`WhiteBoxSamplingConfig` with optional `temperature`, `top_p`, `top_k`, and
-`max_tokens_per_turn` fields. Omitted values inherit the endpoint default.
-During Gateway training or inference, `temperature`, `top_p`, and `top_k` also
-require explicit [request-key permission](gateway-and-trajectories.md#sampling-configuration).
-`max_tokens_per_turn` becomes the request's `max_tokens`; it does not change the
-Gateway context capacity. MemAgent's built-in loop uses `max_memorization_length`
-and `max_final_response_length` for its respective calls, overriding that fallback.
+White-box Agents such as ReAct and MemAgent expose
+`agent.sampling_params_override`, with optional `temperature`, `top_p`, `top_k`,
+and `max_tokens_per_turn` fields. Omitted values use the endpoint or Gateway
+session defaults. Gateway runs require explicit
+[request-key permission](gateway-and-trajectories.md#sampling-configuration)
+for request-level `temperature`, `top_p`, and `top_k` overrides.
 
-Black-box Agents do not expose this sampling block. Claude Code receives its
-connection fields through environment variables; harness-specific CLI options
-can be passed via `ClaudeCodeConfig.extra_args`.
-
-Migration: move white-box sampling fields from `agent.model` into
-`agent.sampling_params_override`. Remove `max_total_tokens`; it is no longer an
-Agent budget. Gateway capacity remains controlled by the rollout lengths and
-model context limit. This does not replace MemAgent's removed cumulative
-completion budget across context segments. Old sampling fields under `model`
-fail validation.
+Black-box Agents delegate sampling to their harness. Claude Code receives model
+connection settings through environment variables and accepts harness options
+through `ClaudeCodeConfig.extra_args`.
 
 ## Agent Contract
 
