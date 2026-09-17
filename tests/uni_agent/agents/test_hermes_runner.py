@@ -6,9 +6,8 @@ import pytest
 
 from examples.blackbox_recipes.hermes.run_hermes import _recipe_config, map_hermes_result
 
-pytestmark = [pytest.mark.cpu, pytest.mark.level0]
-
-
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_recipe_config_disables_non_episode_state():
     config = _recipe_config(approval_mode="off")
     assert config["compression"] == {
@@ -22,6 +21,8 @@ def test_recipe_config_disables_non_episode_state():
     assert config["approvals"]["mode"] == "off"
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_map_hermes_result_keeps_budget_and_errors_unfinished():
     budget = map_hermes_result({"completed": False, "final_response": "summary", "turn_exit_reason": "max_iterations"})
     assert budget["status"] == "budget_exhausted"
@@ -34,6 +35,8 @@ def test_map_hermes_result_keeps_budget_and_errors_unfinished():
     assert error["finished"] is False
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_map_hermes_result_only_marks_unambiguous_text_complete():
     result = map_hermes_result({"completed": True, "final_response": "fixed", "turn_exit_reason": "text_response"})
     assert result["status"] == "completed"

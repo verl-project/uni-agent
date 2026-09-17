@@ -269,6 +269,7 @@ def run(input_data: dict[str, Any], *, result_path: str, log_path: str) -> dict[
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Run the pinned Hermes agent for one Uni-Agent episode.")
     parser.add_argument("--result-path", required=True)
+    parser.add_argument("--messages-path")
     parser.add_argument("--log-path", required=True)
     args = parser.parse_args(argv)
     try:
