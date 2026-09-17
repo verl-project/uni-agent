@@ -233,7 +233,6 @@ class OpenClawAgent(Agent):
             ]
             env = {
                 "HOME": home_dir,
-                "PATH": str(PurePosixPath(cfg.tool_command).parent) + ":/usr/local/bin:/usr/bin:/bin",
                 "OPENCLAW_CONFIG_PATH": config_path,
                 "OPENCLAW_STATE_DIR": state_dir,
                 "OPENCLAW_NO_RESPAWN": "1",
@@ -242,7 +241,14 @@ class OpenClawAgent(Agent):
                 "http_proxy": "",
                 "https_proxy": "",
             }
-            proc = await sandbox.exec(argv, env=env, timeout=cfg.run_timeout, workdir=workspace)
+            tool_dir = str(PurePosixPath(cfg.tool_command).parent)
+            launch_script = f"export PATH={_shell_quote_path(tool_dir)}:\"${{PATH:-}}\"; exec {shlex.join(argv)}"
+            proc = await sandbox.exec(
+                ["bash", "-c", launch_script],
+                env=env,
+                timeout=cfg.run_timeout,
+                workdir=workspace,
+            )
             audit_path = f"{root}/audit_trajectory.py"
             await sandbox.write_file(audit_path, Path(__file__).with_name("trajectory.py").read_text(encoding="utf-8"))
             audit_argv = ["python3", audit_path, state_dir, episode_id, model.model_name]
