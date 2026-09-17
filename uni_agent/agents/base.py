@@ -26,7 +26,7 @@ class ModelConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-class WhiteBoxSamplingConfig(BaseModel):
+class RequestSamplingConfig(BaseModel):
     """Sampling controls for Agents that construct model requests themselves."""
 
     temperature: float | None = None

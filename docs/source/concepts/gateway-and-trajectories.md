@@ -330,7 +330,7 @@ Both forms produce the same permission list. They do not set sampling values;
 those come from the rollout defaults or a white-box Agent request.
 
 White-box Agents place explicit request values in
-`agent.sampling_params_override`, a `WhiteBoxSamplingConfig`:
+`agent.sampling_params_override`, a `RequestSamplingConfig`:
 
 ```yaml
 agent:

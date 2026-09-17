@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 from uni_agent.agents.react.model import OpenAICompatibleChatModel
 from uni_agent.agents.registry import register_agent
 
-from ..base import Agent, AgentConfig, AgentResult, WhiteBoxSamplingConfig
+from ..base import Agent, AgentConfig, AgentResult, RequestSamplingConfig
 
 if TYPE_CHECKING:
     from uni_agent.sandbox import Sandbox
@@ -98,7 +98,7 @@ class MemAgentConfig(AgentConfig):
     """Configuration for chunked-context memory updates."""
 
     name: str = "mem_agent"
-    sampling_params_override: WhiteBoxSamplingConfig = Field(default_factory=WhiteBoxSamplingConfig)
+    sampling_params_override: RequestSamplingConfig = Field(default_factory=RequestSamplingConfig)
     max_steps: int = Field(default=50, gt=0, description="Maximum model calls across all context segments.")
     max_memorization_length: int = Field(default=1024, gt=0)
     max_chunks: int = Field(default=8, gt=0)
