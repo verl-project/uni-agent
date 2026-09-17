@@ -122,6 +122,13 @@ def init_config(args: argparse.Namespace, *, served_model_name: str):
     rollout.disable_log_stats = False
     rollout.free_cache_engine = False
     OmegaConf.update(config, "actor_rollout_ref.rollout.enable_sleep_mode", False, force_add=True)
+    if args.engine == "vllm":
+        OmegaConf.update(
+            config,
+            "actor_rollout_ref.rollout.engine_kwargs.vllm.kv_cache_dtype",
+            getattr(args, "kv_cache_dtype", "auto"),
+            force_add=True,
+        )
 
     # Gateway tool-call parser: the gateway decodes tool calls from raw tokens, so
     # this must match the model's chat template (the analog of vLLM's
@@ -359,6 +366,11 @@ def main() -> None:
         "--tensor-parallel-size", "--tp", dest="tensor_parallel_size", type=int, default=4, help="Tensor parallel size."
     )
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.9, help="Engine GPU memory fraction.")
+    parser.add_argument(
+        "--kv-cache-dtype",
+        default="auto",
+        help="vLLM KV-cache dtype, for example 'auto' or 'fp8'.",
+    )
     parser.add_argument(
         "--gateway-count",
         type=int,
