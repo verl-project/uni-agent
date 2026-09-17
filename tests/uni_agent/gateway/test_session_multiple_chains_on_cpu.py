@@ -765,6 +765,27 @@ async def test_multiple_chains_repeated_same_prompt_creates_siblings_and_continu
 @pytest.mark.cpu
 @pytest.mark.level0
 @pytest.mark.asyncio
+@pytest.mark.parametrize("assistant_content", ["OLD", "EDITED"])
+async def test_chain_selection_excludes_positive_assistant_span(assistant_content):
+    session = _session("assistant-span", enable_last_assistant_rollback=True)
+    backend = SequencedBackend(["OLD", "NEW"])
+    incoming = [
+        {"role": "user", "content": "start"},
+        {"role": "assistant", "content": assistant_content},
+        {"role": "user", "content": "continue"},
+        {"role": "assistant", "content": "external"},
+        {"role": "user", "content": "next"},
+    ]
+
+    await _run(session, backend, incoming[:1])
+    await _run(session, backend, incoming)
+
+    assert [chain.buffer.response_ids for chain in session.active_chains] == [_ids("OLD"), _ids("NEW")]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
 async def test_multiple_chains_distinct_sibling_continuation_matches_older_assistant_prefix():
     """Select an older sibling when its assistant prefix uniquely matches the request."""
     session = _session("distinct-sibling")

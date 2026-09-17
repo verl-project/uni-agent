@@ -70,7 +70,7 @@ MAX_MODEL_LEN=$((PROMPT_LENGTH + RESPONSE_LENGTH))
 
 # ── Rollout parameters ───────────────────────────────────────────────────
 ENGINE="${ENGINE:-vllm}"
-GEN_TP="${GEN_TP:-${TP:-${ROLLOUT_NGPUS_PER_NODE}}}"
+GEN_TP="${GEN_TP:-2}"
 N="${N:-8}"
 TEMPERATURE="${TEMPERATURE:-1.0}"
 TOP_P="${TOP_P:-1.0}"
@@ -84,7 +84,7 @@ USE_DYNAMIC_BSZ="${USE_DYNAMIC_BSZ:-False}"
 
 # ── Megatron training parallelism ────────────────────────────────────────
 if [[ "${TRAINER_MODE}" == "separate_async" ]]; then
-    TRAIN_TP="${TRAIN_TP:-${TP:-${N_GPUS_PER_NODE}}}"
+    TRAIN_TP="${TRAIN_TP:-${TP:-4}}"
 else
     TRAIN_TP="${TRAIN_TP:-${TP:-8}}"
 fi

@@ -473,6 +473,7 @@ class GatewaySession:
         mm_processor_kwargs = self._codec.mm_processor_kwargs or {}
         incoming_message_prefix_hashes = self._extend_message_prefix_hashes([], messages)
         selection = self._select_chain(
+            incoming_assistant_count=sum(message["role"] == "assistant" for message in messages),
             tools=tools,
             incoming_message_prefix_hashes=incoming_message_prefix_hashes,
         )
@@ -630,6 +631,7 @@ class GatewaySession:
     def _select_chain(
         self,
         *,
+        incoming_assistant_count: int,
         tools: list[dict[str, Any]] | None,
         incoming_message_prefix_hashes: list[str],
     ) -> tuple[ChainState, bool] | None:
@@ -646,6 +648,8 @@ class GatewaySession:
             if assistant_start_len >= len(incoming_message_prefix_hashes):
                 continue
             if incoming_message_prefix_hashes[assistant_start_len - 1] != assistant_start.tip_hash:
+                continue
+            if incoming_assistant_count > sum(message["role"] == "assistant" for message in chain.message_history):
                 continue
             if self._is_chain_prefix_hash_match(
                 chain=chain,
