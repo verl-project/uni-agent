@@ -11,8 +11,6 @@
       - from: "swebench/**"
         to: "swr.cn-east-3.myhuaweicloud.com/openyuanrong/swe-bench-verified/**:v2"
     sandbox_kwargs:
-      add_to_path:
-        - /opt/openclaw/bin
       proxy_port: 38197
       mounts:
         - target: /opt/openclaw
