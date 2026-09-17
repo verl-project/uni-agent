@@ -123,6 +123,22 @@ class DataStore:
         """
         self._kv.add_blocks(node_id, block_hashes, layer=layer)
 
+    def record_dispatch_blocks(self, node_id: str, block_hashes: list[str]) -> int:
+        """Mark a dispatched request's prefix blocks resident on a node (GPU).
+
+        The acquire path calls this so the resident index learns the prefix
+        immediately instead of waiting for the engine's kv-events; idempotent
+        against the later ``BlockStored``.
+
+        Args:
+            node_id: The replica the request was dispatched to.
+            block_hashes: The request's full-block chained prefix hashes.
+
+        Returns:
+            Number of blocks this call newly made resident (0 for a full hit).
+        """
+        return self._kv.record_dispatch_blocks(node_id, block_hashes)
+
     def remove_kv_blocks(self, node_id: str, block_hashes: list[str], layer: Layer = Layer.GPU) -> None:
         """Remove KV cache blocks from a node.
 
@@ -134,7 +150,7 @@ class DataStore:
         self._kv.remove_blocks(node_id, block_hashes, layer=layer)
 
     def clear_kv_node(self, node_id: str) -> None:
-        """Clear all KV cache blocks for a node.
+        """Clear all KV cache state for a node: resident blocks, held pins, pin markers.
 
         Args:
             node_id: Target node.
@@ -203,6 +219,31 @@ class DataStore:
         tally log to surface retained-block counts per replica.
         """
         return self._kv.per_replica_block_counts()
+
+    # ── In-flight block pinning ─────────────────────────────────────────
+
+    def pin_inflight_blocks(self, replica_id: str, hash_strs: list[str]) -> None:
+        """Pin a dispatch's prefix blocks on a replica (ref-counted by block hash).
+
+        Thin pass-through to ``KVCacheStore`` (see :meth:`KVCacheStore.pin_inflight_blocks`).
+        """
+        self._kv.pin_inflight_blocks(replica_id, hash_strs)
+
+    def unpin_inflight_blocks(self, replica_id: str, hash_strs: list[str]) -> None:
+        """Release one reference to each block a finishing request held (block-level ref count)."""
+        self._kv.unpin_inflight_blocks(replica_id, hash_strs)
+
+    def inflight_block_count(self, replica_id: str) -> int:
+        """Number of distinct blocks currently pinned by in-flight requests on ``replica_id``."""
+        return self._kv.inflight_block_count(replica_id)
+
+    def set_inflight_pin(self, request_id: str, replica_id: str, hash_strs: list[str]) -> None:
+        """Snapshot the block set a dispatch pinned (see :meth:`KVCacheStore.set_inflight_pin`)."""
+        self._kv.set_inflight_pin(request_id, replica_id, hash_strs)
+
+    def take_inflight_pin(self, request_id: str) -> dict[str, Any] | None:
+        """Remove and return a request's pin marker (``None`` if nothing pinned)."""
+        return self._kv.take_inflight_pin(request_id)
 
     # ── PerReplicaStore incremental write ──────────────────────────────────
 

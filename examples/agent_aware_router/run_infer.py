@@ -32,16 +32,27 @@ KV-cache-aware knobs:
                         relative to the repo root)
   --kv-events           vLLM kv-events zmq publisher; the kvcaware collector's load signal
                         (retained-cache occupancy).
-  --load-threshold      strategy[0] overrides; each falls back to the packaged YAML value.
+  --load-threshold      KVCAware strategy knob: overload when load > threshold, (0,1).
+  --capacity-threshold  KVCAware strategy knob: is-overload waterline — eligible while free
+                        capacity >= total × (1 - threshold), (0,1); omitted → packaged
+                        router-YAML value.
   --max-num-seqs        engine max concurrent sequences.
 
 Debug mode — env overrides for the internalized strategy knobs (no CLI flags;
-see uni_agent/agent_aware_router/debug.py)::
+see uni_agent/agent_aware_router/debug.py; the knob set is
+strategies.kvc_aware.DEFAULT_STRATEGY_KNOBS)::
 
+    # pure sticky
     UNI_AGENT_ROUTER_DEBUG=1 \
     UNI_AGENT_ROUTER_SLOW_CUT=least-inflight \
     UNI_AGENT_ROUTER_OVERLOAD_MODE=None \
-        python examples/agent_aware_router/run_infer.py ...   # pure sticky
+        python examples/agent_aware_router/run_infer.py ...
+
+    # soft-pick tuning: wider tie band + pinned tie-break RNG (reproducible runs)
+    UNI_AGENT_ROUTER_DEBUG=1 \
+    UNI_AGENT_ROUTER_TIE_TOLERANCE=0.2 \
+    UNI_AGENT_ROUTER_SEED=1234 \
+        python examples/agent_aware_router/run_infer.py ...
 
 Example (single node, 2-way tensor parallel, kvcaware router + kv-events)::
 
@@ -307,7 +318,12 @@ def init_config(args: argparse.Namespace, *, served_model_name: str):
         task_runner["runner_kwargs"] = {}
     # KV-cache-aware router knobs — the balancer overrides the packaged router
     # YAML with this node at construction (``custom.agent_framework.router``).
-    agent_framework_cfg["router"] = {"load_threshold": args.load_threshold}
+    # capacity_threshold stays None unless passed, so a custom router YAML's
+    # value survives (apply_override skips None).
+    agent_framework_cfg["router"] = {
+        "load_threshold": args.load_threshold,
+        "capacity_threshold": args.capacity_threshold,
+    }
     agent_framework_cfg["log_dir"] = args.log_dir
     OmegaConf.update(config, "actor_rollout_ref.rollout.custom.agent_framework", agent_framework_cfg, force_add=True)
 
@@ -626,6 +642,14 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=0.9,
         help="KVCAware load_threshold (overload when load > threshold, (0,1)); "
         "read by the balancer from rollout.custom.agent_framework.router at construction.",
+    )
+    parser.add_argument(
+        "--capacity-threshold",
+        type=float,
+        default=None,
+        help="KVCAware capacity_threshold (is-overload waterline: eligible while free "
+        "capacity >= total × (1 - threshold), (0,1)); None falls back to the packaged "
+        "router-YAML value; read from rollout.custom.agent_framework.router at construction.",
     )
 
     return parser.parse_args(argv)

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Iterable
+from typing import Any
 
 from ..types import Layer
 
@@ -42,6 +43,17 @@ class KVCacheStore:
             Layer.CPU: {},
             Layer.SSD: {},
         }
+        # In-flight *held* blocks: replica_id → {block hash → ref count}. Unlike
+        # ``replicas_by_block`` (resident, evictable) these are pinned by in-flight
+        # requests, which only the router's own acquire/release can track — kv-events
+        # carry no request identity. Same lock as the reverse index.
+        self._inflight_blocks: dict[str, dict[str, int]] = {}
+        # Per-request pin markers: request_id → {"replica", "hashes"} — the exact
+        # set each dispatch pinned, snapshotted at pin time so release/stale-unpin
+        # mirror it regardless of what the hash memo later does. Lives beside
+        # ``_inflight_blocks`` (it indexes into that table) and is never evicted:
+        # bounded by the true in-flight count, removed only by release/re-acquire.
+        self._inflight_pins: dict[str, dict[str, Any]] = {}
         self._lock: threading.Lock = threading.Lock()
 
     @classmethod
@@ -54,7 +66,7 @@ class KVCacheStore:
     # ── Replica management ──────────────────────────────────────────────
 
     def clear_replica(self, replica_id: str) -> None:
-        """Clear all blocks for a replica from the reverse index.
+        """Forget everything this replica accounts for: resident blocks, held pins, markers.
 
         O(n) in the number of unique blocks, but replica count is typically small (< 100).
         """
@@ -70,38 +82,145 @@ class KVCacheStore:
                 del self.replicas_by_block[bh]
             for layer_counts in self._replica_layer_counts.values():
                 layer_counts.pop(replica_id, None)
+            self._inflight_blocks.pop(replica_id, None)
+            stale_pins = [rid for rid, marker in self._inflight_pins.items() if marker["replica"] == replica_id]
+            for rid in stale_pins:
+                del self._inflight_pins[rid]
 
     # ── Block management ────────────────────────────────────────────────
 
     def add_blocks(self, replica_id: str, block_hashes: Iterable[str], layer: Layer = Layer.GPU) -> None:
         """Add blocks to a replica at a layer, updating the reverse index.
 
-        Only GPU blocks are indexed in ``replicas_by_block`` (they drive
-        prefix-hit routing); CPU/SSD blocks are counted only.
+        Only GPU blocks are indexed in ``replicas_by_block`` (CPU/SSD counted
+        only); GPU adds are idempotent — a block already resident is a no-op.
         """
         with self._lock:
-            layer_counts = self._replica_layer_counts.setdefault(layer, {})
-            for bh in block_hashes:
-                layer_counts[replica_id] = layer_counts.get(replica_id, 0) + 1
-                if layer != Layer.GPU:
-                    continue
-                if bh not in self.replicas_by_block:
-                    self.replicas_by_block[bh] = set()
-                self.replicas_by_block[bh].add(replica_id)
+            self._add_blocks_locked(replica_id, block_hashes, layer)
+
+    def record_dispatch_blocks(self, replica_id: str, hash_strs: list[str]) -> int:
+        """Mark a dispatched request's prefix blocks *resident* on ``replica_id`` (GPU).
+
+        Called by the acquire path so ``gpu_hit`` sees the prefix immediately
+        instead of trailing the kv-event stream; idempotent against the engine's
+        later ``BlockStored`` for the same hashes, and the blocks stay indexed
+        after release until the engine evicts them (``BlockRemoved``).
+
+        Args:
+            replica_id: The replica the request was dispatched to.
+            hash_strs: The request's full-block chained prefix hashes (empty is
+                a no-op).
+
+        Returns:
+            Number of blocks this call newly made resident (0 for a full hit).
+        """
+        if not hash_strs:
+            return 0
+        with self._lock:
+            return self._add_blocks_locked(replica_id, hash_strs, Layer.GPU)
 
     def remove_blocks(self, replica_id: str, block_hashes: Iterable[str], layer: Layer = Layer.GPU) -> None:
-        """Remove blocks from a replica at a layer, updating the reverse index."""
+        """Remove blocks from a replica at a layer, updating the reverse index.
+
+        Symmetric to :meth:`add_blocks`: a GPU block not resident on the replica
+        is a no-op, so a removal for a block it never had cannot under-count.
+        """
         with self._lock:
-            layer_counts = self._replica_layer_counts.setdefault(layer, {})
-            for bh in block_hashes:
-                layer_counts[replica_id] = layer_counts.get(replica_id, 0) - 1
-                if layer != Layer.GPU:
-                    continue
+            self._remove_blocks_locked(replica_id, block_hashes, layer)
+
+    def _add_blocks_locked(self, replica_id: str, block_hashes: Iterable[str], layer: Layer) -> int:
+        """Index + count blocks; caller holds ``_lock``. Returns the blocks added.
+
+        GPU counting is transition-based (idempotent); CPU/SSD have no reverse
+        index to test against and count unconditionally.
+        """
+        layer_counts = self._replica_layer_counts.setdefault(layer, {})
+        added = 0
+        for bh in block_hashes:
+            if layer == Layer.GPU:
                 replicas = self.replicas_by_block.get(bh)
                 if replicas is not None and replica_id in replicas:
-                    replicas.discard(replica_id)
-                    if not replicas:
-                        del self.replicas_by_block[bh]
+                    continue  # already resident — idempotent, never double-count
+                if replicas is None:
+                    self.replicas_by_block[bh] = {replica_id}
+                else:
+                    replicas.add(replica_id)
+            layer_counts[replica_id] = layer_counts.get(replica_id, 0) + 1
+            added += 1
+        return added
+
+    def _remove_blocks_locked(self, replica_id: str, block_hashes: Iterable[str], layer: Layer) -> None:
+        """Un-index + uncount blocks. Caller holds ``_lock`` (see :meth:`remove_blocks`)."""
+        layer_counts = self._replica_layer_counts.setdefault(layer, {})
+        for bh in block_hashes:
+            if layer == Layer.GPU:
+                replicas = self.replicas_by_block.get(bh)
+                if replicas is None or replica_id not in replicas:
+                    continue  # not resident — never decrement into the negative
+                replicas.discard(replica_id)
+                if not replicas:
+                    del self.replicas_by_block[bh]
+            layer_counts[replica_id] = layer_counts.get(replica_id, 0) - 1
+
+    # ── In-flight block holding (pin / unpin) ───────────────────────────
+
+    def pin_inflight_blocks(self, replica_id: str, hash_strs: list[str]) -> None:
+        """Bump the ref count of every block an in-flight request holds.
+
+        Deduplicated by hash; blocks already resident in the prefix cache are
+        pinned too (occupancy, not new allocations). Empty ``hash_strs`` pins
+        nothing.
+        """
+        with self._lock:
+            held = self._inflight_blocks.setdefault(replica_id, {})
+            for h in hash_strs:
+                held[h] = held.get(h, 0) + 1
+
+    def unpin_inflight_blocks(self, replica_id: str, hash_strs: list[str]) -> None:
+        """Drop one reference to every block a finishing request held.
+
+        A block leaves the held set only when its last holder releases it —
+        a shared prefix survives one of its requests completing. ``hash_strs``
+        must be the same list the request pinned at acquire.
+        """
+        with self._lock:
+            held = self._inflight_blocks.get(replica_id)
+            if not held:
+                return
+            for h in hash_strs:
+                ref_cnt = held.get(h, 0) - 1
+                if ref_cnt > 0:
+                    held[h] = ref_cnt
+                else:
+                    held.pop(h, None)
+
+    def inflight_block_count(self, replica_id: str) -> int:
+        """Number of distinct blocks currently held (pinned by in-flight requests) on ``replica_id``."""
+        with self._lock:
+            return len(self._inflight_blocks.get(replica_id, {}))
+
+    def set_inflight_pin(self, request_id: str, replica_id: str, hash_strs: list[str]) -> None:
+        """Snapshot the exact block set a dispatch pinned (release must mirror it).
+
+        Overwrites any marker left by a previous dispatch of the same request —
+        the acquire path unpins that stale set before calling this.
+        """
+        with self._lock:
+            self._inflight_pins[request_id] = {"replica": replica_id, "hashes": list(hash_strs)}
+
+    def take_inflight_pin(self, request_id: str) -> dict[str, Any] | None:
+        """Remove and return ``request_id``'s pin marker (``None`` if nothing pinned).
+
+        Read-and-clear is one locked step, so a duplicated release can never
+        double-unpin — the second one finds no marker.
+        """
+        with self._lock:
+            return self._inflight_pins.pop(request_id, None)
+
+    def _is_cached_locked(self, replica_id: str, hash_str: str) -> bool:
+        """Whether ``replica_id`` already caches ``hash_str``. Caller holds ``_lock``."""
+        cached = self.replicas_by_block.get(hash_str)
+        return cached is not None and replica_id in cached
 
     # ── Retained-cache size ─────────────────────────────────────────────
 
@@ -146,8 +265,7 @@ class KVCacheStore:
             return 0.0
         matched = 0
         for i, hs in enumerate(hash_strs):
-            cached = self.replicas_by_block.get(hs)
-            if cached is None or node_id not in cached:
+            if not self._is_cached_locked(node_id, hs):
                 break  # chain break — this node doesn't cache this hash
             matched = i + 1
         return matched / len(hash_strs)

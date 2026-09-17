@@ -103,12 +103,22 @@ def test_prefix_load_aware_emits_load_and_scache_per_replica(recording):
 def test_capacity_token_aware_emits_capacity_fractions(recording):
     ds = DataStore()
     ds.set_block_size(16)
-    ds.refresh_metrics({"s0": {MetricKey.NUM_GPU_BLOCKS: 100, MetricKey.KV_CACHE_USAGE_PERC: 0.2}})
+    ds.refresh_metrics(
+        {
+            "s0": {
+                MetricKey.NUM_GPU_BLOCKS: 100,
+                MetricKey.KV_CACHE_USAGE_PERC: 0.2,
+                MetricKey.INFLIGHT_TOKENS: 320,
+                MetricKey.INFLIGHT_BLOCKS: 20,  # 20 held blocks × 16 = 320 tokens
+            }
+        }
+    )
     strat = _strat(slow_cut=SlowCut.CAPACITY_TOKEN_AWARE, do_shortcut=False)
 
     strat.score(PROMPT_IDS, ds, [ReplicaInfo(replica_id="s0")])
 
-    # cap = 100 blocks × 16 = 1600 tokens; kv_perc=0.2 → avail=1280 → ratio 0.8.
+    # cap = 100 blocks × 16 = 1600 tokens; avail = 1600 − 20×16 = 1280 → ratio 0.8
+    # (kv_perc and INFLIGHT_TOKENS are logged, never part of the capacity account).
     # Components are emitted as fractions of capacity (default-bucket friendly).
     assert {"avail_ratio", "need_ratio", "remaining_ratio"} <= _names(recording, "histogram")
     avail_call = next(c for c in recording.calls if c[1] == "avail_ratio")

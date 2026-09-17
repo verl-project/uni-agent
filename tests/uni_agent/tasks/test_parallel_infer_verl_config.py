@@ -171,6 +171,7 @@ def router_args():
         router_config_path="uni_agent/agent_aware_router/configs/agent_aware_router.yaml",
         simulated_runner_fqn=None,
         load_threshold=0.5,
+        capacity_threshold=0.7,
         prompt_length=2048,
         response_length=8192,
     )
@@ -205,6 +206,8 @@ def test_inference_sampling_uses_run_options_and_preserves_length_configuration(
     if entrypoint is init_config:
         assert rollout.max_model_len == expected_prompt_length + expected_response_length
     assert rollout.custom.agent_framework.allowed_request_sampling_param_keys == ["temperature", "top_p", "top_k"]
+    if entrypoint is init_router_config:
+        assert rollout.custom.agent_framework.router == {"load_threshold": 0.5, "capacity_threshold": 0.7}
     task_runner = rollout.custom.agent_framework.agent_runners.task
     if simulated_runner:
         assert task_runner.runner_fqn == simulated_runner
@@ -243,6 +246,7 @@ def test_inference_language_model_only_wires_vllm_and_rejects_other_engines():
         router_config_path="uni_agent/agent_aware_router/configs/agent_aware_router.yaml",
         simulated_runner_fqn=None,
         load_threshold=0.5,
+        capacity_threshold=0.7,
         prompt_length=2048,
         response_length=8192,
     )

@@ -45,12 +45,13 @@ pytestmark = [pytest.mark.level0, pytest.mark.cpu]
 
 def test_strategy_default_config():
     """
-    Feature: KVCAwareStrategyConfig has a single persisted field, load_threshold
+    Feature: KVCAwareStrategyConfig persists the user-tunable knobs
     Description: construct strategy config with no kwargs
-    Expectation: cfg.load_threshold == 0.9 and no other tuning fields exist
+    Expectation: load_threshold == 0.9 and capacity_threshold == 0.5
     """
     cfg = KVCAwareStrategyConfig()
     assert cfg.load_threshold == 0.9
+    assert cfg.capacity_threshold == 0.5
 
 
 def test_strategy_normal_fields_parse():
@@ -75,6 +76,17 @@ def test_strategy_load_threshold_out_of_range_raises_config_error(load_threshold
     """
     with pytest.raises(ConfigError, match="load_threshold"):
         KVCAwareStrategyConfig(load_threshold=load_threshold)
+
+
+@pytest.mark.parametrize("capacity_threshold", [0, -0.5, 1.0, 42])
+def test_strategy_capacity_threshold_out_of_range_raises_config_error(capacity_threshold):
+    """
+    Feature: capacity_threshold outside (0, 1) triggers validation error
+    Description: construct strategy config with capacity_threshold = 0 / -0.5 / 1.0 / 42
+    Expectation: raises ConfigError matching "capacity_threshold"
+    """
+    with pytest.raises(ConfigError, match="capacity_threshold"):
+        KVCAwareStrategyConfig(capacity_threshold=capacity_threshold)
 
 
 # -- (3) Hydra instantiation --

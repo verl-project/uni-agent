@@ -30,6 +30,7 @@ from ..insight import WriteEvent, WriteKind, emitter
 from ..store.data_store import DataStore
 from ..types import EmitKey, MetricKey
 from ..utils.knob import coerce_knob_value
+from ..utils.prefix_cache import resolve_prefix_hashes
 from .parse import KVCacheUpdate, MetricsUpdate, Parser, StickyUpdate
 from .transport.base import Transport
 
@@ -111,6 +112,9 @@ class Collector:
         self._kv_last_logged_total = 0
         # Last-emit time for the dispatched/completed/inflight_turn_sum snapshot (throttled).
         self._dispatch_last_log: float = 0.0
+        # Resident blocks the router wrote itself at acquire (``record_dispatch_blocks``),
+        # logged in the kv-events tally as ``router_recorded`` (cross-check vs engine-side stored).
+        self._dispatch_recorded_blocks: int = 0
 
     # ── Lifecycle ───────────────────────────────────────────────────────
 
@@ -161,6 +165,9 @@ class Collector:
             self._data_store.set_block_size(update.block_size)
         if update.clear_all:
             self._data_store.clear_kv_node(update.node_id)
+            # The held account went with the clear — re-read the (now empty) gauge,
+            # otherwise INFLIGHT_BLOCKS keeps the pre-clear phantom count.
+            self._refresh_inflight_blocks(update.node_id)
         for layer, hashes in update.remove_blocks.items():
             if hashes:
                 self._data_store.remove_kv_blocks(update.node_id, hashes, layer=layer)
@@ -189,10 +196,15 @@ class Collector:
         total = sum(self._kv_event_counts.values())
         if total - self._kv_last_logged_total >= _KV_EVENT_LOG_INTERVAL_S:
             self._kv_last_logged_total = total
+            # Parser-side translation failures: non-zero means the event-side
+            # retained count is drifting above the engine's truth.
+            hash_map_stats = getattr(self._parser, "stats", None)
             logger.debug(
                 f"kv-events tally: events={dict(self._kv_event_counts)} "
                 f"blocks={dict(self._kv_block_counts)} (total_events={total}) | "
-                f"retained_blocks/replica={self._data_store.per_replica_block_counts()}"
+                f"retained_blocks/replica={self._data_store.per_replica_block_counts()} | "
+                f"router_recorded={self._dispatch_recorded_blocks} | "
+                f"hash-map={dict(hash_map_stats or {})}"
             )
 
     def _write_metrics_update(self, update: MetricsUpdate) -> None:
@@ -206,6 +218,10 @@ class Collector:
         neither, so it subtracts what acquire recorded). verl #7115 releases
         carry no token list, which is why the length lives in a per-request row
         rather than the release event.
+        On acquire the request's prefix blocks are also pinned on the chosen
+        replica (:meth:`_pin_dispatch_blocks`, feeding the absolute
+        ``INFLIGHT_BLOCKS`` gauge); release unpins them (:meth:`_release_inflight_blocks`).
+        ``INFLIGHT_TOKENS`` itself stays the raw prompt_len bookkeeping above.
         Both acquire and release refresh the throttled ``router-dispatch``
         snapshot. Absolute (non-delta) updates are polled gauges, handled
         below. When rl-insight emit is on, each write also builds a
@@ -222,16 +238,37 @@ class Collector:
             is_release = MetricKey.COMPLETED_COUNT in deltas
             if is_acquire:
                 if update.request_id is None:
-                    logger.debug("dispatch (DISPATCHED_COUNT) update missing request_id — skipping turn")
+                    logger.debug(
+                        "dispatch (DISPATCHED_COUNT) update missing request_id — "
+                        "skipping turn and block pinning (raw prompt_len booked)"
+                    )
                 else:
                     deltas[MetricKey.INFLIGHT_TURN_SUM] = self._data_store.incr_per_request(update.request_id, "turn")
-                    self._data_store.set_per_request(
-                        update.request_id, _PROMPT_LEN_KEY, deltas.get(MetricKey.INFLIGHT_TOKENS, 0)
-                    )
+                    raw_tokens = deltas.get(MetricKey.INFLIGHT_TOKENS, 0)
+                    # A pin marker still held for the request means its previous
+                    # dispatch never released (a dropped COMPLETED_COUNT): unpin that
+                    # set first and net its still-booked tokens out of this acquire.
+                    stale = self._data_store.take_inflight_pin(update.request_id)
+                    if stale is not None:
+                        logger.warning(
+                            f"re-acquire without release request={update.request_id} on {stale['replica']} "
+                            f"— unpinning the previous block set"
+                        )
+                        self._data_store.unpin_inflight_blocks(stale["replica"], stale["hashes"])
+                        self._refresh_inflight_blocks(stale["replica"])
+                        deltas[MetricKey.INFLIGHT_TOKENS] = raw_tokens - self._data_store.get_per_request(
+                            update.request_id, _PROMPT_LEN_KEY, 0
+                        )
+                        # The dropped release's INFLIGHT_COUNT -1 never arrived either;
+                        # fold it into this acquire so the gauge nets to the one turn
+                        # genuinely in flight.
+                        deltas[MetricKey.INFLIGHT_COUNT] = deltas.get(MetricKey.INFLIGHT_COUNT, 0) - 1
+                    self._data_store.set_per_request(update.request_id, _PROMPT_LEN_KEY, raw_tokens)
+                    self._pin_dispatch_blocks(update.node_id, update.request_id, update.prompt_ids)
             elif is_release:
                 if update.request_id is None:
                     logger.debug(
-                        "release (COMPLETED_COUNT) update missing request_id — skipping turn/token subtraction"
+                        "release (COMPLETED_COUNT) update missing request_id — skipping turn/token/block subtraction"
                     )
                 else:
                     deltas[MetricKey.INFLIGHT_TURN_SUM] = -self._data_store.get_per_request(
@@ -240,6 +277,7 @@ class Collector:
                     deltas[MetricKey.INFLIGHT_TOKENS] = -self._data_store.get_per_request(
                         update.request_id, _PROMPT_LEN_KEY, 0
                     )
+                    self._release_inflight_blocks(update.node_id, update.request_id)
             new_values = self._data_store.incr_metrics(update.node_id, deltas)
             if is_acquire or is_release:
                 emitter.on_write(
@@ -276,6 +314,59 @@ class Collector:
             # ``_metrics_prev`` baseline, so windowed deltas stay correct.
             for nid in self._data_store.get_metric_node_ids():
                 self._log_evidence_window(nid)
+
+    def _pin_dispatch_blocks(self, node_id: str, request_id: str, prompt_ids: tuple[int, ...]) -> None:
+        """Pin this dispatch's prefix blocks on the chosen replica and refresh ``INFLIGHT_BLOCKS``.
+
+        Resolves the request's hash chain (memoized by ``resolve_prefix_hashes``),
+        pins it ref-counted, and records it as resident (``record_dispatch_blocks``)
+        so ``gpu_hit`` sees it at once. Skipped when there is nothing to pin:
+        no ``prompt_ids``, or a block size not yet learned.
+        """
+        block_size = self._data_store.get_block_size()
+        if not prompt_ids or not block_size:
+            return
+        hash_strs = resolve_prefix_hashes(list(prompt_ids), request_id, self._data_store)
+        if not hash_strs:
+            return
+        self._data_store.pin_inflight_blocks(node_id, hash_strs)
+        # Resident record runs *after* the pin, on the same chain; idempotent
+        # against the engine's later ``BlockStored`` for the same hashes.
+        self._dispatch_recorded_blocks += self._data_store.record_dispatch_blocks(node_id, hash_strs)
+        # Snapshot the exact pinned list: release/stale-unpin must mirror THIS
+        # dispatch's set, whatever score() later does to the shared memo. The
+        # marker lives in the pin table (KVCacheStore) — never in the per-request
+        # LRU — so it cannot be evicted before release.
+        self._data_store.set_inflight_pin(request_id, node_id, hash_strs)
+        self._refresh_inflight_blocks(node_id)
+
+    def _release_inflight_blocks(self, node_id: str, request_id: str) -> None:
+        """Unpin a finishing request's blocks and refresh its replica's held gauge.
+
+        The replica and the exact pinned list come from the acquire-time pin
+        marker (``KVCacheStore.set_inflight_pin``) — a snapshot of what that
+        dispatch pinned, immune to later memo extension or shrink (releases
+        carry no prompt under verl #7115). The marker is not LRU-evictable, so
+        it survives any per-request churn; a missing marker means nothing was
+        pinned at acquire.
+        """
+        marker = self._data_store.take_inflight_pin(request_id)
+        if marker is None:
+            # Nothing was pinned at acquire — the held set never knew about this request.
+            logger.debug(f"release with no pinned blocks request={request_id} on {node_id}")
+            return
+        self._data_store.unpin_inflight_blocks(marker["replica"], marker["hashes"])
+        self._refresh_inflight_blocks(marker["replica"])
+
+    def _refresh_inflight_blocks(self, replica_id: str) -> None:
+        """Write a replica's held-block count as an absolute ``INFLIGHT_BLOCKS`` gauge.
+
+        Re-read after every acquire/release: release semantics (freeing zero or
+        several blocks) are not expressible as a signed delta.
+        """
+        self._data_store.refresh_metrics(
+            {replica_id: {MetricKey.INFLIGHT_BLOCKS: self._data_store.inflight_block_count(replica_id)}}
+        )
 
     def _write_sticky_update(self, update: StickyUpdate) -> None:
         """Apply a StickyUpdate to the per-request store (sticky key) via DataStore."""

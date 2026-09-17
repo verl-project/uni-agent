@@ -12,6 +12,10 @@ strategy:
   _target_: uni_agent.agent_aware_router.config.strategy.KVCAwareStrategyConfig
   # overload when load > threshold (load ∈ [0,1], bigger = more loaded)
   load_threshold: 0.9
+  # is-overload waterline: a replica stays eligible while its free token
+  # capacity >= total × (1 - capacity_threshold) — i.e. in-flight requests may
+  # hold up to this fraction of the pool before the replica is gated out
+  capacity_threshold: 0.5
 
 collector:
   http_interval: 5
