@@ -50,11 +50,8 @@ except ImportError:  # fall back to verl's shim (mock raises a clear error if TQ
 
 from uni_agent.framework.entry import AgentFrameworkRolloutAdapter
 from uni_agent.tasks import TaskConfigResolver
-from verl.single_controller.base import Worker
-from verl.single_controller.ray import RayClassWithInitArgs
 from verl.utils import tensordict_utils as tu
 from verl.workers.rollout.llm_server import LLMServerManager
-from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMReplica
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 logger = logging.getLogger(__name__)
@@ -69,40 +66,40 @@ DEFAULT_RESPONSE_LENGTH = 65536
 DEFAULT_PROMPT_LENGTH = 4096
 
 
-class InferenceRolloutWorker(Worker):
-    """Minimal standalone worker used by inference-only vLLM replicas.
+def _create_llm_server_manager(config, engine: str):
+    """Create the inference manager while keeping vLLM-only imports optional."""
+    if engine != "vllm":
+        return LLMServerManager.create(config=config)
 
-    ``LLMServerManager``'s regular standalone path imports
-    ``CheckpointEngineWorker`` in each Ray child.  That worker initializes a
-    training checkpoint process group and is unnecessary when no update is
-    performed; this lightweight worker only supplies the Ray GPU identity that
-    ``vLLMHttpServer`` needs to launch its internal engine.
-    """
+    from verl.single_controller.base import Worker
+    from verl.single_controller.ray import RayClassWithInitArgs
+    from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMReplica
 
-    def __init__(self, rollout_config=None, model_config=None, replica_rank: int = 0, *args, **kwargs):
-        super().__init__()
-        self.rollout_config = rollout_config
-        self.model_config = model_config
-        self.replica_rank = replica_rank
+    class InferenceRolloutWorker(Worker):
+        """Minimal worker for inference-only vLLM replicas."""
 
+        def __init__(self, rollout_config=None, model_config=None, replica_rank: int = 0, *args, **kwargs):
+            super().__init__()
+            self.rollout_config = rollout_config
+            self.model_config = model_config
+            self.replica_rank = replica_rank
 
-class InferenceVLLMReplica(vLLMReplica):
-    """vLLM replica that avoids the training-only checkpoint worker import."""
+    class InferenceVLLMReplica(vLLMReplica):
+        """vLLM replica that avoids the training-only checkpoint worker."""
 
-    def get_ray_class_with_init_args(self) -> RayClassWithInitArgs:
-        rollout_worker_actor_cls = ray.remote(InferenceRolloutWorker)
-        return RayClassWithInitArgs(
-            cls=rollout_worker_actor_cls,
-            rollout_config=self.config,
-            model_config=self.model_config,
-            replica_rank=self.replica_rank,
-        )
+        def get_ray_class_with_init_args(self) -> RayClassWithInitArgs:
+            rollout_worker_actor_cls = ray.remote(InferenceRolloutWorker)
+            return RayClassWithInitArgs(
+                cls=rollout_worker_actor_cls,
+                rollout_config=self.config,
+                model_config=self.model_config,
+                replica_rank=self.replica_rank,
+            )
 
+    class InferenceLLMServerManager(LLMServerManager):
+        rollout_replica_class = InferenceVLLMReplica
 
-class InferenceLLMServerManager(LLMServerManager):
-    """Standalone manager for inference-only runs (no checkpoint/update path)."""
-
-    rollout_replica_class = InferenceVLLMReplica
+    return InferenceLLMServerManager.create(config=config)
 
 
 def _rule(text: str = "", width: int = 50, ch: str = "-") -> str:
@@ -476,8 +473,7 @@ def main() -> None:
     logger.info("initializing configuration, TransferQueue, and LLMServerManager...")
     config = init_config(args, served_model_name=served_model_name)
     tq.init(config.transfer_queue)
-    manager_cls = InferenceLLMServerManager if args.engine == "vllm" else LLMServerManager
-    llm_server_manager = manager_cls.create(config=config)
+    llm_server_manager = _create_llm_server_manager(config, args.engine)
 
     # 2. Framework rollout adapter over the engine.
     adapter = AgentFrameworkRolloutAdapter.create(
