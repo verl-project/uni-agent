@@ -298,7 +298,11 @@ Important knobs include:
 ## Sampling configuration
 
 `actor_rollout_ref.rollout.temperature`, `top_p`, and `top_k` provide the Gateway
-session defaults (`rollout.val_kwargs` supplies validation sampling). Agent HTTP requests can override only `max_tokens` and `stop` by default. Configure `allowed_request_sampling_param_keys` to add request keys for a white-box Agent; configured keys are added to the defaults and do not remove `max_tokens` or `stop`:
+session defaults (`rollout.val_kwargs` supplies validation sampling). Agent HTTP
+requests can override only `max_tokens` and `stop` by default. Configure
+`allowed_request_sampling_param_keys` to permit additional request keys when a
+white-box Agent needs request-level overrides. Configured keys are added to the
+defaults and do not remove `max_tokens` or `stop`:
 
 ```yaml
 actor_rollout_ref:
@@ -308,6 +312,22 @@ actor_rollout_ref:
         allowed_request_sampling_param_keys: [temperature, top_p, top_k]
         # Effective allowlist: max_tokens, stop, temperature, top_p, top_k
 ```
+
+Training launchers set this framework field with Hydra list syntax:
+
+```bash
+++actor_rollout_ref.rollout.custom.agent_framework.allowed_request_sampling_param_keys="[temperature,top_p,top_k]"
+```
+
+The verl inference entrypoints expose the same list through argparse, whose
+multi-value syntax is space-separated:
+
+```bash
+--allowed-request-sampling-param-keys temperature top_p top_k
+```
+
+Both forms produce the same additive permission list. They do not set sampling
+values; those still come from the rollout defaults or a white-box Agent request.
 
 White-box Agents place explicit request values in
 `agent.sampling_params_override`, a `WhiteBoxSamplingConfig`:

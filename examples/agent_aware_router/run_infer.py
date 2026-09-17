@@ -125,7 +125,7 @@ def _resolve_router_config_path(path: str) -> str:
     return os.path.abspath(path)
 
 
-def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_model_name: str):
+def init_config(args: argparse.Namespace, *, served_model_name: str):
     """Compose verl's ``ppo_trainer`` config with the KV-cache-aware router plugin and
     override the engine + framework knobs.
 
@@ -553,7 +553,7 @@ def main() -> None:
             # (default ~10 s threshold would kill them prematurely).
             ray.init(_system_config={"idle_worker_killing_time_threshold_ms": _RAY_IDLE_WORKER_TIMEOUT_MS})
 
-    resolver = TaskConfigResolver.from_file(args.task_config)
+    TaskConfigResolver.from_file(args.task_config)
     served_model_name = os.path.basename(os.path.expanduser(args.model_path).rstrip("/"))
 
     dataset = load_dataset("parquet", data_files=args.data_path, split="train")
@@ -568,13 +568,11 @@ def main() -> None:
         return
     n = max(1, args.n)
 
-    task_configs = list(resolver.defaults_by_name.values())
-
     logger.info(f"loaded {len(samples)} prompts (x n={n} sessions each) from {args.data_path}")
 
     # 1. TransferQueue + verl inference engine with the KV-cache-aware router.
     logger.info("initializing configuration, TransferQueue, and LLMServerManager (kvcaware router)...")
-    config = init_config(args, task_configs=task_configs, served_model_name=served_model_name)
+    config = init_config(args, served_model_name=served_model_name)
     tq.init(config.transfer_queue)
     llm_server_manager = LLMServerManager.create(config=config)
 

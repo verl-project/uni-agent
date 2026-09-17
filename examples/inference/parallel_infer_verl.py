@@ -74,7 +74,7 @@ def _rule(text: str = "", width: int = 50, ch: str = "-") -> str:
     return f"{ch * (pad // 2)} {text} {ch * (pad - pad // 2)}"
 
 
-def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_model_name: str):
+def init_config(args: argparse.Namespace, *, served_model_name: str):
     """Compose verl's ``ppo_trainer`` config and override the engine + framework knobs."""
     from hydra import compose, initialize_config_dir
 
@@ -385,7 +385,7 @@ def main() -> None:
 
     ray.init()
 
-    resolver = TaskConfigResolver.from_file(args.task_config)
+    TaskConfigResolver.from_file(args.task_config)
     served_model_name = args.served_model_name or os.path.basename(os.path.expanduser(args.model_path).rstrip("/"))
 
     dataset = load_dataset("parquet", data_files=args.data_path, split="train")
@@ -397,13 +397,11 @@ def main() -> None:
         return
     n = max(1, args.n)
 
-    task_configs = list(resolver.defaults_by_name.values())
-
     logger.info(f"loaded {len(samples)} prompts (x n={n} sessions each) from {args.data_path}")
 
     # 1. TransferQueue + verl inference engine (Ray auto-inits via the actors below).
     logger.info("initializing configuration, TransferQueue, and LLMServerManager...")
-    config = init_config(args, task_configs=task_configs, served_model_name=served_model_name)
+    config = init_config(args, served_model_name=served_model_name)
     tq.init(config.transfer_queue)
     llm_server_manager = LLMServerManager.create(config=config)
 

@@ -129,10 +129,10 @@ class ReActAgent(Agent):
         logger.info(f"{'=' * 25} STEP {info['steps']} {'=' * 25}")
 
         # step 1: query the model
-        sampling_params: dict[str, Any] = cfg.sampling_params_override.sampling_params()
-        if cfg.sampling_params_override.max_tokens_per_turn is not None:
-            sampling_params["max_tokens"] = cfg.sampling_params_override.max_tokens_per_turn
-        content, tool_calls, gen_info = await model.query(transcript, sampling_params=sampling_params)
+        content, tool_calls, gen_info = await model.query(
+            transcript,
+            sampling_params=cfg.sampling_params_override.sampling_params(),
+        )
         info["total_tokens"] = gen_info["prompt_tokens"] + gen_info["completion_tokens"]
         finish_reason = gen_info.get("finish_reason")
         logger.info(

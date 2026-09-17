@@ -76,6 +76,7 @@ The Quickstart includes two ready-to-use configs:
         sampling_params_override:
           temperature: 0.8
           top_p: 0.9
+          top_k: -1
     ```
 
 Configure the sandbox provider and Agent limits in YAML. Do not hard-code the runtime endpoint there unless every run uses the same service: API mode injects it from `--base-url` and `--model`, while verl mode injects the session Gateway endpoint.
@@ -84,6 +85,10 @@ For verl inference, `--temperature`, `--top-p`, and `--top-k` set the shared
 rollout and validation sampling defaults. To enable ReAct YAML overrides, also
 pass `--allowed-request-sampling-param-keys temperature top_p top_k`. Direct API
 inference sends the white-box overrides directly to the endpoint.
+The space-separated value is argparse syntax for the same framework list that
+training launchers express with Hydra as
+`++actor_rollout_ref.rollout.custom.agent_framework.allowed_request_sampling_param_keys="[temperature,top_p,top_k]"`.
+This option grants override permission; it does not set the sampling values.
 
 `parallel_infer_verl.py` uses `--response-length` (default `65536`) for both
 `rollout.response_length` and `data.max_response_length`, with prompt capacity

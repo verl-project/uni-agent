@@ -114,10 +114,10 @@ def test_model_fallbacks_do_not_override_task_config_defaults():
         },
     )
 
-    model = get_task(resolved).config.agent.sampling_params_override
-    assert model.temperature == 0.3
-    assert model.top_p == 0.7
-    assert model.top_k == 42
+    sampling = get_task(resolved).config.agent.sampling_params_override
+    assert sampling.temperature == 0.3
+    assert sampling.top_p == 0.7
+    assert sampling.top_k == 42
 
 
 @pytest.mark.cpu

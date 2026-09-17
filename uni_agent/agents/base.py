@@ -43,6 +43,7 @@ class WhiteBoxSamplingConfig(BaseModel):
                 "temperature": self.temperature,
                 "top_p": self.top_p,
                 "top_k": self.top_k,
+                "max_tokens": self.max_tokens_per_turn,
             }.items()
             if value is not None
         }

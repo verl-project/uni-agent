@@ -72,6 +72,10 @@ The Quickstart provides separate Task Configs for ReAct and Claude Code. Each re
               TQDM_DISABLE: "1"
               PIP_PROGRESS_BAR: "off"
           - name: submit
+        sampling_params_override:
+          temperature: 1.0
+          top_p: 1.0
+          top_k: -1
 
     - name: swe_rebench
       sandbox:
@@ -91,6 +95,10 @@ The Quickstart provides separate Task Configs for ReAct and Claude Code. Each re
               TQDM_DISABLE: "1"
               PIP_PROGRESS_BAR: "off"
           - name: submit
+        sampling_params_override:
+          temperature: 1.0
+          top_p: 1.0
+          top_k: -1
     ```
 
 === "Claude Code"
@@ -117,6 +125,18 @@ The Quickstart provides separate Task Configs for ReAct and Claude Code. Each re
 
     !!! warning "Network connectivity"
         The Claude Code sandbox must be able to reach the GPU machine hosting its session-scoped Gateway endpoint.
+
+The ReAct recipes explicitly permit their white-box request overrides with
+Hydra's list syntax:
+
+```bash
+++actor_rollout_ref.rollout.custom.agent_framework.allowed_request_sampling_param_keys="[temperature,top_p,top_k]"
+```
+
+This is the same setting that verl inference exposes as the space-separated
+`--allowed-request-sampling-param-keys temperature top_p top_k` option. The
+allowlist is additive and only grants permission; the values remain in the Task
+Config.
 
 Some sandbox providers requires self-hosted task images instead of pulling directly from Docker Hub, you can set `sandbox.image_map` in the Task Config. See [`image_map`](../concepts/sandbox.md#image_map) for details.
 
