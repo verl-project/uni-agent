@@ -1,5 +1,6 @@
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import HTTPException
@@ -1249,7 +1250,7 @@ async def test_multiple_chains_uses_total_trajectory_capacity_instead_of_respons
 @pytest.mark.cpu
 @pytest.mark.level0
 @pytest.mark.asyncio
-async def test_multiple_chains_closes_when_continuation_fills_total_trajectory_capacity():
+async def test_multiple_chains_closes_when_continuation_fills_total_trajectory_capacity(caplog):
     """Count prompt, generated, and continuation-context tokens against one capacity."""
     first_messages = [{"role": "user", "content": "first"}]
     continuation_messages = [
@@ -1282,12 +1283,16 @@ async def test_multiple_chains_closes_when_continuation_fills_total_trajectory_c
     assert len(backend.calls) == 1
     assert backend.steps == ["SHOULD_NOT_RUN"]
     assert trajectories[0].extra_fields == {"materialization_reason": "max_trajectory_length"}
+    assert "Trajectory capacity prevents generation" in caplog.text
+    assert "session=total-capacity-exhausted" in caplog.text
+    assert "backend_called=false" in caplog.text
+    assert "CLAUDE_CODE_MAX_OUTPUT_TOKENS alone will not help" in caplog.text
 
 
 @pytest.mark.cpu
 @pytest.mark.level0
 @pytest.mark.asyncio
-async def test_multiple_chains_returns_length_when_initial_context_fills_total_trajectory_capacity():
+async def test_multiple_chains_returns_length_when_initial_context_fills_total_trajectory_capacity(caplog):
     """Return a normal length stop when a fresh prompt leaves no generation room."""
     messages = [{"role": "user", "content": "initial prompt"}]
     context_length = _prompt_length(messages)
@@ -1306,6 +1311,47 @@ async def test_multiple_chains_returns_length_when_initial_context_fills_total_t
     assert backend.steps == ["SHOULD_NOT_RUN"]
     assert session.active_chains == []
     assert await session.finalize() == []
+    assert "Trajectory capacity prevents generation" in caplog.text
+    assert "effective_max_tokens=0 completion_tokens=0 backend_called=false" in caplog.text
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "remaining_capacity, requested_max_tokens, stop_reason, warns",
+    [
+        pytest.param(4, 32, "length", True, id="trajectory-limit"),
+        pytest.param(8, 4, "length", False, id="generation-limit"),
+        pytest.param(8, 32, "completed", False, id="clamped-but-completed"),
+        pytest.param(None, 4, "length", False, id="unbounded-trajectory"),
+    ],
+)
+async def test_generation_warns_only_when_length_stop_reaches_trajectory_capacity(
+    caplog, remaining_capacity, requested_max_tokens, stop_reason, warns
+):
+    messages = [{"role": "user", "content": "hello"}]
+    session = _session(
+        "capacity-warning",
+        prompt_length=_prompt_length(messages),
+        response_length=remaining_capacity,
+    )
+    backend = SimpleNamespace(
+        generate=AsyncMock(return_value=TokenOutput(token_ids=_ids("FULL"), stop_reason=stop_reason))
+    )
+
+    outcome = await _run(session, backend, messages, max_tokens=requested_max_tokens)
+
+    assert outcome.finish_reason == ("stop" if stop_reason == "completed" else "length")
+    assert outcome.completion_tokens == 4
+    assert ("Generation reached trajectory capacity" in caplog.text) is warns
+    if warns:
+        assert "session=capacity-warning chain_id=1" in caplog.text
+        assert "requested_max_tokens=32 effective_max_tokens=4 completion_tokens=4 backend_called=true" in caplog.text
+        assert "prompt_length + response_length" in caplog.text
+        assert "CLAUDE_CODE_MAX_OUTPUT_TOKENS alone will not help" in caplog.text
+    else:
+        assert "CLAUDE_CODE_MAX_OUTPUT_TOKENS" not in caplog.text
 
 
 @pytest.mark.cpu

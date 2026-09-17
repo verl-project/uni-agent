@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import time
 from dataclasses import dataclass, field, replace
 from enum import Enum
@@ -17,6 +18,13 @@ from uni_agent.gateway.session.types import InternalGenerationRequest, SessionHa
 from uni_agent.rl_insight.adapter import start_generation_span
 
 _EMPTY_PREFIX_HASH = hashlib.sha256(b"uni-agent-prefix-v1\0empty").hexdigest()
+logger = logging.getLogger(__name__)
+_TRAJECTORY_CAPACITY_HINT = (
+    "The trajectory limit is prompt_length + response_length. "
+    "For this event, Claude Code's output-token-limit error is misleading: increasing "
+    "CLAUDE_CODE_MAX_OUTPUT_TOKENS alone will not help. Check the rollout prompt_length/response_length "
+    "budget or compact context earlier; the episode may be unfinished."
+)
 
 
 class SessionPhase(str, Enum):
@@ -262,6 +270,16 @@ class GatewaySession:
                 if joined_future is None:
                     encoded = await self._prepare_generation_inputs(request)
                     if encoded.capacity_exhausted:
+                        logger.warning(
+                            "Trajectory capacity prevents generation (max_trajectory_length): "
+                            "session=%s chain_id=%s trajectory_capacity=%s requested_max_tokens=%s "
+                            "effective_max_tokens=0 completion_tokens=0 backend_called=false. %s",
+                            self.handle.session_id,
+                            encoded.chain_id,
+                            self._trajectory_capacity,
+                            request["sampling_params"].get("max_tokens"),
+                            _TRAJECTORY_CAPACITY_HINT,
+                        )
                         empty_msg = {"role": "assistant", "content": ""}
                         if encoded.chain_id is not None:
                             self._close_length_exhausted_chain(encoded)
@@ -372,6 +390,24 @@ class GatewaySession:
                     stop_reason=output.stop_reason,
                 )
                 chain_id = self._commit_generation_to_chain(encoded, assistant_msg)
+                if (
+                    finish_reason == "length"
+                    and self._trajectory_capacity is not None
+                    and len(encoded.context_ids) + len(response_ids) >= self._trajectory_capacity
+                ):
+                    logger.warning(
+                        "Generation reached trajectory capacity (max_trajectory_length): "
+                        "session=%s chain_id=%s trajectory_capacity=%s context_tokens=%s "
+                        "requested_max_tokens=%s effective_max_tokens=%s completion_tokens=%s backend_called=true. %s",
+                        self.handle.session_id,
+                        chain_id,
+                        self._trajectory_capacity,
+                        len(encoded.context_ids),
+                        request["sampling_params"].get("max_tokens"),
+                        encoded.sampling_params["max_tokens"],
+                        len(response_ids),
+                        _TRAJECTORY_CAPACITY_HINT,
+                    )
                 if reserved_chain_id is not None:
                     self.reserved_chain_ids.discard(reserved_chain_id)
                     reserved_chain_id = None
