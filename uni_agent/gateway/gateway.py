@@ -39,8 +39,6 @@ from verl.utils.net_utils import is_valid_ipv6_address
 from verl.workers.rollout.utils import run_uvicorn
 
 DEFAULT_ALLOWED_REQUEST_SAMPLING_KEYS = frozenset({"max_tokens", "stop"})
-_OPENAI_REQUEST_SAMPLING_KEYS = frozenset({"temperature", "top_p", "top_k", "max_tokens", "stop"})
-_ANTHROPIC_REQUEST_SAMPLING_KEYS = frozenset({"temperature", "top_p", "top_k", "max_tokens"})
 
 logger = logging.getLogger(__name__)
 
@@ -172,7 +170,8 @@ class _GatewayActor:
             )
             _validate_sampling_params(internal["sampling_params"])
             discarded_keys = (
-                _OPENAI_REQUEST_SAMPLING_KEYS.intersection(payload)
+                session.sampling_params.keys()
+                & payload.keys()
                 - self._allowed_request_sampling_param_keys
                 - self._warned_discarded_request_sampling_param_keys
             )
@@ -208,11 +207,9 @@ class _GatewayActor:
                 allowed_sampling_keys=self._allowed_request_sampling_param_keys,
             )
             _validate_sampling_params(internal["sampling_params"])
-            request_sampling_keys = _ANTHROPIC_REQUEST_SAMPLING_KEYS.intersection(payload)
-            if "stop_sequences" in payload:
-                request_sampling_keys = request_sampling_keys.union({"stop"})
             discarded_keys = (
-                request_sampling_keys
+                session.sampling_params.keys()
+                & payload.keys()
                 - self._allowed_request_sampling_param_keys
                 - self._warned_discarded_request_sampling_param_keys
             )

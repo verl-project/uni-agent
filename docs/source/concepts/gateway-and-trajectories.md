@@ -343,10 +343,10 @@ agent:
 ```
 
 Omitted fields inherit the session defaults. Allowed request values override
-session values. Fields outside the allowlist are ignored by the Gateway, which
-logs a warning once per discarded key and actor. The permission applies to every
-request handled by that Gateway, including black-box harness requests in a mixed
-workload.
+session values. When a request tries to replace a session sampling default without
+permission, the Gateway ignores it and logs a warning once per key and actor. The
+permission applies to every request handled by that Gateway, including black-box
+harness requests in a mixed workload.
 
 `max_tokens` and `stop` are defaults because they control individual calls:
 a harness may use different output budgets for normal replies and context

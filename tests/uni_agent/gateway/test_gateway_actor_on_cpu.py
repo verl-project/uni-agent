@@ -1071,8 +1071,9 @@ async def test_gateway_actor_warns_once_per_disallowed_request_sampling_key(prov
 
     actor = _GatewayActor(GatewayActorConfig(tokenizer=FakeTokenizer()), SequencedBackend(["FIRST", "SECOND"]))
     await actor.start()
-    await actor.create_session("warning-1")
-    await actor.create_session("warning-2")
+    session_sampling_params = {"temperature": 0.1, "top_p": 0.9}
+    await actor.create_session("warning-1", sampling_params=session_sampling_params)
+    await actor.create_session("warning-2", sampling_params=session_sampling_params)
     handler = actor._handle_openai_chat_completions if provider == "openai" else actor._handle_anthropic_messages
 
     caplog.set_level(logging.WARNING, logger="uni_agent.gateway.gateway")
