@@ -10,6 +10,9 @@ cd "${REPO_ROOT}"
 : "${DATA_PATH:?Set a preprocessed SWE-bench parquet path}"
 : "${MODEL_PATH:?Set a local model checkpoint path}"
 : "${OUTPUT_DIR:?Set a fresh output directory outside the repository}"
+: "${OPENYUANRONG_SERVER_ADDRESS:?Set the OpenYuanRong server address}"
+: "${OPENYUANRONG_TOKEN:?Set the OpenYuanRong token}"
+export OPENYUANRONG_TUNNEL_SSL_VERIFY="${OPENYUANRONG_TUNNEL_SSL_VERIFY:-0}"
 
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 command -v "${PYTHON_BIN}" >/dev/null || { echo "Python not found: ${PYTHON_BIN}" >&2; exit 2; }

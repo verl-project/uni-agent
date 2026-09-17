@@ -15,8 +15,6 @@ module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 
 
-@pytest.mark.cpu
-@pytest.mark.level0
 class TrajectoryTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -48,34 +46,50 @@ class TrajectoryTests(unittest.TestCase):
         self.db.commit()
         return module.audit_state(self.tmp.name, "s", "policy")
 
+    @pytest.mark.cpu
+    @pytest.mark.level0
     def test_complete_chain(self):
         self.assertTrue(self.audit()["verified"])
 
+    @pytest.mark.cpu
+    @pytest.mark.level0
     def test_empty_evidence(self):
         self.events = []
         self.assertFalse(self.audit()["verified"])
 
+    @pytest.mark.cpu
+    @pytest.mark.level0
     def test_parent_branch(self):
         self.events[-1]["parentId"] = None
         self.assertFalse(self.audit()["verified"])
 
+    @pytest.mark.cpu
+    @pytest.mark.level0
     def test_compaction(self):
         self.events.insert(2, {"type": "compaction", "id": "c", "parentId": "u"})
         self.events[-1]["parentId"] = "c"
         self.assertFalse(self.audit()["verified"])
 
+    @pytest.mark.cpu
+    @pytest.mark.level0
     def test_second_window(self):
         self.db.execute("INSERT INTO session_windows VALUES ('other','s','recovery')")
         self.assertFalse(self.audit()["verified"])
 
+    @pytest.mark.cpu
+    @pytest.mark.level0
     def test_model_fallback(self):
         self.events[-1]["message"]["model"] = "other"
         self.assertFalse(self.audit()["verified"])
 
+    @pytest.mark.cpu
+    @pytest.mark.level0
     def test_missing_tool_result(self):
         self.events[-1]["message"]["content"] = [{"type": "toolCall", "id": "t", "name": "exec"}]
         self.assertFalse(self.audit()["verified"])
 
+    @pytest.mark.cpu
+    @pytest.mark.level0
     def test_second_run(self):
         second = copy.deepcopy(self.events[-1])
         second.update(id="b", parentId="a")
@@ -83,10 +97,14 @@ class TrajectoryTests(unittest.TestCase):
         self.events.append(second)
         self.assertFalse(self.audit()["verified"])
 
+    @pytest.mark.cpu
+    @pytest.mark.level0
     def test_truncated_completion(self):
         self.events[-1]["message"]["stopReason"] = "length"
         self.assertFalse(self.audit()["verified"])
 
+    @pytest.mark.cpu
+    @pytest.mark.level0
     def test_orphan_result(self):
         self.events[-1]["message"] = {"role": "toolResult", "toolCallId": "unknown"}
         self.assertFalse(self.audit()["verified"])
