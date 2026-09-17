@@ -65,7 +65,10 @@ def test_gateway_actor_config_rejects_non_positive_prompt_length(prompt_length):
 
 @pytest.mark.cpu
 @pytest.mark.level0
-@pytest.mark.parametrize("field", ["enable_last_assistant_rollback", "enable_tool_parser_cache"])
+@pytest.mark.parametrize(
+    "field",
+    ["enable_last_assistant_rollback", "enable_tool_parser_cache", "coalesce_reserved_exact_requests"],
+)
 @pytest.mark.parametrize("value", ["true", 1, None])
 def test_gateway_actor_config_rejects_non_bool_options(field, value):
     from uni_agent.gateway.config import GatewayActorConfig
@@ -80,6 +83,23 @@ def test_gateway_actor_config_enables_last_assistant_rollback_by_default():
     from uni_agent.gateway.config import GatewayActorConfig
 
     assert GatewayActorConfig(tokenizer=FakeTokenizer()).enable_last_assistant_rollback is True
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_gateway_actor_forwards_singleflight_to_session():
+    from uni_agent.gateway.config import GatewayActorConfig
+    from uni_agent.gateway.gateway import _GatewayActor
+
+    actor = _GatewayActor(
+        GatewayActorConfig(tokenizer=FakeTokenizer(), coalesce_reserved_exact_requests=True),
+        SequencedBackend(["A"]),
+    )
+    actor._server_base_url = "http://test"
+    await actor.create_session("singleflight-enabled")
+
+    assert actor._sessions["singleflight-enabled"]._coalesce_reserved_exact_requests is True
 
 
 @pytest.mark.cpu
@@ -1055,7 +1075,7 @@ async def test_gateway_actor_warns_once_per_disallowed_request_sampling_key(prov
     await actor.create_session("warning-2")
     handler = actor._handle_openai_chat_completions if provider == "openai" else actor._handle_anthropic_messages
 
-    caplog.set_level(logging.WARNING, logger="gateway")
+    caplog.set_level(logging.WARNING, logger="uni_agent.gateway.gateway")
     try:
         for session_id in ("warning-1", "warning-2"):
             await handler(

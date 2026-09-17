@@ -19,6 +19,7 @@ wire their overrides in (``_exec`` primitive, ``is_alive`` liveness probe, and t
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
@@ -238,6 +239,23 @@ def test_openyuanrong_recognizes_its_timeout():
     assert sb._is_timeout_error(RuntimeError("Command timed out after 60 seconds")) is True
     assert sb._is_timeout_error(TimeoutError()) is True
     assert sb._is_timeout_error(RuntimeError("other")) is False
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_openyuanrong_exec_preserves_command_failure():
+    from uni_agent.sandbox.openyuanrong import OpenyuanrongSandbox
+
+    sdk_result = SimpleNamespace(exit_code=2, stdout="partial output\n", stderr="request timed out after 5 seconds\n")
+    sb = OpenyuanrongSandbox(image="python:3.12")
+    sb._sandbox = SimpleNamespace(
+        commands=SimpleNamespace(run=lambda *args, **kwargs: sdk_result),
+        is_running=lambda: True,
+    )
+
+    result = asyncio.run(sb.exec(["example-command"]))
+
+    assert result == ExecResult(exit_code=2, stdout="partial output\n", stderr="request timed out after 5 seconds\n")
 
 
 # --------------------------- provider is_alive() liveness ---------------------------

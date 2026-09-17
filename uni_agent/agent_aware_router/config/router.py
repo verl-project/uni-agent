@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field, fields
 from typing import Any
 
@@ -23,7 +24,6 @@ from hydra.errors import InstantiationException
 from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 
-from ..logging import get_router_logger
 from .base import (
     ConfigError,
     StrategyConfig,
@@ -31,7 +31,7 @@ from .base import (
 )
 from .collector import CollectorConfig
 
-logger = get_router_logger("config")
+logger = logging.getLogger(__name__)
 
 # ============================================================
 # Top-level KVCAwareConfig

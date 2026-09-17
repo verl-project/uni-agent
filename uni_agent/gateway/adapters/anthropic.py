@@ -28,7 +28,7 @@ _STOP_REASON_MAP = {
     "content_filter": "refusal",
 }
 
-logger = logging.getLogger("gateway")
+logger = logging.getLogger(__name__)
 
 _SSE_HEADERS = {
     "Cache-Control": "no-cache",

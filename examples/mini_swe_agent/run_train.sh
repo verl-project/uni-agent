@@ -70,7 +70,7 @@ MAX_MODEL_LEN=$((PROMPT_LENGTH + RESPONSE_LENGTH))
 
 # ── Rollout parameters ───────────────────────────────────────────────────
 ENGINE="${ENGINE:-vllm}"
-GEN_TP="${GEN_TP:-${TP:-${ROLLOUT_NGPUS_PER_NODE}}}"
+GEN_TP="${GEN_TP:-2}"
 N="${N:-8}"
 TEMPERATURE="${TEMPERATURE:-1.0}"
 TOP_P="${TOP_P:-1.0}"
@@ -84,7 +84,7 @@ USE_DYNAMIC_BSZ="${USE_DYNAMIC_BSZ:-False}"
 
 # ── Megatron training parallelism ────────────────────────────────────────
 if [[ "${TRAINER_MODE}" == "separate_async" ]]; then
-    TRAIN_TP="${TRAIN_TP:-${TP:-${N_GPUS_PER_NODE}}}"
+    TRAIN_TP="${TRAIN_TP:-${TP:-4}}"
 else
     TRAIN_TP="${TRAIN_TP:-${TP:-8}}"
 fi
@@ -98,7 +98,7 @@ PPO_MINI_BATCH_SIZE="${PPO_MINI_BATCH_SIZE:-16}"
 PPO_MICRO_BATCH_SIZE_PER_GPU="${PPO_MICRO_BATCH_SIZE_PER_GPU:-1}"
 
 # ── Agent-framework rollout (unified run_task bridge) ────────────────────
-# mini-swe-agent knobs (step_limit/run_timeout/conda_env) and the tool-image
+# mini-swe-agent knobs (step_limit/run_timeout/conda_env_path) and the tool-image
 # mount are configured in TASK_CONFIG (task_config_mini_swe_agent.yaml).
 TASK_CONFIG="${TASK_CONFIG:-examples/mini_swe_agent/task_config_mini_swe_agent.yaml}"
 TOOL_PARSER="${TOOL_PARSER:-qwen3_coder}"   # gateway tool-call parser; must match the model chat template
@@ -371,6 +371,9 @@ MAIN_CMD=(
     algorithm.use_kl_in_reward=${USE_KL_IN_REWARD}
     algorithm.kl_ctrl.kl_coef=${KL_COEF}
     algorithm.rollout_correction.bypass_mode=${BY_PASS_MODE}
+    algorithm.filter_groups.enable=True
+    algorithm.filter_groups.metric=reward
+    algorithm.filter_groups.max_inflight_gen_batches=1
     reward.reward_manager.name=dapo
     reward.custom_reward_function.path=pkg://uni_agent.framework.task_runner
     reward.custom_reward_function.name=score_from_runner_result

@@ -31,7 +31,7 @@
     name: mini_swe_agent
     step_limit: 100
     run_timeout: 7200
-    conda_env: testbed
+    conda_env_path: /opt/miniconda3/envs/testbed
     tool_python: /opt/mini-swe-agent/bin/python
     run_agent_script: /opt/mini-swe-agent/bin/run_agent.py
 

@@ -146,6 +146,9 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
 
     **Remote or self-hosted service.** [OpenYuanrong](https://docs.openyuanrong.org/zh-cn/latest/index.html) provides elastic sandbox management for distributed agent workloads.
 
+    Completed commands preserve their exit code, stdout, and stderr, including nonzero
+    exits. These are command results; SDK exceptions still use the shared sandbox error policy.
+
     Install the sandbox SDK:
 
     ```bash

@@ -20,13 +20,13 @@ Store writes are handled by Collector via DataStore.
 
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from ....collectors.parse import MetricsUpdate, Parser
-from ....logging import get_router_logger
 from ....types import METRIC_SPECS, MetricKey
 
-logger = get_router_logger("vllm-metrics")
+logger = logging.getLogger(__name__)
 
 
 class VLLMMetricsParser(Parser):

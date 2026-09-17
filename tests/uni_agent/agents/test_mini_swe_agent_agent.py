@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+from pathlib import Path
 
 import pytest
 
@@ -25,6 +26,7 @@ from uni_agent.agents.mini_swe_agent.agent import (
     parse_agent_result,
 )
 from uni_agent.sandbox.base import ExecResult
+from uni_agent.tasks.config import TaskConfigResolver
 
 
 class _FakeSandbox:
@@ -42,6 +44,9 @@ class _FakeSandbox:
 
 _TOOL_PYTHON = "/opt/mini-swe-agent/bin/python"
 _RUN_AGENT_SCRIPT = "/opt/mini-swe-agent/bin/run_agent.py"
+_EXAMPLE_TASK_CONFIG = (
+    Path(__file__).resolve().parents[3] / "examples" / "mini_swe_agent" / "task_config_mini_swe_agent.yaml"
+)
 
 
 def _agent(base_url: str = "http://gateway:8000/v1", **config_kwargs) -> MiniSweAgentAgent:
@@ -66,7 +71,7 @@ def _decode_task_config(cmd: str) -> dict:
 def test_build_agent_command_pipes_config_and_invokes_tool_python():
     cmd = build_agent_command(
         config_b64="Zm9v",
-        conda_env="testbed",
+        conda_env_path="/opt/miniconda3/envs/testbed",
         tool_python=_TOOL_PYTHON,
         run_agent_script=_RUN_AGENT_SCRIPT,
     )
@@ -76,6 +81,7 @@ def test_build_agent_command_pipes_config_and_invokes_tool_python():
     # The task conda env is activated around the launch.
     assert "CONDA_DEFAULT_ENV=testbed" in cmd
     assert "/opt/miniconda3/envs/testbed/bin" in cmd
+    assert "PATH=/opt/miniconda3/envs/testbed/bin:/opt/miniconda3/bin:$PATH" in cmd
 
 
 @pytest.mark.cpu
@@ -83,12 +89,25 @@ def test_build_agent_command_pipes_config_and_invokes_tool_python():
 def test_build_agent_command_honors_overrides():
     cmd = build_agent_command(
         config_b64="",
-        conda_env="myenv",
+        conda_env_path="/opt/miniconda3/envs/myenv",
         tool_python="/x/python",
         run_agent_script="/y/run.py",
     )
     assert "/x/python /y/run.py" in cmd
     assert "CONDA_DEFAULT_ENV=myenv" in cmd
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_build_agent_command_skips_conda_when_unset():
+    cmd = build_agent_command(
+        config_b64="",
+        tool_python=_TOOL_PYTHON,
+        run_agent_script=_RUN_AGENT_SCRIPT,
+    )
+    assert "CONDA_PREFIX" not in cmd
+    assert "CONDA_DEFAULT_ENV" not in cmd
+    assert "PIP_DISABLE_PIP_VERSION_CHECK=1" in cmd
 
 
 @pytest.mark.cpu
@@ -108,9 +127,9 @@ def test_parse_agent_result_picks_last_json_line_ignoring_litellm_noise():
 
 @pytest.mark.cpu
 @pytest.mark.level0
-def test_parse_agent_result_single_json_object():
-    result = parse_agent_result(json.dumps({"exit_status": "error", "submission": ""}))
-    assert result["exit_status"] == "error"
+def test_parse_agent_result_skips_malformed_json_line():
+    stdout = json.dumps({"exit_status": "Submitted", "submission": "diff"}) + '\n{"truncated'
+    assert parse_agent_result(stdout) == {"exit_status": "Submitted", "submission": "diff"}
 
 
 @pytest.mark.cpu
@@ -157,7 +176,7 @@ def test_run_pipes_config_and_parses_stdout_into_result():
         {"exit_status": "Submitted", "submission": "diff --git a/...", "model_stats": {"api_calls": 3}}
     )
     sandbox = _FakeSandbox(stdout=stdout)
-    agent = _agent(step_limit=25)
+    agent = _agent(step_limit=25, conda_env_path="/opt/miniconda3/envs/testbed")
     messages = [{"role": "system", "content": "be careful"}, {"role": "user", "content": "fix the off-by-one bug"}]
 
     result = asyncio.run(agent.run(sandbox=sandbox, messages=messages))
@@ -167,6 +186,7 @@ def test_run_pipes_config_and_parses_stdout_into_result():
     cmd = sandbox.exec_shell_calls[0]
     assert "base64 -d" in cmd
     assert "/opt/mini-swe-agent/bin/python /opt/mini-swe-agent/bin/run_agent.py" in cmd
+    assert "CONDA_PREFIX=/opt/miniconda3/envs/testbed" in cmd
 
     # The decoded task config carries the user task, the gateway URL (base_url
     # passed through unchanged -- run_task does the tunnel rewrite), and step_limit.
@@ -204,6 +224,26 @@ def test_run_passes_base_url_through_unchanged():
     asyncio.run(agent.run(sandbox=sandbox, messages=[{"role": "user", "content": "task"}]))
     task_config = _decode_task_config(sandbox.exec_shell_calls[0])
     assert task_config["gateway_url"] == "http://127.0.0.1:38197/sessions/abc/v1"
+
+
+# --------------------------- example task config ---------------------------
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize("task_name", ["swe_bench", "swe_rebench"])
+def test_example_task_config_builds_agent_config(task_name):
+    resolved = TaskConfigResolver.from_file(str(_EXAMPLE_TASK_CONFIG)).resolve({"name": task_name})
+    cfg = MiniSweAgentConfig(**resolved["agent"])
+
+    assert cfg.conda_env_path == "/opt/miniconda3/envs/testbed"
+    cmd = build_agent_command(
+        config_b64="",
+        tool_python=cfg.tool_python,
+        run_agent_script=cfg.run_agent_script,
+        conda_env_path=cfg.conda_env_path,
+    )
+    assert "CONDA_PREFIX=/opt/miniconda3/envs/testbed" in cmd
 
 
 if __name__ == "__main__":

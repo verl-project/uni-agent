@@ -27,6 +27,7 @@ from typing import Any
 import httpx
 
 from uni_agent.gateway.session import SessionHandle
+from uni_agent.tasks.base import TaskResult
 
 logger = logging.getLogger(__name__)
 logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
@@ -211,7 +212,7 @@ async def simulated_runner(
     max_turns: int = 8,
     reward_score: float = 1.0,
     **_: Any,
-) -> None:
+) -> TaskResult:
     """AgentRunner-protocol callable backed by the simulated sandbox.
 
     Wire from yaml::
@@ -230,9 +231,5 @@ async def simulated_runner(
     )
     turns = await loop.run()
 
-    reward_info = {"reward_score": reward_score, "turns": turns}
-    if not session.reward_info_url:
-        raise ValueError(f"reward_info_url is empty for session {session.session_id}")
-    async with httpx.AsyncClient(timeout=30.0) as client:
-        response = await client.post(session.reward_info_url, json={"reward_info": reward_info})
-        response.raise_for_status()
+    # The framework now owns reward annotation and TransferQueue writes.
+    return TaskResult(reward=reward_score, extra_info={"turns": turns})

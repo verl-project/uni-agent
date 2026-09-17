@@ -22,14 +22,13 @@ row is LRU-evicted as a unit when ``request_id`` stops recurring.
 
 from __future__ import annotations
 
+import logging
 import threading
 from typing import Any
 
 from cachetools import LRUCache
 
-from ..logging import get_router_logger
-
-logger = get_router_logger("per-request")
+logger = logging.getLogger(__name__)
 
 # Max request_ids retained; least-recently-used evicted past this.
 DEFAULT_PER_REQUEST_MAX_SIZE = 10000

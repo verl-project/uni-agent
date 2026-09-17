@@ -148,7 +148,7 @@ touching the training script:
 | `sandbox.sandbox_kwargs.cpu/memory/…` | provider defaults | Sandbox resource sizes (pass through to the openyuanrong SDK) |
 | `agent.step_limit` | `100` | mini-swe-agent max agent steps |
 | `agent.run_timeout` | `7200` | Max wall time (s) for the agent process in the sandbox |
-| `agent.conda_env` | `testbed` | Conda env activated inside the sandbox before running the agent |
+| `agent.conda_env_path` | — (no conda env is activated when unset) | Path of the task-image conda env activated around the agent launch (`/opt/miniconda3/envs/testbed`) |
 | `agent.tool_python` | — (required) | Tool-image python; bound to the Dockerfile layout (`/opt/mini-swe-agent/bin/python`) |
 | `agent.run_agent_script` | — (required) | Tool-image entrypoint; bound to the Dockerfile layout (`/opt/mini-swe-agent/bin/run_agent.py`) |
 | `eval_timeout` | `600` | Task-level per-sample reward-eval timeout (s) inside the sandbox (swe_bench / swe_rebench) |

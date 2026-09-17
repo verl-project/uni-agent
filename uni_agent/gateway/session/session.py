@@ -185,6 +185,7 @@ class GatewaySession:
         response_length: int | None = None,
         sampling_params: dict[str, Any] | None = None,
         enable_last_assistant_rollback: bool = True,
+        coalesce_reserved_exact_requests: bool = False,
         metadata: dict[str, Any] | None = None,
     ):
         """Create an active session bound to a handle and model codec."""
@@ -202,11 +203,16 @@ class GatewaySession:
         )
         self._sampling_params = dict(sampling_params or {})
         self._enable_last_assistant_rollback = enable_last_assistant_rollback
+        self._coalesce_reserved_exact_requests = coalesce_reserved_exact_requests
         self._metadata = dict(metadata or {})
         self._trace_identity = dict(self._metadata.get("_trace_identity") or {})
         self.active_chains: list[ChainState] = []
         self.materialized_chains: list[MaterializedChain] = []
         self.reserved_chain_ids: set[int] = set()
+        self._inflight_exact_requests: dict[
+            str,
+            asyncio.Future[tuple[bool, Any, int | None, int | None]],
+        ] = {}
         self._next_chain_id = 1
         self._order_seq = 0
         self._rollback_count = 0
@@ -235,6 +241,12 @@ class GatewaySession:
         # completion order. That order also determines which trajectory an optional
         # RewardLoopWorker treats as the session's final scoring input.
         reserved_chain_id: int | None = None
+        request_fingerprint = (
+            self._compute_request_fingerprint(request) if self._coalesce_reserved_exact_requests else None
+        )
+        owner_future: asyncio.Future[tuple[bool, Any, int | None, int | None]] | None = None
+        joined_future: asyncio.Future[tuple[bool, Any, int | None, int | None]] | None = None
+        encoded: EncodedData | None = None
         generation_span = start_generation_span(self._trace_identity)
         try:
             async with self.request_lock:
@@ -245,25 +257,49 @@ class GatewaySession:
                     )
                 # Prepare can touch codec and multimodal extractor state, so only
                 # backend generation runs outside the session lock.
-                encoded = await self._prepare_generation_inputs(request)
-                if encoded.capacity_exhausted:
-                    empty_msg = {"role": "assistant", "content": ""}
+                if request_fingerprint is not None:
+                    joined_future = self._inflight_exact_requests.get(request_fingerprint)
+                if joined_future is None:
+                    encoded = await self._prepare_generation_inputs(request)
+                    if encoded.capacity_exhausted:
+                        empty_msg = {"role": "assistant", "content": ""}
+                        if encoded.chain_id is not None:
+                            self._close_length_exhausted_chain(encoded)
+                        self._touch()
+                        generation_span.capacity_exhausted(
+                            prompt_tokens=len(encoded.context_ids),
+                            chain_id=encoded.chain_id,
+                        )
+                        return GenerationOutcome(
+                            assistant_msg=empty_msg,
+                            finish_reason="length",
+                            prompt_tokens=len(encoded.context_ids),
+                            completion_tokens=0,
+                        )
                     if encoded.chain_id is not None:
-                        self._close_length_exhausted_chain(encoded)
-                    self._touch()
-                    generation_span.capacity_exhausted(
-                        prompt_tokens=len(encoded.context_ids),
-                        chain_id=encoded.chain_id,
-                    )
-                    return GenerationOutcome(
-                        assistant_msg=empty_msg,
-                        finish_reason="length",
-                        prompt_tokens=len(encoded.context_ids),
-                        completion_tokens=0,
-                    )
-                if encoded.chain_id is not None:
-                    self.reserved_chain_ids.add(encoded.chain_id)
-                    reserved_chain_id = encoded.chain_id
+                        self.reserved_chain_ids.add(encoded.chain_id)
+                        reserved_chain_id = encoded.chain_id
+                        if request_fingerprint is not None:
+                            owner_future = asyncio.get_running_loop().create_future()
+                            self._inflight_exact_requests[request_fingerprint] = owner_future
+
+            if joined_future is not None:
+                succeeded, value, chain_id, turn = await asyncio.shield(joined_future)
+                if not succeeded:
+                    raise value
+                outcome = value
+                generation_span.success(
+                    prompt_tokens=outcome.prompt_tokens,
+                    completion_tokens=outcome.completion_tokens,
+                    chain_id=chain_id,
+                    turn=turn or 0,
+                    assistant_msg=outcome.assistant_msg,
+                    finish_reason=outcome.finish_reason,
+                )
+                return outcome
+
+            if encoded is None:
+                raise RuntimeError("generation input preparation did not produce a request")
 
             try:
                 output = await backend.generate(
@@ -340,6 +376,18 @@ class GatewaySession:
                     self.reserved_chain_ids.discard(reserved_chain_id)
                     reserved_chain_id = None
                 self._touch()
+                outcome = GenerationOutcome(
+                    assistant_msg=assistant_msg,
+                    finish_reason=finish_reason,
+                    prompt_tokens=len(encoded.context_ids),
+                    completion_tokens=len(response_ids),
+                )
+                if owner_future is not None and request_fingerprint is not None:
+                    self._resolve_inflight_exact_request(
+                        request_fingerprint,
+                        owner_future,
+                        (True, outcome, chain_id, self._order_seq),
+                    )
                 generation_span.success(
                     prompt_tokens=len(encoded.context_ids),
                     completion_tokens=len(response_ids),
@@ -348,13 +396,19 @@ class GatewaySession:
                     assistant_msg=assistant_msg,
                     finish_reason=finish_reason,
                 )
-                return GenerationOutcome(
-                    assistant_msg=assistant_msg,
-                    finish_reason=finish_reason,
-                    prompt_tokens=len(encoded.context_ids),
-                    completion_tokens=len(response_ids),
+                return outcome
+        except BaseException as exc:
+            if owner_future is not None and reserved_chain_id is not None:
+                # Release the chain before waking retry waiters so an immediate
+                # follow-up can select it instead of creating a sibling.
+                await asyncio.shield(self._release_chain_reservation(reserved_chain_id))
+                reserved_chain_id = None
+            if owner_future is not None and request_fingerprint is not None:
+                self._resolve_inflight_exact_request(
+                    request_fingerprint,
+                    owner_future,
+                    (False, exc, reserved_chain_id, None),
                 )
-        except Exception as exc:
             generation_span.failure(exc)
             raise
         finally:
@@ -419,6 +473,7 @@ class GatewaySession:
         mm_processor_kwargs = self._codec.mm_processor_kwargs or {}
         incoming_message_prefix_hashes = self._extend_message_prefix_hashes([], messages)
         selection = self._select_chain(
+            incoming_assistant_count=sum(message["role"] == "assistant" for message in messages),
             tools=tools,
             incoming_message_prefix_hashes=incoming_message_prefix_hashes,
         )
@@ -576,6 +631,7 @@ class GatewaySession:
     def _select_chain(
         self,
         *,
+        incoming_assistant_count: int,
         tools: list[dict[str, Any]] | None,
         incoming_message_prefix_hashes: list[str],
     ) -> tuple[ChainState, bool] | None:
@@ -592,6 +648,8 @@ class GatewaySession:
             if assistant_start_len >= len(incoming_message_prefix_hashes):
                 continue
             if incoming_message_prefix_hashes[assistant_start_len - 1] != assistant_start.tip_hash:
+                continue
+            if incoming_assistant_count > sum(message["role"] == "assistant" for message in chain.message_history):
                 continue
             if self._is_chain_prefix_hash_match(
                 chain=chain,
@@ -665,6 +723,27 @@ class GatewaySession:
             ensure_ascii=False,
         ).encode("utf-8")
         return hashlib.sha256(b"uni-agent-message-v1\0" + canonical_json).hexdigest()
+
+    def _compute_request_fingerprint(self, request: InternalGenerationRequest) -> str:
+        canonical_json = json.dumps(
+            request,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+        return hashlib.sha256(b"uni-agent-request-v1\0" + canonical_json).hexdigest()
+
+    def _resolve_inflight_exact_request(
+        self,
+        request_fingerprint: str,
+        future: asyncio.Future[tuple[bool, Any, int | None, int | None]],
+        result: tuple[bool, Any, int | None, int | None],
+    ) -> None:
+        if self._inflight_exact_requests.get(request_fingerprint) is not future:
+            return
+        self._inflight_exact_requests.pop(request_fingerprint, None)
+        if not future.done():
+            future.set_result(result)
 
     def _copy_trajectory_buffer(self, buffer: TrajectoryBuffer) -> TrajectoryBuffer:
         return TrajectoryBuffer(
