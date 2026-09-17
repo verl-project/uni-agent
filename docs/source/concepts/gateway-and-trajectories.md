@@ -295,14 +295,14 @@ Important knobs include:
 - `rollout.multi_turn.format`: model-specific Tool parser.
 - `transfer_queue.enable`: enables asynchronous trajectory storage.
 
-## Sampling configuration
+## Sampling Configuration
 
 `actor_rollout_ref.rollout.temperature`, `top_p`, and `top_k` provide the Gateway
 session defaults (`rollout.val_kwargs` supplies validation sampling). Agent HTTP
 requests can override only `max_tokens` and `stop` by default. Configure
 `allowed_request_sampling_param_keys` to permit additional request keys when a
-white-box Agent needs request-level overrides. Configured keys are added to the
-defaults and do not remove `max_tokens` or `stop`:
+white-box Agent needs request-level overrides. This list is additive, so
+`max_tokens` and `stop` remain permitted:
 
 ```yaml
 actor_rollout_ref:
@@ -326,8 +326,8 @@ multi-value syntax is space-separated:
 --allowed-request-sampling-param-keys temperature top_p top_k
 ```
 
-Both forms produce the same additive permission list. They do not set sampling
-values; those still come from the rollout defaults or a white-box Agent request.
+Both forms produce the same permission list. They do not set sampling values;
+those come from the rollout defaults or a white-box Agent request.
 
 White-box Agents place explicit request values in
 `agent.sampling_params_override`, a `WhiteBoxSamplingConfig`:
@@ -343,12 +343,9 @@ agent:
 ```
 
 Omitted fields inherit the session defaults. Allowed request values override
-session values; this is intentional and does not emit a warning per request.
-Adding `temperature`, `top_p`, and `top_k` to the allowlist above enables these
-white-box overrides. Fields outside the allowlist are ignored by the Gateway,
-so setting an Agent value alone does not grant permission to override it.
-This permission applies to all requests handled by that Gateway, including
-black-box harness requests in a mixed workload.
+session values. Fields outside the allowlist are ignored by the Gateway. The
+permission applies to every request handled by that Gateway, including black-box
+harness requests in a mixed workload.
 
 `max_tokens` and `stop` are defaults because they control individual calls:
 a harness may use different output budgets for normal replies and context
@@ -357,12 +354,6 @@ subject to the available Gateway and model context capacity; it cannot bypass
 those limits. Sampling distribution controls (`temperature`, `top_p`, `top_k`)
 normally belong to the training configuration, while white-box loops can opt in
 to overriding them for algorithm-specific needs.
-
-The allowlist is additive: an omitted or empty list permits `max_tokens` and
-`stop`; it cannot disable these defaults. No separate removal setting is
-provided. Black-box Agents such as Claude Code do not expose
-`sampling_params_override`; use supported harness-specific options such as
-`ClaudeCodeConfig.extra_args` when needed.
 
 ## Extension Boundaries
 

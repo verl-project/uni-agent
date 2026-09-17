@@ -85,17 +85,8 @@ For verl inference, `--temperature`, `--top-p`, and `--top-k` set the shared
 rollout and validation sampling defaults. To enable ReAct YAML overrides, also
 pass `--allowed-request-sampling-param-keys temperature top_p top_k`. Direct API
 inference sends the white-box overrides directly to the endpoint.
-The space-separated value is argparse syntax for the same framework list that
-training launchers express with Hydra as
-`++actor_rollout_ref.rollout.custom.agent_framework.allowed_request_sampling_param_keys="[temperature,top_p,top_k]"`.
-This option grants override permission; it does not set the sampling values.
-
-`parallel_infer_verl.py` uses `--response-length` (default `65536`) for both
-`rollout.response_length` and `data.max_response_length`, with prompt capacity
-`4096`. It no longer derives this capacity from `agent.model.max_total_tokens`.
-When migrating an old YAML with `max_total_tokens: 131072`, pass
-`--response-length 131072` to preserve the previous rollout length setting.
-This capacity is separate from a white-box request's `max_tokens_per_turn`.
+See [Sampling configuration](../concepts/gateway-and-trajectories.md#sampling-configuration)
+for the precedence and allowlist semantics.
 
 !!! note "Claude Code network access"
     Claude Code runs inside the sandbox and calls the Anthropic Messages endpoint from there. The endpoint must therefore be resolvable and reachable **from inside the sandbox**.
