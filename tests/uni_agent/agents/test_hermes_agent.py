@@ -80,6 +80,7 @@ def test_command_does_not_contain_prompt_or_key():
     command = build_runner_command(
         input_path="/tmp/hermes/run/input.json",
         result_path="/tmp/hermes/run/result.json",
+        messages_path="/tmp/hermes/run/messages.json",
         log_path="/tmp/hermes/run/runner.log",
         hermes_home="/tmp/hermes/run/home",
         environment_prefix="/custom env/testbed",
@@ -89,7 +90,7 @@ def test_command_does_not_contain_prompt_or_key():
         approval_mode="off",
     )
     assert "/tmp/hermes/run/input.json" in command
-    assert "--result-path" in command and "<" in command
+    assert "--result-path" in command and "--messages-path" in command and "<" in command
     assert "prompt" not in command and "api_key" not in command
     assert "HERMES_INTERACTIVE=0" in command
     assert "HERMES_YOLO_MODE=1" in command

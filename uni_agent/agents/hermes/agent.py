@@ -98,6 +98,7 @@ def build_runner_command(
     *,
     input_path: str,
     result_path: str,
+    messages_path: str,
     log_path: str,
     hermes_home: str,
     environment_prefix: str | None,
@@ -137,7 +138,7 @@ def build_runner_command(
         f"umask 077; mkdir -p {q(hermes_home)}; "
         f"{path_setup}"
         f"env {assignments} {q(tool_python)} {q(runner_script)} "
-        f"--result-path {q(result_path)} --log-path {q(log_path)} "
+        f"--result-path {q(result_path)} --messages-path {q(messages_path)} --log-path {q(log_path)} "
         f"< {q(input_path)}"
     )
 
@@ -217,6 +218,7 @@ class HermesAgent(Agent):
         remote_root = f"/tmp/hermes-{run_id}"
         input_path = f"{remote_root}/input.json"
         result_path = f"{remote_root}/result.json"
+        messages_path = f"{remote_root}/messages.json"
         log_path = f"{remote_root}/runner.log"
         hermes_home = f"{remote_root}/home"
         payload = {
@@ -238,6 +240,7 @@ class HermesAgent(Agent):
         command = build_runner_command(
             input_path=input_path,
             result_path=result_path,
+            messages_path=messages_path,
             log_path=log_path,
             hermes_home=hermes_home,
             environment_prefix=cfg.environment_prefix,
