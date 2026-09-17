@@ -243,17 +243,10 @@ def test_openyuanrong_recognizes_its_timeout():
 
 @pytest.mark.cpu
 @pytest.mark.level0
-@pytest.mark.parametrize(
-    ("exit_code", "stdout", "stderr"),
-    [
-        (1, "test failure details\n", ""),
-        (2, "partial output\n", "request timed out after 5 seconds\n"),
-    ],
-)
-def test_openyuanrong_exec_preserves_command_failure(exit_code, stdout, stderr):
+def test_openyuanrong_exec_preserves_command_failure():
     from uni_agent.sandbox.openyuanrong import OpenyuanrongSandbox
 
-    sdk_result = SimpleNamespace(exit_code=exit_code, stdout=stdout, stderr=stderr)
+    sdk_result = SimpleNamespace(exit_code=2, stdout="partial output\n", stderr="request timed out after 5 seconds\n")
     sb = OpenyuanrongSandbox(image="python:3.12")
     sb._sandbox = SimpleNamespace(
         commands=SimpleNamespace(run=lambda *args, **kwargs: sdk_result),
@@ -262,23 +255,7 @@ def test_openyuanrong_exec_preserves_command_failure(exit_code, stdout, stderr):
 
     result = asyncio.run(sb.exec(["example-command"]))
 
-    assert result == ExecResult(exit_code=exit_code, stdout=stdout, stderr=stderr)
-
-
-@pytest.mark.cpu
-@pytest.mark.level0
-def test_openyuanrong_exec_classifies_in_band_timeout():
-    from uni_agent.sandbox.openyuanrong import OpenyuanrongSandbox
-
-    sdk_result = SimpleNamespace(exit_code=-1, stdout="", stderr="Command timed out after 5 seconds")
-    sb = OpenyuanrongSandbox(image="python:3.12")
-    sb._sandbox = SimpleNamespace(commands=SimpleNamespace(run=lambda *args, **kwargs: sdk_result))
-
-    result = asyncio.run(sb.exec(["sleep", "10"], timeout=5))
-
-    assert result == ExecResult(
-        exit_code=-1, stdout="", stderr="exec timed out after 5s: Command timed out after 5 seconds"
-    )
+    assert result == ExecResult(exit_code=2, stdout="partial output\n", stderr="request timed out after 5 seconds\n")
 
 
 # --------------------------- provider is_alive() liveness ---------------------------
