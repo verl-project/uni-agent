@@ -71,7 +71,9 @@ def initialize_generation_prompt(processing_class, **apply_chat_template_kwargs)
     return with_generation_prompt[len(without_generation_prompt) :]
 
 
-def _normalize_messages_for_continuous_tokens(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _normalize_messages_for_continuous_tokens(
+    messages: list[dict[str, Any]], *, force_system_anchor: bool = False
+) -> list[dict[str, Any]]:
     """Keep a leading system message before the Qwen synthetic user anchor.
 
     ``verl`` can add a dummy user when a chat template requires one.  That
@@ -86,7 +88,7 @@ def _normalize_messages_for_continuous_tokens(messages: list[dict[str, Any]]) ->
         if isinstance(message.get("tool_calls"), list):
             copied["tool_calls"] = list(message["tool_calls"])
         normalized.append(copied)
-    if any(message.get("role") == "user" for message in normalized):
+    if not force_system_anchor and any(message.get("role") == "user" for message in normalized):
         return normalized
     first_non_system = next(
         (index for index, message in enumerate(normalized) if message.get("role") != "system"),
@@ -280,9 +282,17 @@ class MessageCodec:
             raise ValueError(
                 "Continuous Token context merging does not currently support incremental image or video data"
             )
+        force_system_anchor = (
+            any(message.get("role") == "system" for message in previous_messages)
+            and not any(message.get("role") == "user" for message in previous_messages)
+        )
         merge_result = self._continuous_token_builder.merge_context_tokens(
-            _normalize_messages_for_continuous_tokens(previous_messages),
-            _normalize_messages_for_continuous_tokens(updated_messages),
+            _normalize_messages_for_continuous_tokens(
+                previous_messages, force_system_anchor=force_system_anchor
+            ),
+            _normalize_messages_for_continuous_tokens(
+                updated_messages, force_system_anchor=force_system_anchor
+            ),
             runtime_token_ids,
             tools=tools,
         )

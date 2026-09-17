@@ -4,9 +4,6 @@ import pytest
 
 from uni_agent.gateway.session.codec import MessageCodec, _normalize_messages_for_continuous_tokens
 
-pytestmark = [pytest.mark.cpu, pytest.mark.level0]
-
-
 class StrictQwenTokenizer:
     """Minimal Qwen3.5-like template used with an unpatched verl adapter."""
 
@@ -49,6 +46,8 @@ class StrictQwenTokenizer:
         return str(content)
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_system_only_initial_tokens_insert_dummy_user_after_system():
     tokenizer = StrictQwenTokenizer()
     codec = MessageCodec(tokenizer)
@@ -60,3 +59,8 @@ def test_system_only_initial_tokens_insert_dummy_user_after_system():
     assert messages == [{"role": "system", "content": "system prompt"}]
     assert [message["role"] for message in normalized] == ["system", "user"]
     assert "<system>system prompt<end><user><end><assistant>" == tokenizer.decode(encoded)
+
+    updated = messages + [{"role": "user", "content": "continue"}]
+    previous_for_merge = _normalize_messages_for_continuous_tokens(messages, force_system_anchor=True)
+    updated_for_merge = _normalize_messages_for_continuous_tokens(updated, force_system_anchor=True)
+    assert updated_for_merge[: len(previous_for_merge)] == previous_for_merge
