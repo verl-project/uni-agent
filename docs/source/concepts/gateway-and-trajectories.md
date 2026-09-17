@@ -330,6 +330,67 @@ Important knobs include:
 - `rollout.multi_turn.format`: model-specific Tool parser.
 - `transfer_queue.enable`: enables asynchronous trajectory storage.
 
+## Sampling Configuration
+
+`actor_rollout_ref.rollout.temperature`, `top_p`, and `top_k` provide the Gateway
+session defaults (`rollout.val_kwargs` supplies validation sampling). Agent HTTP
+requests can override only `max_tokens` and `stop` by default. Configure
+`allowed_request_sampling_param_keys` to permit additional request keys when a
+white-box Agent needs request-level overrides. This list is additive, so
+`max_tokens` and `stop` remain permitted:
+
+```yaml
+actor_rollout_ref:
+  rollout:
+    custom:
+      agent_framework:
+        allowed_request_sampling_param_keys: [temperature, top_p, top_k]
+        # Effective allowlist: max_tokens, stop, temperature, top_p, top_k
+```
+
+Training launchers set this framework field with Hydra list syntax:
+
+```bash
+++actor_rollout_ref.rollout.custom.agent_framework.allowed_request_sampling_param_keys="[temperature,top_p,top_k]"
+```
+
+The verl inference entrypoints expose the same list through argparse, whose
+multi-value syntax is space-separated:
+
+```bash
+--allowed-request-sampling-param-keys temperature top_p top_k
+```
+
+Both forms produce the same permission list. They do not set sampling values;
+those come from the rollout defaults or a white-box Agent request.
+
+White-box Agents place explicit request values in
+`agent.sampling_params_override`, a `RequestSamplingConfig`:
+
+```yaml
+agent:
+  name: react
+  sampling_params_override:
+    temperature: 0.8
+    top_p: 0.9
+    top_k: 20
+    max_tokens_per_turn: 8192
+```
+
+Omitted fields inherit the session defaults. Allowed request values override
+session values. When a request tries to replace a session sampling default without
+permission, the Gateway ignores it and logs a warning once per key and actor. The
+permission applies to every request handled by that Gateway, including black-box
+harness requests in a mixed workload.
+
+`max_tokens` and `stop` are defaults because they control individual calls:
+a harness may use different output budgets for normal replies and context
+summarization, or stop generation at a protocol delimiter. `max_tokens` remains
+subject to the available Gateway and model context capacity; it cannot bypass
+those limits. Sampling distribution controls (`temperature`, `top_p`, `top_k`)
+normally belong to the training configuration, while white-box loops can opt in
+to overriding them for algorithm-specific needs.
+
 ## Extension Boundaries
 
 Customize the layer that owns the behavior:

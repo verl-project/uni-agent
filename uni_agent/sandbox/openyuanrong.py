@@ -319,6 +319,4 @@ class OpenyuanrongSandbox(Sandbox):
         # an exception; re-raise so the shared exec() policy classifies it.
         if exit_code == -1 and "timed out" in stderr:
             raise TimeoutError(stderr)
-        if exit_code != 0:
-            raise RuntimeError(stderr or f"command exited with {exit_code}")
-        return ExecResult(exit_code=0, stdout=stdout, stderr=stderr)
+        return ExecResult(exit_code=exit_code, stdout=stdout, stderr=stderr)

@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import os
 import time
 from types import SimpleNamespace
@@ -641,6 +642,7 @@ async def test_gateway_actor_forwards_image_data_on_initial_multimodal_request(r
             tokenizer=FakeTokenizer(),
             processor=processor,
             vision_info_extractor=fake_vision_info_extractor,
+            allowed_request_sampling_param_keys={"temperature"},
         ),
         InspectingBackend(),
     )
@@ -1064,7 +1066,51 @@ async def test_gateway_actor_allowlist_filters_sampling_params(ray_runtime, back
 @pytest.mark.level0
 @pytest.mark.asyncio
 @pytest.mark.parametrize("provider", ["openai", "anthropic"])
-async def test_gateway_actor_session_sampling_defaults_are_isolated_and_request_overridable(provider):
+async def test_gateway_actor_warns_once_per_disallowed_request_sampling_key(provider, caplog):
+    from uni_agent.gateway.config import GatewayActorConfig
+    from uni_agent.gateway.gateway import _GatewayActor
+
+    actor = _GatewayActor(GatewayActorConfig(tokenizer=FakeTokenizer()), SequencedBackend(["FIRST", "SECOND"]))
+    await actor.start()
+    session_sampling_params = {"temperature": 0.1, "top_p": 0.9}
+    await actor.create_session("warning-1", sampling_params=session_sampling_params)
+    await actor.create_session("warning-2", sampling_params=session_sampling_params)
+    handler = actor._handle_openai_chat_completions if provider == "openai" else actor._handle_anthropic_messages
+
+    caplog.set_level(logging.WARNING, logger="uni_agent.gateway.gateway")
+    try:
+        for session_id in ("warning-1", "warning-2"):
+            await handler(
+                session_id,
+                {
+                    "messages": [{"role": "user", "content": session_id}],
+                    "temperature": 0.7,
+                    "top_p": 0.8,
+                    "max_tokens": 32,
+                },
+            )
+    finally:
+        await actor.abort_session("warning-1")
+        await actor.abort_session("warning-2")
+        await actor.shutdown()
+
+    warnings = [record.getMessage() for record in caplog.records if "request sampling" in record.getMessage()]
+    assert len(warnings) == 1
+    assert "temperature" in warnings[0]
+    assert "top_p" in warnings[0]
+    assert "max_tokens" not in warnings[0]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["openai", "anthropic"])
+@pytest.mark.parametrize(
+    "allowed_keys",
+    [None, {"temperature", "top_p", "top_k", "max_tokens", "stop"}, set()],
+    ids=["default", "explicit-overrides", "no-overrides"],
+)
+async def test_gateway_actor_session_sampling_defaults_are_isolated_and_request_overridable(provider, allowed_keys):
     """Both provider handlers apply session defaults, then request sampling params."""
     from uni_agent.gateway.config import GatewayActorConfig
     from uni_agent.gateway.gateway import _GatewayActor
@@ -1073,6 +1119,7 @@ async def test_gateway_actor_session_sampling_defaults_are_isolated_and_request_
     actor = _GatewayActor(
         GatewayActorConfig(
             tokenizer=FakeTokenizer(),
+            allowed_request_sampling_param_keys=allowed_keys,
         ),
         backend,
     )
@@ -1104,6 +1151,9 @@ async def test_gateway_actor_session_sampling_defaults_are_isolated_and_request_
             {
                 "messages": [{"role": "user", "content": "train"}],
                 "temperature": 0.7,
+                "top_p": 0.8,
+                "top_k": 5,
+                ("stop" if provider == "openai" else "stop_sequences"): ["END"],
                 "max_tokens": 128,
             },
         )
@@ -1117,14 +1167,13 @@ async def test_gateway_actor_session_sampling_defaults_are_isolated_and_request_
     finally:
         await actor.shutdown()
 
-    assert [call["sampling_params"] for call in backend.calls] == [
+    expected = [
         {
-            "temperature": 0.7,
+            "temperature": 0.4,
             "top_p": 0.5,
             "top_k": 1,
             "presence_penalty": 0.3,
             "logprobs": True,
-            "max_tokens": 128,
         },
         {
             "temperature": 0,
@@ -1132,9 +1181,14 @@ async def test_gateway_actor_session_sampling_defaults_are_isolated_and_request_
             "top_k": -1,
             "presence_penalty": 0.3,
             "logprobs": False,
-            "max_tokens": 64,
         },
     ]
+
+    expected[0].update(max_tokens=128, stop=["END"])
+    expected[1]["max_tokens"] = 64
+    if allowed_keys and "temperature" in allowed_keys:
+        expected[0].update(temperature=0.7, top_p=0.8, top_k=5)
+    assert [call["sampling_params"] for call in backend.calls] == expected
 
 
 @pytest.mark.cpu

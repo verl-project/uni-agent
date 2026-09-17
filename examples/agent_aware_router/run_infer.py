@@ -125,7 +125,7 @@ def _resolve_router_config_path(path: str) -> str:
     return os.path.abspath(path)
 
 
-def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_model_name: str):
+def init_config(args: argparse.Namespace, *, served_model_name: str):
     """Compose verl's ``ppo_trainer`` config with the KV-cache-aware router plugin and
     override the engine + framework knobs.
 
@@ -142,13 +142,14 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
 
     rollout = config.actor_rollout_ref.rollout
 
-    model_cfgs = [entry.get("agent", {}).get("model", {}) for entry in task_configs]
-    temperature = model_cfgs[0].get("temperature", DEFAULT_TEMPERATURE)
-    top_p = model_cfgs[0].get("top_p", DEFAULT_TOP_P)
-    rollout.temperature = temperature
-    rollout.top_p = top_p
-    rollout.val_kwargs.temperature = temperature
-    rollout.val_kwargs.top_p = top_p
+    rollout.temperature = args.temperature
+    rollout.top_p = args.top_p
+    rollout.top_k = args.top_k
+    rollout.val_kwargs.temperature = args.temperature
+    rollout.val_kwargs.top_p = args.top_p
+    rollout.val_kwargs.top_k = args.top_k
+    # Use the configured sampling values in the validation partition used by inference.
+    rollout.val_kwargs.do_sample = True
 
     # Fan-out: the framework runs rollout.n gateway sessions per prompt.
     rollout.n = max(1, args.n)
@@ -167,7 +168,7 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
     rollout.agent.num_workers = args.num_workers
     rollout.tensor_model_parallel_size = args.tensor_parallel_size
     rollout.gpu_memory_utilization = args.gpu_memory_utilization
-    # Cap the engine context. Must be >= the agent's per-episode token budget,
+    # Cap the engine context to accommodate the transcript required by the agent,
     # else vLLM rejects the request (HTTP 400, transcript overruns the limit).
     rollout.max_model_len = args.max_model_len
     # kvcaware additions: engine concurrency + expose metrics on /metrics for the
@@ -213,6 +214,7 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
 
     agent_framework_cfg = {
         "gateway_count": args.gateway_count,
+        "allowed_request_sampling_param_keys": args.allowed_request_sampling_param_keys,
         "agent_runners": {
             "task": {
                 "runner_fqn": "uni_agent.framework.task_runner.run_task",
@@ -391,9 +393,9 @@ def main() -> None:
         "--task-config",
         required=True,
         help="Path to a YAML task config: one ``- name: ...`` entry or a list of them (required). "
-        "run_task routes each row to the entry whose 'name' matches the row's task; all agent/model "
-        "knobs (sampling, max_total_tokens, max_steps, ...) come from it. The endpoint is bound to the "
-        "gateway session.",
+        "run_task routes each row by task name. White-box agents use agent.sampling_params_override; "
+        "allow extra request keys with --allowed-request-sampling-param-keys. "
+        "The endpoint is bound to the gateway session.",
     )
     parser.add_argument(
         "--result-path",
@@ -413,7 +415,17 @@ def main() -> None:
         "--n", type=int, default=1, help="Rollout sessions per instance (rollout.n; scores average over all)."
     )
 
-    # Sampling.
+    # Shared rollout defaults; white-box agents may override request sampling.
+    parser.add_argument("--temperature", type=float, default=DEFAULT_TEMPERATURE, help="Default sampling temperature.")
+    parser.add_argument("--top-p", type=float, default=DEFAULT_TOP_P, help="Default nucleus sampling probability.")
+    parser.add_argument("--top-k", type=int, default=-1, help="Default top-k sampling (-1 disables).")
+    parser.add_argument(
+        "--allowed-request-sampling-param-keys",
+        nargs="+",
+        default=[],
+        help="Extra request sampling keys allowed in addition to max_tokens and stop.",
+    )
+
     parser.add_argument("--prompt-length", type=int, default=4096, help="Maximum prompt length (tokens).")
     parser.add_argument("--response-length", type=int, default=8192, help="Maximum response length (tokens).")
     parser.add_argument(
@@ -443,7 +455,7 @@ def main() -> None:
         default=int(os.getenv("MAX_MODEL_LEN", "0")) or None,
         help=(
             "Maximum model context length (tokens) passed to the engine. Must be >= "
-            "the task config's max_total_tokens; otherwise multi-step episodes crash "
+            "the engine context required by the agent; otherwise multi-step episodes crash "
             "with HTTP 400 once the transcript grows past the engine limit."
         ),
     )
@@ -541,7 +553,7 @@ def main() -> None:
             # (default ~10 s threshold would kill them prematurely).
             ray.init(_system_config={"idle_worker_killing_time_threshold_ms": _RAY_IDLE_WORKER_TIMEOUT_MS})
 
-    resolver = TaskConfigResolver.from_file(args.task_config)
+    TaskConfigResolver.from_file(args.task_config)
     served_model_name = os.path.basename(os.path.expanduser(args.model_path).rstrip("/"))
 
     dataset = load_dataset("parquet", data_files=args.data_path, split="train")
@@ -556,13 +568,11 @@ def main() -> None:
         return
     n = max(1, args.n)
 
-    task_configs = list(resolver.defaults_by_name.values())
-
     logger.info(f"loaded {len(samples)} prompts (x n={n} sessions each) from {args.data_path}")
 
     # 1. TransferQueue + verl inference engine with the KV-cache-aware router.
     logger.info("initializing configuration, TransferQueue, and LLMServerManager (kvcaware router)...")
-    config = init_config(args, task_configs=task_configs, served_model_name=served_model_name)
+    config = init_config(args, served_model_name=served_model_name)
     tq.init(config.transfer_queue)
     llm_server_manager = LLMServerManager.create(config=config)
 

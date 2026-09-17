@@ -319,6 +319,90 @@ def test_build_gateway_manager_wires_gateway_config_defaults(
     assert captured["gateway_actor_config"].mm_processor_kwargs == expected_mm_processor_kwargs
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [(None, None), ([], set()), (["temperature", "max_tokens"], {"temperature", "max_tokens"})],
+)
+def test_build_gateway_manager_wires_allowed_request_sampling_keys(monkeypatch, configured, expected):
+    from omegaconf import OmegaConf
+
+    from uni_agent.framework import entry as entry_module
+
+    class ModelConfig:
+        tokenizer = object()
+        processor = None
+        hf_config = types.SimpleNamespace(model_type="test")
+
+    class RolloutConfig:
+        name = "vllm"
+        prompt_length = 128
+        response_length = 64
+        multi_turn = types.SimpleNamespace(format="hermes")
+
+    captured = {}
+
+    class Manager:
+        def __init__(self, *, gateway_actor_config, **kwargs):
+            captured["config"] = gateway_actor_config
+
+    monkeypatch.setattr(
+        entry_module,
+        "omega_conf_to_dataclass",
+        lambda cfg: RolloutConfig() if "multi_turn" in cfg else ModelConfig(),
+    )
+    monkeypatch.setattr(entry_module, "GatewayManager", Manager)
+    af = {"gateway_count": 1}
+    if configured is not None:
+        af["allowed_request_sampling_param_keys"] = configured
+    config = OmegaConf.create(
+        {
+            "data": {},
+            "actor_rollout_ref": {
+                "model": {},
+                "rollout": {
+                    "name": "vllm",
+                    "prompt_length": 128,
+                    "response_length": 64,
+                    "multi_turn": {"format": "hermes"},
+                    "custom": {"agent_framework": af},
+                },
+            },
+        }
+    )
+    entry_module.build_gateway_manager(config=config, llm_client=object())
+    assert captured["config"].allowed_request_sampling_param_keys == expected
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_build_gateway_manager_rejects_invalid_allowed_request_sampling_keys(monkeypatch):
+    from omegaconf import OmegaConf
+
+    from uni_agent.framework import entry as entry_module
+
+    config = OmegaConf.create(
+        {
+            "data": {},
+            "actor_rollout_ref": {
+                "model": {},
+                "rollout": {
+                    "name": "vllm",
+                    "prompt_length": 128,
+                    "response_length": 64,
+                    "multi_turn": {"format": "hermes"},
+                    "custom": {
+                        "agent_framework": {"gateway_count": 1, "allowed_request_sampling_param_keys": "temperature"}
+                    },
+                },
+            },
+        }
+    )
+    with pytest.raises(ValueError, match="allowed_request_sampling_param_keys"):
+        entry_module.build_gateway_manager(config=config, llm_client=object())
+
+
 class _FakeTransferQueue:
     def __init__(self):
         self.puts = []

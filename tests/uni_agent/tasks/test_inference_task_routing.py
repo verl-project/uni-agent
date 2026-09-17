@@ -16,7 +16,7 @@ def test_resolver_loads_every_named_entry(tmp_path):
     provider: local
   agent:
     name: react
-    model:
+    sampling_params_override:
       temperature: 0.2
 - name: task_b
   sandbox:
@@ -28,7 +28,7 @@ def test_resolver_loads_every_named_entry(tmp_path):
     resolver = TaskConfigResolver.from_file(str(config_path))
 
     assert set(resolver.defaults_by_name) == {"task_a", "task_b"}
-    assert resolver.defaults_by_name["task_a"]["agent"]["model"]["temperature"] == 0.2
+    assert resolver.defaults_by_name["task_a"]["agent"]["sampling_params_override"]["temperature"] == 0.2
 
 
 @pytest.mark.cpu
@@ -45,8 +45,8 @@ def test_resolver_routes_by_name_and_applies_sample_and_runtime_overrides():
                     "base_url": "http://model:8000/v1",
                     "model_name": "policy",
                     "api_key": "key",
-                    "temperature": 0.8,
                 },
+                "sampling_params_override": {"temperature": 0.8},
             },
         },
         "task_b": {
@@ -65,7 +65,7 @@ def test_resolver_routes_by_name_and_applies_sample_and_runtime_overrides():
     sample = {
         "name": "task_a",
         "sandbox": {"image": "sample-image"},
-        "agent": {"max_steps": 200, "model": {"temperature": 0.3}},
+        "agent": {"max_steps": 200, "sampling_params_override": {"temperature": 0.3}},
     }
 
     resolver = TaskConfigResolver(defaults)
@@ -81,7 +81,7 @@ def test_resolver_routes_by_name_and_applies_sample_and_runtime_overrides():
     assert resolved["name"] == "task_a"
     assert resolved["sandbox"] == {"provider": "local", "image": "sample-image"}
     assert resolved["agent"]["max_steps"] == 200
-    assert resolved["agent"]["model"]["temperature"] == 0.3
+    assert resolved["agent"]["sampling_params_override"]["temperature"] == 0.3
     assert resolved["agent"]["model"]["base_url"] == "http://runtime:8000/v1"
     assert resolved["agent"]["model"]["model_name"] == "runtime-policy"
     assert resolved["agent"]["model"]["api_key"] == "runtime-key"

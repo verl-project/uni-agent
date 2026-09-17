@@ -39,6 +39,13 @@ def build_gateway_manager(*, config, llm_client) -> GatewayManager:
 
     apply_chat_template_kwargs = data_cfg.get("apply_chat_template_kwargs", {})
     mm_processor_kwargs = data_cfg.get("mm_processor_kwargs", {})
+    allowed_sampling_keys = af_cfg.get("allowed_request_sampling_param_keys")
+    if allowed_sampling_keys is not None:
+        if not isinstance(allowed_sampling_keys, list | tuple) and not OmegaConf.is_list(allowed_sampling_keys):
+            raise ValueError("allowed_request_sampling_param_keys must be a list of strings or null")
+        if any(not isinstance(key, str) for key in allowed_sampling_keys):
+            raise ValueError("allowed_request_sampling_param_keys must be a list of strings or null")
+        allowed_sampling_keys = set(allowed_sampling_keys)
 
     # Match AgentLoopWorker pattern: self-load tokenizer/processor via HFModelConfig.
     rollout_config: RolloutConfig = omega_conf_to_dataclass(rollout_cfg)
@@ -55,6 +62,7 @@ def build_gateway_manager(*, config, llm_client) -> GatewayManager:
         prompt_length=rollout_config.prompt_length,
         response_length=rollout_config.response_length,
         enable_last_assistant_rollback=af_cfg.get("enable_last_assistant_rollback", True),
+        allowed_request_sampling_param_keys=allowed_sampling_keys,
         coalesce_reserved_exact_requests=af_cfg.get("coalesce_reserved_exact_requests", True),
     )
 
