@@ -42,7 +42,6 @@ The `react` agent drives a ReAct (reason + act) loop: the model reasons, calls a
     sampling_params_override:
       temperature: 0.8
       top_p: 0.9
-      top_k: -1
 ```
 
 To use the modal sandbox, configure its service endpoint and credentials — see [Launch a Sandbox](launch-sandbox.md).

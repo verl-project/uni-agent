@@ -11,4 +11,3 @@
     sampling_params_override:
       temperature: 1.0
       # Omit top_p to inherit the endpoint / rollout default.
-      top_k: -1

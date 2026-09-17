@@ -19,7 +19,6 @@
     sampling_params_override:
       temperature: 1.0
       top_p: 1.0
-      top_k: -1
   prompt_template: &swe_react_prompt
     - role: system
       content: You are a helpful assistant that can interact with a computer to solve tasks.
@@ -121,7 +120,6 @@
     sampling_params_override:
       temperature: 1.0
       top_p: 1.0
-      top_k: -1
   prompt_template: *swe_react_prompt
 
 - name: swe_bench_multilingual
@@ -145,7 +143,6 @@
     sampling_params_override:
       temperature: 1.0
       top_p: 1.0
-      top_k: -1
   prompt_template:
     - role: system
       content: You are a helpful assistant that can interact with a computer to solve tasks.

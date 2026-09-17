@@ -75,7 +75,6 @@ The Quickstart provides separate Task Configs for ReAct and Claude Code. Each re
         sampling_params_override:
           temperature: 1.0
           top_p: 1.0
-          top_k: -1
 
     - name: swe_rebench
       sandbox:
@@ -98,7 +97,6 @@ The Quickstart provides separate Task Configs for ReAct and Claude Code. Each re
         sampling_params_override:
           temperature: 1.0
           top_p: 1.0
-          top_k: -1
     ```
 
 === "Claude Code"

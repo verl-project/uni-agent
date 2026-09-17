@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import os
 import time
 from types import SimpleNamespace
@@ -1038,6 +1039,44 @@ async def test_gateway_actor_allowlist_filters_sampling_params(ray_runtime, back
     ray.get(actor.shutdown.remote())
 
     assert response.status_code == 200
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["openai", "anthropic"])
+async def test_gateway_actor_warns_once_per_disallowed_request_sampling_key(provider, caplog):
+    from uni_agent.gateway.config import GatewayActorConfig
+    from uni_agent.gateway.gateway import _GatewayActor
+
+    actor = _GatewayActor(GatewayActorConfig(tokenizer=FakeTokenizer()), SequencedBackend(["FIRST", "SECOND"]))
+    await actor.start()
+    await actor.create_session("warning-1")
+    await actor.create_session("warning-2")
+    handler = actor._handle_openai_chat_completions if provider == "openai" else actor._handle_anthropic_messages
+
+    caplog.set_level(logging.WARNING, logger="gateway")
+    try:
+        for session_id in ("warning-1", "warning-2"):
+            await handler(
+                session_id,
+                {
+                    "messages": [{"role": "user", "content": session_id}],
+                    "temperature": 0.7,
+                    "top_p": 0.8,
+                    "max_tokens": 32,
+                },
+            )
+    finally:
+        await actor.abort_session("warning-1")
+        await actor.abort_session("warning-2")
+        await actor.shutdown()
+
+    warnings = [record.getMessage() for record in caplog.records if "request sampling" in record.getMessage()]
+    assert len(warnings) == 1
+    assert "temperature" in warnings[0]
+    assert "top_p" in warnings[0]
+    assert "max_tokens" not in warnings[0]
 
 
 @pytest.mark.cpu

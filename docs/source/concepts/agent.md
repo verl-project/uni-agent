@@ -81,7 +81,6 @@ agent:
   sampling_params_override:
     temperature: 0.8
     top_p: 0.9
-    top_k: -1
 ```
 
 Use this style when you need complete control over Tool schemas, observations, transcripts, and stopping behavior.

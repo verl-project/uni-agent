@@ -114,6 +114,7 @@ def init_config(args: argparse.Namespace, *, served_model_name: str):
     rollout.load_format = "auto"
     rollout.prompt_length = DEFAULT_PROMPT_LENGTH
     rollout.response_length = response_length
+    rollout.max_model_len = rollout.prompt_length + rollout.response_length
     rollout.tensor_model_parallel_size = args.tensor_parallel_size
     rollout.gpu_memory_utilization = args.gpu_memory_utilization
     rollout.calculate_log_probs = True

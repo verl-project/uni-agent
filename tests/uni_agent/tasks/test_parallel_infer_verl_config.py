@@ -60,6 +60,8 @@ def test_inference_sampling_uses_run_options_and_preserves_length_configuration(
     expected_response_length = args.response_length
     assert rollout.prompt_length == config.data.max_prompt_length == expected_prompt_length
     assert rollout.response_length == config.data.max_response_length == expected_response_length
+    if entrypoint is init_config:
+        assert rollout.max_model_len == expected_prompt_length + expected_response_length
     assert rollout.custom.agent_framework.allowed_request_sampling_param_keys == ["temperature", "top_p", "top_k"]
     task_runner = rollout.custom.agent_framework.agent_runners.task
     if simulated_runner:

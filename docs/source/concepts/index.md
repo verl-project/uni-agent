@@ -57,7 +57,6 @@ The run-level Task Config defines common behavior such as the Agent, Tools, Sand
     sampling_params_override:
       temperature: 0.8
       top_p: 0.9
-      top_k: -1
 ```
 
 Each sample can then provide or override fields such as its prompt, metadata, sandbox image, budgets, or other nested Task settings:
