@@ -1,16 +1,17 @@
 # Claude Code tasks running in an OpenYuanrong sandbox. The task image is
 # remapped to the internal registry and the prebuilt Claude Code sidecar is
-# mounted at /opt/claude-code. Its bin directory is placed on the sandbox PATH.
+# mounted at /opt/claude-code. A generic startup command links the executable
+# into the task image's existing PATH without adding provider-specific logic.
 - name: swe_bench
   sandbox:
     provider: openyuanrong
     runtime_timeout: 7200
+    startup_commands:
+      - mkdir -p /usr/local/bin && ln -sfn /opt/claude-code/bin/claude /usr/local/bin/claude
     image_map:
       - from: "swebench/**"
         to: "swr.cn-east-3.myhuaweicloud.com/openyuanrong/swe-bench-verified/**:v2"
     sandbox_kwargs:
-      add_to_path:
-        - /opt/claude-code/bin
       proxy_port: 38197
       mounts:
         - target: /opt/claude-code
@@ -19,10 +20,6 @@
     name: claude_code
     max_turns: 200
     run_timeout: 4800
-    model:
-      temperature: 1.0
-      top_p: 1.0
-      max_total_tokens: 131072
   prompt_template: &swe_claude_prompt
     - role: user
       content: |-
@@ -37,12 +34,12 @@
   sandbox:
     provider: openyuanrong
     runtime_timeout: 7200
+    startup_commands:
+      - mkdir -p /usr/local/bin && ln -sfn /opt/claude-code/bin/claude /usr/local/bin/claude
     image_map:
       - from: "swerebench/sweb.eval.x86_64.**"
         to: "swr.cn-east-3.myhuaweicloud.com/openyuanrong/swe-rebench/**:latest"
     sandbox_kwargs:
-      add_to_path:
-        - /opt/claude-code/bin
       proxy_port: 38197
       mounts:
         - target: /opt/claude-code
@@ -51,8 +48,4 @@
     name: claude_code
     max_turns: 200
     run_timeout: 4800
-    model:
-      temperature: 1.0
-      top_p: 1.0
-      max_total_tokens: 131072
   prompt_template: *swe_claude_prompt

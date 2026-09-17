@@ -123,7 +123,6 @@ class OpenyuanrongSandbox(Sandbox):
         mem_limit: int = 12288,
         idle_timeout: int = 7200,
         env: dict[str, str] | None = None,
-        add_to_path: list[str] | None = None,
         cwd: str | None = None,
         name: str | None = None,
         mounts: list[Any] | None = None,
@@ -140,11 +139,6 @@ class OpenyuanrongSandbox(Sandbox):
         self.mem_limit = mem_limit
         self.idle_timeout = idle_timeout
         self.env = env
-        if add_to_path is not None and not isinstance(add_to_path, list):
-            raise ValueError("add_to_path must be a list of non-empty strings")
-        self.add_to_path = tuple(add_to_path or [])
-        if any(not isinstance(path, str) or not path for path in self.add_to_path):
-            raise ValueError("add_to_path must be a list of non-empty strings")
         self.cwd = cwd
         self.name = name
         self.mounts = mounts or []
@@ -220,14 +214,7 @@ class OpenyuanrongSandbox(Sandbox):
     ) -> _OpenyuanrongShell:
         """Return a long-lived SDK shell (cwd/env persist across ``run`` calls)."""
         sb = self._require()
-        shell = _OpenyuanrongShell(await sb.shells.create(cwd=cwd, envs=env))
-        if (path_setup := self._path_setup_command()) is not None:
-            result = await shell.run(path_setup)
-            if result.exit_code != 0:
-                await shell.close()
-                detail = result.stderr or result.stdout or f"exit code {result.exit_code}"
-                raise RuntimeError(f"failed to initialize OpenYuanrong shell PATH: {detail}")
-        return shell
+        return _OpenyuanrongShell(await sb.shells.create(cwd=cwd, envs=env))
 
     # ----- public: data plane (files / ports) -----
     async def read_file(self, path: str) -> bytes:
@@ -283,19 +270,6 @@ class OpenyuanrongSandbox(Sandbox):
         # out after ..."); server-side failures may still raise with that wording.
         return "timed out after" in str(exc) or super()._is_timeout_error(exc)
 
-    def _path_setup_command(self) -> str | None:
-        """Return a shell command that prepends configured directories to PATH.
-
-        ``Sandbox(env=...)`` has ordinary environment-assignment semantics, so
-        setting its ``PATH`` key would replace the task image's original PATH.
-        Expanding ``PATH`` in the remote command/shell preserves image tools
-        such as conda while giving mounted sidecars precedence.
-        """
-        if not self.add_to_path:
-            return None
-        prefix = ":".join(self.add_to_path)
-        return f'export PATH={shlex.quote(prefix)}:"${{PATH:-}}"'
-
     async def _exec(
         self,
         argv: list[str],
@@ -308,8 +282,6 @@ class OpenyuanrongSandbox(Sandbox):
         sb = self._require()
         timeout_i = int(timeout) if timeout else 60
         command = shlex.join(argv)
-        if (path_setup := self._path_setup_command()) is not None:
-            command = f"{path_setup}; {command}"
         # commands.run is a blocking SDK poll; run it off the event loop.
         result = await asyncio.to_thread(sb.commands.run, command, envs=env, cwd=workdir, timeout=timeout_i)
         exit_code = int(result.exit_code)

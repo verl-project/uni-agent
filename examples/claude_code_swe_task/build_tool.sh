@@ -7,10 +7,10 @@
 # Node or npm to run the agent.
 #
 # Usage:
-#   bash examples/blackbox_recipes/claude_code/build_tool.sh
-#   bash examples/blackbox_recipes/claude_code/build_tool.sh --npm-registry https://registry.npmmirror.com
-#   bash examples/blackbox_recipes/claude_code/build_tool.sh --tool-version latest
-#   bash examples/blackbox_recipes/claude_code/build_tool.sh --registry swr.cn-east-3.myhuaweicloud.com/openyuanrong
+#   bash examples/claude_code_swe_task/build_tool.sh
+#   bash examples/claude_code_swe_task/build_tool.sh --npm-registry https://registry.npmmirror.com
+#   bash examples/claude_code_swe_task/build_tool.sh --tool-version latest
+#   bash examples/claude_code_swe_task/build_tool.sh --registry swr.cn-east-3.myhuaweicloud.com/openyuanrong
 #
 set -euo pipefail
 
