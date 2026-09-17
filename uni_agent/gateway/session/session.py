@@ -280,6 +280,8 @@ class GatewaySession:
                         self.reserved_chain_ids.add(encoded.chain_id)
                         reserved_chain_id = encoded.chain_id
                         if request_fingerprint is not None:
+                            # Register only after selecting an existing chain;
+                            # first-turn/new-chain requests remain independent.
                             owner_future = asyncio.get_running_loop().create_future()
                             self._inflight_exact_requests[request_fingerprint] = owner_future
 

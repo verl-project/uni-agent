@@ -41,7 +41,9 @@ class GatewayActorConfig:
             rollback and reuse an existing chain. Enabled by default.
         coalesce_reserved_exact_requests: Whether an exact duplicate of a request
             already generating against a reserved chain should await and reuse that
-            in-flight result instead of creating a sibling sample.
+            in-flight result instead of creating a sibling sample. Disabled by
+            default; when enabled, identical same-session sampling requests are
+            coalesced as well.
     """
 
     tokenizer: Any
