@@ -107,6 +107,24 @@ Claude Code speaks the Anthropic Messages protocol. Uni-Agent sets `ANTHROPIC_BA
 
 Use this style when an existing Agent Harness already owns its loop and Tools.
 
+### Claude Code Prompt Handling
+
+The Claude Code Agent requires exactly one non-blank user message and allows at most one system message; a second message of either role raises an error. Non-null content must be text. The user text is passed to `claude -p`; non-blank system text is passed to `--system-prompt`, replacing Claude Code's default system prompt. Missing, null, empty, or whitespace-only system content adds no system-prompt flag, retaining the default prompt unless `extra_args` explicitly overrides it. A non-blank system message conflicts with `--system-prompt` or `--system-prompt-file` in `extra_args`; append flags remain explicitly controlled through `extra_args`.
+
+System messages can come from the dataset prompt or the existing Task `prompt_template`:
+
+```yaml
+prompt_template:
+  - role: system
+    content: "Follow these task rules: {task_rules}"
+  - role: user
+    content: "Resolve this issue: {problem_statement}"
+agent:
+  name: claude_code
+```
+
+Template placeholders use Task metadata. A configured template replaces the input prompt, so a user-only template does not inherit dataset system messages.
+
 ## Custom Agent
 
 Create an Agent-specific configuration and implementation:

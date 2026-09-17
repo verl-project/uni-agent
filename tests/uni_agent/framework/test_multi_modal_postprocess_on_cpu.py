@@ -32,6 +32,7 @@ def test_compute_multi_modal_inputs_returns_image_tensors_and_images_seqlens():
         processor,
         input_ids,
         {"images": ["image://a.png"]},
+        {"max_pixels": 1024},
     )
 
     assert "input_ids" not in multi_modal_inputs
@@ -40,6 +41,7 @@ def test_compute_multi_modal_inputs_returns_image_tensors_and_images_seqlens():
     assert multi_modal_inputs["image_grid_thw"].tolist() == [[1, 2, 3]]
     assert multi_modal_inputs["images_seqlens"].tolist() == [6]
     assert "mm_token_type_ids" in multi_modal_inputs
+    assert processor.last_processor_call["extra_kwargs"] == {"max_pixels": 1024}
 
 
 @pytest.mark.cpu

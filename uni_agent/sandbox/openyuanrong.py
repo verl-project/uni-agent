@@ -10,7 +10,6 @@ import asyncio
 import logging
 import os
 import shlex
-import sys
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -23,8 +22,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_sdk_initialized = False
-
 
 def _resolve_sandbox_name() -> str | None:
     """Return ``{prefix}{random}`` when ``SANDBOX_NAME_PREFIX`` env is set."""
@@ -34,45 +31,57 @@ def _resolve_sandbox_name() -> str | None:
     return f"{prefix}{uuid.uuid4().hex[:8]}"
 
 
-def _load_sandbox_module() -> Any:
-    """Configure env and select sandbox SDK via ``sys.modules`` injection."""
-    global _sdk_initialized
-    if _sdk_initialized:
-        return sys.modules["openyuanrong_sandbox_sdk"]
+def _load_sdk() -> Any:
+    """Import ``openyuanrong_sandbox`` lazily so this provider stays importable without it."""
+    try:
+        import yr_sandbox
+    except ImportError as exc:
+        raise ImportError(
+            "the openyuanrong sandbox provider requires the openYuanrong sandbox SDK; "
+            "install it with: pip install openyuanrong-sandbox"
+        ) from exc
+    return yr_sandbox
 
+
+def _connection_config(sdk: Any) -> Any:
+    """Build an SDK ``ConnectionConfig`` from the ``OPENYUANRONG_*`` env vars.
+
+    Only overrides SDK defaults when the matching env var is set:
+
+    * ``OPENYUANRONG_TLS`` → ``use_tls`` (SDK default ``True``)
+    * ``OPENYUANRONG_GATEWAY_ADDRESS`` → ``gateway_address`` (SDK default ``None``)
+    * ``OPENYUANRONG_GATEWAY_TLS`` → ``gateway_use_tls`` (SDK default ``False``)
+    * ``OPENYUANRONG_TLS_VERIFY`` → ``verify_tls`` (SDK default ``False``)
+    * ``OPENYUANRONG_TUNNEL_SSL_VERIFY`` → ``YR_TUNNEL_SSL_VERIFY`` (tunnel
+      client default ``"1"``; process-env only, no ``ConnectionConfig`` field)
+    """
     server = os.getenv("OPENYUANRONG_SERVER_ADDRESS")
     token = os.getenv("OPENYUANRONG_TOKEN")
     if not server or not token:
         raise ValueError(
             "OPENYUANRONG_SERVER_ADDRESS and OPENYUANRONG_TOKEN environment variables must be set for sandbox"
         )
-    os.environ["TUNNEL_SSL_VERIFY"] = os.getenv("OPENYUANRONG_TUNNEL_SSL_VERIFY", "0")
-
-    if os.getenv("USE_OPENYUANRONG_SDK", "0") == "1":
-        try:
-            import openyuanrong_sandbox_sdk as mod
-        except ImportError as exc:
-            raise ImportError(
-                "USE_OPENYUANRONG_SDK=1 but openyuanrong_sandbox_sdk is not installed. "
-                "Please install openyuanrong_sandbox_sdk or set USE_OPENYUANRONG_SDK=0."
-            ) from exc
-    else:
-        os.environ["AKERNEL_SERVER_ADDRESS"] = server
-        os.environ["AKERNEL_TOKEN"] = token
-        try:
-            import akernel_sdk as mod
-        except ImportError as exc:
-            raise ImportError(
-                "USE_OPENYUANRONG_SDK=0 but the fallback SDK is not installed. "
-                "Please install it or set USE_OPENYUANRONG_SDK=1."
-            ) from exc
-    sys.modules["openyuanrong_sandbox_sdk"] = mod
-    _sdk_initialized = True
-    return mod
+    kwargs: dict[str, Any] = {"server_address": server, "token": token}
+    tls = os.getenv("OPENYUANRONG_TLS")
+    if tls:
+        kwargs["use_tls"] = tls != "0"
+    gateway_address = os.getenv("OPENYUANRONG_GATEWAY_ADDRESS")
+    if gateway_address:
+        kwargs["gateway_address"] = gateway_address
+    gateway_tls = os.getenv("OPENYUANRONG_GATEWAY_TLS")
+    if gateway_tls:
+        kwargs["gateway_use_tls"] = gateway_tls != "0"
+    tls_verify = os.getenv("OPENYUANRONG_TLS_VERIFY")
+    if tls_verify:
+        kwargs["verify_tls"] = tls_verify != "0"
+    tunnel_ssl_verify = os.getenv("OPENYUANRONG_TUNNEL_SSL_VERIFY")
+    if tunnel_ssl_verify:
+        os.environ["YR_TUNNEL_SSL_VERIFY"] = tunnel_ssl_verify
+    return sdk.ConnectionConfig(**kwargs)
 
 
 class _OpenyuanrongShell:
-    """Adapt openyuanrong SDK shell to the uni-agent sandbox shell handle.
+    """Adapt an openyuanrong_sandbox shell to the uni-agent sandbox shell handle.
 
     Converts the provider shell protocol (``shell.run`` / ``shell.kill``) into
     uni-agent's ``open_shell()`` contract: ``run`` → :class:`ExecResult`,
@@ -114,6 +123,7 @@ class OpenyuanrongSandbox(Sandbox):
         mem_limit: int = 12288,
         idle_timeout: int = 7200,
         env: dict[str, str] | None = None,
+        add_to_path: list[str] | None = None,
         cwd: str | None = None,
         name: str | None = None,
         mounts: list[Any] | None = None,
@@ -130,6 +140,11 @@ class OpenyuanrongSandbox(Sandbox):
         self.mem_limit = mem_limit
         self.idle_timeout = idle_timeout
         self.env = env
+        if add_to_path is not None and not isinstance(add_to_path, list):
+            raise ValueError("add_to_path must be a list of non-empty strings")
+        self.add_to_path = tuple(add_to_path or [])
+        if any(not isinstance(path, str) or not path for path in self.add_to_path):
+            raise ValueError("add_to_path must be a list of non-empty strings")
         self.cwd = cwd
         self.name = name
         self.mounts = mounts or []
@@ -147,7 +162,7 @@ class OpenyuanrongSandbox(Sandbox):
     async def start(self) -> None:
         if self._sandbox is not None:
             return
-        sdk = _load_sandbox_module()
+        sdk = _load_sdk()
         sb_kwargs: dict[str, Any] = {
             "image": self.image,
             "cpu": self.cpu,
@@ -157,7 +172,7 @@ class OpenyuanrongSandbox(Sandbox):
             "idle_timeout": self.idle_timeout,
         }
         if self.mounts:
-            sb_kwargs["mounts"] = [self._coerce_mount(m, sdk.Mount) for m in self.mounts]
+            sb_kwargs["mounts"] = [self._coerce_mount(m, sdk) for m in self.mounts]
         if self.env:
             sb_kwargs["env"] = self.env
         if self.cwd:
@@ -172,6 +187,9 @@ class OpenyuanrongSandbox(Sandbox):
         if name is not None:
             sb_kwargs["name"] = name
         sb_kwargs.update(self.extra_kwargs)
+        # An explicit ``connection`` in sandbox_kwargs wins over the env-derived one.
+        if "connection" not in sb_kwargs:
+            sb_kwargs["connection"] = _connection_config(sdk)
         self._sandbox = await asyncio.to_thread(lambda: sdk.Sandbox(**sb_kwargs))
 
     async def stop(self) -> None:
@@ -202,8 +220,14 @@ class OpenyuanrongSandbox(Sandbox):
     ) -> _OpenyuanrongShell:
         """Return a long-lived SDK shell (cwd/env persist across ``run`` calls)."""
         sb = self._require()
-        shell = await sb.shells.create(cwd=cwd, envs=env)
-        return _OpenyuanrongShell(shell)
+        shell = _OpenyuanrongShell(await sb.shells.create(cwd=cwd, envs=env))
+        if (path_setup := self._path_setup_command()) is not None:
+            result = await shell.run(path_setup)
+            if result.exit_code != 0:
+                await shell.close()
+                detail = result.stderr or result.stdout or f"exit code {result.exit_code}"
+                raise RuntimeError(f"failed to initialize OpenYuanrong shell PATH: {detail}")
+        return shell
 
     # ----- public: data plane (files / ports) -----
     async def read_file(self, path: str) -> bytes:
@@ -241,14 +265,36 @@ class OpenyuanrongSandbox(Sandbox):
         return self._sandbox
 
     @staticmethod
-    def _coerce_mount(m: Any, MountCls: type) -> Any:
-        """Accept a ``Mount`` instance or a dict (``target`` + ``image_url``/``s3_config``)."""
+    def _coerce_mount(m: Any, sdk: Any) -> Any:
+        """Accept a ``Mount`` instance or a dict (``target`` + ``image_url``/``s3_config``).
+
+        The SDK validates types strictly, so a nested ``s3_config`` dict is
+        reified into ``S3Config`` before constructing the ``Mount``.
+        """
         if isinstance(m, dict):
-            return MountCls(**m)
+            m = dict(m)
+            if isinstance(m.get("s3_config"), dict):
+                m["s3_config"] = sdk.S3Config(**m["s3_config"])
+            return sdk.Mount(**m)
         return m
 
     def _is_timeout_error(self, exc: BaseException) -> bool:
-        return "Command timed out after" in str(exc) or super()._is_timeout_error(exc)
+        # openyuanrong_sandbox reports an expired command budget in-band ("Command timed
+        # out after ..."); server-side failures may still raise with that wording.
+        return "timed out after" in str(exc) or super()._is_timeout_error(exc)
+
+    def _path_setup_command(self) -> str | None:
+        """Return a shell command that prepends configured directories to PATH.
+
+        ``Sandbox(env=...)`` has ordinary environment-assignment semantics, so
+        setting its ``PATH`` key would replace the task image's original PATH.
+        Expanding ``PATH`` in the remote command/shell preserves image tools
+        such as conda while giving mounted sidecars precedence.
+        """
+        if not self.add_to_path:
+            return None
+        prefix = ":".join(self.add_to_path)
+        return f'export PATH={shlex.quote(prefix)}:"${{PATH:-}}"'
 
     async def _exec(
         self,
@@ -258,14 +304,21 @@ class OpenyuanrongSandbox(Sandbox):
         workdir: str | None = None,
         env: dict[str, str] | None = None,
     ) -> ExecResult:
-        """Run ``argv`` once via akernel ``Commands.run``."""
+        """Run ``argv`` once via openyuanrong_sandbox ``Commands.run``."""
         sb = self._require()
         timeout_i = int(timeout) if timeout else 60
+        command = shlex.join(argv)
+        if (path_setup := self._path_setup_command()) is not None:
+            command = f"{path_setup}; {command}"
         # commands.run is a blocking SDK poll; run it off the event loop.
-        result = await asyncio.to_thread(sb.commands.run, shlex.join(argv), envs=env, cwd=workdir, timeout=timeout_i)
+        result = await asyncio.to_thread(sb.commands.run, command, envs=env, cwd=workdir, timeout=timeout_i)
         exit_code = int(result.exit_code)
         stdout = _to_str(getattr(result, "stdout", ""))
         stderr = _to_str(getattr(result, "stderr", ""))
+        # openyuanrong_sandbox surfaces command timeouts as a result (exit_code=-1), not
+        # an exception; re-raise so the shared exec() policy classifies it.
+        if exit_code == -1 and "timed out" in stderr:
+            raise TimeoutError(stderr)
         if exit_code != 0:
             raise RuntimeError(stderr or f"command exited with {exit_code}")
         return ExecResult(exit_code=0, stdout=stdout, stderr=stderr)

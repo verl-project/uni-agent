@@ -12,6 +12,15 @@ if TYPE_CHECKING:
     from .base import SandboxConfig
 
 
+def _positive_timeout(name: str, value: float | None) -> float | None:
+    if value is None:
+        return None
+    value = float(value)
+    if value <= 0:
+        raise ValueError(f"{name} must be a positive number of seconds, got {value!r}")
+    return value
+
+
 @register_sandbox("docker")
 class DockerSandbox(Sandbox):
     """Run an isolated sandbox from an image available to a local Docker daemon."""
@@ -24,6 +33,8 @@ class DockerSandbox(Sandbox):
         container_name: str | None = None,
         run_args: list[str] | None = None,
         pull_policy: str = "missing",
+        pull_timeout: float | None = None,
+        start_timeout: float | None = None,
         entrypoint: str = "sleep",
         command: list[str] | None = None,
     ) -> None:
@@ -34,6 +45,8 @@ class DockerSandbox(Sandbox):
         if pull_policy not in {"always", "missing", "never"}:
             raise ValueError("pull_policy must be one of: 'always', 'missing', 'never'")
         self.pull_policy = pull_policy
+        self.pull_timeout = _positive_timeout("pull_timeout", pull_timeout)
+        self.start_timeout = _positive_timeout("start_timeout", start_timeout)
         self.entrypoint = entrypoint
         self.command = list(command or ["infinity"])
         self._container_name: str | None = None
@@ -69,6 +82,21 @@ class DockerSandbox(Sandbox):
             stderr=_to_str(stderr),
         )
 
+    async def _has_image(self) -> bool:
+        return (await self._run_docker("image", "inspect", self.image)).exit_code == 0
+
+    async def _pull_image(self) -> None:
+        """Fetch the image up front so the pull is bounded by ``pull_timeout``, not by ``docker run``."""
+        try:
+            pulled = await self._run_docker("pull", self.image, timeout=self.pull_timeout)
+        except asyncio.TimeoutError as exc:
+            raise TimeoutError(
+                f"Pulling Docker image {self.image!r} exceeded pull_timeout={self.pull_timeout:g}s"
+            ) from exc
+        if pulled.exit_code != 0:
+            detail = pulled.stderr.strip() or pulled.stdout.strip()
+            raise RuntimeError(f"Failed to pull Docker image {self.image!r}: {detail}")
+
     async def start(self) -> None:
         if self._container_name is not None:
             return
@@ -79,15 +107,30 @@ class DockerSandbox(Sandbox):
                 detail = inspected.stderr.strip() or inspected.stdout.strip()
                 raise RuntimeError(f"Docker image {self.image!r} is not available locally: {detail}")
 
+        # A separate `docker pull` to time-bound the pull on its own
+        pull_policy = self.pull_policy
+        if self.pull_timeout is not None and pull_policy != "never":
+            if pull_policy == "always" or not await self._has_image():
+                await self._pull_image()
+            pull_policy = "never"
+
         name = self.container_name or f"uni-agent-{uuid.uuid4().hex[:12]}"
-        args = ["run", "--rm", "-d", "--name", name, "--pull", self.pull_policy]
+        args = ["run", "--rm", "-d", "--name", name, "--pull", pull_policy]
         if self.entrypoint:
             args.extend(["--entrypoint", self.entrypoint])
         args.extend(self.run_args)
         args.append(self.image)
         args.extend(self.command)
 
-        started = await self._run_docker(*args)
+        try:
+            started = await self._run_docker(*args, timeout=self.start_timeout)
+        except asyncio.TimeoutError as exc:
+            # The timed-out `docker run` may still have created the container; drop it so a
+            # retry with the same container_name does not collide.
+            await self._run_docker("rm", "-f", name, timeout=30.0)
+            raise TimeoutError(
+                f"Starting Docker sandbox from {self.image!r} exceeded start_timeout={self.start_timeout:g}s"
+            ) from exc
         if started.exit_code != 0:
             detail = started.stderr.strip() or started.stdout.strip()
             raise RuntimeError(f"Failed to start Docker sandbox from {self.image!r}: {detail}")

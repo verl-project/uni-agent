@@ -52,12 +52,19 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
             "pull_policy": "missing",
             # Optional arguments inserted before the image in `docker run`.
             "run_args": ["--network", "none"],
+            # Optional seconds budget for pulling the image and for starting the container.
+            "pull_timeout": 900,
+            "start_timeout": 120,
         },
     )
     ```
 
     The provider starts an ephemeral container, executes commands with `docker exec`,
     transfers files with `docker cp`, and removes the container when the sandbox exits.
+    Setting `pull_timeout` moves the pull into its own `docker pull` step so a stalled
+    registry fails with a clear error instead of eating the whole startup budget
+    (`SANDBOX_STARTUP_TIMEOUT`, 600s by default, which bounds pull and start together);
+    `start_timeout` then bounds only `docker run`. Both are unset by default.
     The default container command is `sleep infinity`; images without `sleep` can override
     `entrypoint` and `command` in `sandbox_kwargs`. Run `docker login <registry>` first when
     pulling from a private registry.
@@ -142,8 +149,7 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
     Install the sandbox SDK:
 
     ```bash
-    pip install akernel_sdk
-    pip install openyuanrong_sdk
+    pip install openyuanrong-sandbox
     ```
 
     Configure the service endpoint and credentials through environment variables:
@@ -151,8 +157,8 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
     ```bash
     export OPENYUANRONG_SERVER_ADDRESS="<server-address>"
     export OPENYUANRONG_TOKEN="<token>"
-    # Optional: toggle SSL verification on the reverse tunnel (default "0").
-    export OPENYUANRONG_TUNNEL_SSL_VERIFY="0"
+    # Optional: TLS for the frontend (default "1"). Set to "0" for plain HTTP.
+    export OPENYUANRONG_TLS="1"
     ```
 
     Configure the image, lifecycle timeout, and optional resource limits, mounts, and reverse tunnel:

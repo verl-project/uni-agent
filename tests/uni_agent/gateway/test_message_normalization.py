@@ -54,40 +54,6 @@ def test_canonicalizing_an_existing_result_is_idempotent():
     assert messages == _messages()
 
 
-def test_encode_incremental_reuse_preserves_token_ids_and_messages():
-    messages = [
-        {"role": "assistant", "content": "", "reasoning_content": "think"},
-        {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "search", "arguments": {}}}],
-        },
-        {"role": "tool", "tool_call_id": "call_1", "content": "ok"},
-    ]
-    before = deepcopy(messages)
-    codec = MessageCodec(FakeTokenizer())
-
-    first = codec.encode_incremental(messages)
-    second = codec.encode_incremental(messages)
-
-    assert first == second
-    assert messages == before
-
-
-def test_encode_incremental_coalesces_responses_assistant_fragments():
-    codec = MessageCodec(FakeTokenizer())
-
-    encoded = codec.encode_incremental(
-        [
-            {"role": "assistant", "content": "", "reasoning_content": "thinking"},
-            {"role": "assistant", "content": "", "tool_calls": []},
-            {"role": "tool", "tool_call_id": "call_1", "content": "ok"},
-        ]
-    )
-
-    assert encoded
-
-
 class _SessionBackend:
     def __init__(self):
         self.calls = []

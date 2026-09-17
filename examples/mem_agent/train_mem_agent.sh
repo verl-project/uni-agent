@@ -54,7 +54,7 @@ fi
 
 PPO_MINI_BATCH_SIZE="${PPO_MINI_BATCH_SIZE:-32}"
 ROLLOUT_N="${ROLLOUT_N:-4}"
-PARAMETER_SYNC_STEP="${PARAMETER_SYNC_STEP:-2}"
+PARAMETER_SYNC_STEP="${PARAMETER_SYNC_STEP:-4}"
 NUM_WARMUP_BATCHES="${NUM_WARMUP_BATCHES:-1}"
 TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-$((PARAMETER_SYNC_STEP * PPO_MINI_BATCH_SIZE))}"
 
@@ -127,8 +127,9 @@ PY
     data.prompt_key=prompt \
     data.return_raw_chat=True \
     ++data.apply_chat_template_kwargs.enable_thinking=False \
-    data.filter_overlong_prompts=False \
-    data.truncation=error \
+    data.shuffle=False \
+    data.filter_overlong_prompts=True \
+    data.truncation=center \
     data.max_prompt_length="${MAX_PROMPT_LENGTH}" \
     data.max_response_length="${MAX_RESPONSE_LENGTH}" \
     data.train_batch_size="${TRAIN_BATCH_SIZE}" \
@@ -136,15 +137,21 @@ PY
     data.custom_cls.name=HotpotQAMemAgentDataset \
     ++data.context_chunk_size="${CONTEXT_CHUNK_SIZE}" \
     algorithm.adv_estimator=grpo \
+    algorithm.norm_adv_by_std_in_grpo=False \
     algorithm.use_kl_in_reward=False \
     algorithm.rollout_correction.bypass_mode=False \
     actor_rollout_ref.model.path="${MODEL_PATH}" \
     actor_rollout_ref.model.trust_remote_code=True \
+    actor_rollout_ref.model.use_remove_padding=True \
+    actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.actor.strategy=fsdp2 \
     actor_rollout_ref.actor.optim.lr=1e-6 \
-    actor_rollout_ref.actor.use_kl_loss=False \
+    actor_rollout_ref.actor.optim.lr_warmup_steps=20 \
+    actor_rollout_ref.actor.use_kl_loss=True \
+    actor_rollout_ref.actor.kl_loss_coef=0.001 \
+    actor_rollout_ref.actor.kl_loss_type=low_var_kl \
     actor_rollout_ref.actor.clip_ratio_low=0.2 \
-    actor_rollout_ref.actor.clip_ratio_high=0.28 \
+    actor_rollout_ref.actor.clip_ratio_high=0.2 \
     actor_rollout_ref.actor.use_dynamic_bsz=True \
     actor_rollout_ref.actor.ppo_mini_batch_size="${PPO_MINI_BATCH_SIZE}" \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu="${PPO_MAX_TOKEN_LEN_PER_GPU}" \
@@ -163,7 +170,7 @@ PY
     actor_rollout_ref.rollout.max_model_len="${MAX_MODEL_LEN}" \
     actor_rollout_ref.rollout.max_num_batched_tokens="${MAX_MODEL_LEN}" \
     actor_rollout_ref.rollout.temperature=1.0 \
-    actor_rollout_ref.rollout.top_p=0.7 \
+    actor_rollout_ref.rollout.top_p=1.0 \
     actor_rollout_ref.rollout.top_k=-1 \
     actor_rollout_ref.rollout.calculate_log_probs=True \
     actor_rollout_ref.rollout.log_prob_max_token_len_per_gpu="${PPO_MAX_TOKEN_LEN_PER_GPU}" \

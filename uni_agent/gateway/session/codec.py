@@ -13,10 +13,11 @@ from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
-from uni_agent.gateway.message_normalization import canonicalize_messages, coalesce_consecutive_assistant_messages
+from uni_agent.gateway.utils import normalize_tool_arguments
 from verl.utils.tokenizer import normalize_token_ids
 from verl.utils.tokenizer.chat_template import apply_chat_template as _apply_chat_template
 from verl.utils.tokenizer.chat_template import initialize_turn_separator
+from verl.utils.tokenizer.continuous_token_wiring import create_continuous_token_builder
 
 # Map backend stop_reason values into the gateway's internal finish_reason vocabulary.
 _FINISH_REASON_MAP = {
@@ -41,41 +42,6 @@ _VLLM_TOOL_PARSER_ALIASES = {
 }
 
 
-def _apply_chat_template_for_model(processing_class, messages: list[dict[str, Any]], **kwargs):
-    """Render a model prompt while handling strict no-user templates locally.
-
-    Clean verl already retries a failed render with a synthetic user message,
-    but that retry prepends the user before a leading system message. Strict
-    templates such as Qwen3.5 reject that ordering. Keep this compatibility at
-    the recipe's model boundary so the pinned verl checkout remains unmodified.
-    """
-    try:
-        return _apply_chat_template(processing_class, messages, **kwargs)
-    except Exception:
-        if any(message.get("role") == "user" for message in messages):
-            raise
-
-        normalized = canonicalize_messages(messages)
-        system_messages = [message for message in normalized if message.get("role") == "system"]
-        if not system_messages:
-            # Preserve clean verl's existing fallback for assistant-only
-            # histories; this compatibility is specifically for a strict
-            # template with a leading system and no user message.
-            raise
-
-        # The wire adapters normally perform this canonicalization. Keep the
-        # codec safe for direct callers as well, without mutating the
-        # caller-owned message history.
-        normalized = [dict(message) for message in normalized]
-        insertion_index = 1
-
-        normalized.insert(
-            insertion_index,
-            {"role": "user", "content": [{"type": "text", "text": ""}]},
-        )
-        return _apply_chat_template(processing_class, normalized, **kwargs)
-
-
 def _canonical_tools_hash(tools: list[dict[str, Any]]) -> str:
     """Return a stable hash for a tool schema independent of dict key order."""
     canonical = json.dumps(tools, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
@@ -85,7 +51,7 @@ def _canonical_tools_hash(tools: list[dict[str, Any]]) -> str:
 def initialize_generation_prompt(processing_class, **apply_chat_template_kwargs) -> list[int]:
     """Initialize the token suffix inserted by ``add_generation_prompt=True``."""
     without_generation_prompt = normalize_token_ids(
-        _apply_chat_template_for_model(
+        _apply_chat_template(
             processing_class,
             [{"role": "user", "content": ""}],
             add_generation_prompt=False,
@@ -93,7 +59,7 @@ def initialize_generation_prompt(processing_class, **apply_chat_template_kwargs)
         )
     )
     with_generation_prompt = normalize_token_ids(
-        _apply_chat_template_for_model(
+        _apply_chat_template(
             processing_class,
             [{"role": "user", "content": ""}],
             add_generation_prompt=True,
@@ -105,15 +71,34 @@ def initialize_generation_prompt(processing_class, **apply_chat_template_kwargs)
     return with_generation_prompt[len(without_generation_prompt) :]
 
 
-def _canonicalize_tool_arguments_for_comparison(arguments: Any) -> tuple[str, Any]:
-    if isinstance(arguments, dict | list):
-        return ("json", arguments)
-    if isinstance(arguments, str):
-        try:
-            return ("json", json.loads(arguments))
-        except json.JSONDecodeError:
-            return ("raw", arguments)
-    return ("raw", arguments)
+def _normalize_messages_for_continuous_tokens(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep a leading system message before the Qwen synthetic user anchor.
+
+    ``verl`` can add a dummy user when a chat template requires one.  That
+    fallback must come after an existing system message (Qwen3.5 rejects a
+    system message that follows a user message).  Return copies so the session
+    history owned by the framework is never mutated.
+    """
+
+    normalized = []
+    for message in messages:
+        copied = dict(message)
+        if isinstance(message.get("tool_calls"), list):
+            copied["tool_calls"] = list(message["tool_calls"])
+        normalized.append(copied)
+    if any(message.get("role") == "user" for message in normalized):
+        return normalized
+    first_non_system = next(
+        (index for index, message in enumerate(normalized) if message.get("role") != "system"),
+        len(normalized),
+    )
+    if first_non_system == 0:
+        return normalized
+    return [
+        *normalized[:first_non_system],
+        {"role": "user", "content": [{"type": "text", "text": ""}]},
+        *normalized[first_non_system:],
+    ]
 
 
 class MessageCodec:
@@ -135,22 +120,36 @@ class MessageCodec:
         tool_parser_name: str | None = None,
         rollout_backend: str | None = None,
         enable_tool_parser_cache: bool = True,
+        hf_model_type: str | None = None,
         apply_chat_template_kwargs: dict[str, Any] | None = None,
+        mm_processor_kwargs: dict[str, Any] | None = None,
     ):
         self._tokenizer = tokenizer
         self._processor = processor
         self._vision_info_extractor = vision_info_extractor or self._default_vision_info_extractor
         self._vision_info_extractor_kwargs = dict(vision_info_extractor_kwargs or {})
         self._apply_chat_template_kwargs = dict(apply_chat_template_kwargs or {})
+        self._mm_processor_kwargs = dict(mm_processor_kwargs or {})
+        self._continuous_token_builder = create_continuous_token_builder(
+            tokenizer,
+            hf_model_type=hf_model_type,
+            chat_template_kwargs=self._apply_chat_template_kwargs,
+            mm_processor_kwargs=self._mm_processor_kwargs,
+            processor=processor,
+        )
         processing_class = self._processor if self._processor is not None else tokenizer
-        self._generation_prompt = initialize_generation_prompt(
-            processing_class,
-            **self._apply_chat_template_kwargs,
-        )
-        self._turn_separator = initialize_turn_separator(
-            processing_class,
-            **self._apply_chat_template_kwargs,
-        )
+        if hasattr(processing_class, "chat_template") and processing_class.chat_template is None:
+            self._generation_prompt = []
+            self._turn_separator = []
+        else:
+            self._generation_prompt = initialize_generation_prompt(
+                processing_class,
+                **self._apply_chat_template_kwargs,
+            )
+            self._turn_separator = initialize_turn_separator(
+                processing_class,
+                **self._apply_chat_template_kwargs,
+            )
         self._tool_parser_name = tool_parser_name
         self._rollout_backend = rollout_backend
         self._enable_tool_parser_cache = enable_tool_parser_cache
@@ -163,6 +162,11 @@ class MessageCodec:
         # optimization for parser implementations that require request-scoped
         # instances.
         self._tool_parser_cache: dict[tuple[str, ...], Any] = {}
+
+    @property
+    def mm_processor_kwargs(self) -> dict[str, Any]:
+        """Return processor kwargs shared by CT rendering and inference."""
+        return dict(self._mm_processor_kwargs)
 
     @property
     def generation_prompt(self) -> list[int]:
@@ -222,97 +226,72 @@ class MessageCodec:
             **self._vision_info_extractor_kwargs,
         )
 
-    def _encode_prompt_text(
-        self,
-        prompt: str,
-        image_data: list[Any] | None = None,
-        video_data: list[Any] | None = None,
-    ) -> list[int]:
-        """Encode rendered prompt text with the configured tokenizer or processor."""
-        if self._processor is None:
-            return normalize_token_ids(self._tokenizer.encode(prompt, add_special_tokens=False))
-
-        videos = video_data
-        video_metadata = None
-        if videos is not None:
-            videos, video_metadata = zip(*videos, strict=False)
-            videos, video_metadata = list(videos), list(video_metadata)
-        model_inputs = self._processor(
-            text=[prompt],
-            images=image_data,
-            videos=videos,
-            video_metadata=video_metadata,
-            return_tensors="pt",
-            do_sample_frames=False,
-        )
-        return normalize_token_ids(model_inputs["input_ids"])
-
-    def encode_full(
+    def build_initial_tokens(
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None = None,
         image_data: list[Any] | None = None,
         video_data: list[Any] | None = None,
     ) -> list[int]:
-        """Encode a full chat history into prompt token IDs."""
-        processing_class = self._processor if self._processor is not None else self._tokenizer
-        raw_prompt = _apply_chat_template_for_model(
-            processing_class,
-            messages,
+        """Build the initial runtime token stream."""
+        return self._continuous_token_builder.build_initial_tokens(
+            _normalize_messages_for_continuous_tokens(messages),
             tools=tools,
-            add_generation_prompt=True,
-            tokenize=False,
-            **self._apply_chat_template_kwargs,
+            images=image_data,
+            videos=video_data,
         )
-        return self._encode_prompt_text(raw_prompt, image_data, video_data)
 
-    def encode_incremental(
+    def merge_assistant_tokens(
         self,
-        messages: list[dict[str, Any]],
+        runtime_token_ids: list[int],
+        assistant_token_ids: list[int],
+        response_mask: list[int],
+        response_logprobs: list[float] | None = None,
+        *,
+        assistant_logprobs: list[float] | None = None,
+    ) -> tuple[list[int], list[int], list[float] | None]:
+        """Merge model-generated tokens and align response metadata."""
+        merge_result = self._continuous_token_builder.merge_assistant_tokens(
+            runtime_token_ids,
+            assistant_token_ids,
+        )
+        response_mask, response_logprobs = self._continuous_token_builder.align_response_metadata(
+            merge_result,
+            response_mask,
+            response_logprobs,
+            assistant_logprobs=assistant_logprobs,
+        )
+        return merge_result.token_ids, response_mask, response_logprobs
+
+    def merge_context_tokens(
+        self,
+        previous_messages: list[dict[str, Any]],
+        updated_messages: list[dict[str, Any]],
+        runtime_token_ids: list[int],
+        response_mask: list[int],
+        response_logprobs: list[float] | None = None,
+        *,
+        tools: list[dict[str, Any]] | None = None,
         image_data: list[Any] | None = None,
         video_data: list[Any] | None = None,
-    ) -> list[int]:
-        """Encode continuation messages using a dummy-user anchored delta."""
-        if not messages:
-            return []
-
-        messages = coalesce_consecutive_assistant_messages(messages)
-        processing_class = self._processor if self._processor is not None else self._tokenizer
-        anchor_content = [{"type": "text", "text": ""}] if self._processor is not None else ""
-        anchor = [{"role": "user", "content": anchor_content}]
-
-        if any(message.get("role") == "assistant" for message in messages[1:]):
-            raise ValueError("An incremental assistant message may only appear first")
-
-        # TODO: Replace this user/tool empty-user fallback with continuous-token merging.
-        # A user -> tool anchor is not valid for every chat template.
-        anchor_prompt = _apply_chat_template_for_model(
-            processing_class,
-            anchor,
-            add_generation_prompt=False,
-            tokenize=False,
-            **self._apply_chat_template_kwargs,
+    ) -> tuple[list[int], list[int], list[float] | None]:
+        """Merge appended context and align response metadata."""
+        if image_data or video_data:
+            raise ValueError(
+                "Continuous Token context merging does not currently support incremental image or video data"
+            )
+        merge_result = self._continuous_token_builder.merge_context_tokens(
+            _normalize_messages_for_continuous_tokens(previous_messages),
+            _normalize_messages_for_continuous_tokens(updated_messages),
+            runtime_token_ids,
+            tools=tools,
         )
-        full_prompt = _apply_chat_template_for_model(
-            processing_class,
-            anchor + messages,
-            add_generation_prompt=True,
-            tokenize=False,
-            **self._apply_chat_template_kwargs,
+        response_mask, response_logprobs = self._continuous_token_builder.align_response_metadata(
+            merge_result,
+            response_mask,
+            response_logprobs,
         )
-        prefix_prompt = anchor_prompt
-        if self._turn_separator:
-            separator_text = self._tokenizer.decode(self._turn_separator, skip_special_tokens=False)
-            if not separator_text or not anchor_prompt.endswith(separator_text):
-                raise ValueError("Turn separator is not a stable text suffix")
-            prefix_prompt = anchor_prompt[: -len(separator_text)]
-        if not full_prompt.startswith(prefix_prompt):
-            raise ValueError("Incremental chat template is not prefix-stable")
-        return self._encode_prompt_text(
-            full_prompt[len(prefix_prompt) :],
-            image_data,
-            video_data,
-        )
+        return merge_result.token_ids, response_mask, response_logprobs
 
     def _process_tool_calls_sglang(
         self,
@@ -415,8 +394,7 @@ class MessageCodec:
         stop_reason: str | None = None,
     ) -> tuple[dict[str, Any], str]:
         """Decode model output tokens into an assistant message and finish reason."""
-        finish_reason = _FINISH_REASON_MAP.get(stop_reason, stop_reason) if stop_reason else "stop"
-        if self._tool_parser_name and tools and finish_reason != "length":
+        if self._tool_parser_name and tools:
             content, function_calls = await self._extract_tool_calls(
                 response_ids,
                 tools,
@@ -427,7 +405,10 @@ class MessageCodec:
                     {
                         "id": f"call_{uuid4().hex[:8]}",
                         "type": "function",
-                        "function": {"name": fc.name, "arguments": fc.arguments},
+                        "function": {
+                            "name": fc.name,
+                            "arguments": normalize_tool_arguments(fc.arguments),
+                        },
                     }
                     for fc in function_calls
                 ]
@@ -438,6 +419,7 @@ class MessageCodec:
                 }
                 return message, "tool_calls"
         response_text = self._tokenizer.decode(response_ids, skip_special_tokens=True)
+        finish_reason = _FINISH_REASON_MAP.get(stop_reason, stop_reason) if stop_reason else "stop"
         return {"role": "assistant", "content": response_text}, finish_reason
 
     def canonicalize_message_for_prefix_comparison(self, message: dict[str, Any]) -> dict[str, Any]:
@@ -452,11 +434,6 @@ class MessageCodec:
         for tool_call in tool_calls:
             normalized_tool_call = dict(tool_call)
             normalized_tool_call.pop("id", None)
-            function = normalized_tool_call.get("function")
-            if isinstance(function, dict) and "arguments" in function:
-                normalized_function = dict(function)
-                normalized_function["arguments"] = _canonicalize_tool_arguments_for_comparison(function["arguments"])
-                normalized_tool_call["function"] = normalized_function
             normalized_tool_calls.append(normalized_tool_call)
         normalized["tool_calls"] = normalized_tool_calls
         return normalized

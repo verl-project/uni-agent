@@ -15,6 +15,7 @@ import contextvars
 import hashlib
 import json
 import logging
+import os
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -92,16 +93,16 @@ def _report_span(
     attributes: dict[str, Any] | None = None,
     identity: dict[str, Any] | None = None,
 ) -> None:
-    """Report one completed span through verl's RLInsightLogger adapter.
+    """Report one completed span through the unified rl-insight facade.
 
-    Common trace labels from the current context are merged first, so callers
-    only need to add span-specific attributes.
+    The facade's ``trace_span`` delegates to verl's ``RLInsightLogger.trace_span``
+    (env gate + version check + lazy init live there), so the gateway flow is
+    unchanged. Common trace labels from the current context are merged first,
+    so callers only need to add span-specific attributes.
     """
+    from . import trace_span
+
     merged_attributes = {**(identity or _get_trace_identity()), **(attributes or {})}
-    trace_span = getattr(RLInsightLogger, "trace_span", None)
-    if trace_span is None:
-        _warn_once("verl.trace_span", "installed verl does not provide RLInsightLogger.trace_span")
-        return
     try:
         trace_span(
             name=name,
@@ -196,6 +197,45 @@ def task_span(
             _reset_trace_identity(token)
 
 
+# Per-field character cap for span text. Span attributes end up in Tempo, so an
+# unbounded value would bloat a single trace.
+_SPAN_TEXT_LIMIT = int(os.environ.get("VERL_RL_INSIGHT_SPAN_TEXT_LIMIT", "2000"))
+
+
+def _tool_arguments_text(tool_call: dict[str, Any]) -> str:
+    """Return the tool call arguments, i.e. the command the agent actually ran.
+
+    OpenAI-style payloads carry ``arguments`` as a JSON string, but locally
+    constructed calls may pass a dict; accept both.
+    """
+    arguments = (tool_call.get("function") or {}).get("arguments")
+    if arguments is None:
+        return ""
+    if not isinstance(arguments, str):
+        try:
+            arguments = json.dumps(arguments, ensure_ascii=False)
+        except (TypeError, ValueError):
+            arguments = str(arguments)
+    return arguments[:_SPAN_TEXT_LIMIT]
+
+
+_THINK_CLOSE = "</think>"
+
+
+def _split_reasoning(content: str) -> tuple[str, str]:
+    """Split a completion into (reasoning, answer) at ``</think>``.
+
+    Chat templates that prefill an opening ``<think>`` make the completion start
+    inside the think block, so text before the closing tag is reasoning and text
+    after it is the answer. A completion with no closing tag never left the think
+    block, so all of it is reasoning.
+    """
+    head, sep, tail = content.partition(_THINK_CLOSE)
+    if not sep:
+        return content[:_SPAN_TEXT_LIMIT], ""
+    return head.strip()[:_SPAN_TEXT_LIMIT], tail.strip()[:_SPAN_TEXT_LIMIT]
+
+
 @dataclass
 class GenerationSpan:
     """Mutable gateway-generation span state."""
@@ -211,6 +251,8 @@ class GenerationSpan:
     turn: int | None = None
     type: str | None = None
     tools: list[str] | None = None
+    tool_args: list[str] | None = None
+    reasoning: str | None = None
     content: str | None = None
 
     def capacity_exhausted(self, *, prompt_tokens: int, chain_id: int | None) -> None:
@@ -236,7 +278,8 @@ class GenerationSpan:
         self.turn = turn
         self.type = "tool" if tool_calls else "llm"
         self.tools = [tool_call.get("function", {}).get("name", "") for tool_call in tool_calls]
-        self.content = str(assistant_msg.get("content") or "")[:500]
+        self.tool_args = [_tool_arguments_text(tool_call) for tool_call in tool_calls]
+        self.reasoning, self.content = _split_reasoning(str(assistant_msg.get("content") or ""))
         self.finish_reason = finish_reason
 
     def failure(self, exc: BaseException) -> None:
@@ -274,6 +317,8 @@ class GenerationSpan:
                 "turn": self.turn,
                 "type": self.type,
                 "tools": self.tools,
+                "tool_args": self.tool_args,
+                "reasoning": self.reasoning,
                 "content": self.content,
                 "prompt_tokens": self.prompt_tokens,
                 "completion_tokens": self.completion_tokens,

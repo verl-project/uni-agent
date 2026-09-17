@@ -1,0 +1,20 @@
+- name: swe_bench
+  sandbox:
+    provider: modal
+  agent:
+    name: react
+    max_steps: 100
+    tools:
+      - name: str_replace_editor
+      - name: stateful_shell
+        command_timeout: 180
+        env_vars:
+          PIP_PROGRESS_BAR: "off"
+          PAGER: "cat"
+          TQDM_DISABLE: "1"
+          GIT_PAGER: "cat"
+      - name: submit
+    model:
+      temperature: 0.8
+      top_p: 0.9
+      max_total_tokens: 65536

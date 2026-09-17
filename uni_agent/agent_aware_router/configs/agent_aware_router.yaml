@@ -1,0 +1,17 @@
+# Agent-aware router — external plugin config (FQN injection).
+#
+# Loaded by verl via rollout.router_config_path, e.g.:
+#   rollout.router_config_path: uni_agent/agent_aware_router/configs/agent_aware_router.yaml
+# ``router_class`` FQN is instantiated with this YAML as its ``config``.
+
+router_class: uni_agent.agent_aware_router.balancer.KVCAwareBalancer
+
+# The strategy node is polymorphic and MUST carry _target_ —
+# from_config hydra-instantiates it.
+strategy:
+  _target_: uni_agent.agent_aware_router.config.strategy.KVCAwareStrategyConfig
+  # overload when load > threshold (load ∈ [0,1], bigger = more loaded)
+  load_threshold: 0.9
+
+collector:
+  http_interval: 5

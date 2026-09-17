@@ -106,6 +106,9 @@ include = ["uni_agent*"]
 
 [tool.setuptools.package-data]
 uni_agent = ["version/*"]
+"uni_agent.agent_aware_router" = [
+  "configs/*.yaml",
+]
 
 [tool.pytest.ini_options]
 markers = [

@@ -2,9 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.uni_agent.support import FakeTokenizer
 from uni_agent.gateway.adapters.responses import responses_build_response, responses_to_internal
-from uni_agent.gateway.session.codec import MessageCodec
 
 pytestmark = [pytest.mark.cpu, pytest.mark.level0]
 
@@ -64,7 +62,6 @@ def test_responses_continuation_coalesces_reasoning_and_function_call():
     assert [message["role"] for message in continuation] == ["assistant", "tool"]
     assert continuation[0]["reasoning_content"] == "inspect first"
     assert continuation[0]["tool_calls"][0]["function"]["name"] == "exec_command"
-    MessageCodec(FakeTokenizer()).encode_incremental(continuation)
 
 
 def test_responses_canonicalizes_developer_and_late_system_messages():

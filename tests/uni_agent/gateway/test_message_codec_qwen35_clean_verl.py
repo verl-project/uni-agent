@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from uni_agent.gateway.session import codec as codec_module
-from uni_agent.gateway.session.codec import MessageCodec
+from uni_agent.gateway.session.codec import MessageCodec, _normalize_messages_for_continuous_tokens
 
 pytestmark = [pytest.mark.cpu, pytest.mark.level0]
 
@@ -50,20 +49,14 @@ class StrictQwenTokenizer:
         return str(content)
 
 
-def test_system_only_full_encode_inserts_dummy_user_after_system(monkeypatch):
-    calls = []
-
-    def clean_verl_apply(processing_class, messages, **kwargs):
-        calls.append([message["role"] for message in messages])
-        return processing_class.apply_chat_template(messages, **kwargs)
-
-    monkeypatch.setattr(codec_module, "_apply_chat_template", clean_verl_apply)
+def test_system_only_initial_tokens_insert_dummy_user_after_system():
     tokenizer = StrictQwenTokenizer()
     codec = MessageCodec(tokenizer)
     messages = [{"role": "system", "content": "system prompt"}]
 
-    encoded = codec.encode_full(messages)
+    normalized = _normalize_messages_for_continuous_tokens(messages)
+    encoded = codec.build_initial_tokens(messages)
 
     assert messages == [{"role": "system", "content": "system prompt"}]
-    assert calls[-2:] == [["system"], ["system", "user"]]
+    assert [message["role"] for message in normalized] == ["system", "user"]
     assert "<system>system prompt<end><user><end><assistant>" == tokenizer.decode(encoded)
