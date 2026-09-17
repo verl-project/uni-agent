@@ -12,6 +12,8 @@ from uni_agent.tasks import TaskConfig, TaskConfigResolver, get_task
 _LOCAL_SANDBOX = {"provider": "local"}
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_task_config_has_no_logging_runtime_fields():
     assert "log_dir" not in TaskConfig.model_fields
 
