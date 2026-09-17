@@ -235,6 +235,7 @@ async def test_from_config_warns_for_unsupported_colocated_hybrid_reward(
             {"max_pixels": 1024},
         ),
         ({}, {"enable_tool_parser_cache": False}, True, False, {}, {}),
+        ({}, {"coalesce_reserved_exact_requests": False}, True, True, {}, {}),
     ],
 )
 def test_build_gateway_manager_wires_gateway_config_defaults(
@@ -309,6 +310,9 @@ def test_build_gateway_manager_wires_gateway_config_defaults(
     assert captured["gateway_actor_config"].rollout_backend == "vllm"
     assert captured["gateway_actor_config"].enable_last_assistant_rollback is expected_rollback
     assert captured["gateway_actor_config"].enable_tool_parser_cache is expected_cache
+    assert captured["gateway_actor_config"].coalesce_reserved_exact_requests is agent_framework_config.get(
+        "coalesce_reserved_exact_requests", True
+    )
     assert captured["gateway_actor_config"].hf_model_type == "deepseek_v4"
     assert isinstance(captured["gateway_actor_config"].apply_chat_template_kwargs, dict)
     assert captured["gateway_actor_config"].apply_chat_template_kwargs == expected_chat_template_kwargs

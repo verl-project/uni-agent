@@ -87,18 +87,19 @@ def test_gateway_actor_config_enables_last_assistant_rollback_by_default():
 @pytest.mark.cpu
 @pytest.mark.level0
 @pytest.mark.asyncio
-async def test_gateway_actor_forwards_singleflight_to_session():
+@pytest.mark.parametrize("options, expected", [({}, True), ({"coalesce_reserved_exact_requests": False}, False)])
+async def test_gateway_actor_forwards_singleflight_to_session(options, expected):
     from uni_agent.gateway.config import GatewayActorConfig
     from uni_agent.gateway.gateway import _GatewayActor
 
     actor = _GatewayActor(
-        GatewayActorConfig(tokenizer=FakeTokenizer(), coalesce_reserved_exact_requests=True),
+        GatewayActorConfig(tokenizer=FakeTokenizer(), **options),
         SequencedBackend(["A"]),
     )
     actor._server_base_url = "http://test"
     await actor.create_session("singleflight-enabled")
 
-    assert actor._sessions["singleflight-enabled"]._coalesce_reserved_exact_requests is True
+    assert actor._sessions["singleflight-enabled"]._coalesce_reserved_exact_requests is expected
 
 
 @pytest.mark.cpu
@@ -1189,12 +1190,15 @@ async def test_gateway_actor_continuation_preserves_prompt_and_generation_masks(
 @pytest.mark.cpu
 @pytest.mark.level0
 @pytest.mark.asyncio
-async def test_gateway_actor_parallel_same_session_requests_by_default():
+@pytest.mark.parametrize("coalesce", [True, False])
+async def test_gateway_actor_parallel_same_session_requests(coalesce):
     from uni_agent.gateway.config import GatewayActorConfig
     from uni_agent.gateway.gateway import _GatewayActor
 
     backend = RecordingConcurrentBackend(["FIRST", "SECOND"], delay=0.05)
-    actor = _GatewayActor(GatewayActorConfig(tokenizer=FakeTokenizer()), backend)
+    actor = _GatewayActor(
+        GatewayActorConfig(tokenizer=FakeTokenizer(), coalesce_reserved_exact_requests=coalesce), backend
+    )
     actor._server_base_url = "http://gateway.local"
     await actor.create_session("session-parallel")
 
@@ -1210,12 +1214,13 @@ async def test_gateway_actor_parallel_same_session_requests_by_default():
     assert json.loads(first.body)["choices"][0]["finish_reason"] == "stop"
     assert json.loads(second.body)["choices"][0]["finish_reason"] == "stop"
     request_ids = [window[0] for window in backend.call_windows]
-    assert request_ids == ["session-parallel"] * 2
+    assert request_ids == ["session-parallel"] * (1 if coalesce else 2)
     assert max(start for _, start, _ in backend.call_windows) < min(finish for _, _, finish in backend.call_windows)
-    assert sorted(FakeTokenizer().decode(trajectory.response_ids) for trajectory in trajectories) == [
-        "FIRST",
-        "SECOND",
-    ]
+    assert sorted(FakeTokenizer().decode(trajectory.response_ids) for trajectory in trajectories) == (
+        ["FIRST"] if coalesce else ["FIRST", "SECOND"]
+    )
+    if coalesce:
+        assert json.loads(first.body)["choices"] == json.loads(second.body)["choices"]
 
 
 @pytest.mark.cpu

@@ -185,7 +185,7 @@ class GatewaySession:
         response_length: int | None = None,
         sampling_params: dict[str, Any] | None = None,
         enable_last_assistant_rollback: bool = True,
-        coalesce_reserved_exact_requests: bool = False,
+        coalesce_reserved_exact_requests: bool = True,
         metadata: dict[str, Any] | None = None,
     ):
         """Create an active session bound to a handle and model codec."""
@@ -279,11 +279,11 @@ class GatewaySession:
                     if encoded.chain_id is not None:
                         self.reserved_chain_ids.add(encoded.chain_id)
                         reserved_chain_id = encoded.chain_id
-                        if request_fingerprint is not None:
-                            # Register only after selecting an existing chain;
-                            # first-turn/new-chain requests remain independent.
-                            owner_future = asyncio.get_running_loop().create_future()
-                            self._inflight_exact_requests[request_fingerprint] = owner_future
+                    # Request ownership also covers first turns and new chains,
+                    # which have no existing chain to reserve.
+                    if request_fingerprint is not None:
+                        owner_future = asyncio.get_running_loop().create_future()
+                        self._inflight_exact_requests[request_fingerprint] = owner_future
 
             if joined_future is not None:
                 succeeded, value, chain_id, turn = await asyncio.shield(joined_future)

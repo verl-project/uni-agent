@@ -39,11 +39,10 @@ class GatewayActorConfig:
             The gateway enforces their sum when both values are set.
         enable_last_assistant_rollback: Whether latest-assistant rewrites may
             rollback and reuse an existing chain. Enabled by default.
-        coalesce_reserved_exact_requests: Whether an exact duplicate of a request
-            already generating against a reserved chain should await and reuse that
-            in-flight result instead of creating a sibling sample. Disabled by
-            default; when enabled, identical same-session sampling requests are
-            coalesced as well.
+        coalesce_reserved_exact_requests: Whether exact provider-normalized
+            requests in the same session share an in-flight result, including
+            first-turn and new-chain requests. Enabled by default; disable for
+            independent concurrent sampling of identical requests.
     """
 
     tokenizer: Any
@@ -60,7 +59,7 @@ class GatewayActorConfig:
     prompt_length: int | None = None
     response_length: int | None = None
     enable_last_assistant_rollback: bool = True
-    coalesce_reserved_exact_requests: bool = False
+    coalesce_reserved_exact_requests: bool = True
 
     def __post_init__(self) -> None:
         if type(self.enable_tool_parser_cache) is not bool:
