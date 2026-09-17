@@ -14,9 +14,6 @@ from uni_agent.gateway.session.codec import MessageCodec
 from uni_agent.gateway.session.session import GatewaySession
 from uni_agent.gateway.session.types import SessionHandle
 
-pytestmark = [pytest.mark.cpu, pytest.mark.level0]
-
-
 def _messages():
     return [
         {
@@ -32,6 +29,8 @@ def _messages():
     ]
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_coalescing_does_not_mutate_input_or_accumulate_on_reuse():
     messages = _messages()
     before = deepcopy(messages)
@@ -44,6 +43,8 @@ def test_coalescing_does_not_mutate_input_or_accumulate_on_reuse():
     assert [call["id"] for call in first[0]["tool_calls"]] == ["call_a", "call_b"]
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_canonicalizing_an_existing_result_is_idempotent():
     messages = _messages()
 
@@ -98,6 +99,8 @@ class _SessionBackend:
         return SimpleNamespace(token_ids=[token], stop_reason="stop", extra_fields={}, log_probs=None)
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_session_continuation_reuses_chain_without_mutating_request_history():
     codec = MessageCodec(FakeTokenizer())

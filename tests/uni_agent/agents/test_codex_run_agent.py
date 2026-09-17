@@ -11,12 +11,12 @@ import pytest
 
 from uni_agent.agents.codex.agent import build_agent_command
 
-pytestmark = [pytest.mark.cpu, pytest.mark.level0]
-
 ROOT = Path(__file__).parents[3]
 RUN_AGENT = ROOT / "examples" / "codex" / "run_agent.sh"
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_run_agent_preserves_stdin_arguments_and_inherited_home(tmp_path):
     tool_root = tmp_path / "tool"
     tool_bin = tool_root / "bin"
@@ -73,6 +73,8 @@ def test_run_agent_preserves_stdin_arguments_and_inherited_home(tmp_path):
     assert (home / "config.toml").is_file()
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_run_agent_propagates_codex_exit_code(tmp_path):
     tool_root = tmp_path / "tool"
     tool_bin = tool_root / "bin"

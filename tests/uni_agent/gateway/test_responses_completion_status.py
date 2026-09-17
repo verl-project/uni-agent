@@ -14,9 +14,6 @@ from uni_agent.gateway.config import GatewayActorConfig
 from uni_agent.gateway.gateway import _GatewayActor
 from uni_agent.gateway.session.codec import MessageCodec
 
-pytestmark = [pytest.mark.cpu, pytest.mark.level0]
-
-
 def _outcome(*, finish_reason: str, content: str = "partial", tool_calls=None):
     return SimpleNamespace(
         assistant_msg={
@@ -30,6 +27,8 @@ def _outcome(*, finish_reason: str, content: str = "partial", tool_calls=None):
     )
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_responses_stop_is_completed():
     response = responses_build_response(_outcome(finish_reason="stop"), model="policy")
 
@@ -38,6 +37,8 @@ def test_responses_stop_is_completed():
     assert response["output"][0]["status"] == "completed"
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_responses_length_is_incomplete_and_marks_output_items():
     response = responses_build_response(_outcome(finish_reason="length"), model="policy")
 
@@ -46,6 +47,8 @@ def test_responses_length_is_incomplete_and_marks_output_items():
     assert response["output"][0]["status"] == "incomplete"
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_responses_sse_ends_with_incomplete_event_for_length():
     response = responses_stream_response(_outcome(finish_reason="length"), model="policy")
@@ -58,6 +61,8 @@ async def test_responses_sse_ends_with_incomplete_event_for_length():
     assert b'"reason": "max_output_tokens"' in body
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_responses_complete_function_call_remains_completed():
     response = responses_build_response(
         _outcome(
@@ -79,6 +84,8 @@ def test_responses_complete_function_call_remains_completed():
     assert response["output"][0]["status"] == "completed"
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_responses_http_routes_match_json_and_sse_terminal_statuses():
     actor = _GatewayActor(
@@ -106,6 +113,8 @@ async def test_responses_http_routes_match_json_and_sse_terminal_statuses():
     assert "event: response.incomplete" not in sse_response.text
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_codec_does_not_turn_length_limited_tool_text_into_tool_call(monkeypatch):
     codec = MessageCodec(FakeTokenizer())
