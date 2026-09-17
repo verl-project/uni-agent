@@ -83,12 +83,17 @@ class MetricsUpdate:
             store owns the running counter).
         request_id: Optional routing request id carried with the update
             (``None`` when the update isn't request-scoped).
+        prompt_ids: Input token ids of the acquiring request — the collector
+            needs the prompt to resolve and pin its block-hash chain on the
+            chosen replica. Empty when the source forwarded none; ignored by
+            non-acquire updates.
     """
 
     node_id: str
     metrics: dict[str, Any]
     is_delta: bool = False
     request_id: str | None = None
+    prompt_ids: tuple[int, ...] = ()
 
 
 @dataclass

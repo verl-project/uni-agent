@@ -36,12 +36,25 @@ KV-cache-aware knobs:
   --max-num-seqs        engine max concurrent sequences.
 
 Debug mode — env overrides for the internalized strategy knobs (no CLI flags;
-see uni_agent/agent_aware_router/debug.py)::
+see uni_agent/agent_aware_router/debug.py; the knob set is
+strategies.kvc_aware.DEFAULT_STRATEGY_KNOBS)::
 
+    # pure sticky
     UNI_AGENT_ROUTER_DEBUG=1 \
     UNI_AGENT_ROUTER_SLOW_CUT=least-inflight \
     UNI_AGENT_ROUTER_OVERLOAD_MODE=None \
-        python examples/agent_aware_router/run_infer.py ...   # pure sticky
+        python examples/agent_aware_router/run_infer.py ...
+
+    # soft-pick tuning: wider tie band + pinned tie-break RNG (reproducible runs)
+    UNI_AGENT_ROUTER_DEBUG=1 \
+    UNI_AGENT_ROUTER_TIE_TOLERANCE=0.2 \
+    UNI_AGENT_ROUTER_SEED=1234 \
+        python examples/agent_aware_router/run_infer.py ...
+
+    # capacity gate: eligible-gate threshold, independent of load_threshold (default 0.9)
+    UNI_AGENT_ROUTER_DEBUG=1 \
+    UNI_AGENT_ROUTER_CAPACITY_THRESHOLD=0.95 \
+        python examples/agent_aware_router/run_infer.py ...
 
 Example (single node, 2-way tensor parallel, kvcaware router + kv-events)::
 

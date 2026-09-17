@@ -22,6 +22,7 @@ import msgpack
 import pytest
 
 from uni_agent.agent_aware_router.collectors.parse.vllm.kv import VLLMKVParser
+from uni_agent.agent_aware_router.store.data_store import DataStore
 from uni_agent.agent_aware_router.types import Layer
 
 pytestmark = [pytest.mark.level0, pytest.mark.cpu]
@@ -111,3 +112,62 @@ def test_parse_failure_surfaces_exception_not_swallowed():
     assert "{exc}" not in text  # placeholder must be gone
     assert "node1" in text  # node_id must interpolate
     assert "len=" in text and "head=c1c1c1" in text  # diagnostic preview present
+
+
+# ── Per-replica remote→local hash map (shared-map regression) ─────────────
+
+
+def _chained_stored(node_hashes, tokens_per_block=2, parent=None, medium="GPU"):
+    """One BlockStored frame: [timestamp, [[tag, hashes, parent, tokens, block_size, None, medium]]]."""
+    ids = list(range(len(node_hashes) * tokens_per_block))
+    return [0, [["stored", list(node_hashes), parent, ids, tokens_per_block, None, medium]]]
+
+
+def _removed(hashes, medium="GPU"):
+    """One BlockRemoved frame."""
+    return [0, [["removed", list(hashes), medium, None]]]
+
+
+def _apply(parser, payload, node_id, store):
+    update = parser.parse(msgpack.packb(payload), node_id)
+    assert update is not None
+    for layer, hashes in update.remove_blocks.items():
+        if hashes:
+            store.remove_kv_blocks(node_id, hashes, layer=layer)
+    for layer, hashes in update.add_blocks.items():
+        if hashes:
+            store.add_kv_blocks(node_id, hashes, layer=layer)
+    return update
+
+
+def test_hash_map_is_per_replica_and_survives_sibling_eviction():
+    """A sibling replica's eviction must not break this replica's translation.
+
+    Regression: a flat shared map let replica A's eviction pop the entry
+    replica B still needed, so B's retained count kept drifting high
+    (design doc §5.3.5).
+    """
+    parser = VLLMKVParser()
+    store = DataStore()
+    remote_hashes = ["rh0", "rh1", "rh2"]
+
+    # Same content-chained prefix stored on both replicas → identical local chain.
+    _apply(parser, _chained_stored(remote_hashes), "nodeA", store)
+    _apply(parser, _chained_stored(remote_hashes), "nodeB", store)
+    assert store.per_replica_block_counts() == {"nodeA": 3, "nodeB": 3}
+
+    # Per-replica maps: one entry per node, and local hashes agree across nodes
+    # (the prompt-side chain is replica-independent, so they must).
+    node_maps = parser.remote_to_local_block_hash
+    assert set(node_maps) == {"nodeA", "nodeB"}
+    assert node_maps["nodeA"] == node_maps["nodeB"], "local chain must not depend on the replica"
+
+    # nodeA drops the whole prefix first …
+    _apply(parser, _removed(remote_hashes), "nodeA", store)
+    assert store.per_replica_block_counts() == {"nodeA": 0, "nodeB": 3}
+
+    # … nodeB's eviction of the same remote hashes must still translate.
+    update = _apply(parser, _removed(remote_hashes), "nodeB", store)
+    assert len(update.remove_blocks[Layer.GPU]) == 3, "sibling eviction must not eat this replica's mapping"
+    assert store.per_replica_block_counts()["nodeB"] == 0, "nodeB must not retain blocks its engine freed"
+    assert parser.stats["removed_unmapped"] == 0

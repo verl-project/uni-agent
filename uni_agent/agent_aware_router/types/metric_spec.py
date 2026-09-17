@@ -64,13 +64,14 @@ class MetricKey:
     ESTIMATED_FLOPS_PER_GPU: str = "estimated_flops_per_gpu"
     # In-flight request count (acquire +1 / release -1, mirrors verl least-inflight).
     INFLIGHT_COUNT: str = "inflight_count"
-    # In-flight prompt tokens (acquire +prompt_len / release -prompt_len). The
-    # token-weighted sibling of INFLIGHT_COUNT: a single 30k-token request and a
-    # 100-token one both count as 1 inflight, but load the KV cache very
-    # differently — this gauge captures that. Releases carry no token list
-    # (verl #7115), so the collector folds the negative delta from its
-    # acquire-time per-request prompt_len row — symmetric by construction.
+    # In-flight prompt tokens (acquire +prompt_len / release -prompt_len, folded
+    # from the acquire-time row since verl #7115 releases carry no token list).
+    # Observation-only (raw sizes, not occupancy): free capacity is INFLIGHT_BLOCKS.
     INFLIGHT_TOKENS: str = "inflight_tokens"
+    # In-flight *held* KV blocks per replica (dedup by hash, ref-counted; absolute
+    # gauge maintained by the collector's pin/unpin) — the free-capacity account:
+    # ``avail = cap - inflight_blocks × block_size``. Prompt blocks only, no decode growth.
+    INFLIGHT_BLOCKS: str = "inflight_blocks"
     # In-flight turn sum (acquire += turn / release -= turn), per replica. The
     # numerator of inflight_avg_turn = in-flight turn sum / in-flight count — the
     # instantaneous "how many turns deep are the in-flight requests" level. acquire
@@ -191,6 +192,11 @@ METRIC_SPECS: dict[str, dict[str, Any]] = {
         "default": 0,
         "value_type": int,
         "describe": "In-flight prompt tokens (acquire +prompt_len / release -prompt_len) — token-weighted load",
+    },
+    MetricKey.INFLIGHT_BLOCKS: {
+        "default": 0,
+        "value_type": int,
+        "describe": "In-flight held KV blocks per replica (dedup, ref-counted; absolute gauge) — free-capacity account",
     },
     MetricKey.INFLIGHT_TURN_SUM: {
         "default": 0,
