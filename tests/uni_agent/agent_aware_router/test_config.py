@@ -45,12 +45,12 @@ pytestmark = [pytest.mark.level0, pytest.mark.cpu]
 
 def test_strategy_default_config():
     """
-    Feature: KVCAwareStrategyConfig has a single persisted field, load_threshold
+    Feature: KVCAwareStrategyConfig persists the user-tunable knob
     Description: construct strategy config with no kwargs
-    Expectation: cfg.load_threshold == 0.9 and no other tuning fields exist
+    Expectation: load_threshold == 0.5
     """
     cfg = KVCAwareStrategyConfig()
-    assert cfg.load_threshold == 0.9
+    assert cfg.load_threshold == 0.5
 
 
 def test_strategy_normal_fields_parse():
@@ -99,7 +99,7 @@ def test_strategy_instantiates_with_explicit_fields_and_defaults():
     assert isinstance(result, KVCAwareStrategyConfig)
     assert isinstance(result, StrategyConfig)
     # defaults filled in
-    assert result.load_threshold == 0.9
+    assert result.load_threshold == 0.5
 
 
 # ============================================================
@@ -358,7 +358,7 @@ def test_packaged_yaml_e2e():
     # ── strategy ──
     strategy = result.strategy
     assert isinstance(strategy, KVCAwareStrategyConfig)
-    assert strategy.load_threshold == 0.9
+    assert strategy.load_threshold == 0.5
     # FQN top-level keys are harmless to from_config (extra keys are dropped)
     assert loaded["router_class"] == "uni_agent.agent_aware_router.balancer.KVCAwareBalancer"
     assert not hasattr(result, "router_class")

@@ -300,6 +300,8 @@ def test_inference_sampling_uses_run_options_and_preserves_length_configuration(
             "drop_thinking": False,
         }
     assert rollout.custom.agent_framework.allowed_request_sampling_param_keys == ["temperature", "top_p", "top_k"]
+    if entrypoint is init_router_config:
+        assert rollout.custom.agent_framework.router == {"load_threshold": 0.5}
     task_runner = rollout.custom.agent_framework.agent_runners.task
     if simulated_runner:
         assert task_runner.runner_fqn == simulated_runner

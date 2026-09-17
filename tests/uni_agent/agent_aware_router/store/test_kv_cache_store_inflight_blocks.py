@@ -1,0 +1,102 @@
+# Copyright 2026 Bytedance Ltd. and/or its affiliates
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""CPU unit tests for the in-flight held-block ref-count table (``incr``/``decr`` refs + markers)."""
+
+from __future__ import annotations
+
+import pytest
+
+from uni_agent.agent_aware_router.store.kv_cache_store import KVCacheStore
+from uni_agent.agent_aware_router.types import Layer
+
+pytestmark = [pytest.mark.level0, pytest.mark.cpu]
+
+PREFIX = ["h1", "h2", "h3", "h4", "h5"]
+
+
+def _store() -> KVCacheStore:
+    """A fresh non-singleton store."""
+    return KVCacheStore()
+
+
+def test_held_set_ref_counts_shared_blocks() -> None:
+    """Shared blocks count once and leave only with their last holder's decr; hits are held like misses."""
+    store = _store()
+    store.add_blocks("s0", PREFIX[:2], layer=Layer.GPU)  # h1/h2 already resident
+
+    store.incr_block_refs("s0", PREFIX)  # r1
+    store.incr_block_refs("s0", PREFIX[:3])  # r2 shares r1's prefix
+    assert store.inflight_block_count("s0") == 5  # not 8: shared count once, hits held too
+
+    store.decr_block_refs("s0", PREFIX)  # r1 (superset) leaves
+    assert store.inflight_block_count("s0") == 3  # r2 still holds its subset
+
+    store.decr_block_refs("s0", PREFIX[:3])  # r2 leaves
+    assert store.inflight_block_count("s0") == 0
+
+
+def test_ref_table_edges_and_cleanup() -> None:
+    """Refs are per replica; unknown hashes are ignored; clear_replica drops the replica's whole account."""
+    store = _store()
+
+    store.incr_block_refs("s0", [])  # unresolvable prompt refs nothing
+    assert store.inflight_block_count("s0") == 0
+
+    store.incr_block_refs("s0", PREFIX)
+    store.incr_block_refs("s1", PREFIX)  # the same hash is still new on s1
+    assert store.inflight_block_count("s0") == 5
+    assert store.inflight_block_count("s1") == 5
+
+    store.decr_block_refs("s0", ["never-pinned", "h1", "h1"])  # unknown + doubled decr
+    assert store.inflight_block_count("s0") == 4  # h1 really released, never negative
+
+    store.decr_block_refs("ghost-replica", PREFIX)  # replica with no ref table
+    assert store.inflight_block_count("ghost-replica") == 0
+
+    store.put_marker("r0", "s0", PREFIX)  # a request flying on s0 at clear time
+    store.put_marker("r1", "s1", PREFIX)
+    store.clear_replica("s0")
+    assert store.inflight_block_count("s0") == 0  # held goes with the clear — no release will ever come
+    assert store.pop_marker("r0") is None  # marker swept too: a late release cannot steal refs
+    assert store.inflight_block_count("s1") == 5  # other replicas untouched
+    assert store.pop_marker("r1") == {"replica": "s1", "hashes": PREFIX}
+
+
+def test_marker_take_semantics() -> None:
+    """Markers read-and-clear atomically: take returns the exact pinned set once, then None."""
+    store = _store()
+
+    assert store.pop_marker("r1") is None  # nothing pinned — no error
+
+    store.put_marker("r1", "s0", PREFIX)
+    assert store.pop_marker("r1") == {"replica": "s0", "hashes": PREFIX}
+
+    store.put_marker("r1", "s1", PREFIX[:2])  # re-acquire overwrites the stale marker
+    assert store.pop_marker("r1") == {"replica": "s1", "hashes": PREFIX[:2]}
+    assert store.pop_marker("r1") is None  # a duplicated release finds nothing
+
+
+def test_marker_peek_does_not_clear() -> None:
+    """get_marker returns a copy and leaves the row in place for the later take."""
+    store = _store()
+
+    assert store.get_marker("r1") is None  # absent — no error
+
+    store.put_marker("r1", "s0", PREFIX)
+    peeked = store.get_marker("r1")
+    assert peeked == {"replica": "s0", "hashes": PREFIX}
+    peeked["hashes"].append("mutated")  # a copy — the stored row is untouched
+    assert store.get_marker("r1") == {"replica": "s0", "hashes": PREFIX}
+    assert store.pop_marker("r1") == {"replica": "s0", "hashes": PREFIX}  # peek did not consume it
