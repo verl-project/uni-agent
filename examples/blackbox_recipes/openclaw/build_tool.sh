@@ -9,6 +9,9 @@ else
   IMAGE="${RUNTIME_IMAGE:-openclaw-recipe-runtime:2026.9.2}"
 fi
 # Build only. Authentication and publication are separate explicit operations.
-DOCKER_BUILDKIT="${DOCKER_BUILDKIT:-0}" docker build --network "${BUILD_NETWORK:-host}" \
-  --target "$TARGET" --file "$SCRIPT_DIR/Dockerfile.openclaw-tool" --tag "$IMAGE" "$SCRIPT_DIR"
+BUILD_ARGS=(--target "$TARGET" --file "$SCRIPT_DIR/Dockerfile.openclaw-tool" --tag "$IMAGE")
+if [[ -n "${BUILD_NETWORK:-}" ]]; then
+  BUILD_ARGS+=(--network "${BUILD_NETWORK}")
+fi
+docker build "${BUILD_ARGS[@]}" "$SCRIPT_DIR"
 docker image inspect "$IMAGE" --format "{{.Id}} {{.Size}}"

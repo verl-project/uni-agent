@@ -164,27 +164,10 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
     rollout.response_length = response_length
     rollout.tensor_model_parallel_size = args.tensor_parallel_size
     rollout.gpu_memory_utilization = args.gpu_memory_utilization
-    if args.max_model_len is not None:
-        rollout.max_model_len = args.max_model_len
-    if args.max_num_seqs is not None:
-        rollout.max_num_seqs = args.max_num_seqs
-    if args.max_num_batched_tokens is not None:
-        rollout.max_num_batched_tokens = args.max_num_batched_tokens
-    if args.enforce_eager:
-        rollout.enforce_eager = True
-    if args.enable_chunked_prefill:
-        rollout.enable_chunked_prefill = True
     rollout.calculate_log_probs = True
     rollout.enable_rollout_routing_replay = args.enable_rollout_routing_replay
     rollout.disable_log_stats = False
-    rollout.free_cache_engine = args.free_cache_engine
-    if args.checkpoint_engine_backend is not None:
-        OmegaConf.update(
-            config,
-            "actor_rollout_ref.rollout.checkpoint_engine.backend",
-            args.checkpoint_engine_backend,
-            force_add=True,
-        )
+    rollout.free_cache_engine = False
     OmegaConf.update(config, "actor_rollout_ref.rollout.enable_sleep_mode", False, force_add=True)
 
     if args.language_model_only:
@@ -194,43 +177,8 @@ def init_config(args: argparse.Namespace, *, task_configs: list[dict], served_mo
             True,
             force_add=True,
         )
-    if args.cudagraph_mode is not None:
-        OmegaConf.update(
-            config,
-            "actor_rollout_ref.rollout.engine_kwargs.vllm.compilation_config.cudagraph_mode",
-            args.cudagraph_mode,
-            force_add=True,
-        )
-    if args.mamba_cache_mode is not None:
-        OmegaConf.update(
-            config,
-            "actor_rollout_ref.rollout.engine_kwargs.vllm.mamba_cache_mode",
-            args.mamba_cache_mode,
-            force_add=True,
-        )
-    if args.enable_cpu_binding:
-        OmegaConf.update(
-            config,
-            "actor_rollout_ref.rollout.engine_kwargs.vllm.additional_config.enable_cpu_binding",
-            True,
-            force_add=True,
-        )
-    if args.async_scheduling:
-        OmegaConf.update(
-            config,
-            "actor_rollout_ref.rollout.engine_kwargs.vllm.async_scheduling",
-            True,
-            force_add=True,
-        )
     if args.multi_turn:
         OmegaConf.update(config, "actor_rollout_ref.rollout.multi_turn.enable", True, force_add=True)
-        if args.max_assistant_turns is not None:
-            OmegaConf.update(
-                config,
-                "actor_rollout_ref.rollout.multi_turn.max_assistant_turns",
-                args.max_assistant_turns,
-                force_add=True,
-            )
         if args.max_parallel_calls is not None:
             OmegaConf.update(
                 config,
@@ -459,40 +407,10 @@ def main() -> None:
         "--tensor-parallel-size", "--tp", dest="tensor_parallel_size", type=int, default=4, help="Tensor parallel size."
     )
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.9, help="Engine GPU memory fraction.")
-    parser.add_argument("--max-model-len", type=int, default=None, help="Optional vLLM max model length.")
-    parser.add_argument("--max-num-seqs", type=int, default=None, help="Optional vLLM max concurrent sequences.")
-    parser.add_argument(
-        "--max-num-batched-tokens", type=int, default=None, help="Optional vLLM max batched tokens."
-    )
-    parser.add_argument(
-        "--enforce-eager", action="store_true", help="Disable torch.compile and CUDA graphs in vLLM."
-    )
-    parser.add_argument(
-        "--enable-chunked-prefill", action="store_true", help="Enable vLLM chunked prefill."
-    )
     parser.add_argument(
         "--language-model-only", action="store_true", help="Enable text-only vLLM language-model mode."
     )
-    parser.add_argument(
-        "--free-cache-engine", action="store_true", help="Free the rollout cache engine between requests."
-    )
-    parser.add_argument(
-        "--checkpoint-engine-backend",
-        default="naive",
-        help="Checkpoint engine backend for standalone inference (default: naive; no weight update is performed).",
-    )
-    parser.add_argument("--cudagraph-mode", default=None, help="Optional vLLM cudagraph mode.")
-    parser.add_argument("--mamba-cache-mode", default=None, help="Optional vLLM mamba cache mode.")
-    parser.add_argument(
-        "--enable-cpu-binding", action="store_true", help="Enable vLLM CPU binding in additional_config."
-    )
-    parser.add_argument(
-        "--async-scheduling", action="store_true", help="Enable vLLM async scheduling in additional_config."
-    )
     parser.add_argument("--multi-turn", action="store_true", help="Enable verl multi-turn tool rollout.")
-    parser.add_argument(
-        "--max-assistant-turns", type=int, default=None, help="Optional multi-turn assistant turn limit."
-    )
     parser.add_argument(
         "--max-parallel-calls", type=int, default=None, help="Optional maximum parallel tool calls per turn."
     )
@@ -543,7 +461,8 @@ def main() -> None:
     logger.info("initializing configuration, TransferQueue, and LLMServerManager...")
     config = init_config(args, task_configs=task_configs, served_model_name=served_model_name)
     tq.init(config.transfer_queue)
-    llm_server_manager = InferenceLLMServerManager.create(config=config)
+    manager_cls = InferenceLLMServerManager if args.engine == "vllm" else LLMServerManager
+    llm_server_manager = manager_cls.create(config=config)
 
     # 2. Framework rollout adapter over the engine.
     adapter = AgentFrameworkRolloutAdapter.create(
