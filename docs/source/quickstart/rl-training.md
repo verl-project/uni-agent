@@ -72,10 +72,9 @@ The Quickstart provides separate Task Configs for ReAct and Claude Code. Each re
               TQDM_DISABLE: "1"
               PIP_PROGRESS_BAR: "off"
           - name: submit
-        model:
+        sampling_params_override:
           temperature: 1.0
           top_p: 1.0
-          max_total_tokens: 131072
 
     - name: swe_rebench
       sandbox:
@@ -95,10 +94,9 @@ The Quickstart provides separate Task Configs for ReAct and Claude Code. Each re
               TQDM_DISABLE: "1"
               PIP_PROGRESS_BAR: "off"
           - name: submit
-        model:
+        sampling_params_override:
           temperature: 1.0
           top_p: 1.0
-          max_total_tokens: 131072
     ```
 
 === "Claude Code"
@@ -112,10 +110,6 @@ The Quickstart provides separate Task Configs for ReAct and Claude Code. Each re
         name: claude_code
         max_turns: 200
         run_timeout: 4800
-        model:
-          temperature: 1.0
-          top_p: 1.0
-          max_total_tokens: 131072
 
     - name: swe_rebench
       sandbox:
@@ -125,14 +119,14 @@ The Quickstart provides separate Task Configs for ReAct and Claude Code. Each re
         name: claude_code
         max_turns: 200
         run_timeout: 4800
-        model:
-          temperature: 1.0
-          top_p: 1.0
-          max_total_tokens: 131072
     ```
 
     !!! warning "Network connectivity"
         The Claude Code sandbox must be able to reach the GPU machine hosting its session-scoped Gateway endpoint.
+
+The ReAct launchers permit these request overrides through the Agent Framework
+allowlist. See [Sampling configuration](../concepts/gateway-and-trajectories.md#sampling-configuration)
+for its syntax and precedence.
 
 Some sandbox providers requires self-hosted task images instead of pulling directly from Docker Hub, you can set `sandbox.image_map` in the Task Config. See [`image_map`](../concepts/sandbox.md#image_map) for details.
 

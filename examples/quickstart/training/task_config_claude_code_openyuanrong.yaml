@@ -19,10 +19,6 @@
     name: claude_code
     max_turns: 200
     run_timeout: 4800
-    model:
-      temperature: 1.0
-      top_p: 1.0
-      max_total_tokens: 131072
   prompt_template: &swe_claude_prompt
     - role: user
       content: |-
@@ -51,8 +47,4 @@
     name: claude_code
     max_turns: 200
     run_timeout: 4800
-    model:
-      temperature: 1.0
-      top_p: 1.0
-      max_total_tokens: 131072
   prompt_template: *swe_claude_prompt
