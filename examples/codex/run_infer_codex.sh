@@ -9,9 +9,6 @@ cd "${REPO_ROOT}"
 export DEPLOYMENT="${DEPLOYMENT:-openyuanrong}"
 export OPENYUANRONG_SERVER_ADDRESS="${OPENYUANRONG_SERVER_ADDRESS:?Set OPENYUANRONG_SERVER_ADDRESS}"
 export OPENYUANRONG_TOKEN="${OPENYUANRONG_TOKEN:?Set OPENYUANRONG_TOKEN}"
-export OPENYUANRONG_TUNNEL_SSL_VERIFY="${OPENYUANRONG_TUNNEL_SSL_VERIFY:-0}"
-export TUNNEL_SSL_VERIFY="${TUNNEL_SSL_VERIFY:-0}"
-
 DATA_PATH="${DATA_PATH:?Set DATA_PATH to a prepared Parquet dataset}"
 MODEL_PATH="${MODEL_PATH:?Set MODEL_PATH to the model checkpoint}"
 TASK_CONFIG="${TASK_CONFIG:-examples/codex/task_config_codex.yaml}"
@@ -74,7 +71,10 @@ keys = (
     "OPENYUANRONG_TUNNEL_SSL_VERIFY",
     "TUNNEL_SSL_VERIFY",
 )
-env_vars = {"PYTHONPATH": "verl", **{key: os.environ[key] for key in keys}}
+env_vars = {"PYTHONPATH": "verl"}
+for key in keys:
+    if key in os.environ:
+        env_vars[key] = os.environ[key]
 print(json.dumps({"env_vars": env_vars, "excludes": ["/.git/"]}))
 PY
 )"
