@@ -2,14 +2,30 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from collections.abc import Awaitable
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from .base import ExecResult, Sandbox, _to_str
 from .registry import register_sandbox
 
 if TYPE_CHECKING:
     from .base import SandboxConfig
+
+
+async def _finish_cleanup(awaitable: Awaitable[Any]) -> Any:
+    """Finish bounded resource cleanup even if the caller is cancelled again."""
+    task = asyncio.ensure_future(awaitable)
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled = True
+    result = task.result()
+    if cancelled:
+        raise asyncio.CancelledError
+    return result
 
 
 def _positive_timeout(name: str, value: float | None) -> float | None:
@@ -50,6 +66,7 @@ class DockerSandbox(Sandbox):
         self.entrypoint = entrypoint
         self.command = list(command or ["infinity"])
         self._container_name: str | None = None
+        self._cleanup_label: str | None = None
 
     @classmethod
     def from_config(cls, config: SandboxConfig) -> DockerSandbox:
@@ -68,12 +85,12 @@ class DockerSandbox(Sandbox):
 
         try:
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        except asyncio.TimeoutError:
+        except (asyncio.TimeoutError, asyncio.CancelledError):
             try:
                 proc.kill()
             except ProcessLookupError:
                 pass
-            await proc.communicate()
+            await _finish_cleanup(proc.communicate())
             raise
 
         return ExecResult(
@@ -100,6 +117,9 @@ class DockerSandbox(Sandbox):
     async def start(self) -> None:
         if self._container_name is not None:
             return
+        if self._cleanup_label is not None:
+            # A previous removal failed. Retry it before allocating another rollout.
+            await self.stop()
 
         if self.pull_policy == "never":
             inspected = await self._run_docker("image", "inspect", self.image)
@@ -119,27 +139,59 @@ class DockerSandbox(Sandbox):
         if self.entrypoint:
             args.extend(["--entrypoint", self.entrypoint])
         args.extend(self.run_args)
+        # Names may collide with containers we do not own. A per-attempt label lets
+        # cleanup find only our container, including when `run` never returns its ID.
+        self._cleanup_label = f"uni-agent.sandbox={uuid.uuid4().hex}"
+        args.extend(["--label", self._cleanup_label])
         args.append(self.image)
         args.extend(self.command)
 
         try:
             started = await self._run_docker(*args, timeout=self.start_timeout)
+            if started.exit_code != 0:
+                detail = started.stderr.strip() or started.stdout.strip()
+                raise RuntimeError(f"Failed to start Docker sandbox from {self.image!r}: {detail}")
         except asyncio.TimeoutError as exc:
-            # The timed-out `docker run` may still have created the container; drop it so a
-            # retry with the same container_name does not collide.
-            await self._run_docker("rm", "-f", name, timeout=30.0)
+            await self.stop()
             raise TimeoutError(
                 f"Starting Docker sandbox from {self.image!r} exceeded start_timeout={self.start_timeout:g}s"
             ) from exc
-        if started.exit_code != 0:
-            detail = started.stderr.strip() or started.stdout.strip()
-            raise RuntimeError(f"Failed to start Docker sandbox from {self.image!r}: {detail}")
+        except (Exception, asyncio.CancelledError):
+            await self.stop()
+            raise
         self._container_name = name
 
     async def stop(self) -> None:
-        name, self._container_name = self._container_name, None
-        if name is not None:
-            await self._run_docker("rm", "-f", name)
+        try:
+            await _finish_cleanup(self._stop())
+        except asyncio.TimeoutError as exc:
+            # A removal timeout is an infrastructure error, not a command timeout
+            # that Sandbox.exec may turn into an ordinary tool observation.
+            raise RuntimeError(f"Docker sandbox cleanup timed out (owner={self._cleanup_label!r})") from exc
+
+    async def _stop(self) -> None:
+        # Invalidate the data plane immediately; retain the ownership label until
+        # removal succeeds so callers can retry a failed cleanup.
+        self._container_name = None
+        if self._cleanup_label is None:
+            return
+        found = await self._run_docker(
+            "container",
+            "ls",
+            "--all",
+            "--quiet",
+            "--no-trunc",
+            "--filter",
+            f"label={self._cleanup_label}",
+            timeout=30.0,
+        )
+        if found.exit_code != 0:
+            raise RuntimeError(f"Failed to locate Docker sandbox for cleanup: {found.stderr.strip()}")
+        for container_id in found.stdout.split():
+            removed = await self._run_docker("rm", "-f", container_id, timeout=30.0)
+            if removed.exit_code != 0:
+                raise RuntimeError(f"Failed to remove Docker sandbox {container_id!r}: {removed.stderr.strip()}")
+        self._cleanup_label = None
 
     def _require_container(self) -> str:
         if self._container_name is None:
@@ -176,7 +228,14 @@ class DockerSandbox(Sandbox):
             args.extend(["--env", f"{key}={value}"])
         args.append(self._require_container())
         args.extend(argv)
-        return await self._run_docker(*args, timeout=timeout)
+        try:
+            return await self._run_docker(*args, timeout=timeout)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            # Killing the Docker CLI does not terminate the command in the container.
+            # Retire this rollout before returning so its processes cannot keep
+            # modifying the workspace or race a subsequent verifier.
+            await self.stop()
+            raise
 
     async def upload_file(self, local_file: Path | str, remote_file: str) -> None:
         container = self._require_container()
