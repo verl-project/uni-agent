@@ -28,6 +28,7 @@ endpoint is the gateway session, bound by the runner, not a flag.
 """
 
 import argparse
+import copy
 import json
 import logging
 import os
@@ -64,6 +65,42 @@ DEFAULT_TEMPERATURE = 0.8
 DEFAULT_TOP_P = 0.9
 DEFAULT_RESPONSE_LENGTH = 65536
 DEFAULT_PROMPT_LENGTH = 4096
+
+
+def _create_llm_server_manager(config, engine: str):
+    """Create the inference manager while keeping vLLM-only imports optional."""
+    if engine != "vllm":
+        return LLMServerManager.create(config=config)
+
+    from verl.single_controller.base import Worker
+    from verl.single_controller.ray import RayClassWithInitArgs
+    from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMReplica
+
+    class InferenceRolloutWorker(Worker):
+        """Minimal worker for inference-only vLLM replicas."""
+
+        def __init__(self, rollout_config=None, model_config=None, replica_rank: int = 0, *args, **kwargs):
+            super().__init__()
+            self.rollout_config = rollout_config
+            self.model_config = model_config
+            self.replica_rank = replica_rank
+
+    class InferenceVLLMReplica(vLLMReplica):
+        """vLLM replica that avoids the training-only checkpoint worker."""
+
+        def get_ray_class_with_init_args(self) -> RayClassWithInitArgs:
+            rollout_worker_actor_cls = ray.remote(InferenceRolloutWorker)
+            return RayClassWithInitArgs(
+                cls=rollout_worker_actor_cls,
+                rollout_config=self.config,
+                model_config=self.model_config,
+                replica_rank=self.replica_rank,
+            )
+
+    class InferenceLLMServerManager(LLMServerManager):
+        rollout_replica_class = InferenceVLLMReplica
+
+    return InferenceLLMServerManager.create(config=config)
 
 
 def _rule(text: str = "", width: int = 50, ch: str = "-") -> str:
@@ -130,6 +167,13 @@ def init_config(args: argparse.Namespace, *, served_model_name: str):
             force_add=True,
         )
 
+    if args.language_model_only:
+        OmegaConf.update(
+            config,
+            "actor_rollout_ref.rollout.engine_kwargs.vllm.language_model_only",
+            True,
+            force_add=True,
+        )
     # Gateway tool-call parser: the gateway decodes tool calls from raw tokens, so
     # this must match the model's chat template (the analog of vLLM's
     # --tool-call-parser, e.g. qwen3_coder for Qwen3-Coder, hermes for Qwen3).
@@ -166,11 +210,14 @@ def init_config(args: argparse.Namespace, *, served_model_name: str):
 
 def _build_prompts(samples: list, uids: list):
     """Assemble the TensorDict batch the framework's ``generate_sequences`` expects."""
+    tools_kwargs = []
+    for sample in samples:
+        tools_kwargs.append(copy.deepcopy(sample["extra_info"]["tools_kwargs"]))
     return tu.get_tensordict(
         tensor_dict={
             "raw_prompt": [sample.get("prompt") for sample in samples],
             "uid": list(uids),
-            "tools_kwargs": [sample["extra_info"]["tools_kwargs"] for sample in samples],
+            "tools_kwargs": tools_kwargs,
         },
         non_tensor_dict={"global_steps": None, "validate": True},
     )
@@ -367,6 +414,9 @@ def main() -> None:
     )
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.9, help="Engine GPU memory fraction.")
     parser.add_argument(
+        "--language-model-only", action="store_true", help="Enable text-only vLLM language-model mode."
+    )
+    parser.add_argument(
         "--kv-cache-dtype",
         default="auto",
         help="vLLM KV-cache dtype, for example 'auto' or 'fp8'.",
@@ -416,7 +466,7 @@ def main() -> None:
     logger.info("initializing configuration, TransferQueue, and LLMServerManager...")
     config = init_config(args, served_model_name=served_model_name)
     tq.init(config.transfer_queue)
-    llm_server_manager = LLMServerManager.create(config=config)
+    llm_server_manager = _create_llm_server_manager(config, args.engine)
 
     # 2. Framework rollout adapter over the engine.
     adapter = AgentFrameworkRolloutAdapter.create(
