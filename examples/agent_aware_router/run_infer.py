@@ -74,9 +74,6 @@ try:
 except ImportError:  # fall back to verl's shim (mock raises a clear error if TQ is missing)
     from verl.utils.transferqueue_utils import tq
 
-from uni_agent.agent_aware_router import (
-    server as _kv_events_server,  # noqa: F401  (import overrides the vllm rollout backend)
-)
 from uni_agent.framework.entry import AgentFrameworkRolloutAdapter
 from uni_agent.tasks import TaskConfigResolver
 from verl.utils import tensordict_utils as tu

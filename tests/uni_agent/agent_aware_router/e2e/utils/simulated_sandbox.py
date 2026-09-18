@@ -9,7 +9,7 @@ sglang repo, hand-tuned weights preserved).
 
 The LLM (vLLM replicas + KVCAware router) runs for real; only the sandbox
 side of the agent loop is simulated. That keeps the e2e assertions —
-``routed to server`` / ``COMBINED`` / ``mean rm_score`` / trajectory
+route ranking / capacity-aware scoring / ``mean rm_score`` / trajectory
 output — meaningful while dropping the container dependency.
 """
 
