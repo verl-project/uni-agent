@@ -26,9 +26,16 @@ EOF
 export CODEX_HOME
 export OPENAI_API_KEY="${API_KEY}"
 export CODEX_MANAGED_PACKAGE_ROOT="${CODEX_MANAGED_PACKAGE_ROOT:-${TOOL_ROOT}}"
-export NO_PROXY="*"
-export no_proxy="*"
-unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy
+
+# Keep the caller's proxy configuration and bypass it only for the gateway
+# authority used by this episode.
+gateway_host="${CODEX_API_BASE#*://}"
+gateway_host="${gateway_host%%/*}"
+gateway_host="${gateway_host%%:*}"
+if [[ -n "${gateway_host}" ]]; then
+  export NO_PROXY="${NO_PROXY:+${NO_PROXY},}${gateway_host}"
+  export no_proxy="${no_proxy:+${no_proxy},}${gateway_host}"
+fi
 
 cd "${PROJECT_DIR}"
 

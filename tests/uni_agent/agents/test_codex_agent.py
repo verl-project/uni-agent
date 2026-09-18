@@ -64,14 +64,13 @@ def test_parse_agent_result_jsonl():
             json.dumps({"type": "thread.started", "thread_id": "t"}),
             json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "fixed"}}),
             json.dumps({"type": "turn.completed"}),
-            json.dumps({"type": "process.completed", "exit_code": 0}),
         ]
     )
     assert parse_agent_result(stdout, 0) == {
         "exit_status": "ok",
         "ok": True,
         "content": "fixed",
-        "event_count": 4,
+        "event_count": 3,
     }
 
 
@@ -87,10 +86,11 @@ def test_parse_agent_result_timeout_and_failure():
 
 @pytest.mark.cpu
 @pytest.mark.level0
-def test_parse_agent_result_honors_wrapper_process_exit_event():
+def test_parse_agent_result_honors_process_exit_code():
     stdout = "\n".join(
         [
             json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "partial"}}),
+            json.dumps({"type": "turn.completed"}),
             json.dumps({"type": "process.completed", "exit_code": 17}),
         ]
     )
@@ -123,8 +123,6 @@ def test_codex_agent_runs_and_returns_agent_result():
         stdout=json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "done"}})
         + "\n"
         + json.dumps({"type": "turn.completed"})
-        + "\n"
-        + json.dumps({"type": "process.completed", "exit_code": 0})
     )
     agent = make_agent()
     result = asyncio.run(agent.run(sandbox=sandbox, messages=[{"role": "user", "content": "fix bug"}]))
