@@ -14,7 +14,7 @@ from uni_agent.agents.hermes.agent import (
     HermesConfig,
     build_runner_command,
     parse_result_stdout,
-    split_messages,
+    validate_messages,
     validate_result,
 )
 from uni_agent.sandbox.base import ExecResult
@@ -61,17 +61,17 @@ def _agent(**kwargs) -> HermesAgent:
 
 @pytest.mark.cpu
 @pytest.mark.level0
-def test_split_messages_preserves_all_text_and_rejects_unrepresentable_roles():
-    assert split_messages(
+def test_validate_messages_accepts_system_user_prefix_and_rejects_other_roles():
+    validate_messages(
         [
             {"role": "system", "content": "rules"},
             {"role": "system", "content": "more rules"},
             {"role": "user", "content": "issue"},
             {"role": "user", "content": "details"},
         ]
-    ) == ("rules\n\nmore rules", "issue\n\ndetails")
+    )
     with pytest.raises(ValueError, match="only supports"):
-        split_messages([{"role": "assistant", "content": "hidden context"}, {"role": "user", "content": "issue"}])
+        validate_messages([{"role": "assistant", "content": "hidden context"}, {"role": "user", "content": "issue"}])
 
 
 @pytest.mark.cpu

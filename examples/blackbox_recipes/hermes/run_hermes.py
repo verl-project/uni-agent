@@ -18,8 +18,22 @@ from typing import Any
 
 SCHEMA_VERSION = 1
 RESULT_MARKER = "HERMES_RECIPE_RESULT "
-HERMES_COMMIT = os.getenv("HERMES_COMMIT", "5eb99eb2844b22ebb723711b8e6a0bbb80bb5f04")
 MAX_INPUT_BYTES = 16 * 1024 * 1024
+
+
+def _load_hermes_commit() -> str:
+    configured = os.getenv("HERMES_COMMIT")
+    if configured:
+        return configured
+    version_path = Path(__file__).resolve().parents[1] / "HERMES_COMMIT"
+    try:
+        value = version_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        value = ""
+    return value or "unknown"
+
+
+HERMES_COMMIT = _load_hermes_commit()
 
 
 def _add_pinned_runtime_to_path() -> None:
