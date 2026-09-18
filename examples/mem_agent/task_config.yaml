@@ -7,7 +7,8 @@
     max_chunks: 8
     max_final_response_length: 1024
     max_steps: 9
-    model:
+    # Explicit request overrides for direct API inference and Gateway training.
+    sampling_params_override:
       temperature: 1.0
-      top_p: 0.7
+      # Omit top_p to inherit the endpoint / rollout default.
       top_k: -1

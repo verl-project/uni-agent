@@ -22,6 +22,7 @@ ray job submit --no-wait \
     --data-path ~/data/swe_agent/swe_bench_verified.parquet \
     --model-path Qwen/Qwen3-Coder-30B-A3B-Instruct \
     --task-config examples/quickstart/inference/task_config_react.yaml \
+    --allowed-request-sampling-param-keys temperature top_p top_k \
     --tool-parser qwen3_coder \
     --tensor-parallel-size 4 \
     --nnodes 8 \

@@ -15,6 +15,7 @@ from fastapi.responses import StreamingResponse
 
 from uni_agent.gateway.session.session import GenerationOutcome
 from uni_agent.gateway.session.types import InternalGenerationRequest
+from uni_agent.gateway.utils import normalize_tool_arguments
 
 from .types import MalformedRequestError
 
@@ -49,13 +50,44 @@ def openai_error_body(status_code: int, message: str) -> dict[str, Any]:
     }
 
 
+def _message_to_openai_wire(message: dict[str, Any]) -> dict[str, Any]:
+    """Serialize canonical internal tool arguments to OpenAI JSON strings."""
+    wire_message = dict(message)
+    tool_calls = message.get("tool_calls")
+    if not isinstance(tool_calls, list):
+        return wire_message
+
+    wire_tool_calls = []
+    for tool_call in tool_calls:
+        if not isinstance(tool_call, dict):
+            wire_tool_calls.append(tool_call)
+            continue
+        wire_tool_call = dict(tool_call)
+        function = tool_call.get("function")
+        if isinstance(function, dict):
+            wire_function = dict(function)
+            arguments = function.get("arguments")
+            if "arguments" in function and not isinstance(arguments, str):
+                wire_function["arguments"] = json.dumps(arguments, ensure_ascii=False)
+            wire_tool_call["function"] = wire_function
+        wire_tool_calls.append(wire_tool_call)
+    wire_message["tool_calls"] = wire_tool_calls
+    return wire_message
+
+
 def openai_build_response(outcome: GenerationOutcome, *, model: str) -> dict[str, Any]:
     return {
         "id": f"chatcmpl-{uuid4().hex}",
         "object": "chat.completion",
         "created": int(time.time()),
         "model": model,
-        "choices": [{"index": 0, "message": outcome.assistant_msg, "finish_reason": outcome.finish_reason}],
+        "choices": [
+            {
+                "index": 0,
+                "message": _message_to_openai_wire(outcome.assistant_msg),
+                "finish_reason": outcome.finish_reason,
+            }
+        ],
         "usage": {
             "prompt_tokens": outcome.prompt_tokens,
             "completion_tokens": outcome.completion_tokens,
@@ -82,7 +114,7 @@ def openai_stream_response(outcome: GenerationOutcome, *, model: str) -> Streami
         return f"data: {json.dumps(body, ensure_ascii=False)}\n\n"
 
     async def _gen() -> AsyncIterator[bytes]:
-        msg = outcome.assistant_msg
+        msg = _message_to_openai_wire(outcome.assistant_msg)
         yield _chunk({"role": "assistant"}, None).encode()
         if isinstance(msg.get("reasoning_content"), str) and msg["reasoning_content"]:
             yield _chunk({"reasoning_content": msg["reasoning_content"]}, None).encode()
@@ -125,12 +157,8 @@ def _normalize_tool_calls(tool_calls: Any) -> list[dict[str, Any]]:
 
         normalized_tool_call = dict(tool_call)
         normalized_function = dict(function)
-        arguments = normalized_function.get("arguments")
-        if isinstance(arguments, str):
-            try:
-                normalized_function["arguments"] = json.loads(arguments)
-            except (json.JSONDecodeError, TypeError):
-                pass
+        if "arguments" in normalized_function:
+            normalized_function["arguments"] = normalize_tool_arguments(normalized_function["arguments"])
         normalized_tool_call["function"] = normalized_function
         result.append(normalized_tool_call)
     return result

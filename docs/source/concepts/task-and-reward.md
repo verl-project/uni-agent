@@ -152,11 +152,16 @@ TaskResult(
 Custom Tasks may use any evaluation method, but the built-in Agent Runner currently
 expects `TaskResult.reward` to be a scalar outcome reward. `TaskResult.accuracy`
 becomes the validation metric `acc`; `extra_info` becomes the structured
-`runner_reward_info.reward_context` payload and is not aggregated as a metric. When streaming Reward Loop
-Worker handles are available, the Framework passes the complete Runner result
-under `extra_info["runner_reward_info"]` to a configured custom scorer. Without
-such a scorer, a non-`None` Runner reward is used directly and the Worker is
-consulted only when the Runner did not return a reward. Custom Agent Runners return `TaskResult` when they provide episode
+`runner_reward_info.reward_context` payload and is not aggregated as a metric.
+A trajectory postprocessor receives a deep copy of `TaskResult` as the
+`task_result` keyword argument. It can inspect or modify this copy without
+affecting subsequent scoring. Returned trajectories must preserve their
+`finished`, `reward_score`, and `reward_metrics` fields.
+When streaming Reward Loop Worker handles are available, the Framework passes
+the complete Runner result under `extra_info["runner_reward_info"]` to a
+configured custom scorer. Without such a scorer, a non-`None` Runner reward is
+used directly and the Worker is consulted only when the Runner did not return
+a reward. Custom Agent Runners return `TaskResult` when they provide episode
 annotations. A trajectory-only Runner may return `None`, which the Framework
 normalizes to an empty `TaskResult()` before trajectory scoring.
 

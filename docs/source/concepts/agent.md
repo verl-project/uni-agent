@@ -17,15 +17,20 @@ class AgentConfig(BaseModel):
     model: ModelConfig
 ```
 
-`ModelConfig` contains:
+`ModelConfig` contains the model endpoint and identity: `base_url`, `api_key`,
+and `model_name`. Runners normally inject these fields, so Task YAML can omit
+`model`. Custom callers can supply them when binding an external endpoint.
 
-- `base_url`, `api_key`, and `model_name`.
-- Optional `temperature`, `top_p`, and `top_k` overrides.
-- Per-turn and episode token budgets.
+White-box Agents such as ReAct and MemAgent expose
+`agent.sampling_params_override`, with optional `temperature`, `top_p`, `top_k`,
+and `max_tokens_per_turn` fields. Omitted values use the endpoint or Gateway
+session defaults. Gateway runs require explicit
+[request-key permission](gateway-and-trajectories.md#sampling-configuration)
+for request-level `temperature`, `top_p`, and `top_k` overrides.
 
-The model endpoint is runtime state. Dataset rows and Task YAML may override sampling behavior; omitted sampling
-fields inherit the endpoint default (the rollout configuration during RL training). The live runner or Gateway
-injects `base_url`, credentials, and served model name last.
+Black-box Agents delegate sampling to their harness. Claude Code receives model
+connection settings through environment variables and accepts harness options
+through `ClaudeCodeConfig.extra_args`.
 
 ## Agent Contract
 
@@ -73,10 +78,9 @@ agent:
     - name: str_replace_editor
     - name: stateful_shell
     - name: submit
-  model:
+  sampling_params_override:
     temperature: 0.8
     top_p: 0.9
-    max_total_tokens: 65536
 ```
 
 Use this style when you need complete control over Tool schemas, observations, transcripts, and stopping behavior.
@@ -97,15 +101,29 @@ agent:
   name: claude_code
   max_turns: 200
   run_timeout: 4800
-  model:
-    temperature: 1.0
-    top_p: 0.95
-    max_total_tokens: 131072
 ```
 
 Claude Code speaks the Anthropic Messages protocol. Uni-Agent sets `ANTHROPIC_BASE_URL` to either a direct model endpoint or a session-scoped Gateway endpoint.
 
 Use this style when an existing Agent Harness already owns its loop and Tools.
+
+### Claude Code Prompt Handling
+
+The Claude Code Agent requires exactly one non-blank user message and allows at most one system message; a second message of either role raises an error. Non-null content must be text. The user text is passed to `claude -p`; non-blank system text is passed to `--system-prompt`, replacing Claude Code's default system prompt. Missing, null, empty, or whitespace-only system content adds no system-prompt flag, retaining the default prompt unless `extra_args` explicitly overrides it. A non-blank system message conflicts with `--system-prompt` or `--system-prompt-file` in `extra_args`; append flags remain explicitly controlled through `extra_args`.
+
+System messages can come from the dataset prompt or the existing Task `prompt_template`:
+
+```yaml
+prompt_template:
+  - role: system
+    content: "Follow these task rules: {task_rules}"
+  - role: user
+    content: "Resolve this issue: {problem_statement}"
+agent:
+  name: claude_code
+```
+
+Template placeholders use Task metadata. A configured template replaces the input prompt, so a user-only template does not inherit dataset system messages.
 
 ## Custom Agent
 

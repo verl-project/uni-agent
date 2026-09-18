@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import os
 import time
 from types import SimpleNamespace
@@ -64,7 +65,10 @@ def test_gateway_actor_config_rejects_non_positive_prompt_length(prompt_length):
 
 @pytest.mark.cpu
 @pytest.mark.level0
-@pytest.mark.parametrize("field", ["enable_last_assistant_rollback", "enable_tool_parser_cache"])
+@pytest.mark.parametrize(
+    "field",
+    ["enable_last_assistant_rollback", "enable_tool_parser_cache", "coalesce_reserved_exact_requests"],
+)
 @pytest.mark.parametrize("value", ["true", 1, None])
 def test_gateway_actor_config_rejects_non_bool_options(field, value):
     from uni_agent.gateway.config import GatewayActorConfig
@@ -79,6 +83,24 @@ def test_gateway_actor_config_enables_last_assistant_rollback_by_default():
     from uni_agent.gateway.config import GatewayActorConfig
 
     assert GatewayActorConfig(tokenizer=FakeTokenizer()).enable_last_assistant_rollback is True
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+@pytest.mark.parametrize("options, expected", [({}, True), ({"coalesce_reserved_exact_requests": False}, False)])
+async def test_gateway_actor_forwards_singleflight_to_session(options, expected):
+    from uni_agent.gateway.config import GatewayActorConfig
+    from uni_agent.gateway.gateway import _GatewayActor
+
+    actor = _GatewayActor(
+        GatewayActorConfig(tokenizer=FakeTokenizer(), **options),
+        SequencedBackend(["A"]),
+    )
+    actor._server_base_url = "http://test"
+    await actor.create_session("singleflight-enabled")
+
+    assert actor._sessions["singleflight-enabled"]._coalesce_reserved_exact_requests is expected
 
 
 @pytest.mark.cpu
@@ -328,8 +350,8 @@ async def test_unknown_session_raises_404():
 
 @pytest.mark.cpu
 @pytest.mark.level0
-def test_prefix_canonicalization_ignores_provider_ids_and_normalizes_arguments():
-    """Drop provider IDs and normalize arguments without mutating the message."""
+def test_prefix_canonicalization_ignores_provider_ids_without_mutating_message():
+    """Drop provider IDs without mutating the canonical internal message."""
     from uni_agent.gateway.session.codec import MessageCodec
 
     codec = MessageCodec(FakeTokenizer())
@@ -355,7 +377,7 @@ def test_prefix_canonicalization_ignores_provider_ids_and_normalizes_arguments()
         "tool_calls": [
             {
                 "type": "function",
-                "function": {"name": "f", "arguments": ("json", {"x": 1})},
+                "function": {"name": "f", "arguments": {"x": 1}},
             }
         ],
     }
@@ -363,37 +385,12 @@ def test_prefix_canonicalization_ignores_provider_ids_and_normalizes_arguments()
     assert message["tool_calls"][0]["id"] == "call_AAA"
     assert message["tool_calls"][0]["function"]["arguments"] == {"x": 1}
 
-    argument_cases = [
-        ({"b": 2, "a": 1}, '{"a": 1, "b": 2}', True),
-        ("{b: 2, a: 1}", "{a: 1, b: 2}", False),
-    ]
-    for arguments_a, arguments_b, expect_equal in argument_cases:
-        msg_a = {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-                {"id": "call-1", "type": "function", "function": {"name": "search", "arguments": arguments_a}}
-            ],
-        }
-        msg_b = {
-            "role": "assistant",
-            "content": "",
-            "tool_calls": [
-                {"id": "call-2", "type": "function", "function": {"name": "search", "arguments": arguments_b}}
-            ],
-        }
-        assert (
-            codec.canonicalize_message_for_prefix_comparison(msg_a)
-            == codec.canonicalize_message_for_prefix_comparison(msg_b)
-        ) is expect_equal
-
 
 @pytest.mark.cpu
 @pytest.mark.level0
 @pytest.mark.asyncio
-async def test_config_chat_template_kwargs_forwarded(monkeypatch):
+async def test_config_chat_template_kwargs_forwarded():
     """Codec-level chat-template kwargs are copied and forwarded."""
-    import uni_agent.gateway.session.codec as codec_mod
     from uni_agent.gateway.config import GatewayActorConfig
     from uni_agent.gateway.gateway import _GatewayActor
 
@@ -406,15 +403,6 @@ async def test_config_chat_template_kwargs_forwarded(monkeypatch):
         InspectingBackend(),
     )
     template_kwargs["enable_thinking"] = True
-    captured_kwargs = {}
-    template_fn_name = "_apply_chat" + "_template"
-    original_template = getattr(codec_mod, template_fn_name)
-
-    def _spy(tokenizer, messages, **kwargs):
-        captured_kwargs.update(kwargs)
-        return original_template(tokenizer, messages, **kwargs)
-
-    monkeypatch.setattr(codec_mod, template_fn_name, _spy)
     await actor.start()
     try:
         await actor.create_session("s1")
@@ -425,8 +413,10 @@ async def test_config_chat_template_kwargs_forwarded(monkeypatch):
             },
         )
 
-        assert captured_kwargs["enable_thinking"] is False
-        assert captured_kwargs["default_only"] == "kept"
+        assert actor._codec._continuous_token_builder.chat_template_kwargs == {
+            "enable_thinking": False,
+            "default_only": "kept",
+        }
     finally:
         await actor.shutdown()
 
@@ -602,14 +592,19 @@ async def test_tool_choice_none_skips_tool_injection_and_parser(monkeypatch):
         QueuedBackend(['<tool_call>\n{"name": "foo", "arguments": {}}\n</tool_call>']),
     )
     captured_tools = {}
-    template_fn_name = "_apply_chat" + "_template"
-    original_template = getattr(codec_mod, template_fn_name)
+    original_build_initial_tokens = codec_mod.MessageCodec.build_initial_tokens
 
-    def _spy(tokenizer, messages, **kwargs):
-        captured_tools["tools"] = kwargs.get("tools")
-        return original_template(tokenizer, messages, **kwargs)
+    def _spy(self, messages, tools=None, image_data=None, video_data=None):
+        captured_tools["tools"] = tools
+        return original_build_initial_tokens(
+            self,
+            messages,
+            tools=tools,
+            image_data=image_data,
+            video_data=video_data,
+        )
 
-    monkeypatch.setattr(codec_mod, template_fn_name, _spy)
+    monkeypatch.setattr(codec_mod.MessageCodec, "build_initial_tokens", _spy)
     await actor.start()
     try:
         await actor.create_session("s1")
@@ -647,6 +642,7 @@ async def test_gateway_actor_forwards_image_data_on_initial_multimodal_request(r
             tokenizer=FakeTokenizer(),
             processor=processor,
             vision_info_extractor=fake_vision_info_extractor,
+            allowed_request_sampling_param_keys={"temperature"},
         ),
         InspectingBackend(),
     )
@@ -867,19 +863,11 @@ async def test_gateway_actor_multimodal_reference_change_splits_trajectory(ray_r
 @pytest.mark.cpu
 @pytest.mark.level0
 @pytest.mark.asyncio
-async def test_gateway_actor_continuation_with_tool_returned_image_appends_media(monkeypatch):
-    """When a tool-call continuation brings a new image (e.g. a zoomed crop),
-    the new image is appended to the session media accumulator. The full
-    ``prompt_ids`` sequence (initial prompt + tool-call tokens + incremental
-    prompt) is verified token-by-token."""
+async def test_gateway_actor_rejects_ct_continuation_with_tool_returned_image(monkeypatch):
+    """Reject incremental media until Continuous Token context merging supports it."""
     import uni_agent.gateway.session.codec as codec_mod
     from uni_agent.gateway.config import GatewayActorConfig
     from uni_agent.gateway.gateway import _GatewayActor
-    from verl.utils.tokenizer.chat_template import (
-        apply_chat_template,
-        initialize_system_prompt,
-        initialize_turn_separator,
-    )
 
     monkeypatch.setattr(codec_mod.MessageCodec, "_extract_tool_calls", fake_tool_call_dispatch)
     processor = FakeProcessor()
@@ -924,59 +912,21 @@ async def test_gateway_actor_continuation_with_tool_returned_image_appends_media
         ],
     }
 
-    second = await actor._handle_openai_chat_completions(
-        "session-mm-tool-image",
-        {
-            "model": "dummy-model",
-            "tools": tools,
-            "messages": [initial_message, assistant_message, tool_message],
-        },
-    )
+    with pytest.raises(ValueError, match="does not currently support incremental image or video data"):
+        await actor._handle_openai_chat_completions(
+            "session-mm-tool-image",
+            {
+                "model": "dummy-model",
+                "tools": tools,
+                "messages": [initial_message, assistant_message, tool_message],
+            },
+        )
 
     trajectories = await actor.finalize_session("session-mm-tool-image")
     await actor.shutdown()
 
-    assert second.status_code == 200
-    second_call = json.loads(json.loads(second.body)["choices"][0]["message"]["content"])
-    assert second_call["image_data"] == ["image://a.png", "image://tool-b.png"]
     assert len(trajectories) == 1
-    assert trajectories[0].multi_modal_data == {
-        "images": ["image://a.png", "image://tool-b.png"],
-    }
-
-    initial_raw_prompt = apply_chat_template(
-        processor,
-        [initial_message],
-        tools=tools,
-        tokenize=False,
-        add_generation_prompt=True,
-    )
-    initial_prompt_ids = processor(
-        text=[initial_raw_prompt],
-        images=["image://a.png"],
-        videos=None,
-        return_tensors="pt",
-        do_sample_frames=False,
-    )["input_ids"][0].tolist()
-
-    incremental_raw_prompt = apply_chat_template(
-        processor,
-        [tool_message],
-        tokenize=False,
-        add_generation_prompt=True,
-    )
-    incremental_prompt_ids = processor(
-        text=[incremental_raw_prompt],
-        images=["image://tool-b.png"],
-        videos=None,
-        return_tensors="pt",
-        do_sample_frames=False,
-    )["input_ids"][0].tolist()
-    system_prompt = initialize_system_prompt(processor)
-    turn_separator = initialize_turn_separator(processor)
-    expected_incremental_ids = turn_separator + incremental_prompt_ids[len(system_prompt) :]
-    expected_prompt_ids = initial_prompt_ids + [ord(char) for char in tool_call_text] + expected_incremental_ids
-    assert second_call["prompt_ids"] == expected_prompt_ids
+    assert trajectories[0].multi_modal_data == {"images": ["image://a.png"]}
 
 
 @pytest.mark.cpu
@@ -1116,7 +1066,51 @@ async def test_gateway_actor_allowlist_filters_sampling_params(ray_runtime, back
 @pytest.mark.level0
 @pytest.mark.asyncio
 @pytest.mark.parametrize("provider", ["openai", "anthropic"])
-async def test_gateway_actor_session_sampling_defaults_are_isolated_and_request_overridable(provider):
+async def test_gateway_actor_warns_once_per_disallowed_request_sampling_key(provider, caplog):
+    from uni_agent.gateway.config import GatewayActorConfig
+    from uni_agent.gateway.gateway import _GatewayActor
+
+    actor = _GatewayActor(GatewayActorConfig(tokenizer=FakeTokenizer()), SequencedBackend(["FIRST", "SECOND"]))
+    await actor.start()
+    session_sampling_params = {"temperature": 0.1, "top_p": 0.9}
+    await actor.create_session("warning-1", sampling_params=session_sampling_params)
+    await actor.create_session("warning-2", sampling_params=session_sampling_params)
+    handler = actor._handle_openai_chat_completions if provider == "openai" else actor._handle_anthropic_messages
+
+    caplog.set_level(logging.WARNING, logger="uni_agent.gateway.gateway")
+    try:
+        for session_id in ("warning-1", "warning-2"):
+            await handler(
+                session_id,
+                {
+                    "messages": [{"role": "user", "content": session_id}],
+                    "temperature": 0.7,
+                    "top_p": 0.8,
+                    "max_tokens": 32,
+                },
+            )
+    finally:
+        await actor.abort_session("warning-1")
+        await actor.abort_session("warning-2")
+        await actor.shutdown()
+
+    warnings = [record.getMessage() for record in caplog.records if "request sampling" in record.getMessage()]
+    assert len(warnings) == 1
+    assert "temperature" in warnings[0]
+    assert "top_p" in warnings[0]
+    assert "max_tokens" not in warnings[0]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["openai", "anthropic"])
+@pytest.mark.parametrize(
+    "allowed_keys",
+    [None, {"temperature", "top_p", "top_k", "max_tokens", "stop"}, set()],
+    ids=["default", "explicit-overrides", "no-overrides"],
+)
+async def test_gateway_actor_session_sampling_defaults_are_isolated_and_request_overridable(provider, allowed_keys):
     """Both provider handlers apply session defaults, then request sampling params."""
     from uni_agent.gateway.config import GatewayActorConfig
     from uni_agent.gateway.gateway import _GatewayActor
@@ -1125,6 +1119,7 @@ async def test_gateway_actor_session_sampling_defaults_are_isolated_and_request_
     actor = _GatewayActor(
         GatewayActorConfig(
             tokenizer=FakeTokenizer(),
+            allowed_request_sampling_param_keys=allowed_keys,
         ),
         backend,
     )
@@ -1156,6 +1151,9 @@ async def test_gateway_actor_session_sampling_defaults_are_isolated_and_request_
             {
                 "messages": [{"role": "user", "content": "train"}],
                 "temperature": 0.7,
+                "top_p": 0.8,
+                "top_k": 5,
+                ("stop" if provider == "openai" else "stop_sequences"): ["END"],
                 "max_tokens": 128,
             },
         )
@@ -1169,14 +1167,13 @@ async def test_gateway_actor_session_sampling_defaults_are_isolated_and_request_
     finally:
         await actor.shutdown()
 
-    assert [call["sampling_params"] for call in backend.calls] == [
+    expected = [
         {
-            "temperature": 0.7,
+            "temperature": 0.4,
             "top_p": 0.5,
             "top_k": 1,
             "presence_penalty": 0.3,
             "logprobs": True,
-            "max_tokens": 128,
         },
         {
             "temperature": 0,
@@ -1184,9 +1181,14 @@ async def test_gateway_actor_session_sampling_defaults_are_isolated_and_request_
             "top_k": -1,
             "presence_penalty": 0.3,
             "logprobs": False,
-            "max_tokens": 64,
         },
     ]
+
+    expected[0].update(max_tokens=128, stop=["END"])
+    expected[1]["max_tokens"] = 64
+    if allowed_keys and "temperature" in allowed_keys:
+        expected[0].update(temperature=0.7, top_p=0.8, top_k=5)
+    assert [call["sampling_params"] for call in backend.calls] == expected
 
 
 @pytest.mark.cpu
@@ -1242,12 +1244,15 @@ async def test_gateway_actor_continuation_preserves_prompt_and_generation_masks(
 @pytest.mark.cpu
 @pytest.mark.level0
 @pytest.mark.asyncio
-async def test_gateway_actor_parallel_same_session_requests_by_default():
+@pytest.mark.parametrize("coalesce", [True, False])
+async def test_gateway_actor_parallel_same_session_requests(coalesce):
     from uni_agent.gateway.config import GatewayActorConfig
     from uni_agent.gateway.gateway import _GatewayActor
 
     backend = RecordingConcurrentBackend(["FIRST", "SECOND"], delay=0.05)
-    actor = _GatewayActor(GatewayActorConfig(tokenizer=FakeTokenizer()), backend)
+    actor = _GatewayActor(
+        GatewayActorConfig(tokenizer=FakeTokenizer(), coalesce_reserved_exact_requests=coalesce), backend
+    )
     actor._server_base_url = "http://gateway.local"
     await actor.create_session("session-parallel")
 
@@ -1263,12 +1268,13 @@ async def test_gateway_actor_parallel_same_session_requests_by_default():
     assert json.loads(first.body)["choices"][0]["finish_reason"] == "stop"
     assert json.loads(second.body)["choices"][0]["finish_reason"] == "stop"
     request_ids = [window[0] for window in backend.call_windows]
-    assert request_ids == ["session-parallel"] * 2
+    assert request_ids == ["session-parallel"] * (1 if coalesce else 2)
     assert max(start for _, start, _ in backend.call_windows) < min(finish for _, _, finish in backend.call_windows)
-    assert sorted(FakeTokenizer().decode(trajectory.response_ids) for trajectory in trajectories) == [
-        "FIRST",
-        "SECOND",
-    ]
+    assert sorted(FakeTokenizer().decode(trajectory.response_ids) for trajectory in trajectories) == (
+        ["FIRST"] if coalesce else ["FIRST", "SECOND"]
+    )
+    if coalesce:
+        assert json.loads(first.body)["choices"] == json.loads(second.body)["choices"]
 
 
 @pytest.mark.cpu
@@ -1479,6 +1485,9 @@ async def test_gateway_actor_tool_call_decode_returns_openai_format(monkeypatch)
         assert "id" in tool_calls[0]
         # HTTP response arguments should be a JSON string (OpenAI compatible)
         assert isinstance(tool_calls[0]["function"]["arguments"], str)
+        [active_chain] = actor._sessions["session-tool-call"].active_chains
+        internal_arguments = active_chain.message_history[-1]["tool_calls"][0]["function"]["arguments"]
+        assert internal_arguments == {"query": "weather"}
 
         # Second request: agent sends back tool result as continuation
         second = await actor._handle_openai_chat_completions(

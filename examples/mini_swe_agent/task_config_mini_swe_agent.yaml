@@ -19,6 +19,9 @@
 # - agent.tool_python / agent.run_agent_script are REQUIRED: they name the paths
 #   inside the prebuilt tool image and are bound to its Dockerfile layout
 #   (mounted at /opt/mini-swe-agent); change them together with the tool image.
+# - agent.conda_env_path names the conda env inside the TASK image that is
+#   activated around the launch (e.g. /opt/miniconda3/envs/testbed); leave it
+#   unset for images with no conda and the launch runs bare.
 - name: swe_rebench
   sandbox:
     provider: openyuanrong
@@ -30,12 +33,12 @@
       proxy_port: 38197
       mounts:
         - target: /opt/mini-swe-agent
-          image_url: swr.cn-east-3.myhuaweicloud.com/openyuanrong/mini-swe-agent-tool:latest
+          image_url: swr.cn-east-3.myhuaweicloud.com/openyuanrong/mini-swe-agent-tool:20260910
   agent:
     name: mini_swe_agent
     step_limit: 100
     run_timeout: 7200
-    conda_env: testbed
+    conda_env_path: /opt/miniconda3/envs/testbed
     tool_python: /opt/mini-swe-agent/bin/python
     run_agent_script: /opt/mini-swe-agent/bin/run_agent.py
 
@@ -50,11 +53,11 @@
       proxy_port: 38197
       mounts:
         - target: /opt/mini-swe-agent
-          image_url: swr.cn-east-3.myhuaweicloud.com/openyuanrong/mini-swe-agent-tool:latest
+          image_url: swr.cn-east-3.myhuaweicloud.com/openyuanrong/mini-swe-agent-tool:20260910
   agent:
     name: mini_swe_agent
     step_limit: 100
     run_timeout: 7200
-    conda_env: testbed
+    conda_env_path: /opt/miniconda3/envs/testbed
     tool_python: /opt/mini-swe-agent/bin/python
     run_agent_script: /opt/mini-swe-agent/bin/run_agent.py

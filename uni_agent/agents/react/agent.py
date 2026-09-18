@@ -10,7 +10,7 @@ from pydantic import Field
 
 from uni_agent.tools import Toolbox
 
-from ..base import Agent, AgentConfig, AgentResult
+from ..base import Agent, AgentConfig, AgentResult, RequestSamplingConfig
 from ..registry import register_agent
 from .model import OpenAICompatibleChatModel
 
@@ -27,6 +27,7 @@ class ReActConfig(AgentConfig):
     """White-box launch params: host-side tools + step / timeout budgets."""
 
     name: str = "react"
+    sampling_params_override: RequestSamplingConfig = Field(default_factory=RequestSamplingConfig)
     tools: list[dict] = Field(
         default_factory=lambda: [
             {"name": "str_replace_editor"},
@@ -70,7 +71,7 @@ class ReActAgent(Agent):
             base_url=cfg.model.base_url,
             api_key=cfg.model.api_key,
             model_name=cfg.model.model_name,
-            sampling_params=cfg.model.sampling_params(),
+            sampling_params=cfg.sampling_params_override.sampling_params(),
             tools_schemas=toolbox.schemas(),
         )
 
@@ -128,18 +129,10 @@ class ReActAgent(Agent):
         logger.info(f"{'=' * 25} STEP {info['steps']} {'=' * 25}")
 
         # step 1: query the model
-        max_tokens = cfg.model.max_tokens_per_turn or cfg.model.max_total_tokens
-        if cfg.model.max_total_tokens is not None:
-            remaining = cfg.model.max_total_tokens - info["total_tokens"]
-            if remaining <= 0:
-                logger.info(f"Exit: token budget spent ({info['total_tokens']}/{cfg.model.max_total_tokens}).")
-                return "token_limit"
-            max_tokens = min(max_tokens, remaining)
-
-        sampling_params: dict[str, Any] = cfg.model.sampling_params()
-        if max_tokens is not None:  # both budgets unset -> let the server run to EOS
-            sampling_params["max_tokens"] = max_tokens
-        content, tool_calls, gen_info = await model.query(transcript, sampling_params=sampling_params)
+        content, tool_calls, gen_info = await model.query(
+            transcript,
+            sampling_params=cfg.sampling_params_override.sampling_params(),
+        )
         info["total_tokens"] = gen_info["prompt_tokens"] + gen_info["completion_tokens"]
         finish_reason = gen_info.get("finish_reason")
         logger.info(
@@ -152,10 +145,6 @@ class ReActAgent(Agent):
         if tool_calls:
             assistant_msg["tool_calls"] = tool_calls
         transcript.append(assistant_msg)
-
-        if cfg.model.max_total_tokens is not None and info["total_tokens"] >= cfg.model.max_total_tokens:
-            logger.info(f"Exit: token budget reached ({info['total_tokens']}/{cfg.model.max_total_tokens}).")
-            return "token_limit"
 
         if finish_reason == "length":
             logger.info("Exit: response truncated at a token cap.")

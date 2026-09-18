@@ -193,10 +193,25 @@ async def test_gateway_manager_default_chains_config_to_http_finalizes_subagent_
     class _ModelConfig:
         tokenizer = FakeTokenizer()
         processor = None
+        hf_config = None
 
-    monkeypatch.setattr(entry_module, "omega_conf_to_dataclass", lambda _config: _ModelConfig())
+    class _MultiTurnConfig:
+        format = None
+
+    class _RolloutConfig:
+        name = None
+        prompt_length = 2048
+        response_length = 2048
+        multi_turn = _MultiTurnConfig()
+
+    monkeypatch.setattr(
+        entry_module,
+        "omega_conf_to_dataclass",
+        lambda cfg: _RolloutConfig() if "multi_turn" in cfg else _ModelConfig(),
+    )
     config = OmegaConf.create(
         {
+            "data": {},
             "actor_rollout_ref": {
                 "model": {},
                 "rollout": {
@@ -205,7 +220,7 @@ async def test_gateway_manager_default_chains_config_to_http_finalizes_subagent_
                     "multi_turn": {"format": None},
                     "custom": {"agent_framework": {"gateway_count": 1}},
                 },
-            }
+            },
         }
     )
     manager = entry_module.build_gateway_manager(
@@ -252,8 +267,8 @@ async def test_gateway_manager_default_chains_config_to_http_finalizes_subagent_
 @pytest.mark.cpu
 @pytest.mark.level0
 @pytest.mark.asyncio
-async def test_gateway_manager_allows_concurrent_http_requests_within_one_session(ray_runtime):
-    """Two HTTP requests must reach backend generation concurrently and both materialize."""
+async def test_gateway_manager_allows_independent_http_requests_when_coalescing_disabled(ray_runtime):
+    """Opting out lets identical HTTP requests generate concurrently and both materialize."""
     from uni_agent.gateway.config import GatewayActorConfig
     from uni_agent.gateway.manager import GatewayManager
     from verl.workers.rollout.replica import TokenOutput
@@ -263,7 +278,16 @@ async def test_gateway_manager_allows_concurrent_http_requests_within_one_sessio
             self.started = 0
             self.both_started = asyncio.Event()
 
-        async def generate(self, request_id, *, prompt_ids, sampling_params, image_data=None, video_data=None):
+        async def generate(
+            self,
+            request_id,
+            *,
+            prompt_ids,
+            sampling_params,
+            image_data=None,
+            video_data=None,
+            mm_processor_kwargs=None,
+        ):
             response_index = self.started
             self.started += 1
             if self.started == 2:
@@ -279,7 +303,9 @@ async def test_gateway_manager_allows_concurrent_http_requests_within_one_sessio
     manager = GatewayManager(
         llm_client=_BarrierBackend(),
         gateway_count=1,
-        gateway_actor_config=GatewayActorConfig(tokenizer=FakeTokenizer(), response_length=128),
+        gateway_actor_config=GatewayActorConfig(
+            tokenizer=FakeTokenizer(), response_length=128, coalesce_reserved_exact_requests=False
+        ),
     )
 
     try:

@@ -24,7 +24,7 @@ from tensordict.tensorclass import NonTensorData, NonTensorStack
 
 from uni_agent.gateway.session import SessionHandle, Trajectory
 from uni_agent.logging import LogContext, sample_logging
-from uni_agent.rlinsight_adapter import agent_loop_session
+from uni_agent.rl_insight.adapter import agent_loop_session
 from uni_agent.tasks import TaskResult
 from verl.tools.tool_registry import initialize_tools_from_config
 from verl.utils import tensordict_utils as tu
@@ -430,6 +430,7 @@ class GatewayAgentFramework(AgentFramework):
     async def _apply_trajectory_postprocessor(
         self,
         trajectories: list[Trajectory],
+        task_result: TaskResult,
     ) -> list[Trajectory]:
         """Apply the optional sync/async postprocessor and validate its result."""
         expected_reward_fields = (
@@ -441,7 +442,9 @@ class GatewayAgentFramework(AgentFramework):
             if trajectories
             else (None, None, {})
         )
-        result = self._trajectory_postprocessor(tuple(trajectories), **self._trajectory_postprocessor_kwargs)
+        result = self._trajectory_postprocessor(
+            tuple(trajectories), task_result=deepcopy(task_result), **self._trajectory_postprocessor_kwargs
+        )
         if inspect.isawaitable(result):
             result = await result
 
@@ -477,7 +480,8 @@ class GatewayAgentFramework(AgentFramework):
                 top_p=config.val_kwargs.top_p,
                 top_k=config.val_kwargs.top_k,
             )
-        elif "__do_sample__" in sample_fields and not bool(sample_fields["__do_sample__"]):
+        # An explicit greedy flag overrides the partition sampling defaults.
+        if "__do_sample__" in sample_fields and not bool(sample_fields["__do_sample__"]):
             sampling_params.update(temperature=0, top_p=1.0, top_k=-1)
         return sampling_params
 
@@ -604,6 +608,7 @@ class GatewayAgentFramework(AgentFramework):
 
         # Prompt layer: rollout.n sessions race independently for the same uid.
         # Successful sessions are written to TQ; failed sessions only affect this uid's stats.
+        await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "running"})
         tasks = [
             self._run_agent_episode_with_concurrency_limit(
                 sample_fields=sample_fields,
@@ -857,20 +862,20 @@ class GatewayAgentFramework(AgentFramework):
             # they filter or reorder trajectories.  These fields are the
             # Framework-owned trajectory representation of the session result;
             # scorer metadata remains a separate Worker output channel.
+            task_metrics = {} if task_result.accuracy is None else {"acc": task_result.accuracy}
             if session_trajectories:
-                runner_metrics = {} if task_result.accuracy is None else {"acc": task_result.accuracy}
                 session_trajectories = [
                     replace(
                         trajectory,
                         finished=task_result.finished,
                         reward_score=task_result.reward,
-                        reward_metrics=dict(runner_metrics),
+                        reward_metrics=dict(task_metrics),
                     )
                     for trajectory in session_trajectories
                 ]
 
             if self._trajectory_postprocessor is not None:
-                session_trajectories = await self._apply_trajectory_postprocessor(session_trajectories)
+                session_trajectories = await self._apply_trajectory_postprocessor(session_trajectories, task_result)
 
             if not session_trajectories:
                 session_trace.finish(
@@ -897,17 +902,9 @@ class GatewayAgentFramework(AgentFramework):
                 annotations = None
                 reward_source = None
 
-            task_metrics = {} if task_result.accuracy is None else {"acc": task_result.accuracy}
             if annotations is None:
                 logger.info("session %s: Framework produced no reward; rm_scores remain zero", session_id)
-                result_trajectories = [
-                    replace(
-                        traj,
-                        finished=task_result.finished,
-                        reward_metrics=dict(task_metrics),
-                    )
-                    for traj in session_trajectories
-                ]
+                result_trajectories = session_trajectories
             else:
                 logger.info("session %s: scored via %s", session_id, reward_source)
                 result_trajectories = [
@@ -1147,10 +1144,14 @@ class GatewayAgentFramework(AgentFramework):
         )
         input_ids = torch.cat([prompts, responses], dim=0)
         attention_mask = torch.ones_like(input_ids, dtype=torch.long)
+        mm_processor_kwargs = trajectory.extra_fields.get("mm_processor_kwargs")
+        if mm_processor_kwargs is not None and not isinstance(mm_processor_kwargs, dict):
+            raise ValueError("trajectory extra_fields.mm_processor_kwargs must be a dict or null")
         multi_modal_inputs = compute_multi_modal_inputs(
             self._processor,
             input_ids.unsqueeze(0),
             trajectory.multi_modal_data,
+            mm_processor_kwargs,
         )
         if self._processor is None:
             position_ids = compute_position_id_with_mask(attention_mask.unsqueeze(0)).squeeze(0)

@@ -13,7 +13,7 @@ if TYPE_CHECKING:
 
 
 class ModelConfig(BaseModel):
-    """The OpenAI-compatible LLM endpoint the agent's policy talks to, plus sampling knobs."""
+    """The endpoint and model identity used by an Agent."""
 
     base_url: str | None = Field(
         default=None, description="Endpoint URL; the runner fills this in (in RL, the current policy server)."
@@ -23,49 +23,37 @@ class ModelConfig(BaseModel):
         default=None, description="Model name sent to the endpoint (the served model / policy)."
     )
 
-    # During RL, the Gateway session gets these defaults from the rollout config
-    temperature: float | None = Field(
-        default=None,
-        description="Sampling temperature; None inherits the endpoint/session default.",
-    )
-    top_p: float | None = Field(
-        default=None,
-        description="Nucleus-sampling probability mass; None inherits the endpoint/session default.",
-    )
-    top_k: int | None = Field(
-        default=None,
-        description="Top-k sampling; -1 disables it and None inherits the endpoint/session default.",
-    )
+    model_config = ConfigDict(extra="forbid")
 
-    # Generation budget: one turn's generation vs the whole episode's generation.
-    max_total_tokens: int | None = Field(
-        default=None,
-        description="Whole-episode generation budget (sum of completion tokens over all turns)",
-    )
-    max_tokens_per_turn: int | None = Field(
-        default=None,
-        description="Per-turn generation cap, sent as `max_tokens` on each chat-completions call.",
-    )
 
+class RequestSamplingConfig(BaseModel):
+    """Sampling controls for Agents that construct model requests themselves."""
+
+    temperature: float | None = None
+    top_p: float | None = None
+    top_k: int | None = None
+    max_tokens_per_turn: int | None = None
     model_config = ConfigDict(extra="forbid")
 
     def sampling_params(self) -> dict[str, float | int]:
-        """Return only sampling knobs explicitly configured by this Agent."""
-        params = {
-            "temperature": self.temperature,
-            "top_p": self.top_p,
-            "top_k": self.top_k,
+        """Return configured white-box sampling overrides."""
+        return {
+            key: value
+            for key, value in {
+                "temperature": self.temperature,
+                "top_p": self.top_p,
+                "top_k": self.top_k,
+                "max_tokens": self.max_tokens_per_turn,
+            }.items()
+            if value is not None
         }
-        return {key: value for key, value in params.items() if value is not None}
 
 
 class AgentConfig(BaseModel):
     """Base config for a registered agent."""
 
     name: str = Field(default="", description="Registered agent name (key in AGENT_REGISTRY).")
-    model: ModelConfig = Field(
-        default_factory=ModelConfig, description="LLM endpoint + sampling params for the policy."
-    )
+    model: ModelConfig = Field(default_factory=ModelConfig, description="LLM endpoint and model identity.")
 
     model_config = ConfigDict(extra="forbid", protected_namespaces=())
 

@@ -86,6 +86,7 @@ class DebugFakeBackend:
         sampling_params: dict[str, Any],
         image_data: list[Any] | None = None,
         video_data: list[Any] | None = None,
+        mm_processor_kwargs: dict[str, Any] | None = None,
     ) -> TokenOutput:
         self.calls.append(
             {
@@ -152,6 +153,7 @@ class OpenAICompletionsBackend:
         sampling_params: dict[str, Any],
         image_data: list[Any] | None = None,
         video_data: list[Any] | None = None,
+        mm_processor_kwargs: dict[str, Any] | None = None,
     ) -> TokenOutput:
         payload: dict[str, Any] = {
             "model": self._backend_model,

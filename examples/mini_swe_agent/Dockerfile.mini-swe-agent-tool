@@ -13,7 +13,7 @@
 #   docker build -f Dockerfile.mini-swe-agent-tool -t mini-swe-agent-tool:latest .
 #
 
-FROM debian:bullseye-slim AS builder
+FROM debian:bookworm-slim AS builder
 
 ARG PBS_RELEASE="20260602"
 ARG PBS_PYTHON="3.12.13"

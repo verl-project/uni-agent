@@ -93,11 +93,13 @@ Framework initialization. The callable must follow this contract:
 
 ```python
 from uni_agent.gateway.session import Trajectory
+from uni_agent.tasks import TaskResult
 
 
 def process_trajectories(
     trajectories: tuple[Trajectory, ...],
     *,
+    task_result: TaskResult,
     max_total_tokens: int = 262_144,
 ) -> list[Trajectory]:
     return [
@@ -107,19 +109,24 @@ def process_trajectories(
     ]
 ```
 
-`trajectory_postprocessor_kwargs` is passed as keyword arguments. The processor
-receives a tuple and must return `list[Trajectory]`; returning an empty list
-filters the session out. An `async def` processor is also supported and is
-awaited. Returned trajectories must preserve the finalized session
-`reward_info` and keep their token arrays aligned because reward scoring,
-unfinished masking, and TransferQueue materialization run later. Use
-`dataclasses.replace` when constructing transformed trajectories so unrelated
-fields remain intact.
+The processor receives a trajectory tuple and must return `list[Trajectory]`;
+returning an empty list filters the session out. An `async def` processor is
+also supported and is awaited. Returned trajectories must preserve the finalized
+session `finished`, `reward_score`, and `reward_metrics` fields and keep their
+token arrays aligned because reward scoring, unfinished masking, and
+TransferQueue materialization run later. Use `dataclasses.replace` when
+constructing transformed trajectories so unrelated fields remain intact.
 
+The Framework automatically passes a deep copy of the Runner's `TaskResult` to
+the postprocessor as the `task_result` keyword argument. Use `task_result.extra_info`
+to access task context. Modifying this copy does not affect the original result
+or later scoring. `trajectory_postprocessor_kwargs` supplies additional keyword
+arguments; do not include `task_result` in this configuration.
+
+A processor may define additional keyword arguments or just accept `task_result`.
 `max_total_tokens` above is defined by the example processor.
 This compact example drops oversized trajectories; a processor that
-crops them must preserve token-array alignment and valid turn boundaries. A
-processor may define different keyword arguments or none at all.
+crops them must preserve token-array alignment and valid turn boundaries.
 
 The hook is disabled when `trajectory_postprocessor_fqn` is omitted or `null`.
 In that case no extension is imported or called, and finalized trajectories
@@ -140,6 +147,36 @@ The configured Tool parser must match the model's chat template.
 One session may contain multiple model turns. Tool observations are encoded as continuation tokens and marked with `response_mask=0`, while model completions are marked with `response_mask=1`.
 
 Concurrent requests may create multiple chains within one session. Chains sharing a message prefix reuse the same encoded context where possible, then materialize as separate trajectories during finalization.
+
+When a transport retry resends an identical request while the original request
+is still in flight, `coalesce_reserved_exact_requests` makes the retry await the
+original request by default. The owner response is returned
+to all waiters, so the backend generation and trajectory commit happen once.
+If the owner fails or is cancelled, the same failure is delivered to its
+waiters and the coordination state is cleared so a later retry can try again.
+The fingerprint is computed from the provider-normalized `messages`, `tools`,
+and `sampling_params` fields; differences in any of these fields are treated as
+different requests. JSON object key order and wire-format whitespace do not
+affect matching. Coalescing is scoped to one Gateway session and includes first
+turns and requests that start a new chain. A retry that arrives after the owner
+finishes follows normal chain selection and can generate independently; results
+are not cached for later retries. Cancelling a waiter does not cancel the owner.
+
+This policy treats identical in-flight requests as transport retries. Intentional
+concurrent sampling of identical normalized requests in the same session also
+shares one result. To retain independent samples for those requests, disable it:
+
+```yaml
+actor_rollout_ref:
+  rollout:
+    custom:
+      agent_framework:
+        coalesce_reserved_exact_requests: false
+```
+
+`rollout.n` creates separate Gateway sessions, so its samples are not coalesced
+with one another. The option name is retained for configuration compatibility;
+coalescing also applies when no existing chain is reserved.
 
 When a client rewrites only the most recent Assistant message, the Gateway rolls
 the matching chain back to the start of that Assistant turn and re-encodes the
@@ -180,13 +217,13 @@ The result fields have separate contracts:
 - `reward` is the Runner's scalar outcome reward. A streaming Worker receives it as scorer input and decides the final score.
 - `accuracy` becomes the Runner-provided `acc` validation metric.
 - `finished` is a tri-state episode fact, not a validation metric.
-- `extra_info` may contain structured scorer input. A streaming Worker receives it as `extra_info["runner_reward_info"]["reward_context"]`; it is never aggregated directly as a validation metric.
+- `extra_info` is available to postprocessors through the copied `TaskResult` and may contain structured scorer input. A streaming Worker receives it as `extra_info["runner_reward_info"]["reward_context"]`; it is never aggregated directly as a validation metric.
 
 The names at the two boundaries are intentional: `Trajectory.reward_metrics` is
 the Framework's internal field, while VERL's Worker response calls the same
 output channel `reward_extra_info` when it is serialized under
 `extra_fields["reward_extra_info"]`. `TaskResult.extra_info` is a separate
-Runner-to-scorer context channel and is not copied into either metrics field.
+context channel and is not copied into either metrics field.
 
 Runner and Worker metrics are not merged in streaming mode. The Worker's
 `reward_extra_info` is the complete final metric/metadata set returned by the
@@ -275,6 +312,11 @@ Important knobs include:
 - `enable_last_assistant_rollback`: reuses a chain when only its latest Assistant
   message is rewritten. Defaults to `true`; set it to `false` to preserve the
   previous split-on-rewrite behavior.
+- `coalesce_reserved_exact_requests`: makes exact provider-normalized requests
+  in the same session await and reuse an in-flight owner result, including
+  first-turn/new-chain requests. Defaults to `true`; set it to `false` for
+  independent concurrent sampling of identical requests. Retries arriving after
+  the owner completes are not coalesced.
 - `trajectory_postprocessor_fqn`: optional import path for a sync or async
   callable that postprocesses finalized trajectories before reward scoring.
 - `trajectory_postprocessor_kwargs`: optional keyword arguments passed to the
@@ -287,6 +329,67 @@ Important knobs include:
 - `rollout.n`: sessions per prompt.
 - `rollout.multi_turn.format`: model-specific Tool parser.
 - `transfer_queue.enable`: enables asynchronous trajectory storage.
+
+## Sampling Configuration
+
+`actor_rollout_ref.rollout.temperature`, `top_p`, and `top_k` provide the Gateway
+session defaults (`rollout.val_kwargs` supplies validation sampling). Agent HTTP
+requests can override only `max_tokens` and `stop` by default. Configure
+`allowed_request_sampling_param_keys` to permit additional request keys when a
+white-box Agent needs request-level overrides. This list is additive, so
+`max_tokens` and `stop` remain permitted:
+
+```yaml
+actor_rollout_ref:
+  rollout:
+    custom:
+      agent_framework:
+        allowed_request_sampling_param_keys: [temperature, top_p, top_k]
+        # Effective allowlist: max_tokens, stop, temperature, top_p, top_k
+```
+
+Training launchers set this framework field with Hydra list syntax:
+
+```bash
+++actor_rollout_ref.rollout.custom.agent_framework.allowed_request_sampling_param_keys="[temperature,top_p,top_k]"
+```
+
+The verl inference entrypoints expose the same list through argparse, whose
+multi-value syntax is space-separated:
+
+```bash
+--allowed-request-sampling-param-keys temperature top_p top_k
+```
+
+Both forms produce the same permission list. They do not set sampling values;
+those come from the rollout defaults or a white-box Agent request.
+
+White-box Agents place explicit request values in
+`agent.sampling_params_override`, a `RequestSamplingConfig`:
+
+```yaml
+agent:
+  name: react
+  sampling_params_override:
+    temperature: 0.8
+    top_p: 0.9
+    top_k: 20
+    max_tokens_per_turn: 8192
+```
+
+Omitted fields inherit the session defaults. Allowed request values override
+session values. When a request tries to replace a session sampling default without
+permission, the Gateway ignores it and logs a warning once per key and actor. The
+permission applies to every request handled by that Gateway, including black-box
+harness requests in a mixed workload.
+
+`max_tokens` and `stop` are defaults because they control individual calls:
+a harness may use different output budgets for normal replies and context
+summarization, or stop generation at a protocol delimiter. `max_tokens` remains
+subject to the available Gateway and model context capacity; it cannot bypass
+those limits. Sampling distribution controls (`temperature`, `top_p`, `top_k`)
+normally belong to the training configuration, while white-box loops can opt in
+to overriding them for algorithm-specific needs.
 
 ## Extension Boundaries
 

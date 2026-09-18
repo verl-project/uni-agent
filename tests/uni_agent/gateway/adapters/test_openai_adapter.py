@@ -31,6 +31,37 @@ def test_openai_build_response_shape():
 
 @pytest.mark.cpu
 @pytest.mark.level0
+def test_openai_build_response_serializes_internal_dict_tool_arguments():
+    from uni_agent.gateway.adapters.openai import openai_build_response
+    from uni_agent.gateway.session.session import GenerationOutcome
+
+    assistant_msg = {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [
+            {
+                "id": "call-1",
+                "type": "function",
+                "function": {"name": "f", "arguments": {"a": 1}},
+            }
+        ],
+    }
+    outcome = GenerationOutcome(
+        assistant_msg=assistant_msg,
+        finish_reason="tool_calls",
+        prompt_tokens=3,
+        completion_tokens=2,
+    )
+
+    body = openai_build_response(outcome, model="m")
+    wire_arguments = body["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]
+
+    assert json.loads(wire_arguments) == {"a": 1}
+    assert assistant_msg["tool_calls"][0]["function"]["arguments"] == {"a": 1}
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_openai_stream_response_emits_compatible_sse_chunks():
     """A completed internal outcome is synthesized into OpenAI-compatible SSE
@@ -48,7 +79,7 @@ async def test_openai_stream_response_emits_compatible_sse_chunks():
                     {
                         "id": "call-1",
                         "type": "function",
-                        "function": {"name": "f", "arguments": '{"a":1}'},
+                        "function": {"name": "f", "arguments": {"a": 1}},
                     }
                 ],
             },
@@ -73,6 +104,8 @@ async def test_openai_stream_response_emits_compatible_sse_chunks():
     assert chunks[2]["choices"][0]["delta"] == {"content": "hello"}
     assert chunks[3]["choices"][0]["delta"]["tool_calls"][0]["index"] == 0
     assert chunks[3]["choices"][0]["delta"]["tool_calls"][0]["id"] == "call-1"
+    wire_arguments = chunks[3]["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"]
+    assert json.loads(wire_arguments) == {"a": 1}
     assert chunks[4]["choices"][0]["finish_reason"] == "tool_calls"
     assert chunks[4]["usage"] == {
         "prompt_tokens": 3,
@@ -85,8 +118,8 @@ async def test_openai_stream_response_emits_compatible_sse_chunks():
 @pytest.mark.level0
 def test_openai_to_internal_normalizes_messages_sampling_and_tools():
     """OpenAI wire requests lower to the internal shape: sampling params use the
-    gateway allowlist, JSON tool arguments are parsed, malformed argument
-    strings are preserved, and tool_choice=none clears tool schemas."""
+    gateway allowlist, JSON-object tool arguments are parsed, non-object and
+    malformed arguments stay strings, and tool_choice=none clears tool schemas."""
     from uni_agent.gateway.adapters.openai import openai_to_internal
 
     payload = {
@@ -97,6 +130,8 @@ def test_openai_to_internal_normalizes_messages_sampling_and_tools():
                 "tool_calls": [
                     {"id": "x", "type": "function", "function": {"name": "f", "arguments": '{"x": 1}'}},
                     {"id": "y", "type": "function", "function": {"name": "g", "arguments": "not json"}},
+                    {"id": "z", "type": "function", "function": {"name": "h", "arguments": "[1, 2]"}},
+                    {"id": "w", "type": "function", "function": {"name": "i", "arguments": [1, 2]}},
                 ],
             },
         ],
@@ -116,6 +151,8 @@ def test_openai_to_internal_normalizes_messages_sampling_and_tools():
     assert req["messages"][0] == {"role": "user", "content": "hi"}
     assert req["messages"][1]["tool_calls"][0]["function"]["arguments"] == {"x": 1}
     assert req["messages"][1]["tool_calls"][1]["function"]["arguments"] == "not json"
+    assert req["messages"][1]["tool_calls"][2]["function"]["arguments"] == "[1, 2]"
+    assert req["messages"][1]["tool_calls"][3]["function"]["arguments"] == "[1, 2]"
     assert req["tools"][0]["function"]["name"] == "f"
     assert req["sampling_params"]["max_tokens"] == 32
     assert req["sampling_params"]["temperature"] == 0.7

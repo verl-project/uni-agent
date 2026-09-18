@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import types
+from copy import deepcopy
 from dataclasses import replace
 
 import numpy as np
@@ -21,34 +22,39 @@ _POSTPROCESSOR_CALLS = []
 _NOT_CALLABLE_POSTPROCESSOR = 42
 
 
-def _recording_trajectory_postprocessor(trajectories, *, policy=None):
+def _recording_trajectory_postprocessor(trajectories, *, task_result, policy=None):
     _POSTPROCESSOR_CALLS.append((trajectories, policy))
     return list(reversed(trajectories))
 
 
-async def _async_trajectory_postprocessor(trajectories):
+async def _async_trajectory_postprocessor(trajectories, *, task_result):
+    assert task_result == TaskResult()
     await asyncio.sleep(0)
     return list(trajectories[-1:])
 
 
-def _recording_reward_postprocessor(trajectories):
-    _POSTPROCESSOR_CALLS.append(tuple(trajectories))
+def _mutating_task_result_postprocessor(trajectories, *, task_result):
+    _POSTPROCESSOR_CALLS.append((trajectories, task_result))
+    task_result.reward = -1.0
+    task_result.accuracy = -1.0
+    task_result.finished = not task_result.finished
+    task_result.extra_info["nested"]["values"].append(-1)
     return list(trajectories)
 
 
-def _empty_trajectory_postprocessor(_trajectories):
+def _empty_trajectory_postprocessor(_trajectories, *, task_result):
     return []
 
 
-def _tuple_trajectory_postprocessor(trajectories):
+def _tuple_trajectory_postprocessor(trajectories, *, task_result):
     return tuple(trajectories)
 
 
-def _invalid_item_trajectory_postprocessor(trajectories):
+def _invalid_item_trajectory_postprocessor(trajectories, *, task_result):
     return ["not-a-trajectory"]
 
 
-def _dropping_finalized_field_postprocessor(trajectories, *, field):
+def _dropping_finalized_field_postprocessor(trajectories, *, task_result, field):
     replacement = {} if field == "reward_metrics" else None
     return [replace(trajectories[-1], **{field: replacement})]
 
@@ -213,17 +219,23 @@ async def test_from_config_warns_for_unsupported_colocated_hybrid_reward(
         "expected_rollback",
         "expected_cache",
         "expected_chat_template_kwargs",
+        "expected_mm_processor_kwargs",
     ),
     [
-        ({}, {}, True, True, {}),
+        ({}, {}, True, True, {}, {}),
         (
-            {"apply_chat_template_kwargs": {"thinking": True}},
+            {
+                "apply_chat_template_kwargs": {"thinking": True},
+                "mm_processor_kwargs": {"max_pixels": 1024},
+            },
             {"enable_last_assistant_rollback": False},
             False,
             True,
             {"thinking": True},
+            {"max_pixels": 1024},
         ),
-        ({}, {"enable_tool_parser_cache": False}, True, False, {}),
+        ({}, {"enable_tool_parser_cache": False}, True, False, {}, {}),
+        ({}, {"coalesce_reserved_exact_requests": False}, True, True, {}, {}),
     ],
 )
 def test_build_gateway_manager_wires_gateway_config_defaults(
@@ -233,6 +245,7 @@ def test_build_gateway_manager_wires_gateway_config_defaults(
     expected_rollback,
     expected_cache,
     expected_chat_template_kwargs,
+    expected_mm_processor_kwargs,
 ):
     from omegaconf import OmegaConf
 
@@ -241,6 +254,13 @@ def test_build_gateway_manager_wires_gateway_config_defaults(
     class _ModelConfig:
         tokenizer = object()
         processor = None
+        hf_config = types.SimpleNamespace(model_type="deepseek_v4")
+
+    class _RolloutConfig:
+        name = "vllm"
+        prompt_length = 128
+        response_length = 64
+        multi_turn = types.SimpleNamespace(format="hermes")
 
     captured = {}
 
@@ -250,7 +270,11 @@ def test_build_gateway_manager_wires_gateway_config_defaults(
             captured["gateway_count"] = gateway_count
             captured["gateway_actor_config"] = gateway_actor_config
 
-    monkeypatch.setattr(entry_module, "omega_conf_to_dataclass", lambda _config: _ModelConfig())
+    monkeypatch.setattr(
+        entry_module,
+        "omega_conf_to_dataclass",
+        lambda cfg: _RolloutConfig() if "multi_turn" in cfg else _ModelConfig(),
+    )
     monkeypatch.setattr(entry_module, "GatewayManager", _FakeGatewayManager)
 
     llm_client = object()
@@ -286,8 +310,97 @@ def test_build_gateway_manager_wires_gateway_config_defaults(
     assert captured["gateway_actor_config"].rollout_backend == "vllm"
     assert captured["gateway_actor_config"].enable_last_assistant_rollback is expected_rollback
     assert captured["gateway_actor_config"].enable_tool_parser_cache is expected_cache
+    assert captured["gateway_actor_config"].coalesce_reserved_exact_requests is agent_framework_config.get(
+        "coalesce_reserved_exact_requests", True
+    )
+    assert captured["gateway_actor_config"].hf_model_type == "deepseek_v4"
     assert isinstance(captured["gateway_actor_config"].apply_chat_template_kwargs, dict)
     assert captured["gateway_actor_config"].apply_chat_template_kwargs == expected_chat_template_kwargs
+    assert captured["gateway_actor_config"].mm_processor_kwargs == expected_mm_processor_kwargs
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [(None, None), ([], set()), (["temperature", "max_tokens"], {"temperature", "max_tokens"})],
+)
+def test_build_gateway_manager_wires_allowed_request_sampling_keys(monkeypatch, configured, expected):
+    from omegaconf import OmegaConf
+
+    from uni_agent.framework import entry as entry_module
+
+    class ModelConfig:
+        tokenizer = object()
+        processor = None
+        hf_config = types.SimpleNamespace(model_type="test")
+
+    class RolloutConfig:
+        name = "vllm"
+        prompt_length = 128
+        response_length = 64
+        multi_turn = types.SimpleNamespace(format="hermes")
+
+    captured = {}
+
+    class Manager:
+        def __init__(self, *, gateway_actor_config, **kwargs):
+            captured["config"] = gateway_actor_config
+
+    monkeypatch.setattr(
+        entry_module,
+        "omega_conf_to_dataclass",
+        lambda cfg: RolloutConfig() if "multi_turn" in cfg else ModelConfig(),
+    )
+    monkeypatch.setattr(entry_module, "GatewayManager", Manager)
+    af = {"gateway_count": 1}
+    if configured is not None:
+        af["allowed_request_sampling_param_keys"] = configured
+    config = OmegaConf.create(
+        {
+            "data": {},
+            "actor_rollout_ref": {
+                "model": {},
+                "rollout": {
+                    "name": "vllm",
+                    "prompt_length": 128,
+                    "response_length": 64,
+                    "multi_turn": {"format": "hermes"},
+                    "custom": {"agent_framework": af},
+                },
+            },
+        }
+    )
+    entry_module.build_gateway_manager(config=config, llm_client=object())
+    assert captured["config"].allowed_request_sampling_param_keys == expected
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_build_gateway_manager_rejects_invalid_allowed_request_sampling_keys(monkeypatch):
+    from omegaconf import OmegaConf
+
+    from uni_agent.framework import entry as entry_module
+
+    config = OmegaConf.create(
+        {
+            "data": {},
+            "actor_rollout_ref": {
+                "model": {},
+                "rollout": {
+                    "name": "vllm",
+                    "prompt_length": 128,
+                    "response_length": 64,
+                    "multi_turn": {"format": "hermes"},
+                    "custom": {
+                        "agent_framework": {"gateway_count": 1, "allowed_request_sampling_param_keys": "temperature"}
+                    },
+                },
+            },
+        }
+    )
+    with pytest.raises(ValueError, match="allowed_request_sampling_param_keys"):
+        entry_module.build_gateway_manager(config=config, llm_client=object())
 
 
 class _FakeTransferQueue:
@@ -624,32 +737,39 @@ async def test_runner_reward_is_used_without_custom_scorer_even_when_worker_exis
 @pytest.mark.cpu
 @pytest.mark.level0
 @pytest.mark.asyncio
-async def test_postprocessor_sees_runner_annotations_before_scoring():
+@pytest.mark.parametrize("reward", [0.75, None], ids=["runner-reward", "no-reward"])
+async def test_postprocessor_task_result_is_isolated_from_runner_and_tq(reward, fake_tq):
     _POSTPROCESSOR_CALLS.clear()
+    task_result = TaskResult(
+        reward=reward,
+        accuracy=0.5,
+        finished=False,
+        extra_info={"nested": {"values": [1]}, "tags": {"test"}},
+    )
+    original = deepcopy(task_result)
 
     async def result_runner(**kwargs):
-        return TaskResult(reward=0.75, accuracy=0.5, finished=False)
+        return task_result
 
     framework = await _build_framework_with_agent_runners(
         agent_runners={"runner": _inline_runner_config(result_runner)},
         gateway_manager=_FakeGatewayManager({"session-sample-0-rollout-0": [_trajectory()]}),
-        trajectory_postprocessor_fqn=f"{__name__}._recording_reward_postprocessor",
+        trajectory_postprocessor_fqn=f"{__name__}._mutating_task_result_postprocessor",
     )
 
-    await framework._run_agent_episode(
-        sample_fields={"raw_prompt": [], "uid": "uid-0"},
-        sample_index=0,
-        session_index=0,
-        global_steps=7,
-        runner_name="runner",
-        runner_config=framework.runner_registry["runner"],
-        sampling_params={},
-    )
+    await framework.generate_sequences(_build_prompts(count=1, global_steps=7))
 
-    processed = _POSTPROCESSOR_CALLS[0]
-    assert [(trajectory.reward_score, trajectory.reward_metrics, trajectory.finished) for trajectory in processed] == [
-        (0.75, {"acc": 0.5}, False)
+    processed, copied_result = _POSTPROCESSOR_CALLS[0]
+    assert copied_result is not task_result
+    assert copied_result.extra_info["nested"]["values"] == [1, -1]
+    assert copied_result.extra_info["tags"] == original.extra_info["tags"]
+    assert task_result == original
+    assert [(traj.reward_score, traj.reward_metrics, traj.finished) for traj in processed] == [
+        (reward, {"acc": 0.5}, False)
     ]
+    fields = fake_tq.batch_puts[0]["fields"]
+    assert tu.get(fields, "extra_fields")[0]["reward_extra_info"] == {"acc": 0.5}
+    assert fields["rm_scores"][0].sum().item() == (reward or 0.0)
 
 
 @pytest.mark.cpu
@@ -673,7 +793,7 @@ async def test_reward_worker_processes_runner_reward_info_and_owns_final_metrics
             reward=0.5,
             accuracy=1.0,
             finished=True,
-            extra_info={"case_id": "case-1"},
+            extra_info={"case_id": "case-1", "nested": {"values": [1]}},
         )
 
     worker = _Worker()
@@ -683,6 +803,7 @@ async def test_reward_worker_processes_runner_reward_info_and_owns_final_metrics
         gateway_manager=runtime,
         reward_loop_worker_handles=[worker],
         reward_config={"custom_reward_function": {"path": "pkg://custom_reward.py"}},
+        trajectory_postprocessor_fqn=f"{__name__}._mutating_task_result_postprocessor",
     )
 
     trajectories, _ = await framework._run_agent_episode(
@@ -701,7 +822,7 @@ async def test_reward_worker_processes_runner_reward_info_and_owns_final_metrics
             "runner_reward_info": {
                 "reward": 0.5,
                 "metrics": {"acc": 1.0},
-                "reward_context": {"case_id": "case-1"},
+                "reward_context": {"case_id": "case-1", "nested": {"values": [1]}},
             },
         }
     ]
@@ -1118,7 +1239,9 @@ async def test_generate_sequences_writes_tq_schema_for_each_session(monkeypatch,
 
     assert fake_tq.batch_puts[0]["keys"] == ["uid-0_0_0"]
     assert fake_tq.batch_puts[1]["keys"] == ["uid-0_1_0"]
-    assert fake_tq.puts == [{"key": "uid-0", "partition_id": "train", "tag": {"status": "finished"}}]
+    assert fake_tq.puts == [
+        {"key": "uid-0", "partition_id": "train", "tag": {"status": status}} for status in ("running", "finished")
+    ]
 
     first = fake_tq.batch_puts[0]
     fields = first["fields"]
@@ -1222,7 +1345,9 @@ async def test_generate_sequences_masks_unfinished_trajectory_without_dropping_i
     assert batch["tags"][0]["status"] == "success"
     assert "finished" not in batch["tags"][0]
     assert "finished" not in batch["fields"].keys()
-    assert fake_tq.puts == [{"key": "uid-0", "partition_id": "train", "tag": {"status": "finished"}}]
+    assert fake_tq.puts == [
+        {"key": "uid-0", "partition_id": "train", "tag": {"status": status}} for status in ("running", "finished")
+    ]
 
 
 @pytest.mark.cpu
@@ -1536,7 +1661,7 @@ async def test_trajectory_postprocessor_reports_invalid_extensions(
     )
 
     with pytest.raises(error_type, match=error_message):
-        await framework._apply_trajectory_postprocessor([_trajectory()])
+        await framework._apply_trajectory_postprocessor([_trajectory()], TaskResult())
 
 
 @pytest.mark.cpu
@@ -1553,7 +1678,7 @@ async def test_trajectory_postprocessor_rejects_dropped_finalized_fields(field):
 
     with pytest.raises(ValueError, match="must preserve finalized reward fields"):
         await framework._apply_trajectory_postprocessor(
-            [_trajectory(reward_score=0.5, reward_metrics={"acc": 1.0}, finished=False)]
+            [_trajectory(reward_score=0.5, reward_metrics={"acc": 1.0}, finished=False)], TaskResult()
         )
 
 
@@ -1610,6 +1735,7 @@ async def test_generate_sequences_keeps_successful_sessions_when_one_session_fai
     )
 
     async def agent_runner(*, raw_prompt, session, sample_index, tools_kwargs, **kwargs):
+        assert fake_tq.puts == [{"key": "uid-0", "partition_id": "train", "tag": {"status": "running"}}]
         if session.session_id.startswith("session-sample-0-rollout-1-"):
             raise RuntimeError("gateway failed once")
         return TaskResult()
@@ -1624,7 +1750,9 @@ async def test_generate_sequences_keeps_successful_sessions_when_one_session_fai
     await framework.generate_sequences(_build_prompts(count=1, global_steps=8))
 
     assert fake_tq.batch_puts[0]["keys"] == ["uid-0_0_0"]
-    assert fake_tq.puts == [{"key": "uid-0", "partition_id": "train", "tag": {"status": "finished"}}]
+    assert fake_tq.puts == [
+        {"key": "uid-0", "partition_id": "train", "tag": {"status": status}} for status in ("running", "finished")
+    ]
     assert len(runtime.aborted_sessions) == 1
     assert runtime.aborted_sessions[0].startswith("session-sample-0-rollout-1-")
 
@@ -1653,7 +1781,9 @@ async def test_generate_sequences_marks_prompt_failure_when_all_sessions_fail(fa
         await framework.generate_sequences(_build_prompts(count=1, global_steps=9, validate=True))
 
     assert fake_tq.batch_puts == []
-    assert fake_tq.puts == [{"key": "uid-0", "partition_id": "val", "tag": {"status": "failure"}}]
+    assert fake_tq.puts == [
+        {"key": "uid-0", "partition_id": "val", "tag": {"status": status}} for status in ("running", "failure")
+    ]
 
 
 @pytest.mark.cpu
@@ -1705,8 +1835,9 @@ async def test_generate_sequences_keeps_other_prompts_when_one_prompt_fails(fake
 
     assert [put["keys"] for put in fake_tq.batch_puts] == [["uid-1_0_0"]]
     assert sorted(fake_tq.puts, key=lambda put: put["key"]) == [
-        {"key": "uid-0", "partition_id": "train", "tag": {"status": "failure"}},
-        {"key": "uid-1", "partition_id": "train", "tag": {"status": "finished"}},
+        {"key": uid, "partition_id": "train", "tag": {"status": status}}
+        for uid, terminal in (("uid-0", "failure"), ("uid-1", "finished"))
+        for status in ("running", terminal)
     ]
     assert len(runtime.aborted_sessions) == 1
     assert runtime.aborted_sessions[0].startswith("session-sample-0-rollout-0-")

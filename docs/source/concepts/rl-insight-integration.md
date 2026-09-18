@@ -19,7 +19,7 @@ defines lane IDs, private dashboard metrics, or the span protocol.
 ```mermaid
 flowchart LR
     trainer[verl trainer] --> worker[AgentFrameworkWorker]
-    worker --> adapter[uni_agent.rlinsight_adapter]
+    worker --> adapter[uni_agent.rl_insight.adapter]
     framework[Agent framework session] --> adapter
     task[Task runner] --> adapter
     gateway[Gateway generation] --> adapter
@@ -66,7 +66,7 @@ agent session, consistent identity fields, and exactly one final `finish` call.
 
 ## Adapter API
 
-`uni_agent/rlinsight_adapter.py` is the only Uni-Agent module that knows how to
+`uni_agent/rl_insight/adapter.py` is the only Uni-Agent module that knows how to
 normalize and forward completed spans.
 
 ### `init_rollout_trace_config(config)`

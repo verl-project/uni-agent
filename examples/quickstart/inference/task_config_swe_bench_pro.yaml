@@ -1,0 +1,48 @@
+- name: swe_bench_pro
+  sandbox:
+    provider: modal
+    runtime_timeout: 14400
+    sandbox_kwargs:
+      # SWE-bench Pro images keep themselves alive through their entrypoint.
+      startup_command: []
+  eval_timeout: 3600
+  agent:
+    name: react
+    max_steps: 500
+    tools:
+      - name: str_replace_editor
+      - name: stateful_shell
+        command_timeout: 300
+        env_vars:
+          PAGER: "cat"
+          GIT_PAGER: "cat"
+          MANPAGER: "cat"
+          TQDM_DISABLE: "1"
+          PIP_PROGRESS_BAR: "off"
+      - name: submit
+    sampling_params_override:
+      temperature: 1.0
+      top_p: 1.0
+  prompt_template:
+    - role: system
+      content: You are a helpful assistant that can interact with a computer to solve tasks.
+    - role: user
+      content: |-
+        <uploaded_files>
+        /app
+        </uploaded_files>
+        I've uploaded a code repository in the directory /app. Consider the following PR description:
+
+        <pr_description>
+        {problem_statement}
+        </pr_description>
+
+        Can you help me implement the necessary changes to the repository so that the requirements specified in the <pr_description> are met?
+        I've already taken care of all changes to any of the test files described in the <pr_description>. This means you DON'T have to modify the testing logic or any of the tests in any way!
+        Your task is to make the minimal changes to non-test files in the /app directory to ensure the <pr_description> is satisfied.
+        Follow these steps to resolve the issue:
+        1. As a first step, find and read code relevant to the <pr_description>
+        2. Create a script to reproduce the error and execute it using the shell tool, to confirm the error
+        3. Edit the source code of the repository to resolve the issue
+        4. Rerun your reproduction script and confirm that the error is fixed
+        5. Think about edge cases and make sure your fix handles them as well

@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from uni_agent import rlinsight_adapter
+from uni_agent.rl_insight import adapter as rlinsight_adapter
 
 
 @pytest.fixture(autouse=True)
@@ -22,7 +22,7 @@ def _capture_trace_span(monkeypatch: pytest.MonkeyPatch):
     def trace_span(**kwargs):
         captured.append(kwargs)
 
-    monkeypatch.setattr(rlinsight_adapter.RLInsightLogger, "trace_span", staticmethod(trace_span))
+    monkeypatch.setattr("verl.utils.tracking.RLInsightLogger.trace_span", staticmethod(trace_span))
     return captured
 
 
@@ -120,7 +120,13 @@ def test_old_verl_missing_optional_apis_degrades_to_warnings(monkeypatch: pytest
     class OldVerlLogger:
         pass
 
-    monkeypatch.setattr(rlinsight_adapter, "RLInsightLogger", OldVerlLogger)
+    # verl's RLInsightLogger warns once per feature for the whole process (a
+    # class-level set); earlier tests may have consumed the agent_loop_session
+    # warning, so clear it to make the assertion independent of run history.
+    from verl.utils.tracking import RLInsightLogger
+
+    monkeypatch.setattr(RLInsightLogger, "_warned_unsupported_features", set())
+    monkeypatch.setattr("verl.utils.tracking.RLInsightLogger", OldVerlLogger)
     monkeypatch.setattr(rlinsight_adapter, "agent_loop_lane_id", None)
     rlinsight_adapter.RolloutTraceConfig.init(
         project_name="project",
@@ -128,12 +134,12 @@ def test_old_verl_missing_optional_apis_degrades_to_warnings(monkeypatch: pytest
         backend=None,
     )
 
-    with caplog.at_level("WARNING", logger="uni_agent.rlinsight_adapter"):
+    with caplog.at_level("WARNING"):
         rlinsight_adapter._report_span("agent_task", start_time_ns=1, attributes={})
         session = rlinsight_adapter.agent_loop_session(sample=7, session=1, global_steps=2)
 
-    assert "does not provide RLInsightLogger.trace_span" in caplog.text
-    assert "does not provide RLInsightLogger.agent_loop_session" in caplog.text
+    assert "failed to report rl-insight span agent_task" in caplog.text
+    assert "RL-Insight does not support agent_loop_session" in caplog.text
     assert session.identity["project"] == "project"
     assert session.identity["state_lane_id"] == "experiment=experiment/sample=7/session=1/traj=0"
     session.finish(status="success", trajectories=[])
