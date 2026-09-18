@@ -40,6 +40,12 @@ class GatewayActorConfig:
             The gateway enforces their sum when both values are set.
         enable_last_assistant_rollback: Whether latest-assistant rewrites may
             rollback and reuse an existing chain. Enabled by default.
+        kv_cache_offload_enabled: Whether Gateway injects agent KV hints.
+        kv_cache_offload_priority_mode: ``static`` uses configured priorities;
+            ``dynamic`` scores the request from its live trajectory state.
+        kv_cache_offload_lease_seconds: Lifetime assigned to each refreshed hint.
+        kv_cache_offload_priority: Priority for requests without tools.
+        kv_cache_offload_tool_priority: Priority for requests with tools available.
         coalesce_reserved_exact_requests: Whether exact provider-normalized
             requests in the same session share an in-flight result, including
             first-turn and new-chain requests. Enabled by default; disable for
@@ -60,6 +66,11 @@ class GatewayActorConfig:
     prompt_length: int | None = None
     response_length: int | None = None
     enable_last_assistant_rollback: bool = True
+    kv_cache_offload_enabled: bool = False
+    kv_cache_offload_priority_mode: str = "static"
+    kv_cache_offload_lease_seconds: float = 300.0
+    kv_cache_offload_priority: int = 50
+    kv_cache_offload_tool_priority: int = 90
     coalesce_reserved_exact_requests: bool = True
 
     def __post_init__(self) -> None:
@@ -72,6 +83,22 @@ class GatewayActorConfig:
                 "enable_last_assistant_rollback must be a bool, "
                 f"got {type(self.enable_last_assistant_rollback).__name__}"
             )
+        if type(self.kv_cache_offload_enabled) is not bool:
+            raise ValueError("kv_cache_offload_enabled must be a bool")
+        if self.kv_cache_offload_priority_mode not in {"static", "dynamic"}:
+            raise ValueError("kv_cache_offload_priority_mode must be 'static' or 'dynamic'")
+        if (
+            isinstance(self.kv_cache_offload_lease_seconds, bool)
+            or not isinstance(self.kv_cache_offload_lease_seconds, int | float)
+            or self.kv_cache_offload_lease_seconds <= 0
+        ):
+            raise ValueError("kv_cache_offload_lease_seconds must be positive")
+        for name, value in (
+            ("kv_cache_offload_priority", self.kv_cache_offload_priority),
+            ("kv_cache_offload_tool_priority", self.kv_cache_offload_tool_priority),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 100:
+                raise ValueError(f"{name} must be an integer between 0 and 100")
         if type(self.coalesce_reserved_exact_requests) is not bool:
             raise ValueError(
                 "coalesce_reserved_exact_requests must be a bool, "

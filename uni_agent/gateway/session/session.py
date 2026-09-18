@@ -13,6 +13,7 @@ from typing import Any
 
 from fastapi import HTTPException
 
+from uni_agent.gateway.kv_offload.hints import DynamicPriorityInputs, compute_dynamic_priority
 from uni_agent.gateway.session.codec import MessageCodec
 from uni_agent.gateway.session.types import InternalGenerationRequest, SessionHandle, Trajectory
 from uni_agent.rl_insight.adapter import start_generation_span
@@ -136,6 +137,7 @@ class EncodedData:
             assistant before re-encoding the incoming suffix.
         rollback_dropped_trainable_tokens: Number of mask=1 tokens removed by
             that rollback.
+        active_chain_count: Number of active chains when input preparation ran.
     """
 
     buffer: TrajectoryBuffer
@@ -152,6 +154,7 @@ class EncodedData:
     last_assistant_start: LastAssistantStart | None = None
     rollback_applied: bool = False
     rollback_dropped_trainable_tokens: int = 0
+    active_chain_count: int = 0
 
 
 @dataclass
@@ -195,6 +198,7 @@ class GatewaySession:
         enable_last_assistant_rollback: bool = True,
         coalesce_reserved_exact_requests: bool = True,
         metadata: dict[str, Any] | None = None,
+        kv_cache_offload_config: dict[str, Any] | None = None,
     ):
         """Create an active session bound to a handle and model codec."""
         if prompt_length is not None and prompt_length <= 0:
@@ -214,6 +218,7 @@ class GatewaySession:
         self._coalesce_reserved_exact_requests = coalesce_reserved_exact_requests
         self._metadata = dict(metadata or {})
         self._trace_identity = dict(self._metadata.get("_trace_identity") or {})
+        self._kv_cache_offload_config = dict(kv_cache_offload_config or {})
         self.active_chains: list[ChainState] = []
         self.materialized_chains: list[MaterializedChain] = []
         self.reserved_chain_ids: set[int] = set()
@@ -322,10 +327,11 @@ class GatewaySession:
                 raise RuntimeError("generation input preparation did not produce a request")
 
             try:
+                backend_sampling_params = self._sampling_params_with_kv_hint(encoded)
                 output = await backend.generate(
                     request_id=self.handle.session_id,
                     prompt_ids=encoded.context_ids,
-                    sampling_params=encoded.sampling_params,
+                    sampling_params=backend_sampling_params,
                     image_data=encoded.image_data,
                     video_data=encoded.video_data,
                     mm_processor_kwargs=encoded.mm_processor_kwargs,
@@ -453,6 +459,52 @@ class GatewaySession:
             generation_span.report()
             if reserved_chain_id is not None:
                 await asyncio.shield(self._release_chain_reservation(reserved_chain_id))
+
+    def _sampling_params_with_kv_hint(self, encoded: EncodedData) -> dict[str, Any]:
+        """Attach a vLLM request hint without changing provider-visible params."""
+        sampling_params = dict(encoded.sampling_params)
+        if not self._kv_cache_offload_config.get("enabled", False):
+            return sampling_params
+
+        tools_available = bool(encoded.tools)
+        priority_mode = str(self._kv_cache_offload_config.get("priority_mode", "static"))
+        if priority_mode == "dynamic":
+            remaining_capacity = (
+                self._trajectory_capacity - len(encoded.context_ids)
+                if self._trajectory_capacity is not None
+                else None
+            )
+            decision = compute_dynamic_priority(
+                DynamicPriorityInputs(
+                    tools_available=tools_available,
+                    has_active_chain=encoded.chain_id is not None,
+                    received_tool_result=bool(encoded.messages and encoded.messages[-1].get("role") == "tool"),
+                    context_tokens=len(encoded.context_ids),
+                    trajectory_capacity=self._trajectory_capacity,
+                    remaining_capacity=remaining_capacity,
+                    rollback_applied=encoded.rollback_applied,
+                    active_chain_count=encoded.active_chain_count,
+                )
+            )
+            priority = decision.priority
+        else:
+            priority_key = "tool_priority" if tools_available else "priority"
+            priority = int(self._kv_cache_offload_config.get(priority_key, 50))
+        lease_seconds = float(self._kv_cache_offload_config.get("lease_seconds", 300.0))
+        hint = {
+            "schema_version": 1,
+            "trajectory_id": self.handle.session_id,
+            "kv_priority": priority,
+            "lease_until": time.time() + lease_seconds,
+            "tools_available": tools_available,
+        }
+
+        extra_args = dict(sampling_params.get("extra_args") or {})
+        kv_transfer_params = dict(extra_args.get("kv_transfer_params") or {})
+        kv_transfer_params["agent_hint"] = hint
+        extra_args["kv_transfer_params"] = kv_transfer_params
+        sampling_params["extra_args"] = extra_args
+        return sampling_params
 
     async def finalize(self) -> list[Trajectory]:
         """Close the session and return its materialized token trajectories."""
@@ -632,6 +684,7 @@ class GatewaySession:
                 incoming_message_prefix_hashes=list(incoming_message_prefix_hashes),
                 rollback_applied=rollback_applied,
                 rollback_dropped_trainable_tokens=rollback_dropped_trainable_tokens,
+                active_chain_count=len(self.active_chains),
             )
 
         remaining_trajectory_capacity = (
@@ -664,6 +717,7 @@ class GatewaySession:
             last_assistant_start=last_assistant_start,
             rollback_applied=rollback_applied,
             rollback_dropped_trainable_tokens=rollback_dropped_trainable_tokens,
+            active_chain_count=len(self.active_chains),
         )
 
     def _select_chain(

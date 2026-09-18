@@ -87,6 +87,26 @@ def test_gateway_actor_config_enables_last_assistant_rollback_by_default():
 
 @pytest.mark.cpu
 @pytest.mark.level0
+def test_gateway_actor_config_rejects_invalid_kv_priority_mode():
+    from uni_agent.gateway.config import GatewayActorConfig
+
+    with pytest.raises(ValueError, match="must be 'static' or 'dynamic'"):
+        GatewayActorConfig(tokenizer=FakeTokenizer(), kv_cache_offload_priority_mode="adaptive")
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize("field", ["kv_cache_offload_priority", "kv_cache_offload_tool_priority"])
+@pytest.mark.parametrize("value", [-1, 101, True])
+def test_gateway_actor_config_rejects_invalid_kv_priority(field, value):
+    from uni_agent.gateway.config import GatewayActorConfig
+
+    with pytest.raises(ValueError, match="must be an integer between 0 and 100"):
+        GatewayActorConfig(tokenizer=FakeTokenizer(), **{field: value})
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 @pytest.mark.parametrize("options, expected", [({}, True), ({"coalesce_reserved_exact_requests": False}, False)])
 async def test_gateway_actor_forwards_singleflight_to_session(options, expected):

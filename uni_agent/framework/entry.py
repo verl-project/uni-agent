@@ -39,6 +39,9 @@ def build_gateway_manager(*, config, llm_client) -> GatewayManager:
 
     apply_chat_template_kwargs = data_cfg.get("apply_chat_template_kwargs", {})
     mm_processor_kwargs = data_cfg.get("mm_processor_kwargs", {})
+    
+    kv_cfg = af_cfg.get("kv_cache_offload") or {}
+    
     allowed_sampling_keys = af_cfg.get("allowed_request_sampling_param_keys")
     if allowed_sampling_keys is not None:
         if not isinstance(allowed_sampling_keys, list | tuple) and not OmegaConf.is_list(allowed_sampling_keys):
@@ -62,6 +65,11 @@ def build_gateway_manager(*, config, llm_client) -> GatewayManager:
         prompt_length=rollout_config.prompt_length,
         response_length=rollout_config.response_length,
         enable_last_assistant_rollback=af_cfg.get("enable_last_assistant_rollback", True),
+        kv_cache_offload_enabled=kv_cfg.get("enable", False),
+        kv_cache_offload_priority_mode=str(kv_cfg.get("priority_mode", "static")),
+        kv_cache_offload_lease_seconds=float(kv_cfg.get("active_lease_seconds", 300.0)),
+        kv_cache_offload_priority=int(kv_cfg.get("priority", 50)),
+        kv_cache_offload_tool_priority=int(kv_cfg.get("tool_priority", 90)),
         allowed_request_sampling_param_keys=allowed_sampling_keys,
         coalesce_reserved_exact_requests=af_cfg.get("coalesce_reserved_exact_requests", True),
     )
