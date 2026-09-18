@@ -8,9 +8,9 @@ The immutable OpenClaw tool image is:
 
     swr.cn-east-3.myhuaweicloud.com/openyuanrong/openclaw-tool@sha256:90cef4641f82a955692385c48cb4db01a3bd73fc6f68f37962a58717ce547c13
 
-The `tool` image is a scratch image mounted at `/opt/openclaw` by the OpenYuanRong provider in the included SWE-bench config. The task image supplies the benchmark repository and its own Python environment; the provider adds `/opt/openclaw/bin` to the sandbox PATH.
+The `tool` image is a scratch image mounted at `/opt/openclaw` by the OpenYuanRong provider in the included SWE-bench config. The task image supplies the benchmark repository and its own Python environment; the agent command prepends `/opt/openclaw/bin` while preserving the task image PATH.
 
-    BUILD_TARGET=runtime RUNTIME_IMAGE=openclaw-recipe-runtime:2026.9.2 bash examples/blackbox_recipes/openclaw/build_tool.sh
+    bash examples/blackbox_recipes/openclaw/build_tool.sh
 
 The task image must be reachable by the provider's image mapping and include the normal SWE-bench dependencies. The sidecar image reference in `config/openclaw_swe_bench.yaml` is pinned by digest; rebuild and publish a new digest when the OpenClaw version changes.
 
@@ -27,7 +27,7 @@ Use an environment with the repository's inference dependencies installed, provi
     OPENYUANRONG_TOKEN=your-token \
     bash examples/blackbox_recipes/openclaw/run_infer_openclaw.sh
 
-`LIMIT` defaults to one sample and `N` to one rollout per sample. The script records verifier scores in `result.json` and writes a structural rollout summary to `inference_summary.json`; reward 0 is a normal task result and does not make the launcher fail. Optional `N_GPUS_PER_NODE` and `TENSOR_PARALLEL_SIZE` values are passed through to the inference driver.
+`LIMIT` defaults to one sample and `N` to one rollout per sample. The script records verifier scores in `result.json` and validates the corresponding task logs and finished trajectories; reward 0 is a normal task result and does not make the launcher fail. Optional `N_GPUS_PER_NODE` and `TENSOR_PARALLEL_SIZE` values are passed through to the inference driver.
 
 ## Tests and deployment limits
 

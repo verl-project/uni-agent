@@ -172,16 +172,6 @@ def init_config(args: argparse.Namespace, *, served_model_name: str):
             True,
             force_add=True,
         )
-    if args.multi_turn:
-        OmegaConf.update(config, "actor_rollout_ref.rollout.multi_turn.enable", True, force_add=True)
-        if args.max_parallel_calls is not None:
-            OmegaConf.update(
-                config,
-                "actor_rollout_ref.rollout.multi_turn.max_parallel_calls",
-                args.max_parallel_calls,
-                force_add=True,
-            )
-
     # Gateway tool-call parser: the gateway decodes tool calls from raw tokens, so
     # this must match the model's chat template (the analog of vLLM's
     # --tool-call-parser, e.g. qwen3_coder for Qwen3-Coder, hermes for Qwen3).
@@ -423,10 +413,6 @@ def main() -> None:
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.9, help="Engine GPU memory fraction.")
     parser.add_argument(
         "--language-model-only", action="store_true", help="Enable text-only vLLM language-model mode."
-    )
-    parser.add_argument("--multi-turn", action="store_true", help="Enable verl multi-turn tool rollout.")
-    parser.add_argument(
-        "--max-parallel-calls", type=int, default=None, help="Optional maximum parallel tool calls per turn."
     )
     parser.add_argument(
         "--gateway-count",
