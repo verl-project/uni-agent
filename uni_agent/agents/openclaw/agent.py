@@ -236,10 +236,6 @@ class OpenClawAgent(Agent):
                 "OPENCLAW_CONFIG_PATH": config_path,
                 "OPENCLAW_STATE_DIR": state_dir,
                 "OPENCLAW_NO_RESPAWN": "1",
-                "HTTP_PROXY": "",
-                "HTTPS_PROXY": "",
-                "http_proxy": "",
-                "https_proxy": "",
             }
             tool_dir = str(PurePosixPath(cfg.tool_command).parent)
             launch_script = f"export PATH={_shell_quote_path(tool_dir)}:\"${{PATH:-}}\"; exec {shlex.join(argv)}"
