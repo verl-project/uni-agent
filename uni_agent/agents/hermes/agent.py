@@ -61,18 +61,10 @@ def _message_text(message: object, index: int) -> str:
     return content
 
 
-def split_messages(messages: list[dict[str, Any]]) -> tuple[str | None, str]:
-    """Map framework text messages onto Hermes' system/user API arguments.
-
-    Hermes' Python entry point accepts one system string and one user string.  We
-    preserve all system and user messages in order, while rejecting roles that
-    cannot be represented without silently discarding conversation state.
-    """
-
+def validate_messages(messages: list[dict[str, Any]]) -> None:
+    """Validate the system/user prefix accepted by the Hermes runner."""
     if not isinstance(messages, list) or not messages:
         raise ValueError("hermes requires a non-empty messages list")
-    system_parts: list[str] = []
-    user_parts: list[str] = []
     saw_user = False
     for index, message in enumerate(messages):
         if not isinstance(message, dict):
@@ -82,16 +74,10 @@ def split_messages(messages: list[dict[str, Any]]) -> tuple[str | None, str]:
             raise ValueError(f"hermes only supports initial system/user messages; message {index} has role {role!r}")
         if role == "system" and saw_user:
             raise ValueError("hermes system messages must precede user messages")
-        text = _message_text(message, index)
-        if role == "system":
-            system_parts.append(text)
-        else:
-            saw_user = True
-            user_parts.append(text)
-    if not user_parts:
+        _message_text(message, index)
+        saw_user = saw_user or role == "user"
+    if not saw_user:
         raise ValueError("hermes requires at least one user message")
-    system_message = "\n\n".join(system_parts) or None
-    return system_message, "\n\n".join(user_parts)
 
 
 def build_runner_command(
@@ -126,12 +112,6 @@ def build_runner_command(
             "TERMINAL_ENV=local",
             f"TERMINAL_TIMEOUT={q(str(terminal_timeout))}",
             "PYTHONUNBUFFERED=1",
-            "HTTP_PROXY=",
-            "HTTPS_PROXY=",
-            "http_proxy=",
-            "https_proxy=",
-            "NO_PROXY=*",
-            "no_proxy=*",
         ]
     )
     return (
@@ -212,7 +192,7 @@ class HermesAgent(Agent):
         workdir: str | None = None,
     ) -> AgentResult:
         cfg: HermesConfig = self.config  # type: ignore[assignment]
-        split_messages(messages)
+        validate_messages(messages)
         model = _model_payload(cfg)
         run_id = _safe_run_id(f"{uuid.uuid4().hex}-{getattr(self.config, 'name', 'hermes')}")
         remote_root = f"/tmp/hermes-{run_id}"

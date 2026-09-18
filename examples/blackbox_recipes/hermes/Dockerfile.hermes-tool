@@ -9,7 +9,7 @@ FROM debian:bookworm-slim AS builder
 
 ARG PBS_RELEASE="20260602"
 ARG PBS_PYTHON="3.12.13"
-ARG HERMES_COMMIT="5eb99eb2844b22ebb723711b8e6a0bbb80bb5f04"
+ARG HERMES_COMMIT
 ARG PIP_INDEX_URL=""
 
 RUN apt-get update \
