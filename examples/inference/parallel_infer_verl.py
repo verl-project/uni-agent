@@ -118,6 +118,10 @@ def init_config(args: argparse.Namespace, *, served_model_name: str):
     rollout.tensor_model_parallel_size = args.tensor_parallel_size
     rollout.gpu_memory_utilization = args.gpu_memory_utilization
     rollout.calculate_log_probs = True
+    if args.language_model_only:
+        OmegaConf.update(
+            config, "actor_rollout_ref.rollout.engine_kwargs.vllm.language_model_only", True, force_add=True
+        )
     rollout.enable_rollout_routing_replay = args.enable_rollout_routing_replay
     rollout.disable_log_stats = False
     rollout.free_cache_engine = False
@@ -316,6 +320,11 @@ def main() -> None:
         "--result-path",
         default=None,
         help="Optional path to write a JSON result file (mean rm_score and per-session scores).",
+    )
+    parser.add_argument(
+        "--language-model-only",
+        action="store_true",
+        help="Set vLLM engine_kwargs.vllm.language_model_only for text-only model checkpoints.",
     )
     parser.add_argument(
         "--limit",

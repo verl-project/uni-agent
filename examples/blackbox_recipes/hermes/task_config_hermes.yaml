@@ -1,0 +1,52 @@
+# Hermes black-box SWE-bench recipe.
+#
+# The dataset row contributes only the canonical task image and metadata.  The
+# runner overwrites agent.model.* from the live Uni-Agent gateway session and
+# run_task injects the reverse-tunnel upstream/base_url.
+- name: swe_bench
+  sandbox:
+    provider: openyuanrong
+    runtime_timeout: 10800
+    image_map:
+      - from: "swebench/**"
+        to: "swr.cn-east-3.myhuaweicloud.com/openyuanrong/swe-bench-verified/**:v2"
+    sandbox_kwargs:
+      cpu: 1000
+      memory: 2048
+      cpu_limit: 4000
+      mem_limit: 8192
+      idle_timeout: 7200
+      proxy_port: 38197
+      tunnel_connect_timeout: 60
+      mounts:
+        - target: /opt/hermes
+          image_url: swr.cn-east-3.myhuaweicloud.com/openyuanrong/hermes-agent-tool:20260915
+  agent:
+    name: hermes
+    max_iterations: 100
+    run_budget_seconds: 6600
+    run_timeout: 7200
+    terminal_timeout: 600
+    environment_prefix: /opt/miniconda3/envs/testbed
+    tool_python: /opt/hermes/bin/python
+    runner_script: /opt/hermes/bin/run_hermes.py
+    approval_mode: "off"
+    model:
+      temperature: 0.8
+      top_p: 0.9
+      max_total_tokens: 65536
+      max_tokens_per_turn: 8192
+  eval_timeout: 900
+  prompt_template:
+    - role: system
+      content: |-
+        You are solving one SWE-bench issue inside /testbed.
+        Work only on the repository in /testbed. Do not modify tests, install or
+        change dependencies, or commit/push changes. First inspect the relevant
+        code and reproduce the issue when practical. Implement the smallest
+        correct fix, then run focused verification and report what you changed.
+    - role: user
+      content: |-
+        Issue description:
+
+        {problem_statement}
