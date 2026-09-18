@@ -12,8 +12,6 @@ cd "${REPO_ROOT}"
 : "${OUTPUT_DIR:?Set a fresh output directory outside the repository}"
 : "${OPENYUANRONG_SERVER_ADDRESS:?Set the OpenYuanRong server address}"
 : "${OPENYUANRONG_TOKEN:?Set the OpenYuanRong token}"
-export OPENYUANRONG_TUNNEL_SSL_VERIFY="${OPENYUANRONG_TUNNEL_SSL_VERIFY:-0}"
-
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 command -v "${PYTHON_BIN}" >/dev/null || { echo "Python not found: ${PYTHON_BIN}" >&2; exit 2; }
 TASK_CONFIG="${TASK_CONFIG:-examples/blackbox_recipes/openclaw/config/openclaw_swe_bench.yaml}"
@@ -41,8 +39,6 @@ INFER_CMD=(
     --tool-parser "${TOOL_PARSER}"
     --engine vllm
     --language-model-only
-    --multi-turn
-    --max-parallel-calls 1
     --limit "${LIMIT}"
     --n "${N}"
     --gateway-count "${GATEWAY_COUNT}"
@@ -70,7 +66,7 @@ fi
 
 "${INFER_CMD[@]}"
 
-"${PYTHON_BIN}" - "${RESULT_PATH}" "${LOG_DIR}" > "${OUTPUT_DIR}/inference_summary.json" <<'PY'
+"${PYTHON_BIN}" - "${RESULT_PATH}" "${LOG_DIR}" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -89,7 +85,6 @@ if len(task_logs) != num_sessions or len(trajectories) != num_sessions:
         f"found {len(task_logs)} and {len(trajectories)}"
     )
 
-trajectory_summaries = []
 for path in trajectories:
     data = json.loads(path.read_text(encoding="utf-8"))
     items = data.get("trajectories", [])
@@ -98,24 +93,7 @@ for path in trajectories:
     item = items[0]
     if item.get("finished") is not True:
         raise SystemExit(f"OpenClaw did not finish a valid audited episode: {path}")
-    trajectory_summaries.append({
-        "session_id": data.get("session_id"),
-        "finished": item["finished"],
-        "reward_score": item.get("reward_score"),
-        "reward_metrics": item.get("reward_metrics", {}),
-    })
-
-summary = {
-    "num_task_logs": len(task_logs),
-    "num_sessions": num_sessions,
-    "num_framework_trajectories": len(trajectories),
-    "mean_rm_score": result.get("mean_rm_score"),
-    "scores": scores,
-    "single_trajectory_per_session": True,
-    "all_agents_finished": True,
-    "sessions": trajectory_summaries,
-}
-print(json.dumps(summary, ensure_ascii=False, indent=2))
+print(f"validated {num_sessions} session(s), task logs and finished trajectories")
 PY
 
-echo "Inference complete: ${OUTPUT_DIR}/inference_summary.json"
+echo "Inference complete: ${RESULT_PATH}"
