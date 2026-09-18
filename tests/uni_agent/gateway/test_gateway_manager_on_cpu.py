@@ -31,15 +31,48 @@ class _FakeGateway:
 
     def __init__(self):
         self.created = []
+        self.created_kwargs = []
 
     async def _create(self, session_id, **kwargs):
         await asyncio.sleep(0)  # yield the loop mid-create to expose select/increment races
         self.created.append(session_id)
+        self.created_kwargs.append(kwargs)
         return session_id
 
     @property
     def create_session(self):
         return _FakeRemoteMethod(self._create)
+
+
+class _LifecycleGateway:
+    """Controllable remote-method stub for close failures."""
+
+    def __init__(self, *, finalize_error=None):
+        self.finalize_error = finalize_error
+        self.abort_calls = []
+        self.finalize_calls = []
+
+    async def _abort(self, session_id):
+        self.abort_calls.append(session_id)
+
+    async def _finalize(self, session_id):
+        self.finalize_calls.append(session_id)
+        if self.finalize_error is not None:
+            raise self.finalize_error
+        return ["trajectory"]
+
+    abort_session = property(lambda self: _FakeRemoteMethod(self._abort))
+    finalize_session = property(lambda self: _FakeRemoteMethod(self._finalize))
+
+
+def _new_manager(gateway, *, session_ids=()):
+    from uni_agent.gateway.manager import GatewayManager
+
+    manager = GatewayManager.__new__(GatewayManager)
+    manager.gateways = [gateway]
+    manager.active_sessions_per_gateway = [len(session_ids)]
+    manager._session_to_gateway_index = dict.fromkeys(session_ids, 0)
+    return manager
 
 
 @pytest.mark.cpu
@@ -68,6 +101,44 @@ async def test_gateway_manager_balances_concurrent_session_creation():
     assert sum(counts) == 40
     assert max(counts) - min(counts) <= 1, counts
     assert [len(g.created) for g in gateways] == counts
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_gateway_manager_forwards_session_config():
+    gateway = _FakeGateway()
+    manager = _new_manager(gateway)
+
+    await manager.create_session("session-create", weight_version=3)
+    assert gateway.created == ["session-create"]
+    assert gateway.created_kwargs == [{"weight_version": 3}]
+
+    assert manager._session_to_gateway_index == {"session-create": 0}
+    assert manager.active_sessions_per_gateway == [1]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_gateway_manager_close_failure_retains_mapping_and_owner():
+    close_error = RuntimeError("actor-close-unknown")
+    gateway = _LifecycleGateway(finalize_error=close_error)
+    manager = _new_manager(gateway, session_ids=("session-close",))
+
+    with pytest.raises(RuntimeError, match="actor-close-unknown") as raised:
+        await manager.finalize_session("session-close")
+
+    assert raised.value is close_error
+    assert gateway.finalize_calls == ["session-close"]
+    assert manager._session_to_gateway_index == {"session-close": 0}
+    assert manager.active_sessions_per_gateway == [1]
+
+    await manager.abort_session("session-close")
+
+    assert gateway.abort_calls == ["session-close"]
+    assert manager._session_to_gateway_index == {}
+    assert manager.active_sessions_per_gateway == [0]
 
 
 @pytest.mark.cpu

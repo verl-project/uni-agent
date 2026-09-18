@@ -1,6 +1,6 @@
 """Driver-side gateway manager: owns the gateway actor pool and routes sessions.
 
-The manager spawns ``GatewayActor`` handles, injects the ``LLMServerClient``
+The manager spawns ``GatewayActor`` handles, injects the LLM client
 backend into each, and tracks which actor owns each session so lifecycle calls
 forward to the right actor through Ray remote methods.
 """
@@ -12,19 +12,18 @@ import asyncio
 import ray
 
 from uni_agent.gateway.config import GatewayActorConfig
-from verl.workers.rollout.llm_server import LLMServerClient
 
 
 class GatewayManager:
     """Owns gateway actors and routes sessions to them.
 
-    Spawns ``gateway_count`` actors over the injected ``LLMServerClient`` backend
+    Spawns ``gateway_count`` actors over the injected LLM client backend
     and tracks which actor owns each session so lifecycle calls reach it.
     """
 
     def __init__(
         self,
-        llm_client: LLMServerClient,
+        llm_client,
         *,
         gateway_count: int,
         gateway_actor_config: GatewayActorConfig | None = None,
@@ -91,6 +90,7 @@ class GatewayManager:
             self._session_to_gateway_index.pop(session_id, None)
             raise
 
+    # TODO: Consider merging finalize_session and abort_session in a future PR.
     async def finalize_session(self, session_id: str):
         """Finalize a session on its owning actor, release the route, and return its trajectories."""
         gateway, gateway_index = self._get_gateway(session_id)
