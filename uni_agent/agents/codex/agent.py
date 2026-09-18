@@ -75,7 +75,6 @@ def parse_agent_result(stdout: str, exit_code: int) -> dict[str, Any]:
     errors: list[str] = []
     process_exit_code = exit_code
     saw_turn_completed = False
-    saw_process_completed = False
     for line in stdout.splitlines():
         line = line.strip()
         if not line or not line.startswith("{"):
@@ -89,7 +88,6 @@ def parse_agent_result(stdout: str, exit_code: int) -> dict[str, Any]:
         event_count += 1
         event_type = event.get("type")
         if event_type == "process.completed":
-            saw_process_completed = True
             value = event.get("exit_code")
             if isinstance(value, int):
                 process_exit_code = value
@@ -108,7 +106,7 @@ def parse_agent_result(stdout: str, exit_code: int) -> dict[str, Any]:
             if isinstance(response, dict) and isinstance(response.get("output_text"), str):
                 final_content = response["output_text"]
 
-    ok = process_exit_code == 0 and not errors and saw_turn_completed and saw_process_completed
+    ok = process_exit_code == 0 and not errors and saw_turn_completed
     result: dict[str, Any] = {
         "exit_status": "ok" if ok else "error",
         "ok": ok,
@@ -119,8 +117,6 @@ def parse_agent_result(stdout: str, exit_code: int) -> dict[str, Any]:
         result["error"] = errors[-1]
     elif process_exit_code != 0:
         result["error"] = f"codex exited with code {process_exit_code}"
-    elif not saw_process_completed:
-        result["error"] = "codex output did not contain a process.completed event"
     elif not saw_turn_completed:
         result["error"] = "codex output did not contain a turn.completed event"
     return result
