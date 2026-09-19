@@ -1,0 +1,53 @@
+# KernelBench defaults layered under each prepared sample by TaskConfigResolver.
+# The Task is uni_agent.tasks.kernel_bench.task.TritonOperatorTask; Claude Code
+# is loaded from the existing uni_agent.agents.claude_code package. Its endpoint,
+# API key, and model name are injected from the live Gateway session.
+- name: npu_triton_kernel
+  sandbox:
+    provider: triton_remote_docker
+    image: triton-claude-code-env:latest
+    runtime_timeout: 15000
+    sandbox_kwargs:
+      # docker_host and the host-local NPU lock mount are injected per session.
+      cwd: /workspace
+      pull_policy: never
+      run_args:
+        - --privileged
+        - --ipc=host
+        - --network=host
+        - --volume=/dev:/dev
+        - --volume=/usr/local/Ascend/driver:/usr/local/Ascend/driver:ro
+        - --volume=/usr/local/Ascend/firmware:/usr/local/Ascend/firmware:ro
+        - --volume=/usr/local/dcmi:/usr/local/dcmi:ro
+        - --volume=/usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi:ro
+        - --volume=/etc/ascend_install.info:/etc/ascend_install.info:ro
+  agent:
+    name: claude_code
+    max_turns: 12
+    run_timeout: 720
+    extra_args:
+      - --disable-slash-commands
+    extra_env:
+      CLAUDE_CODE_SKIP_PROMPT_HISTORY: "0"
+  workspace_dir: /workspace
+  template_dir: /opt/triton-agent-template
+  setup_timeout: 120
+  npu_lease_command: /opt/triton-agent-tools/with_npu_lease.py
+  npu_lease_required: true
+  agent_verify_entrypoint: tools/verify_once.sh
+  trusted_agent_verify_command: /opt/triton-agent-tools/verify_once.sh
+  enforce_trusted_image: true
+  trusted_tool_paths:
+    - /opt/triton-agent-tools/with_npu_lease.py
+    - /opt/triton-agent-tools/verify_once.sh
+    - /opt/triton-agent-tools/cleanup_task_processes.sh
+  cleanup_timeout: 30
+  cleanup_command: /opt/triton-agent-tools/cleanup_task_processes.sh
+  install_transcript_hooks: true
+  verify_early_stop_patience: 7
+  verify_early_stop_min_reward: 0.15
+  latency_optimize_patience: 3
+  artifact_dir: null
+  artifact_timeout: 120
+  evaluation_timeout: 120
+  max_artifact_bytes: 2097152
