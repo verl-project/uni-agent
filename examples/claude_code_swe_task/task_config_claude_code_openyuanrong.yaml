@@ -1,7 +1,7 @@
 # Claude Code tasks running in an OpenYuanrong sandbox. The task image is
 # remapped to the internal registry and the prebuilt Claude Code sidecar is
-# mounted at /opt/claude-code. A generic startup command links the executable
-# into the task image's existing PATH without adding provider-specific logic.
+# mounted at /opt/claude-code. A generic startup command links its executable into
+# the task image's existing PATH without adding Claude-specific provider logic.
 - name: swe_bench
   sandbox:
     provider: openyuanrong
@@ -20,6 +20,9 @@
     name: claude_code
     max_turns: 200
     run_timeout: 4800
+    extra_env:
+      CLAUDE_CODE_MAX_CONTEXT_TOKENS: "136000"
+      CLAUDE_CODE_AUTO_COMPACT_WINDOW: "120000"
   prompt_template: &swe_claude_prompt
     - role: user
       content: |-
@@ -48,4 +51,7 @@
     name: claude_code
     max_turns: 200
     run_timeout: 4800
+    extra_env:
+      CLAUDE_CODE_MAX_CONTEXT_TOKENS: "136000"
+      CLAUDE_CODE_AUTO_COMPACT_WINDOW: "120000"
   prompt_template: *swe_claude_prompt
