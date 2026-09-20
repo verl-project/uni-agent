@@ -45,9 +45,7 @@ def test_startup_commands_run_after_start_and_before_sandbox_is_returned(monkeyp
 @pytest.mark.cpu
 @pytest.mark.level0
 def test_failed_startup_command_fails_start_and_cleans_up(monkeypatch):
-    sandbox = build_sandbox(
-        SandboxConfig(provider="local", startup_commands=["failing command"])
-    )
+    sandbox = build_sandbox(SandboxConfig(provider="local", startup_commands=["failing command"]))
     stopped = False
 
     async def start() -> None:

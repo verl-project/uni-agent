@@ -315,9 +315,7 @@ class Sandbox(abc.ABC):
             result = await self.exec_shell(command)
             if result.exit_code != 0:
                 detail = (result.stderr or result.stdout or f"exit code {result.exit_code}").strip()
-                raise RuntimeError(
-                    f"sandbox startup command {index}/{len(self._startup_commands)} failed: {detail}"
-                )
+                raise RuntimeError(f"sandbox startup command {index}/{len(self._startup_commands)} failed: {detail}")
 
     async def __aenter__(self, retry: int = 3) -> Sandbox:
         """Create the sandbox (retrying transient ``start()`` failures) and return it ready.
