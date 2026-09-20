@@ -83,7 +83,7 @@ def test_command_does_not_contain_prompt_or_key():
         messages_path="/tmp/hermes/run/messages.json",
         log_path="/tmp/hermes/run/runner.log",
         hermes_home="/tmp/hermes/run/home",
-        environment_prefix="/custom env/testbed",
+        conda_env_path="/custom env/testbed",
         tool_python="/opt/hermes/bin/python",
         runner_script="/opt/hermes/bin/run_hermes.py",
         terminal_timeout=600,

@@ -18,7 +18,7 @@ The image is a filesystem sidecar, mounted at `/opt/hermes`. Update
 `task_config_hermes.yaml` with the image reference you built, preferably a digest,
 and a task image mapping accessible to your sandbox service. The included image
 reference records the original build; it is not a guarantee of registry access.
-Set `agent.environment_prefix` to the absolute environment prefix in your task
+Set `agent.conda_env_path` to the absolute Conda environment path in your task
 image, or omit it to inherit PATH. Tool Python and runner paths are configurable.
 Use the current `openyuanrong-sandbox` / `yr_sandbox` provider supported by the
 repository; this recipe does not include the legacy SDK bridge.
