@@ -17,9 +17,10 @@ bash examples/codex/build_tool.sh \
   --registry registry.example
 ```
 
-The task config mounts the image at `/opt/codex`. It also provides the full
-Conda environment prefix and PATH entries for the task sandbox, so the agent
-does not assume a host's Conda installation layout.
+The task config mounts the image at `/opt/codex`. It provides the task-image
+Conda environment path and PATH entries, so the agent does not assume a host's
+Conda installation layout. Leave `agent.conda_env_path` unset for a task image
+without Conda.
 
 ## Inference
 

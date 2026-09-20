@@ -11,9 +11,9 @@ from __future__ import annotations
 import base64
 import json
 import logging
-import posixpath
 import shlex
 import uuid
+from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 from pydantic import Field
@@ -34,7 +34,7 @@ def build_agent_command(
     gateway_url: str,
     model_name: str,
     api_key: str,
-    conda_prefix: str,
+    conda_env_path: str | None = None,
     path: str,
     project_dir: str = "/testbed",
 ) -> str:
@@ -44,11 +44,15 @@ def build_agent_command(
     hazards. Gateway and process settings are passed as environment variables
     consumed by the sidecar entrypoint.
     """
-    conda_env = posixpath.basename(conda_prefix.rstrip("/"))
+    conda_env_vars = ""
+    if conda_env_path:
+        env_dir = PurePosixPath(conda_env_path)
+        conda_env_vars = (
+            f"CONDA_DEFAULT_ENV={shlex.quote(env_dir.name)} "
+            f"CONDA_PREFIX={shlex.quote(str(env_dir))} "
+        )
     env = (
-        f"CONDA_DEFAULT_ENV={shlex.quote(conda_env)} "
-        f"CONDA_PREFIX={shlex.quote(conda_prefix)} "
-        f"PATH={shlex.quote(path)}:\"$PATH\" "
+        f"{conda_env_vars}PATH={shlex.quote(path)}:\"$PATH\" "
         f"CODEX_API_BASE={shlex.quote(gateway_url)} "
         f"CODEX_MODEL={shlex.quote(model_name)} "
         f"CODEX_API_KEY={shlex.quote(api_key)} "
@@ -127,7 +131,10 @@ class CodexConfig(AgentConfig):
 
     name: str = "codex"
     run_timeout: float = Field(default=7200.0, description="Maximum wall-clock time for one Codex episode.")
-    conda_prefix: str = Field(description="Full path to the repository's Conda environment.")
+    conda_env_path: str | None = Field(
+        default=None,
+        description="Task-image path of the Conda environment; unset leaves the launch unactivated.",
+    )
     path: str = Field(description="Colon-separated PATH entries to prepend inside the task sandbox.")
     tool_script: str = Field(description="Sidecar entrypoint, normally /opt/codex/bin/run_agent.sh.")
 
@@ -171,7 +178,7 @@ class CodexAgent(Agent):
             model_name=model_name,
             api_key=api_key,
             project_dir=project_dir,
-            conda_prefix=cfg.conda_prefix,
+            conda_env_path=cfg.conda_env_path,
             path=cfg.path,
         )
 
