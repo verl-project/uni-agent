@@ -23,7 +23,7 @@ class FakeSandbox:
 
 def make_agent(**kwargs):
     kwargs.setdefault("tool_script", "/opt/codex/bin/run_agent.sh")
-    kwargs.setdefault("conda_prefix", "/custom/conda/envs/testbed")
+    kwargs.setdefault("conda_env_path", "/custom/conda/envs/testbed")
     kwargs.setdefault("path", "/custom/conda/envs/testbed/bin:/custom/conda/bin")
     kwargs.setdefault("model", ModelConfig(base_url="http://gateway/v1", model_name="policy"))
     return CodexAgent(CodexConfig(**kwargs))
@@ -39,7 +39,7 @@ def test_build_agent_command_uses_stdin_and_isolates_env():
         gateway_url="http://127.0.0.1:38197/sessions/s1/v1",
         model_name="policy",
         api_key="key",
-        conda_prefix="/sandbox/conda/envs/task",
+        conda_env_path="/sandbox/conda/envs/task",
         path="/sandbox/conda/envs/task/bin:/sandbox/conda/bin",
         project_dir="/testbed",
     )
@@ -54,6 +54,21 @@ def test_build_agent_command_uses_stdin_and_isolates_env():
     assert "HTTP_PROXY" not in command
     assert "PIP_PROGRESS" not in command
     assert "fix 'this'" not in command
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_build_agent_command_skips_conda_when_unset():
+    command = build_agent_command(
+        task_b64="",
+        tool_script="/opt/codex/bin/run_agent.sh",
+        gateway_url="http://gateway/v1",
+        model_name="policy",
+        api_key="key",
+        path="/custom/bin",
+    )
+    assert "CONDA_PREFIX" not in command
+    assert "CONDA_DEFAULT_ENV" not in command
 
 
 @pytest.mark.cpu

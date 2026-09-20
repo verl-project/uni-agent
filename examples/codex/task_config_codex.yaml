@@ -16,7 +16,7 @@
   agent:
     name: codex
     run_timeout: 7200
-    conda_prefix: /opt/miniconda3/envs/testbed
+    conda_env_path: /opt/miniconda3/envs/testbed
     path: /opt/miniconda3/envs/testbed/bin:/opt/miniconda3/bin
     tool_script: /opt/codex/bin/run_agent.sh
   prompt_template:
