@@ -63,6 +63,4 @@ def get_sandbox_cls(name: str) -> type[Sandbox]:
 
 def build_sandbox(config: SandboxConfig) -> Sandbox:
     """Instantiate the sandbox provider named by ``config.provider`` from its config."""
-    sandbox = get_sandbox_cls(config.provider).from_config(config)
-    sandbox._set_startup_commands(config.startup_commands)
-    return sandbox
+    return get_sandbox_cls(config.provider).from_config(config)

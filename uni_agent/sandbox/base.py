@@ -114,10 +114,6 @@ class SandboxConfig(BaseModel):
         default_factory=list,
         description="Optional glob from/to rules applied to image at construction. First match wins.",
     )
-    startup_commands: list[str] = Field(
-        default_factory=list,
-        description="Shell commands run after the sandbox starts and before it is returned to the task.",
-    )
     sandbox_kwargs: dict[str, Any] = Field(
         default_factory=dict,
         description="Extra provider-specific kwargs forwarded to the sandbox constructor.",
@@ -132,13 +128,6 @@ class SandboxConfig(BaseModel):
             return []
         if isinstance(value, dict):
             return [value]
-        return value
-
-    @field_validator("startup_commands")
-    @classmethod
-    def _validate_startup_commands(cls, value: list[str]) -> list[str]:
-        if any(not command.strip() for command in value):
-            raise ValueError("startup_commands must contain only non-empty commands")
         return value
 
     @model_validator(mode="after")
@@ -259,8 +248,6 @@ class Sandbox(abc.ABC):
     provider: ClassVar[str] = ""
     #: Whether this sandbox natively supports a long-lived shell session. False by default.
     supports_shell: ClassVar[bool] = False
-    #: Generic commands configured by :func:`build_sandbox` and run after each successful start.
-    _startup_commands: tuple[str, ...] = ()
 
     @classmethod
     def from_config(cls, config: SandboxConfig) -> Sandbox:
@@ -305,18 +292,6 @@ class Sandbox(abc.ABC):
         except asyncio.TimeoutError as exc:
             raise TimeoutError(f"sandbox start() exceeded SANDBOX_STARTUP_TIMEOUT={timeout:g}s") from exc
 
-    def _set_startup_commands(self, commands: list[str]) -> None:
-        """Attach provider-independent initialization commands from :class:`SandboxConfig`."""
-        self._startup_commands = tuple(commands)
-
-    async def _run_startup_commands(self) -> None:
-        """Run configured initialization commands after the provider is ready."""
-        for index, command in enumerate(self._startup_commands, start=1):
-            result = await self.exec_shell(command)
-            if result.exit_code != 0:
-                detail = (result.stderr or result.stdout or f"exit code {result.exit_code}").strip()
-                raise RuntimeError(f"sandbox startup command {index}/{len(self._startup_commands)} failed: {detail}")
-
     async def __aenter__(self, retry: int = 3) -> Sandbox:
         """Create the sandbox (retrying transient ``start()`` failures) and return it ready.
 
@@ -330,7 +305,6 @@ class Sandbox(abc.ABC):
             try:
                 async with _startup_slot():
                     await self._run_start()
-                    await self._run_startup_commands()
                 return self
             except Exception as exc:
                 last_exc = exc
