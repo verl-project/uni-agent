@@ -27,14 +27,13 @@
     run_budget_seconds: 6600
     run_timeout: 7200
     terminal_timeout: 600
-    environment_prefix: /opt/miniconda3/envs/testbed
+    conda_env_path: /opt/miniconda3/envs/testbed
     tool_python: /opt/hermes/bin/python
     runner_script: /opt/hermes/bin/run_hermes.py
     approval_mode: "off"
-    model:
+    sampling_params_override:
       temperature: 0.8
       top_p: 0.9
-      max_total_tokens: 65536
       max_tokens_per_turn: 8192
   eval_timeout: 900
   prompt_template:

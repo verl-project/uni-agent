@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import Field
 
-from ..base import Agent, AgentConfig, AgentResult
+from ..base import Agent, AgentConfig, AgentResult, RequestSamplingConfig
 from ..registry import register_agent
 
 if TYPE_CHECKING:
@@ -34,11 +34,15 @@ class HermesConfig(AgentConfig):
     """Launch and budget settings for the sidecar Hermes runtime."""
 
     name: str = "hermes"
+    sampling_params_override: RequestSamplingConfig = Field(default_factory=RequestSamplingConfig)
     max_iterations: int = Field(default=100, ge=1)
     run_budget_seconds: float = Field(default=6600.0, gt=0)
     run_timeout: float = Field(default=7200.0, gt=0)
     terminal_timeout: int = Field(default=600, ge=1)
-    environment_prefix: str | None = Field(default=None, description="Absolute task environment prefix, if needed.")
+    conda_env_path: str | None = Field(
+        default=None,
+        description="Task-image path of the Conda environment; unset leaves the launch unactivated.",
+    )
     tool_python: str = Field(default="/opt/hermes/bin/python", min_length=1)
     runner_script: str = Field(default="/opt/hermes/bin/run_hermes.py", min_length=1)
     approval_mode: Literal["off", "default"] = Field(
@@ -87,7 +91,7 @@ def build_runner_command(
     messages_path: str,
     log_path: str,
     hermes_home: str,
-    environment_prefix: str | None,
+    conda_env_path: str | None,
     tool_python: str,
     runner_script: str,
     terminal_timeout: int,
@@ -100,9 +104,9 @@ def build_runner_command(
     """
 
     q = shlex.quote
-    if environment_prefix is not None and not environment_prefix.startswith("/"):
-        raise ValueError("environment_prefix must be an absolute sandbox path")
-    path_setup = f'export PATH={q(environment_prefix + "/bin")}:"${{PATH:-}}"; ' if environment_prefix else ""
+    if conda_env_path is not None and not conda_env_path.startswith("/"):
+        raise ValueError("conda_env_path must be an absolute sandbox path")
+    path_setup = f'export PATH={q(conda_env_path + "/bin")}:"${{PATH:-}}"; ' if conda_env_path else ""
     yolo = "1" if approval_mode == "off" else "0"
     assignments = " ".join(
         [
@@ -207,10 +211,10 @@ class HermesAgent(Agent):
             "messages": messages,
             "workdir": workdir or "/testbed",
             "model": model,
-            "sampling": cfg.model.sampling_params(),
+            "sampling": cfg.sampling_params_override.sampling_params(),
             "limits": {
                 "max_iterations": cfg.max_iterations,
-                "max_tokens": cfg.model.max_tokens_per_turn,
+                "max_tokens": cfg.sampling_params_override.max_tokens_per_turn,
                 "run_budget_seconds": cfg.run_budget_seconds,
                 "terminal_timeout": cfg.terminal_timeout,
             },
@@ -223,7 +227,7 @@ class HermesAgent(Agent):
             messages_path=messages_path,
             log_path=log_path,
             hermes_home=hermes_home,
-            environment_prefix=cfg.environment_prefix,
+            conda_env_path=cfg.conda_env_path,
             tool_python=cfg.tool_python,
             runner_script=cfg.runner_script,
             terminal_timeout=cfg.terminal_timeout,
