@@ -15,7 +15,12 @@ if TYPE_CHECKING:
 
 @register_sandbox("modal")
 class ModalSandbox(Sandbox):
-    """Creates a Modal sandbox (``sleep infinity``) and drives it via exec."""
+    """Create a Modal sandbox and drive it via exec.
+
+    The default startup command is ``sleep infinity``. Set
+    ``sandbox_kwargs.startup_command`` to an empty list for images whose own
+    entrypoint keeps the sandbox alive, such as SWE-bench Pro images.
+    """
 
     def __init__(
         self,
@@ -23,11 +28,13 @@ class ModalSandbox(Sandbox):
         image: str = "python:3.12-slim",
         app_name: str = "agent-sandbox",
         runtime_timeout: float = 3600.0,
+        startup_command: list[str] | tuple[str, ...] = ("sleep", "infinity"),
         **modal_sandbox_kwargs,
     ):
         self.image = image
         self.app_name = app_name
         self.runtime_timeout = runtime_timeout
+        self.startup_command = list(startup_command)
         self.modal_sandbox_kwargs = dict(modal_sandbox_kwargs)
         self._app = None
         self._sandbox: modal.Sandbox | None = None
@@ -45,8 +52,7 @@ class ModalSandbox(Sandbox):
         self._app = await modal.App.lookup.aio(self.app_name, create_if_missing=True)
         image = modal.Image.from_registry(self.image)
         self._sandbox = await modal.Sandbox.create.aio(
-            "sleep",
-            "infinity",
+            *self.startup_command,
             image=image,
             app=self._app,
             timeout=int(self.runtime_timeout),

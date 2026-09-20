@@ -480,7 +480,8 @@ class GatewayAgentFramework(AgentFramework):
                 top_p=config.val_kwargs.top_p,
                 top_k=config.val_kwargs.top_k,
             )
-        elif "__do_sample__" in sample_fields and not bool(sample_fields["__do_sample__"]):
+        # An explicit greedy flag overrides the partition sampling defaults.
+        if "__do_sample__" in sample_fields and not bool(sample_fields["__do_sample__"]):
             sampling_params.update(temperature=0, top_p=1.0, top_k=-1)
         return sampling_params
 

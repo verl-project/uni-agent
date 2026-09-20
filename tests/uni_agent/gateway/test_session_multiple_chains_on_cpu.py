@@ -1,5 +1,6 @@
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import HTTPException
@@ -45,7 +46,7 @@ def _session(
     response_length: int | None = None,
     sampling_params: dict | None = None,
     enable_last_assistant_rollback: bool = False,
-    coalesce_reserved_exact_requests: bool = False,
+    coalesce_reserved_exact_requests: bool = True,
     processor=None,
     vision_info_extractor=None,
     tool_parser_name: str | None = None,
@@ -88,13 +89,14 @@ def test_gateway_session_rejects_non_positive_prompt_length(prompt_length):
 
 @pytest.mark.cpu
 @pytest.mark.level0
-def test_gateway_session_enables_last_assistant_rollback_by_default():
+def test_gateway_session_enables_rollback_and_coalescing_by_default():
     session = GatewaySession(
         SessionHandle(session_id="rollback-default"),
         MessageCodec(FakeTokenizer()),
     )
 
     assert session._enable_last_assistant_rollback is True
+    assert session._coalesce_reserved_exact_requests is True
 
 
 async def _run(session: GatewaySession, backend: SequencedBackend, messages: list[dict], **payload_extra):
@@ -765,6 +767,27 @@ async def test_multiple_chains_repeated_same_prompt_creates_siblings_and_continu
 @pytest.mark.cpu
 @pytest.mark.level0
 @pytest.mark.asyncio
+@pytest.mark.parametrize("assistant_content", ["OLD", "EDITED"])
+async def test_chain_selection_excludes_positive_assistant_span(assistant_content):
+    session = _session("assistant-span", enable_last_assistant_rollback=True)
+    backend = SequencedBackend(["OLD", "NEW"])
+    incoming = [
+        {"role": "user", "content": "start"},
+        {"role": "assistant", "content": assistant_content},
+        {"role": "user", "content": "continue"},
+        {"role": "assistant", "content": "external"},
+        {"role": "user", "content": "next"},
+    ]
+
+    await _run(session, backend, incoming[:1])
+    await _run(session, backend, incoming)
+
+    assert [chain.buffer.response_ids for chain in session.active_chains] == [_ids("OLD"), _ids("NEW")]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
 async def test_multiple_chains_distinct_sibling_continuation_matches_older_assistant_prefix():
     """Select an older sibling when its assistant prefix uniquely matches the request."""
     session = _session("distinct-sibling")
@@ -805,7 +828,7 @@ async def test_multiple_chains_distinct_sibling_continuation_matches_older_assis
 @pytest.mark.asyncio
 async def test_multiple_chains_reserved_siblings_fall_back_before_starting_new_chain():
     """Reserve matching siblings newest-first, then full-encode when all are busy."""
-    session = _session("reserved-siblings")
+    session = _session("reserved-siblings", coalesce_reserved_exact_requests=False)
     prompt = [{"role": "user", "content": "same prompt"}]
     for _ in range(3):
         await _run(session, SequencedBackend(["SAME"]), prompt)
@@ -885,7 +908,7 @@ async def test_multiple_chains_parallel_different_chains_commit_in_place():
 @pytest.mark.asyncio
 async def test_multiple_chains_parallel_new_siblings_reuse_session_request_id():
     """Retain concurrent first-turn siblings while reusing the sticky session id."""
-    session = _session("parallel-new-siblings")
+    session = _session("parallel-new-siblings", coalesce_reserved_exact_requests=False)
     backend = _ControlledParallelBackend(["A", "B", "C"])
     prompt = [{"role": "user", "content": "same first turn"}]
 
@@ -905,16 +928,22 @@ async def test_multiple_chains_parallel_new_siblings_reuse_session_request_id():
 @pytest.mark.cpu
 @pytest.mark.level0
 @pytest.mark.asyncio
-async def test_exact_retry_on_reserved_chain_reuses_inflight_generation():
+@pytest.mark.parametrize("chain_path", ["first", "existing", "new"])
+async def test_exact_retry_reuses_inflight_generation(chain_path):
     """Let an exact in-flight retry reuse the owner result without forking."""
     session = _session("singleflight", coalesce_reserved_exact_requests=True)
     first_messages = [{"role": "user", "content": "first turn"}]
-    await _run(session, SequencedBackend(["FIRST"]), first_messages)
+    if chain_path != "first":
+        await _run(session, SequencedBackend(["FIRST"]), first_messages)
     continuation = [
         *first_messages,
         {"role": "assistant", "content": "FIRST"},
         {"role": "user", "content": "continue"},
     ]
+    if chain_path == "first":
+        continuation = first_messages
+    elif chain_path == "new":
+        continuation = [{"role": "user", "content": "unrelated prompt"}]
     backend = _ControlledParallelBackend(["SECOND"])
 
     owner = asyncio.create_task(_run(session, backend, continuation))
@@ -925,23 +954,29 @@ async def test_exact_retry_on_reserved_chain_reuses_inflight_generation():
     assert len(backend.calls) == 1
     backend.release_call(0)
     assert await owner == await duplicate
-    assert session.snapshot_state()["active_chain_ids"] == [1]
+    trajectories = await session.finalize()
+    assert len(trajectories) == (2 if chain_path == "new" else 1)
+    assert sum(_decode_response_ids(t.response_ids).endswith("SECOND") for t in trajectories) == 1
 
 
 @pytest.mark.cpu
 @pytest.mark.level0
 @pytest.mark.asyncio
-async def test_exact_retry_reuses_failure_and_allows_a_later_retry():
+@pytest.mark.parametrize("existing_chain", [False, True])
+async def test_exact_retry_reuses_failure_and_allows_a_later_retry(existing_chain):
     """Propagate the owner failure, then clear singleflight and reservation state."""
     session = _session("singleflight-failure", coalesce_reserved_exact_requests=True)
     first_messages = [{"role": "user", "content": "first turn"}]
-    await _run(session, SequencedBackend(["FIRST"]), first_messages)
+    if existing_chain:
+        await _run(session, SequencedBackend(["FIRST"]), first_messages)
     continuation = [
         *first_messages,
         {"role": "assistant", "content": "FIRST"},
         {"role": "user", "content": "continue"},
     ]
-    backend = _ControlledParallelBackend([RuntimeError("boom")])
+    backend = _ControlledParallelBackend([RuntimeError("boom"), "UNEXPECTED"])
+    if not existing_chain:
+        continuation = first_messages
 
     owner = asyncio.create_task(_run(session, backend, continuation))
     await backend.wait_for_calls(1)
@@ -958,6 +993,69 @@ async def test_exact_retry_reuses_failure_and_allows_a_later_retry():
     await _run(session, SequencedBackend(["RECOVERED"]), continuation)
     [trajectory] = await session.finalize()
     assert _decode_response_ids(trajectory.response_ids).endswith("RECOVERED")
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_owner", [False, True], ids=["waiter", "owner"])
+async def test_first_turn_coalescing_cancellation(cancel_owner):
+    session = _session("cancel-singleflight")
+    prompt = [{"role": "user", "content": "first turn"}]
+    backend = _ControlledParallelBackend(["FIRST"])
+    owner = asyncio.create_task(_run(session, backend, prompt))
+    await backend.wait_for_calls(1)
+    waiter = asyncio.create_task(_run(session, backend, prompt))
+    await asyncio.sleep(0)
+
+    if cancel_owner:
+        owner.cancel()
+        results = await asyncio.wait_for(asyncio.gather(owner, waiter, return_exceptions=True), timeout=5)
+        assert all(isinstance(result, asyncio.CancelledError) for result in results)
+        await _run(session, SequencedBackend(["RECOVERED"]), prompt)
+        expected = "RECOVERED"
+    else:
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        assert not owner.done()
+        backend.release_call(0)
+        await owner
+        expected = "FIRST"
+
+    assert len(backend.calls) == 1
+    assert session.reserved_chain_ids == set()
+    assert session._inflight_exact_requests == {}
+    [trajectory] = await session.finalize()
+    assert _decode_response_ids(trajectory.response_ids) == expected
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+@pytest.mark.parametrize("boundary", ["sampling", "session", "completed"])
+async def test_exact_request_coalescing_keeps_independent_generations(boundary):
+    session = _session("independent")
+    other_session = _session("other") if boundary == "session" else session
+    prompt = [{"role": "user", "content": "same prompt"}]
+    backend = _ControlledParallelBackend(["FIRST", "SECOND"])
+    owner = asyncio.create_task(_run(session, backend, prompt, temperature=0.5))
+    await backend.wait_for_calls(1)
+    if boundary == "completed":
+        backend.release_call(0)
+        await owner
+    second = asyncio.create_task(
+        _run(other_session, backend, prompt, temperature=0.8 if boundary == "sampling" else 0.5)
+    )
+    await backend.wait_for_calls(2)
+    backend.release_call(0)
+    backend.release_call(1)
+    first_result, second_result = await asyncio.gather(owner, second)
+    assert first_result.assistant_msg != second_result.assistant_msg
+    trajectories = await session.finalize()
+    if other_session is not session:
+        trajectories += await other_session.finalize()
+    assert sorted(_decode_response_ids(t.response_ids) for t in trajectories) == ["FIRST", "SECOND"]
 
 
 @pytest.mark.cpu
@@ -1249,7 +1347,7 @@ async def test_multiple_chains_uses_total_trajectory_capacity_instead_of_respons
 @pytest.mark.cpu
 @pytest.mark.level0
 @pytest.mark.asyncio
-async def test_multiple_chains_closes_when_continuation_fills_total_trajectory_capacity():
+async def test_multiple_chains_closes_when_continuation_fills_total_trajectory_capacity(caplog):
     """Count prompt, generated, and continuation-context tokens against one capacity."""
     first_messages = [{"role": "user", "content": "first"}]
     continuation_messages = [
@@ -1282,12 +1380,16 @@ async def test_multiple_chains_closes_when_continuation_fills_total_trajectory_c
     assert len(backend.calls) == 1
     assert backend.steps == ["SHOULD_NOT_RUN"]
     assert trajectories[0].extra_fields == {"materialization_reason": "max_trajectory_length"}
+    assert "Trajectory capacity prevents generation" in caplog.text
+    assert "session=total-capacity-exhausted" in caplog.text
+    assert "backend_called=false" in caplog.text
+    assert "CLAUDE_CODE_MAX_OUTPUT_TOKENS alone will not help" in caplog.text
 
 
 @pytest.mark.cpu
 @pytest.mark.level0
 @pytest.mark.asyncio
-async def test_multiple_chains_returns_length_when_initial_context_fills_total_trajectory_capacity():
+async def test_multiple_chains_returns_length_when_initial_context_fills_total_trajectory_capacity(caplog):
     """Return a normal length stop when a fresh prompt leaves no generation room."""
     messages = [{"role": "user", "content": "initial prompt"}]
     context_length = _prompt_length(messages)
@@ -1306,6 +1408,47 @@ async def test_multiple_chains_returns_length_when_initial_context_fills_total_t
     assert backend.steps == ["SHOULD_NOT_RUN"]
     assert session.active_chains == []
     assert await session.finalize() == []
+    assert "Trajectory capacity prevents generation" in caplog.text
+    assert "effective_max_tokens=0 completion_tokens=0 backend_called=false" in caplog.text
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "remaining_capacity, requested_max_tokens, stop_reason, warns",
+    [
+        pytest.param(4, 32, "length", True, id="trajectory-limit"),
+        pytest.param(8, 4, "length", False, id="generation-limit"),
+        pytest.param(8, 32, "completed", False, id="clamped-but-completed"),
+        pytest.param(None, 4, "length", False, id="unbounded-trajectory"),
+    ],
+)
+async def test_generation_warns_only_when_length_stop_reaches_trajectory_capacity(
+    caplog, remaining_capacity, requested_max_tokens, stop_reason, warns
+):
+    messages = [{"role": "user", "content": "hello"}]
+    session = _session(
+        "capacity-warning",
+        prompt_length=_prompt_length(messages),
+        response_length=remaining_capacity,
+    )
+    backend = SimpleNamespace(
+        generate=AsyncMock(return_value=TokenOutput(token_ids=_ids("FULL"), stop_reason=stop_reason))
+    )
+
+    outcome = await _run(session, backend, messages, max_tokens=requested_max_tokens)
+
+    assert outcome.finish_reason == ("stop" if stop_reason == "completed" else "length")
+    assert outcome.completion_tokens == 4
+    assert ("Generation reached trajectory capacity" in caplog.text) is warns
+    if warns:
+        assert "session=capacity-warning chain_id=1" in caplog.text
+        assert "requested_max_tokens=32 effective_max_tokens=4 completion_tokens=4 backend_called=true" in caplog.text
+        assert "prompt_length + response_length" in caplog.text
+        assert "CLAUDE_CODE_MAX_OUTPUT_TOKENS alone will not help" in caplog.text
+    else:
+        assert "CLAUDE_CODE_MAX_OUTPUT_TOKENS" not in caplog.text
 
 
 @pytest.mark.cpu
