@@ -2,11 +2,11 @@
 set -xeuo pipefail
 
 project_name=${PROJECT_NAME:-"cc-yuanrong-qwen3p5-9b-grpo"}
-exp_name=${EXP_NAME:-"2node-qwen35-9b-grpo-$(date +%Y%m%d-%H%M)"}
+exp_name=${EXP_NAME:-"swe_agent_$(date +%Y%m%d_%H%M)"}
 
 MODEL_PATH=${MODEL_PATH:-"${DATA_DIR}/models/Qwen3.5-9B"}
-TRAIN_FILE=${TRAIN_FILE:-"${DATA_DIR}/data/uni_agent/swe_rebench_filtered_1k_47_208.parquet"}
-TEST_FILE=${TEST_FILE:-"${DATA_DIR}/data/uni_agent/swe_bench_verified_53_47.parquet"}
+TRAIN_FILE=${TRAIN_FILE:-"${DATA_DIR}/data/uni_agent/swe_rebench_filtered.parquet"}
+TEST_FILE=${TEST_FILE:-"${DATA_DIR}/data/uni_agent/swe_bench_verified.parquet"}
 
 RUNTIME_ENV=${RUNTIME_ENV:-"${RUNTIME_DIR}/data/uni_agent/runtime_env_openyuanrong.yaml"}
 CKPTS_DIR=${CKPTS_DIR:-"${RUNTIME_DIR}/ckpts/${project_name}/${exp_name}"}
