@@ -132,6 +132,44 @@ The hook is disabled when `trajectory_postprocessor_fqn` is omitted or `null`.
 In that case no extension is imported or called, and finalized trajectories
 continue through the original scoring, logging, and TransferQueue path.
 
+## Request Annotation Policy
+
+The Gateway can attach conservative, request-level annotations to
+`Trajectory.extra_fields["trajectory_annotations"]`. Each list item corresponds
+to one successful model generation in the trajectory and contains only `tags`
+and short `evidence` names. The annotations do not affect chain selection,
+token construction, rewards, or postprocessor ordering.
+
+The built-in policy recognizes provider-visible signals from Claude Code,
+Codex, DeepSeek Harness, and native OpenClaw requests. It emits
+`role:subagent` only when a verified marker is present; otherwise it emits
+`role:unknown` and never infers that the request came from the main agent.
+Compaction request signals (`purpose:compaction_request`), summary generation
+(`purpose:summary_generation`), compacted-history replay
+(`context:compacted_history`), and branch summaries are separate tags. A
+request-level tag is evidence about that request, not proof that compaction
+completed or that a new chain was caused by it. OpenClaw's internal lane and
+session key are not used because they are not provider-wire fields.
+
+The default policy is enabled by `build_gateway_manager`. Replace it with a
+callable FQN when a harness supplies a different marker:
+
+```yaml
+actor_rollout_ref:
+  rollout:
+    custom:
+      agent_framework:
+        trajectory_annotation_policy_fqn: my_recipe.annotations.policy
+```
+
+The callable receives `(headers, body, protocol)` and returns a mapping with
+`tags: list[str]` and `evidence: list[str]`. Headers and raw bodies are
+available only while the request is handled; authorization values and raw
+prompts are never persisted by the built-in policy. Use the existing trajectory
+postprocessor to aggregate or filter annotations across trajectories. Missing
+signals remain unknown, and failed or rolled-back generations do not leave an
+annotation behind.
+
 The Gateway uses a `MessageCodec` to:
 
 - Apply the model chat template.
@@ -319,6 +357,8 @@ Important knobs include:
   the owner completes are not coalesced.
 - `trajectory_postprocessor_fqn`: optional import path for a sync or async
   callable that postprocesses finalized trajectories before reward scoring.
+- `trajectory_annotation_policy_fqn`: optional import path for a request
+  annotation policy; omitted uses the built-in conservative policy.
 - `trajectory_postprocessor_kwargs`: optional keyword arguments passed to the
   postprocessor.
 - `agent_runners`: Runner import paths and arguments. With multiple entries, each

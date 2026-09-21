@@ -13,6 +13,11 @@ from typing import Any
 
 from fastapi import HTTPException
 
+from uni_agent.gateway.annotation import (
+    TrajectoryAnnotationPolicy,
+    infer_trajectory_annotations,
+    normalize_trajectory_annotations,
+)
 from uni_agent.gateway.session.codec import MessageCodec
 from uni_agent.gateway.session.types import InternalGenerationRequest, SessionHandle, Trajectory
 from uni_agent.rl_insight.adapter import start_generation_span
@@ -61,6 +66,8 @@ class TrajectoryBuffer:
             with the tokens it describes, so a dropped assistant no longer
             widens the trajectory's version span. Marks carry ``None`` when the
             backend reports no version.
+        generation_annotations: One request annotation per successful generation;
+            rollback removes the discarded generation's annotation with its tokens.
     """
 
     prompt_ids: list[int]
@@ -69,6 +76,7 @@ class TrajectoryBuffer:
     response_logprobs: list[float] = field(default_factory=list)
     routed_experts: Any | None = None
     generation_versions: list[tuple[int | None, int | None]] = field(default_factory=list)
+    generation_annotations: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -152,6 +160,7 @@ class EncodedData:
     last_assistant_start: LastAssistantStart | None = None
     rollback_applied: bool = False
     rollback_dropped_trainable_tokens: int = 0
+    annotation: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -194,6 +203,7 @@ class GatewaySession:
         sampling_params: dict[str, Any] | None = None,
         enable_last_assistant_rollback: bool = True,
         coalesce_reserved_exact_requests: bool = True,
+        annotation_policy: TrajectoryAnnotationPolicy | None = None,
         metadata: dict[str, Any] | None = None,
     ):
         """Create an active session bound to a handle and model codec."""
@@ -213,6 +223,7 @@ class GatewaySession:
         self._enable_last_assistant_rollback = enable_last_assistant_rollback
         self._coalesce_reserved_exact_requests = coalesce_reserved_exact_requests
         self._metadata = dict(metadata or {})
+        self._annotation_policy = annotation_policy or infer_trajectory_annotations
         self._trace_identity = dict(self._metadata.get("_trace_identity") or {})
         self.active_chains: list[ChainState] = []
         self.materialized_chains: list[MaterializedChain] = []
@@ -367,6 +378,7 @@ class GatewaySession:
                     output.extra_fields.get("max_global_steps"),
                 )
             )
+            encoded.buffer.generation_annotations.append(encoded.annotation)
             self._assert_response_logprob_alignment(encoded.buffer)
 
             # R3 router replay: the backend returns routing for the full context
@@ -542,6 +554,7 @@ class GatewaySession:
                 # One generation appends exactly one mark, so the rewritten
                 # assistant is always the last one.
                 del buffer.generation_versions[-1:]
+                del buffer.generation_annotations[-1:]
 
                 if image_data is not None:
                     assert last_assistant_start.image_data_len <= len(image_data)
@@ -617,6 +630,12 @@ class GatewaySession:
                     video_data.extend(new_video_data)
 
         context_ids = buffer.prompt_ids + buffer.response_ids
+        annotation = self._annotate_request(request)
+        if rollback_applied and annotation:
+            annotation = {
+                "tags": sorted({*annotation["tags"], "split:assistant_rollback"}),
+                "evidence": sorted({*annotation["evidence"], "gateway:assistant_rollback"}),
+            }
         if capacity_exhausted:
             return EncodedData(
                 buffer=buffer,
@@ -632,6 +651,7 @@ class GatewaySession:
                 incoming_message_prefix_hashes=list(incoming_message_prefix_hashes),
                 rollback_applied=rollback_applied,
                 rollback_dropped_trainable_tokens=rollback_dropped_trainable_tokens,
+                annotation=annotation,
             )
 
         remaining_trajectory_capacity = (
@@ -664,6 +684,7 @@ class GatewaySession:
             last_assistant_start=last_assistant_start,
             rollback_applied=rollback_applied,
             rollback_dropped_trainable_tokens=rollback_dropped_trainable_tokens,
+            annotation=annotation,
         )
 
     def _select_chain(
@@ -763,13 +784,30 @@ class GatewaySession:
         return hashlib.sha256(b"uni-agent-message-v1\0" + canonical_json).hexdigest()
 
     def _compute_request_fingerprint(self, request: InternalGenerationRequest) -> str:
+        fingerprint_request = dict(request)
+        for key in ("annotation_headers", "annotation_body", "annotation_protocol"):
+            fingerprint_request.pop(key, None)
         canonical_json = json.dumps(
-            request,
+            fingerprint_request,
             sort_keys=True,
             separators=(",", ":"),
             ensure_ascii=False,
         ).encode("utf-8")
         return hashlib.sha256(b"uni-agent-request-v1\0" + canonical_json).hexdigest()
+
+    def _annotate_request(self, request: InternalGenerationRequest) -> dict[str, Any]:
+        if "annotation_protocol" not in request:
+            return {}
+        try:
+            annotations = self._annotation_policy(
+                request.get("annotation_headers", {}),
+                request.get("annotation_body", {}),
+                request.get("annotation_protocol", "unknown"),
+            )
+            return normalize_trajectory_annotations(annotations)
+        except Exception:
+            logger.exception("session %s: trajectory annotation policy failed", self.handle.session_id)
+            return {"tags": ["role:unknown"], "evidence": []}
 
     def _resolve_inflight_exact_request(
         self,
@@ -791,6 +829,7 @@ class GatewaySession:
             response_logprobs=list(buffer.response_logprobs),
             routed_experts=buffer.routed_experts,
             generation_versions=list(buffer.generation_versions),
+            generation_annotations=[dict(annotation) for annotation in buffer.generation_annotations],
         )
 
     def _copy_chain_media(self, chain: ChainState) -> tuple[list[Any] | None, list[Any] | None]:
@@ -956,6 +995,10 @@ class GatewaySession:
         if marks:
             trajectory_extra_fields["min_global_steps"] = min(mark[0] for mark in marks)
             trajectory_extra_fields["max_global_steps"] = max(mark[1] for mark in marks)
+        if any(chain.buffer.generation_annotations):
+            trajectory_extra_fields["trajectory_annotations"] = [
+                dict(annotation) for annotation in chain.buffer.generation_annotations
+            ]
         if extra_fields:
             trajectory_extra_fields.update(extra_fields)
         mm_processor_kwargs = self._codec.mm_processor_kwargs

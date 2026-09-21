@@ -61,6 +61,7 @@ class GatewayActorConfig:
     response_length: int | None = None
     enable_last_assistant_rollback: bool = True
     coalesce_reserved_exact_requests: bool = True
+    trajectory_annotation_policy: Callable | None = None
 
     def __post_init__(self) -> None:
         if type(self.enable_tool_parser_cache) is not bool:
