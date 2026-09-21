@@ -107,7 +107,7 @@ MAX_CONCURRENT_SESSIONS="${MAX_CONCURRENT_SESSIONS:-256}"
 # Hard cap per-session runtime (seconds). A runner that hangs without raising
 # (e.g. remote sandbox OOM-killed without surfacing an error) otherwise holds its
 # concurrency slot forever and stalls the whole training batch.
-SESSION_TIMEOUT_SECONDS="${SESSION_TIMEOUT_SECONDS:-1800}"
+SESSION_TIMEOUT_SECONDS="${SESSION_TIMEOUT_SECONDS:-3600}"
 SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-$(basename "${MODEL_PATH}")}"
 # The agent reports finished explicitly (exit_status == "Submitted"); set True to
 # exclude unfinished episodes from the loss (paired with the finished field in agent.py).
@@ -344,7 +344,6 @@ MAIN_CMD=(
     actor_rollout_ref.actor.entropy_coeff=0
     actor_rollout_ref.actor.entropy_from_logits_with_chunking=False
     actor_rollout_ref.actor.megatron.param_offload=${OFFLOAD}
-    actor_rollout_ref.actor.megatron.grad_offload=${OFFLOAD}
     actor_rollout_ref.actor.megatron.optimizer_offload=${OFFLOAD}
     actor_rollout_ref.actor.megatron.tensor_model_parallel_size=${TRAIN_TP}
     actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=${TRAIN_PP}
