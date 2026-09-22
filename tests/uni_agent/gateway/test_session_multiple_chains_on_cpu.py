@@ -353,6 +353,9 @@ async def test_first_assistant_rewrite_reuses_chain_without_stale_response():
     assert chain.buffer.response_ids == incremental_ids + _ids("FIXED")
     assert chain.buffer.response_mask == [0] * len(incremental_ids) + [1] * len("FIXED")
     assert chain.buffer.response_logprobs == [0.0] * len(incremental_ids) + [-0.1] * len("FIXED")
+    [trajectory] = await session.finalize()
+    assert trajectory.extra_fields["rollback_count"] == 1
+    assert trajectory.extra_fields["rollback_dropped_trainable_tokens_total"] == len("FORMAT_ERROR")
 
 
 @pytest.mark.cpu
@@ -932,7 +935,7 @@ async def test_multiple_chains_parallel_new_siblings_reuse_session_request_id():
 @pytest.mark.parametrize("chain_path", ["first", "existing", "new"])
 async def test_exact_retry_reuses_inflight_generation(chain_path, caplog):
     """Let an exact in-flight retry reuse the owner result without forking."""
-    caplog.set_level("WARNING", logger="uni_agent.gateway.session.session")
+    caplog.set_level("INFO", logger="uni_agent.gateway.session.session")
     session = _session("singleflight", coalesce_reserved_exact_requests=True)
     first_messages = [{"role": "user", "content": "first turn"}]
     if chain_path != "first":
@@ -960,6 +963,8 @@ async def test_exact_retry_reuses_inflight_generation(chain_path, caplog):
     backend.release_call(0)
     assert await owner == await duplicate == await second_duplicate
     trajectories = await session.finalize()
+    assert trajectories[0].extra_fields["num_coalesced_requests"] == 2
+    assert sum(record.getMessage().startswith("Session finalized with") for record in caplog.records) == 1
     assert len(trajectories) == (2 if chain_path == "new" else 1)
     assert sum(_decode_response_ids(t.response_ids).endswith("SECOND") for t in trajectories) == 1
 

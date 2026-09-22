@@ -180,7 +180,10 @@ coalescing also applies when no existing chain is reserved.
 `GatewaySession.snapshot_state()` reports the cumulative number of waiters in
 `num_coalesced_requests`; the first coalesce in a session also emits a warning
 with a short request fingerprint so operators can distinguish this behavior
-from an independent backend generation.
+from an independent backend generation. When a session is finalized with a
+coalesce or rollback, the nonzero session counters are copied into each
+trajectory's `extra_fields`; the Framework includes them in its summary log,
+trajectory artifact, and TransferQueue metadata.
 
 When a client rewrites only the most recent Assistant message, the Gateway rolls
 the matching chain back to the start of that Assistant turn and re-encodes the

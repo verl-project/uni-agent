@@ -474,6 +474,23 @@ class GatewaySession:
                 raise RuntimeError(f"Session {self.handle.session_id} is finalized")
             self._touch()
             self._materialize_active_chains()
+            if self._coalesced_request_count or self._rollback_count:
+                session_stats = {
+                    "num_coalesced_requests": self._coalesced_request_count,
+                    "rollback_count": self._rollback_count,
+                    "rollback_dropped_trainable_tokens_total": self._rollback_dropped_trainable_tokens_total,
+                }
+                for materialized in self.materialized_chains:
+                    materialized.trajectory.extra_fields.update(session_stats)
+                logger.info(
+                    "Session finalized with session=%s trajectories=%s num_coalesced_requests=%s "
+                    "rollback_count=%s rollback_dropped_trainable_tokens_total=%s",
+                    self.handle.session_id,
+                    len(self.materialized_chains),
+                    self._coalesced_request_count,
+                    self._rollback_count,
+                    self._rollback_dropped_trainable_tokens_total,
+                )
             self.reserved_chain_ids.clear()
             self.phase = SessionPhase.FINALIZED
             self._touch()

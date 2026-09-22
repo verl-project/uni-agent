@@ -966,6 +966,13 @@ class GatewayAgentFramework(AgentFramework):
         """Log a per-session trajectory summary -- the info the task layer can't emit,
         since trajectories exist only after the session finalizes."""
         lines = [f"session {session_id}: {len(trajectories)} trajectory(ies)"]
+        session_stats = trajectories[0].extra_fields if trajectories else {}
+        if "num_coalesced_requests" in session_stats:
+            lines[0] += (
+                f" coalesced_waiters={session_stats['num_coalesced_requests']}"
+                f" rollback_count={session_stats.get('rollback_count', 0)}"
+                f" rollback_dropped_trainable_tokens={session_stats.get('rollback_dropped_trainable_tokens_total', 0)}"
+            )
         for i, traj in enumerate(trajectories):
             model_tokens = sum(traj.response_mask) if traj.response_mask else 0
             finished = traj.finished
@@ -1026,6 +1033,9 @@ class GatewayAgentFramework(AgentFramework):
             "finished": traj.finished,
             "reward_score": traj.reward_score,
             "reward_metrics": dict(traj.reward_metrics),
+            "num_coalesced_requests": extra.get("num_coalesced_requests"),
+            "rollback_count": extra.get("rollback_count"),
+            "rollback_dropped_trainable_tokens_total": extra.get("rollback_dropped_trainable_tokens_total"),
             "materialization_reason": extra.get("materialization_reason"),
             "prompt_len": len(traj.prompt_ids),
             "response_len": len(traj.response_ids),

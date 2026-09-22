@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import types
 from copy import deepcopy
@@ -1068,6 +1069,42 @@ async def test_framework_and_runner_logs_share_one_session_directory(tmp_path, f
     else:
         assert not framework_log.exists()
         assert "session session-sample-0-rollout-0-" in task_log.read_text()
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_framework_logs_and_persists_session_observability(tmp_path, fake_tq):
+    runtime = _FakeGatewayManager(
+        {
+            "session-sample-0-rollout-0": [
+                _trajectory(
+                    extra_fields={
+                        "num_coalesced_requests": 2,
+                        "rollback_count": 1,
+                        "rollback_dropped_trainable_tokens_total": 3,
+                    }
+                )
+            ]
+        }
+    )
+    framework = await _build_framework_with_agent_runners(
+        agent_runners={"runner": _inline_runner_config(logging_runner)},
+        gateway_manager=runtime,
+        log_dir=str(tmp_path),
+    )
+
+    await framework.generate_sequences(_build_prompts(count=1, global_steps=12))
+
+    session_dir = next((tmp_path / "step_12").iterdir())
+    task_log = (session_dir / "task.log").read_text()
+    trajectory_summary = json.loads((session_dir / "trajectory.json").read_text())
+    assert "coalesced_waiters=2" in task_log
+    assert "rollback_count=1" in task_log
+    assert trajectory_summary["trajectories"][0]["num_coalesced_requests"] == 2
+    assert trajectory_summary["trajectories"][0]["rollback_count"] == 1
+    fields = fake_tq.batch_puts[0]["fields"]
+    assert fields["extra_fields"][0]["num_coalesced_requests"] == 2
 
 
 @pytest.mark.cpu
