@@ -20,8 +20,3 @@
     tool_command: /opt/openclaw/bin/openclaw
     run_timeout: 600
     cli_timeout_seconds: 540
-    model:
-      temperature: 1.0
-      top_p: 1.0
-      top_k: -1
-      max_total_tokens: 4096
