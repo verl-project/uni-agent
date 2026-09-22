@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, TypedDict
 
+from uni_agent.metrics.model import MetricsFragment
+
 if TYPE_CHECKING:
     import numpy as np
     import torch
@@ -77,3 +79,11 @@ class Trajectory:
     routed_experts: torch.Tensor | np.ndarray | None = None
     multi_modal_data: dict[str, Any] | None = None
     extra_fields: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class SessionFinalizationResult:
+    """Gateway finalization output with trajectories and independent metrics."""
+
+    trajectories: list[Trajectory]
+    metrics_fragment: MetricsFragment | None = None

@@ -44,6 +44,8 @@ class GatewayActorConfig:
             requests in the same session share an in-flight result, including
             first-turn and new-chain requests. Enabled by default; disable for
             independent concurrent sampling of identical requests.
+        task_metrics_mode: Local Task Metrics mode. ``off`` preserves the legacy
+            path; ``shadow`` and ``primary`` enable local fact projection.
     """
 
     tokenizer: Any
@@ -61,6 +63,7 @@ class GatewayActorConfig:
     response_length: int | None = None
     enable_last_assistant_rollback: bool = True
     coalesce_reserved_exact_requests: bool = True
+    task_metrics_mode: str = "off"
 
     def __post_init__(self) -> None:
         if type(self.enable_tool_parser_cache) is not bool:
@@ -76,6 +79,14 @@ class GatewayActorConfig:
             raise ValueError(
                 "coalesce_reserved_exact_requests must be a bool, "
                 f"got {type(self.coalesce_reserved_exact_requests).__name__}"
+            )
+        if not isinstance(self.task_metrics_mode, str) or self.task_metrics_mode not in {
+            "off",
+            "shadow",
+            "primary",
+        }:
+            raise ValueError(
+                f"task_metrics_mode must be one of 'off', 'shadow', or 'primary', got {self.task_metrics_mode!r}"
             )
         if self.prompt_length is not None and self.prompt_length <= 0:
             raise ValueError(f"prompt_length must be positive when set, got {self.prompt_length}")

@@ -72,6 +72,37 @@ async def test_gateway_manager_balances_concurrent_session_creation():
 
 @pytest.mark.cpu
 @pytest.mark.level0
+@pytest.mark.asyncio
+async def test_gateway_manager_finalization_result_preserves_legacy_list_contract():
+    from uni_agent.gateway.manager import GatewayManager
+    from uni_agent.gateway.session import SessionFinalizationResult, Trajectory
+
+    trajectory = Trajectory(prompt_ids=[1], response_ids=[2], response_mask=[1])
+
+    async def finalize(session_id: str):
+        assert session_id in {"new-contract", "legacy-contract"}
+        return SessionFinalizationResult(trajectories=[trajectory], metrics_fragment=None)
+
+    class _FinalizeGateway:
+        finalize_session_result = _FakeRemoteMethod(finalize)
+
+    manager = GatewayManager.__new__(GatewayManager)
+    manager.gateways = [_FinalizeGateway()]
+    manager.gateway_count = 1
+    manager.active_sessions_per_gateway = [2]
+    manager._session_to_gateway_index = {"new-contract": 0, "legacy-contract": 0}
+
+    result = await manager.finalize_session_result("new-contract")
+    trajectories = await manager.finalize_session("legacy-contract")
+
+    assert result.trajectories == [trajectory]
+    assert trajectories == [trajectory]
+    assert manager.active_sessions_per_gateway == [0]
+    assert manager._session_to_gateway_index == {}
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_gateway_manager_rejects_zero_gateway_count():
     """``GatewayManager`` raises ``ValueError`` when ``gateway_count=0``, rather
     than silently spawning a half-initialized manager."""
@@ -152,7 +183,7 @@ async def test_gateway_manager_finalizes_each_session_on_its_owning_gateway(ray_
     manager = GatewayManager(
         llm_client=RecordingLLMClient("OK"),
         gateway_count=2,
-        gateway_actor_config=GatewayActorConfig(tokenizer=FakeTokenizer()),
+        gateway_actor_config=GatewayActorConfig(tokenizer=FakeTokenizer(), task_metrics_mode="primary"),
     )
 
     session_a = await manager.create_session("session-a")
@@ -169,11 +200,15 @@ async def test_gateway_manager_finalizes_each_session_on_its_owning_gateway(ray_
             )
             assert chat.status_code == 200
 
-    trajectories_a = await manager.finalize_session("session-a")
+    finalization_a = await manager.finalize_session_result("session-a")
+    trajectories_a = finalization_a.trajectories
     trajectories_b = await manager.finalize_session("session-b")
 
     assert len(trajectories_a) == 1
     assert len(trajectories_b) == 1
+    assert finalization_a.metrics_fragment is not None
+    assert finalization_a.metrics_fragment.complete
+    assert finalization_a.metrics_fragment.metrics["gateway.requests"].value == 1
 
     await manager.shutdown()
 

@@ -8,12 +8,13 @@ serves: trajectory buffering and message encoding/decoding.
 
 from .codec import MessageCodec
 from .session import GatewaySession, TrajectoryBuffer
-from .types import InternalGenerationRequest, SessionHandle, Trajectory
+from .types import InternalGenerationRequest, SessionFinalizationResult, SessionHandle, Trajectory
 
 __all__ = [
     "InternalGenerationRequest",
     "GatewaySession",
     "MessageCodec",
+    "SessionFinalizationResult",
     "SessionHandle",
     "Trajectory",
     "TrajectoryBuffer",
