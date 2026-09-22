@@ -46,7 +46,7 @@ def test_run_agent_preserves_stdin_arguments_and_inherited_home(tmp_path):
         gateway_url="http://gateway/v1",
         model_name="policy",
         api_key="key",
-        conda_prefix="/custom/envs/testbed",
+        conda_env_path="/custom/envs/testbed",
         path="/custom/envs/testbed/bin:/custom/bin",
         project_dir=str(tmp_path),
     )
