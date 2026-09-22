@@ -72,7 +72,7 @@ def _compaction_request_kind(value: str) -> str | None:
     return None
 
 
-def infer_trajectory_annotations(
+def default_trajectory_annotation_policy(
     headers: Mapping[str, str], body: Mapping[str, Any], protocol: str
 ) -> dict[str, list[str]]:
     """Infer conservative request tags from provider-visible fields.

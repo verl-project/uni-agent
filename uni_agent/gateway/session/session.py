@@ -15,7 +15,7 @@ from fastapi import HTTPException
 
 from uni_agent.gateway.annotation import (
     TrajectoryAnnotationPolicy,
-    infer_trajectory_annotations,
+    default_trajectory_annotation_policy,
     normalize_trajectory_annotations,
 )
 from uni_agent.gateway.session.codec import MessageCodec
@@ -223,7 +223,7 @@ class GatewaySession:
         self._enable_last_assistant_rollback = enable_last_assistant_rollback
         self._coalesce_reserved_exact_requests = coalesce_reserved_exact_requests
         self._metadata = dict(metadata or {})
-        self._annotation_policy = annotation_policy or infer_trajectory_annotations
+        self._annotation_policy = annotation_policy or default_trajectory_annotation_policy
         self._trace_identity = dict(self._metadata.get("_trace_identity") or {})
         self.active_chains: list[ChainState] = []
         self.materialized_chains: list[MaterializedChain] = []

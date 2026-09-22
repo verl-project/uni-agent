@@ -52,7 +52,7 @@ def build_gateway_manager(*, config, llm_client) -> GatewayManager:
     model_config: HFModelConfig = omega_conf_to_dataclass(model_cfg)
     annotation_policy_fqn = af_cfg.get("trajectory_annotation_policy_fqn")
     if annotation_policy_fqn is None:
-        annotation_policy_fqn = "uni_agent.gateway.annotation.infer_trajectory_annotations"
+        annotation_policy_fqn = "uni_agent.gateway.annotation.default_trajectory_annotation_policy"
     elif not isinstance(annotation_policy_fqn, str) or not annotation_policy_fqn.strip():
         raise ValueError("trajectory_annotation_policy_fqn must be a non-empty string")
     annotation_policy = load_class_from_fqn(annotation_policy_fqn, description="trajectory annotation policy")

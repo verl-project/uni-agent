@@ -2,12 +2,12 @@ import asyncio
 
 from tests.uni_agent.support import FakeTokenizer, SequencedBackend
 from uni_agent.gateway.adapters.openai import openai_to_internal
-from uni_agent.gateway.annotation import infer_trajectory_annotations
+from uni_agent.gateway.annotation import default_trajectory_annotation_policy
 from uni_agent.gateway.session import GatewaySession, MessageCodec, SessionHandle
 
 
 def test_default_policy_recognizes_verified_harness_signals():
-    annotations = infer_trajectory_annotations(
+    annotations = default_trajectory_annotation_policy(
         headers={
             "x-claude-code-agent-id": "child-123",
             "x-codex-turn-metadata": '{"request_kind":"compaction"}',
@@ -47,7 +47,7 @@ def test_default_policy_recognizes_verified_harness_signals():
 
 
 def test_default_policy_distinguishes_openclaw_branch_summary_and_unknown_role():
-    annotations = infer_trajectory_annotations(
+    annotations = default_trajectory_annotation_policy(
         headers={},
         body={
             "system": "You are a context summarization assistant.",
@@ -71,13 +71,13 @@ def test_default_policy_distinguishes_openclaw_branch_summary_and_unknown_role()
 
 
 def test_default_policy_does_not_infer_main_agent_from_missing_signals():
-    annotations = infer_trajectory_annotations(headers={}, body={"messages": []}, protocol="openai_chat")
+    annotations = default_trajectory_annotation_policy(headers={}, body={"messages": []}, protocol="openai_chat")
 
     assert annotations == {"tags": ["role:unknown"], "evidence": []}
 
 
 def test_prompt_markers_in_later_user_content_are_not_treated_as_harness_signals():
-    annotations = infer_trajectory_annotations(
+    annotations = default_trajectory_annotation_policy(
         headers={},
         body={
             "system": "You are a helpful assistant.",
