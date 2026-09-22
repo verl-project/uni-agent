@@ -205,13 +205,17 @@ class HermesAgent(Agent):
         messages_path = f"{remote_root}/messages.json"
         log_path = f"{remote_root}/runner.log"
         hermes_home = f"{remote_root}/home"
+        sampling = cfg.sampling_params_override.sampling_params()
+        # The sidecar accepts request sampling keys only; the per-turn token cap
+        # is carried separately in ``limits.max_tokens``.
+        sampling.pop("max_tokens", None)
         payload = {
             "schema_version": SCHEMA_VERSION,
             "run_id": run_id,
             "messages": messages,
             "workdir": workdir or "/testbed",
             "model": model,
-            "sampling": cfg.sampling_params_override.sampling_params(),
+            "sampling": sampling,
             "limits": {
                 "max_iterations": cfg.max_iterations,
                 "max_tokens": cfg.sampling_params_override.max_tokens_per_turn,
