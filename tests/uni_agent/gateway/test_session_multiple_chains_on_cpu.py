@@ -921,6 +921,7 @@ async def test_multiple_chains_parallel_new_siblings_reuse_session_request_id():
     request_ids = [call["request_id"] for call in backend.calls]
     assert request_ids == ["parallel-new-siblings"] * 3
     assert session.snapshot_state()["active_chain_ids"] == [1, 2, 3]
+    assert session.snapshot_state()["num_coalesced_requests"] == 0
     trajectories = await session.finalize()
     assert sorted(_decode_response_ids(trajectory.response_ids) for trajectory in trajectories) == ["A", "B", "C"]
 
@@ -929,8 +930,9 @@ async def test_multiple_chains_parallel_new_siblings_reuse_session_request_id():
 @pytest.mark.level0
 @pytest.mark.asyncio
 @pytest.mark.parametrize("chain_path", ["first", "existing", "new"])
-async def test_exact_retry_reuses_inflight_generation(chain_path):
+async def test_exact_retry_reuses_inflight_generation(chain_path, caplog):
     """Let an exact in-flight retry reuse the owner result without forking."""
+    caplog.set_level("WARNING", logger="uni_agent.gateway.session.session")
     session = _session("singleflight", coalesce_reserved_exact_requests=True)
     first_messages = [{"role": "user", "content": "first turn"}]
     if chain_path != "first":
@@ -949,11 +951,14 @@ async def test_exact_retry_reuses_inflight_generation(chain_path):
     owner = asyncio.create_task(_run(session, backend, continuation))
     await backend.wait_for_calls(1)
     duplicate = asyncio.create_task(_run(session, backend, continuation))
+    second_duplicate = asyncio.create_task(_run(session, backend, continuation))
     await asyncio.sleep(0)
 
     assert len(backend.calls) == 1
+    assert session.snapshot_state()["num_coalesced_requests"] == 2
+    assert sum(record.getMessage().startswith("Exact in-flight request coalesced") for record in caplog.records) == 1
     backend.release_call(0)
-    assert await owner == await duplicate
+    assert await owner == await duplicate == await second_duplicate
     trajectories = await session.finalize()
     assert len(trajectories) == (2 if chain_path == "new" else 1)
     assert sum(_decode_response_ids(t.response_ids).endswith("SECOND") for t in trajectories) == 1
@@ -989,6 +994,7 @@ async def test_exact_retry_reuses_failure_and_allows_a_later_retry(existing_chai
     assert all(isinstance(result, HTTPException) and result.status_code == 500 for result in results)
     assert session.reserved_chain_ids == set()
     assert session._inflight_exact_requests == {}
+    assert session.snapshot_state()["num_coalesced_requests"] == 1
 
     await _run(session, SequencedBackend(["RECOVERED"]), continuation)
     [trajectory] = await session.finalize()

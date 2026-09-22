@@ -225,6 +225,7 @@ class GatewaySession:
         self._order_seq = 0
         self._rollback_count = 0
         self._rollback_dropped_trainable_tokens_total = 0
+        self._coalesced_request_count = 0
         self.phase = SessionPhase.ACTIVE
         self.created_at = time.time()
         self.updated_at = self.created_at
@@ -304,6 +305,16 @@ class GatewaySession:
                         self._inflight_exact_requests[request_fingerprint] = owner_future
 
             if joined_future is not None:
+                self._coalesced_request_count += 1
+                if self._coalesced_request_count == 1:
+                    logger.warning(
+                        "Exact in-flight request coalesced: session=%s fingerprint=%s role=waiter. "
+                        "The waiter shares the owner's backend generation and trajectory result. "
+                        "Set coalesce_reserved_exact_requests=false to preserve independent "
+                        "same-session sampling.",
+                        self.handle.session_id,
+                        request_fingerprint[:12],
+                    )
                 succeeded, value, chain_id, turn = await asyncio.shield(joined_future)
                 if not succeeded:
                     raise value
@@ -499,6 +510,7 @@ class GatewaySession:
             "active_chain_tip_hashes": {chain.chain_id: chain.message_tip_hash for chain in self.active_chains},
             "rollback_count": self._rollback_count,
             "rollback_dropped_trainable_tokens_total": self._rollback_dropped_trainable_tokens_total,
+            "num_coalesced_requests": self._coalesced_request_count,
         }
 
     async def _prepare_generation_inputs(

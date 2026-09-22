@@ -177,6 +177,10 @@ actor_rollout_ref:
 `rollout.n` creates separate Gateway sessions, so its samples are not coalesced
 with one another. The option name is retained for configuration compatibility;
 coalescing also applies when no existing chain is reserved.
+`GatewaySession.snapshot_state()` reports the cumulative number of waiters in
+`num_coalesced_requests`; the first coalesce in a session also emits a warning
+with a short request fingerprint so operators can distinguish this behavior
+from an independent backend generation.
 
 When a client rewrites only the most recent Assistant message, the Gateway rolls
 the matching chain back to the start of that Assistant turn and re-encodes the
