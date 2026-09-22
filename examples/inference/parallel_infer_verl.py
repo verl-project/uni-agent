@@ -28,6 +28,7 @@ endpoint is the gateway session, bound by the runner, not a flag.
 """
 
 import argparse
+import copy
 import json
 import logging
 import os
