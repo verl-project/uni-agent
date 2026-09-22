@@ -71,6 +71,38 @@ def initialize_generation_prompt(processing_class, **apply_chat_template_kwargs)
     return with_generation_prompt[len(without_generation_prompt) :]
 
 
+def _normalize_messages_for_continuous_tokens(
+    messages: list[dict[str, Any]], *, force_system_anchor: bool = False
+) -> list[dict[str, Any]]:
+    """Keep a leading system message before the Qwen synthetic user anchor.
+
+    ``verl`` can add a dummy user when a chat template requires one.  That
+    fallback must come after an existing system message (Qwen3.5 rejects a
+    system message that follows a user message).  Return copies so the session
+    history owned by the framework is never mutated.
+    """
+
+    normalized = []
+    for message in messages:
+        copied = dict(message)
+        if isinstance(message.get("tool_calls"), list):
+            copied["tool_calls"] = list(message["tool_calls"])
+        normalized.append(copied)
+    if not force_system_anchor and any(message.get("role") == "user" for message in normalized):
+        return normalized
+    first_non_system = next(
+        (index for index, message in enumerate(normalized) if message.get("role") != "system"),
+        len(normalized),
+    )
+    if first_non_system == 0:
+        return normalized
+    return [
+        *normalized[:first_non_system],
+        {"role": "user", "content": [{"type": "text", "text": ""}]},
+        *normalized[first_non_system:],
+    ]
+
+
 class MessageCodec:
     """Model-scoped request codec used by gateway sessions.
 
@@ -205,7 +237,7 @@ class MessageCodec:
     ) -> list[int]:
         """Build the initial runtime token stream."""
         return self._continuous_token_builder.build_initial_tokens(
-            messages,
+            _normalize_messages_for_continuous_tokens(messages),
             tools=tools,
             images=image_data,
             videos=video_data,
@@ -250,9 +282,17 @@ class MessageCodec:
             raise ValueError(
                 "Continuous Token context merging does not currently support incremental image or video data"
             )
+        force_system_anchor = (
+            any(message.get("role") == "system" for message in previous_messages)
+            and not any(message.get("role") == "user" for message in previous_messages)
+        )
         merge_result = self._continuous_token_builder.merge_context_tokens(
-            previous_messages,
-            updated_messages,
+            _normalize_messages_for_continuous_tokens(
+                previous_messages, force_system_anchor=force_system_anchor
+            ),
+            _normalize_messages_for_continuous_tokens(
+                updated_messages, force_system_anchor=force_system_anchor
+            ),
             runtime_token_ids,
             tools=tools,
         )
