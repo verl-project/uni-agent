@@ -8,7 +8,7 @@ import re
 
 import pytest
 
-from uni_agent.agents.base import ModelConfig
+from uni_agent.agents.base import ModelConfig, RequestSamplingConfig
 from uni_agent.agents.hermes.agent import (
     HermesAgent,
     HermesConfig,
@@ -117,7 +117,14 @@ def test_parse_and_validate_marked_result():
 @pytest.mark.level0
 def test_run_reads_result_and_preserves_endpoint_and_messages():
     sandbox = FakeSandbox()
-    agent = _agent()
+    agent = _agent(
+        sampling_params_override=RequestSamplingConfig(
+            temperature=0.7,
+            top_p=0.8,
+            top_k=20,
+            max_tokens_per_turn=8192,
+        )
+    )
     messages = [{"role": "system", "content": "rules"}, {"role": "user", "content": "fix it"}]
     result = asyncio.run(agent.run(sandbox=sandbox, messages=messages, workdir="/testbed"))
     assert result.finished is True
@@ -127,6 +134,8 @@ def test_run_reads_result_and_preserves_endpoint_and_messages():
     payload = json.loads(next(iter(sandbox.files.values())))
     assert payload["model"]["endpoint"] == "http://gateway/sessions/s/v1"
     assert payload["messages"] == messages
+    assert payload["sampling"] == {"temperature": 0.7, "top_p": 0.8, "top_k": 20}
+    assert payload["limits"]["max_tokens"] == 8192
 
 
 @pytest.mark.cpu
