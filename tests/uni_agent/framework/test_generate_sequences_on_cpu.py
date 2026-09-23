@@ -321,6 +321,35 @@ def test_build_gateway_manager_wires_gateway_config_defaults(
 
 @pytest.mark.cpu
 @pytest.mark.level0
+@pytest.mark.parametrize("key", ["priority", "tool_priority", "active_lease_seconds"])
+@pytest.mark.parametrize("value", [True, "10", 1.9, 10])
+def test_build_gateway_manager_validates_raw_kv_config(monkeypatch, key, value):
+    from uni_agent.framework import entry as entry_module
+
+    model = types.SimpleNamespace(tokenizer=None, processor=None, hf_config=types.SimpleNamespace(model_type=None))
+    rollout = types.SimpleNamespace(
+        name="vllm",
+        prompt_length=128,
+        response_length=64,
+        multi_turn=types.SimpleNamespace(format="hermes"),
+        custom=types.SimpleNamespace(agent_framework={"gateway_count": 1, "kv_cache_offload": {key: value}}),
+    )
+    config = types.SimpleNamespace(data={}, actor_rollout_ref=types.SimpleNamespace(model=model, rollout=rollout))
+    monkeypatch.setattr(entry_module, "omega_conf_to_dataclass", lambda cfg: cfg)
+    monkeypatch.setattr(entry_module, "GatewayManager", lambda **kwargs: kwargs["gateway_actor_config"])
+
+    valid = type(value) is int or (key == "active_lease_seconds" and type(value) is float)
+    if not valid:
+        with pytest.raises(ValueError, match="priority|lease_seconds"):
+            entry_module.build_gateway_manager(config=config, llm_client=None)
+    else:
+        result = entry_module.build_gateway_manager(config=config, llm_client=None)
+        field = "lease_seconds" if key == "active_lease_seconds" else key
+        assert getattr(result.kv_cache_offload_config, field) == value
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.parametrize(
     ("configured", "expected"),
     [(None, None), ([], set()), (["temperature", "max_tokens"], {"temperature", "max_tokens"})],

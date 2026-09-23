@@ -7,9 +7,45 @@ only its rollout name is forwarded here to select a matching tool parser.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
+
+
+@dataclass(frozen=True)
+class KVCacheHintConfig:
+    """Agent KV hint settings; these do not enable backend CPU offloading.
+
+    Static mode uses priority for requests without tools and tool_priority for
+    requests with tools. Dynamic mode computes priority from trajectory state.
+    lease_seconds sets the lifetime of each refreshed hint in either mode.
+    """
+
+    enabled: bool = False
+    priority_mode: str = "static"
+    lease_seconds: float = 300.0
+    priority: int = 50
+    tool_priority: int = 90
+
+    def __post_init__(self) -> None:
+        if type(self.enabled) is not bool:
+            raise ValueError("enabled must be a bool")
+        if self.priority_mode not in ("static", "dynamic"):
+            raise ValueError("priority_mode must be 'static' or 'dynamic'")
+        if (
+            isinstance(self.lease_seconds, bool)
+            or not isinstance(self.lease_seconds, int | float)
+            or not math.isfinite(self.lease_seconds)
+            or self.lease_seconds <= 0
+        ):
+            raise ValueError("lease_seconds must be finite and positive")
+        for name, value in (
+            ("priority", self.priority),
+            ("tool_priority", self.tool_priority),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 100:
+                raise ValueError(f"{name} must be an integer between 0 and 100")
 
 
 @dataclass(frozen=True)
@@ -40,6 +76,7 @@ class GatewayActorConfig:
             The gateway enforces their sum when both values are set.
         enable_last_assistant_rollback: Whether latest-assistant rewrites may
             rollback and reuse an existing chain. Enabled by default.
+        kv_cache_offload_config: Immutable agent KV hint settings.
         coalesce_reserved_exact_requests: Whether exact provider-normalized
             requests in the same session share an in-flight result, including
             first-turn and new-chain requests. Enabled by default; disable for
@@ -60,6 +97,7 @@ class GatewayActorConfig:
     prompt_length: int | None = None
     response_length: int | None = None
     enable_last_assistant_rollback: bool = True
+    kv_cache_offload_config: KVCacheHintConfig = field(default_factory=KVCacheHintConfig)
     coalesce_reserved_exact_requests: bool = True
 
     def __post_init__(self) -> None:
@@ -72,6 +110,8 @@ class GatewayActorConfig:
                 "enable_last_assistant_rollback must be a bool, "
                 f"got {type(self.enable_last_assistant_rollback).__name__}"
             )
+        if not isinstance(self.kv_cache_offload_config, KVCacheHintConfig):
+            raise ValueError("kv_cache_offload_config must be a KVCacheHintConfig")
         if type(self.coalesce_reserved_exact_requests) is not bool:
             raise ValueError(
                 "coalesce_reserved_exact_requests must be a bool, "

@@ -83,6 +83,7 @@ class _GatewayActor:
         self._prompt_length = config.prompt_length
         self._response_length = config.response_length
         self._enable_last_assistant_rollback = config.enable_last_assistant_rollback
+        self._kv_cache_offload_config = config.kv_cache_offload_config
         self._coalesce_reserved_exact_requests = config.coalesce_reserved_exact_requests
         self._sessions: dict[str, GatewaySession] = {}
         self._app = FastAPI()
@@ -273,6 +274,7 @@ class _GatewayActor:
             enable_last_assistant_rollback=self._enable_last_assistant_rollback,
             coalesce_reserved_exact_requests=self._coalesce_reserved_exact_requests,
             metadata=metadata,
+            kv_cache_offload_config=self._kv_cache_offload_config,
         )
         return handle
 

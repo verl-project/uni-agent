@@ -4,6 +4,10 @@ The Uni-Agent Gateway connects Agent runtimes to a verl-managed rollout engine. 
 
 The Gateway is not an inference engine. vLLM or SGLang generates tokens; the Gateway owns session routing, protocol conversion, and trajectory materialization.
 
+For optional vLLM GPU-to-CPU cache admission and eviction hints, see
+[Agent-Aware KV Cache Offload](agent-aware-kv-offload.md), including setup,
+parameter defaults, priority modes and lease semantics.
+
 ## Two Inference Paths
 
 External API inference bypasses the Gateway:
