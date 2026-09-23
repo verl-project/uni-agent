@@ -222,6 +222,7 @@ class ClaudeCodeAgent(Agent):
             "CLAUDE_CODE_SKIP_PROMPT_HISTORY": "1",
             "CLAUDE_CODE_DISABLE_TERMINAL_TITLE": "1",
             "API_TIMEOUT_MS": "86400000",  # 24 hours
+            "API_FORCE_IDLE_TIMEOUT": "0",
             "CLAUDE_CODE_MAX_RETRIES": "0",
             "NO_PROXY": "*",
             "no_proxy": "*",
