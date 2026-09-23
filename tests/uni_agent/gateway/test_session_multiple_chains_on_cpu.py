@@ -1,4 +1,5 @@
 import asyncio
+import copy
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -8,6 +9,7 @@ from fastapi import HTTPException
 from tests.uni_agent.support import (
     FakeProcessor,
     FakeTokenizer,
+    QwenVLTokenizer,
     SequencedBackend,
     fake_vision_info_extractor,
 )
@@ -51,15 +53,18 @@ def _session(
     vision_info_extractor=None,
     tool_parser_name: str | None = None,
     mm_processor_kwargs: dict | None = None,
+    tokenizer=None,
+    hf_model_type: str | None = None,
 ) -> GatewaySession:
     return GatewaySession(
         SessionHandle(session_id=session_id),
         MessageCodec(
-            FakeTokenizer(),
+            tokenizer or FakeTokenizer(),
             processor=processor,
             vision_info_extractor=vision_info_extractor,
             tool_parser_name=tool_parser_name,
             mm_processor_kwargs=mm_processor_kwargs,
+            hf_model_type=hf_model_type,
         ),
         prompt_length=prompt_length,
         response_length=response_length,
@@ -1553,58 +1558,69 @@ async def test_multiple_chains_video_media_stays_chain_local():
 
 @pytest.mark.cpu
 @pytest.mark.level0
-@pytest.mark.parametrize(
-    ("media_kind", "message_factory", "extractor", "sent_url", "unsent_url", "backend_field", "trajectory_key"),
-    [
-        (
-            "image",
-            _image_message,
-            fake_vision_info_extractor,
-            "image://sent-a.png",
-            "image://unsent-b.png",
-            "image_data",
-            "images",
-        ),
-        (
-            "video",
-            _video_message,
-            _codec_compatible_video_extractor,
-            "video://sent-a.mp4",
-            "video://unsent-b.mp4",
-            "video_data",
-            "videos",
-        ),
-    ],
-)
 @pytest.mark.asyncio
-async def test_multiple_chains_rejects_incremental_media_without_mutating_stored_media(
-    media_kind, message_factory, extractor, sent_url, unsent_url, backend_field, trajectory_key
-):
-    """Reject unsupported CT media without mutating the selected chain."""
-    first_messages = [message_factory(sent_url, "describe first")]
+async def test_multiple_chains_accepts_incremental_image_without_mutating_stored_media():
+    """Append a tool-returned image while preserving the selected chain media."""
+    first_messages = [_image_message("image://sent-a.png", "describe first")]
     continuation_messages = [
         *first_messages,
         {"role": "assistant", "content": "FIRST"},
-        message_factory(unsent_url, "new incremental media"),
+        _image_message("image://unsent-b.png", "new incremental media"),
     ]
-    expected_sent = [sent_url] if media_kind == "image" else [(sent_url, {"url": sent_url})]
+    original_messages = copy.deepcopy([first_messages, continuation_messages])
+    tokenizer = QwenVLTokenizer()
     session = _session(
-        f"incremental-media-{media_kind}",
+        "incremental-media-image",
         processor=FakeProcessor(),
-        vision_info_extractor=extractor,
+        vision_info_extractor=fake_vision_info_extractor,
+        tokenizer=tokenizer,
+        hf_model_type="qwen2_5_vl",
+    )
+    backend = SequencedBackend(["FIRST", "SECOND"])
+
+    await _run(session, backend, first_messages)
+    await _run(session, backend, continuation_messages)
+    trajectories = await session.finalize()
+
+    assert len(backend.calls) == 2
+    assert backend.calls[0]["image_data"] == ["image://sent-a.png"]
+    assert backend.calls[1]["image_data"] == ["image://sent-a.png", "image://unsent-b.png"]
+    assert [first_messages, continuation_messages] == original_messages
+    assert len(trajectories) == 1
+    assert trajectories[0].multi_modal_data == {"images": ["image://sent-a.png", "image://unsent-b.png"]}
+    assert trajectories[0].extra_fields == {}
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_multiple_chains_rejects_incremental_video_without_mutating_stored_media():
+    """Reject incremental video while preserving the selected chain media."""
+    sent_url = "video://sent-a.mp4"
+    first_messages = [_video_message(sent_url, "describe first")]
+    continuation_messages = [
+        *first_messages,
+        {"role": "assistant", "content": "FIRST"},
+        _video_message("video://unsent-b.mp4", "new incremental media"),
+    ]
+    expected_sent = [(sent_url, {"url": sent_url})]
+    session = _session(
+        "incremental-media-video",
+        processor=FakeProcessor(),
+        vision_info_extractor=_codec_compatible_video_extractor,
     )
     backend = SequencedBackend(["FIRST", "SHOULD_NOT_RUN"])
 
     await _run(session, backend, first_messages)
-    with pytest.raises(ValueError, match="does not currently support incremental image or video data"):
+    with pytest.raises(ValueError, match="incremental video"):
         await _run(session, backend, continuation_messages)
     trajectories = await session.finalize()
 
     assert len(backend.calls) == 1
     assert backend.steps == ["SHOULD_NOT_RUN"]
-    assert backend.calls[0][backend_field] == expected_sent
+    assert backend.calls[0]["video_data"] == expected_sent
     assert len(trajectories) == 1
-    assert trajectories[0].multi_modal_data == {trajectory_key: expected_sent}
+    assert trajectories[0].multi_modal_data == {"videos": expected_sent}
     assert trajectories[0].extra_fields == {}
 
 

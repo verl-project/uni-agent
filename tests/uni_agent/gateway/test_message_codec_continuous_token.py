@@ -91,3 +91,169 @@ def test_deepseek_v4_codec_uses_continuous_token_without_chat_template():
     assert response_logprobs is not None
     assert response_logprobs[: len(assistant_ids)] == [-0.1] * len(assistant_ids)
     assert response_logprobs[len(assistant_ids) :] == [0.0] * (len(response_logprobs) - len(assistant_ids))
+
+
+class _NoPatchSizeProcessor:
+    """Multimodal processor without the Qwen ``patch_size`` attribute."""
+
+    chat_template = None
+
+    class image_processor:
+        pass
+
+
+def _image_url_message() -> dict:
+    return {
+        "role": "user",
+        "content": [
+            {"type": "image_url", "image_url": {"url": "image://a.png"}},
+            {"type": "text", "text": "describe"},
+        ],
+    }
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_extract_multi_modal_data_prefers_configured_patch_size():
+    """An explicitly configured patch size wins and the processor is not read."""
+    from tests.uni_agent.support import FakeProcessor, FakeTokenizer
+
+    extractor_calls = []
+
+    async def recording_extractor(messages, image_patch_size, config=None):
+        extractor_calls.append(image_patch_size)
+        return ["image://a.png"], None
+
+    codec = MessageCodec(
+        FakeTokenizer(),
+        processor=FakeProcessor(),
+        vision_info_extractor=recording_extractor,
+        vision_info_extractor_kwargs={"image_patch_size": 14},
+    )
+
+    images, videos = await codec.extract_multi_modal_data([_image_url_message()])
+
+    assert images == ["image://a.png"]
+    assert videos is None
+    assert extractor_calls == [14]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_extract_multi_modal_data_reports_missing_patch_size():
+    """The Qwen patch size read fails clearly when the processor lacks it and nothing is configured."""
+    from tests.uni_agent.support import FakeTokenizer
+
+    async def extractor(messages, image_patch_size):
+        raise AssertionError("extractor must not run when the patch size is unavailable")
+
+    codec = MessageCodec(
+        FakeTokenizer(),
+        processor=_NoPatchSizeProcessor(),
+        vision_info_extractor=extractor,
+    )
+
+    with pytest.raises(ValueError, match="processor.image_processor.patch_size"):
+        await codec.extract_multi_modal_data([_image_url_message()])
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_extract_multi_modal_data_configured_patch_size_avoids_processor_read():
+    """A configured patch size makes the missing processor attribute harmless."""
+    from tests.uni_agent.support import FakeTokenizer
+
+    async def extractor(messages, image_patch_size, config=None):
+        return ["image://a.png"], None
+
+    codec = MessageCodec(
+        FakeTokenizer(),
+        processor=_NoPatchSizeProcessor(),
+        vision_info_extractor=extractor,
+        vision_info_extractor_kwargs={"image_patch_size": 14},
+    )
+
+    images, videos = await codec.extract_multi_modal_data([_image_url_message()])
+
+    assert images == ["image://a.png"]
+    assert videos is None
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+@pytest.mark.parametrize("signature_kind", ["optional", "kwargs"])
+async def test_extract_multi_modal_data_optional_patch_size_does_not_require_processor_attribute(signature_kind):
+    """Optional patch-size contracts work with non-Qwen processor shapes."""
+    from tests.uni_agent.support import FakeTokenizer
+
+    calls = []
+    if signature_kind == "optional":
+
+        async def extractor(messages, image_patch_size=None):
+            calls.append(image_patch_size)
+            return ["image://a.png"], None
+
+    else:
+
+        async def extractor(messages, **kwargs):
+            calls.append(kwargs)
+            return ["image://a.png"], None
+
+    codec = MessageCodec(
+        FakeTokenizer(),
+        processor=_NoPatchSizeProcessor(),
+        vision_info_extractor=extractor,
+    )
+
+    images, videos = await codec.extract_multi_modal_data([_image_url_message()])
+
+    assert images == ["image://a.png"]
+    assert videos is None
+    assert calls == ([None] if signature_kind == "optional" else [{}])
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_merge_context_tokens_rejects_misaligned_image_data():
+    """Image data shorter or longer than the image blocks never reaches the builder."""
+    from tests.uni_agent.support import FakeProcessor, QwenVLTokenizer
+
+    tokenizer = QwenVLTokenizer()
+    codec = MessageCodec(
+        tokenizer,
+        processor=FakeProcessor(),
+        hf_model_type="qwen2_5_vl",
+    )
+    previous_messages = [{"role": "user", "content": "start"}]
+    appended_tool_image = {
+        "role": "tool",
+        "tool_call_id": "call_crop",
+        "name": "crop_image",
+        "content": [
+            {"type": "image_url", "image_url": {"url": "image://crop.png"}},
+            {"type": "text", "text": "crop"},
+        ],
+    }
+    updated_messages = [*previous_messages, {"role": "assistant", "content": "FIRST"}, appended_tool_image]
+
+    with pytest.raises(ValueError, match="found 1 image blocks but received 0 resolved images"):
+        codec.merge_context_tokens(previous_messages, updated_messages, [1, 2, 3], [1, 1, 1], image_data=[])
+    with pytest.raises(ValueError, match="found 1 image blocks but received 2 resolved images"):
+        codec.merge_context_tokens(
+            previous_messages,
+            updated_messages,
+            [1, 2, 3],
+            [1, 1, 1],
+            image_data=["image://a.png", "image://b.png"],
+        )
+
+    # A history image block without its resolved object is also rejected, even
+    # when the appended messages are pure text.
+    history_messages = [_image_url_message()]
+    text_appended = [*history_messages, {"role": "assistant", "content": "FIRST"}, {"role": "user", "content": "go on"}]
+    with pytest.raises(ValueError, match="found 1 image blocks but received 0 resolved images"):
+        codec.merge_context_tokens(history_messages, text_appended, [1, 2, 3], [1, 1, 1], image_data=[])

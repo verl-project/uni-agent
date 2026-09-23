@@ -13,10 +13,12 @@ from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
+from uni_agent.gateway.session.multimodal import MultimodalCodec
 from uni_agent.gateway.utils import normalize_tool_arguments
 from verl.utils.tokenizer import normalize_token_ids
 from verl.utils.tokenizer.chat_template import apply_chat_template as _apply_chat_template
 from verl.utils.tokenizer.chat_template import initialize_turn_separator
+from verl.utils.tokenizer.continuous_token import QwenVLContinuousTokenBuilder
 from verl.utils.tokenizer.continuous_token_wiring import create_continuous_token_builder
 
 # Map backend stop_reason values into the gateway's internal finish_reason vocabulary.
@@ -95,9 +97,6 @@ class MessageCodec:
         mm_processor_kwargs: dict[str, Any] | None = None,
     ):
         self._tokenizer = tokenizer
-        self._processor = processor
-        self._vision_info_extractor = vision_info_extractor or self._default_vision_info_extractor
-        self._vision_info_extractor_kwargs = dict(vision_info_extractor_kwargs or {})
         self._apply_chat_template_kwargs = dict(apply_chat_template_kwargs or {})
         self._mm_processor_kwargs = dict(mm_processor_kwargs or {})
         self._continuous_token_builder = create_continuous_token_builder(
@@ -107,7 +106,14 @@ class MessageCodec:
             mm_processor_kwargs=self._mm_processor_kwargs,
             processor=processor,
         )
-        processing_class = self._processor if self._processor is not None else tokenizer
+        # Gateway currently opens incremental image CT only for Qwen VL builders.
+        self._multimodal = MultimodalCodec(
+            processor,
+            vision_info_extractor=vision_info_extractor,
+            vision_info_extractor_kwargs=vision_info_extractor_kwargs,
+            supports_incremental_images=isinstance(self._continuous_token_builder, QwenVLContinuousTokenBuilder),
+        )
+        processing_class = processor if processor is not None else tokenizer
         if hasattr(processing_class, "chat_template") and processing_class.chat_template is None:
             self._generation_prompt = []
             self._turn_separator = []
@@ -148,53 +154,12 @@ class MessageCodec:
         """Return the configured chat template's inter-turn separator tokens."""
         return list(self._turn_separator)
 
-    async def _default_vision_info_extractor(
-        self,
-        messages: list[dict[str, Any]],
-        *,
-        image_patch_size: int,
-        **_extra: Any,
-    ) -> tuple[list[Any] | None, list[Any] | None]:
-        # Lazy import so callers without multi-modal needs do not load
-        # qwen_vl_utils. ``_extra`` absorbs ``vision_info_extractor_kwargs`` that
-        # ``extract_multi_modal_data`` forwards for custom extractors; the
-        # default path needs nothing beyond ``messages`` and patch size.
-        from qwen_vl_utils import process_vision_info
-
-        return process_vision_info(
-            messages,
-            image_patch_size=image_patch_size,
-            return_video_metadata=True,
-        )
-
     async def extract_multi_modal_data(
         self,
         messages: list[dict[str, Any]],
     ) -> tuple[list[Any] | None, list[Any] | None]:
-        """Extract image and video inputs when a processor-backed request needs them."""
-        if self._processor is None:
-            return None, None
-
-        has_multi_modal_blocks = False
-        for message in messages:
-            content = message.get("content")
-            if not isinstance(content, list):
-                continue
-            for part in content:
-                if isinstance(part, dict) and part.get("type") in {"image", "image_url", "video", "video_url"}:
-                    has_multi_modal_blocks = True
-                    break
-            if has_multi_modal_blocks:
-                break
-
-        if not has_multi_modal_blocks:
-            return None, None
-
-        return await self._vision_info_extractor(
-            messages,
-            image_patch_size=self._processor.image_processor.patch_size,
-            **self._vision_info_extractor_kwargs,
-        )
+        """Keep the session-facing extraction API while delegating media rules."""
+        return await self._multimodal.extract(messages)
 
     def build_initial_tokens(
         self,
@@ -204,6 +169,7 @@ class MessageCodec:
         video_data: list[Any] | None = None,
     ) -> list[int]:
         """Build the initial runtime token stream."""
+        self._multimodal.validate_images(messages, image_data)
         return self._continuous_token_builder.build_initial_tokens(
             messages,
             tools=tools,
@@ -233,6 +199,13 @@ class MessageCodec:
         )
         return merge_result.token_ids, response_mask, response_logprobs
 
+    async def prepare_incremental_images(self, messages: list[dict[str, Any]]) -> list[Any] | None:
+        """Validate and resolve only newly appended images, before any state changes."""
+        self._multimodal.validate_incremental_messages(messages)
+        images, videos = await self.extract_multi_modal_data(messages)
+        self._multimodal.validate_incremental_images(messages, images, videos)
+        return images
+
     def merge_context_tokens(
         self,
         previous_messages: list[dict[str, Any]],
@@ -245,11 +218,21 @@ class MessageCodec:
         image_data: list[Any] | None = None,
         video_data: list[Any] | None = None,
     ) -> tuple[list[int], list[int], list[float] | None]:
-        """Merge appended context and align response metadata."""
-        if image_data or video_data:
-            raise ValueError(
-                "Continuous Token context merging does not currently support incremental image or video data"
-            )
+        """Merge appended context and align response metadata.
+
+        ``image_data`` contains already-resolved images for the *complete*
+        ``updated_messages`` (history plus appended messages), one per image
+        block in message and content-block order. It is not just the newly
+        appended images.
+        The multimodal component prepares the temporary message view required
+        by verl; the CT builder performs the token merge and metadata alignment.
+        """
+        previous_messages, updated_messages = self._multimodal.prepare_context_merge(
+            previous_messages,
+            updated_messages,
+            image_data=image_data,
+            video_data=video_data,
+        )
         merge_result = self._continuous_token_builder.merge_context_tokens(
             previous_messages,
             updated_messages,
