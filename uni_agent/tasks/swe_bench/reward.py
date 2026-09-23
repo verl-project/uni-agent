@@ -86,6 +86,7 @@ def _get_eval_report(metadata, eval_output: str):
     # step 1: get logs eval
     status_map, found = _get_logs_eval(metadata, eval_output)
     eval_report["found_eval_status"] = found
+    eval_report["status_map"] = status_map
     if not found:
         return eval_report
 
@@ -143,7 +144,9 @@ async def compute_reward(metadata, sandbox, eval_timeout: float = 600.0) -> dict
     resp = await sandbox.exec_shell(f"bash {eval_script_container} 2>&1", workdir="/testbed", timeout=eval_timeout)
     output, exit_code = resp.stdout, resp.exit_code
     execution_time = time.perf_counter() - execution_t0
+    # TODO: Remove eval_completed; it is redundant with eval_exit_code == 0.
     result["eval_completed"] = exit_code == 0
+    result["eval_exit_code"] = exit_code
     result["eval_execution_time"] = execution_time
     logger.info(f"eval finished in {execution_time:.1f}s (exit_code={exit_code})")
 

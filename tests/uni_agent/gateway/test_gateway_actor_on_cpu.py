@@ -134,6 +134,84 @@ async def test_gateway_actor_forwards_last_assistant_rollback_to_session():
     assert state["rollback_count"] == 1
 
 
+class _RouteBackend(InspectingBackend):
+    def __init__(self, *, release_error=None):
+        super().__init__()
+        self.release_error = release_error
+        self.bind_calls = []
+        self.release_calls = []
+
+    async def bind_route(self, **kwargs):
+        self.bind_calls.append(kwargs)
+
+    async def release_route(self, **kwargs):
+        self.release_calls.append(kwargs)
+        if self.release_error is not None:
+            raise self.release_error
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+@pytest.mark.parametrize("weight_version", [None, 3])
+@pytest.mark.parametrize("close_method", ["finalize_session", "abort_session"])
+async def test_gateway_actor_owns_route_lifecycle(weight_version, close_method):
+    from uni_agent.gateway.config import GatewayActorConfig
+    from uni_agent.gateway.gateway import _GatewayActor
+
+    backend = _RouteBackend()
+    actor = _GatewayActor(GatewayActorConfig(tokenizer=FakeTokenizer()), backend)
+    await actor.start()
+    try:
+        await actor.create_session("route-session", weight_version=weight_version)
+
+        assert backend.bind_calls == [
+            {
+                "session_id": "route-session",
+                "weight_version": weight_version,
+            }
+        ]
+
+        await getattr(actor, close_method)("route-session")
+
+        assert backend.release_calls == [{"session_id": "route-session"}]
+        assert "route-session" not in actor._sessions
+    finally:
+        await actor.shutdown()
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_gateway_actor_abort_retries_failed_route_release():
+    from uni_agent.gateway.config import GatewayActorConfig
+    from uni_agent.gateway.gateway import _GatewayActor
+
+    release_error = RuntimeError("route-release-failed")
+    backend = _RouteBackend(release_error=release_error)
+    actor = _GatewayActor(GatewayActorConfig(tokenizer=FakeTokenizer()), backend)
+    await actor.start()
+    try:
+        await actor.create_session("route-session")
+
+        with pytest.raises(RuntimeError, match="route-release-failed") as raised:
+            await actor.finalize_session("route-session")
+
+        assert raised.value is release_error
+        assert "route-session" not in actor._sessions
+        assert backend.release_calls == [{"session_id": "route-session"}]
+
+        backend.release_error = None
+        await actor.abort_session("route-session")
+
+        assert backend.release_calls == [
+            {"session_id": "route-session"},
+            {"session_id": "route-session"},
+        ]
+    finally:
+        await actor.shutdown()
+
+
 @pytest.mark.cpu
 @pytest.mark.level0
 @pytest.mark.asyncio
