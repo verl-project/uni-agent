@@ -30,7 +30,7 @@ from __future__ import annotations
 import time
 
 import pytest
-from conftest import BLOCK_SIZE, NODE_ID, FakeZMQTransport, kv_payload, make_stored_event
+from conftest import BLOCK_SIZE, NODE_ID, FakeZMQTransport, kv_payload, make_stored_event, mapping_event
 
 from uni_agent.agent_aware_router.collectors.collector import Collector
 from uni_agent.agent_aware_router.collectors.parse.vllm.kv import VLLMKVParser
@@ -118,3 +118,27 @@ class TestGpuPrefixHitRate:
 
         assert 0.0 <= hit <= 1.0, f"Hit rate should be in [0.0, 1.0], got {hit}"
         assert hit == 1.0, f"Expected hit_rate=1.0 for fully cached chain, got {hit}"
+
+
+@pytest.mark.parametrize("removed_hash, expected_hit", [(102, 0.5), (101, 0.0)])
+def test_wire_events_change_prefix_hit_rate(removed_hash, expected_hit):
+    """Removing the first or last full block reduces the contiguous prefix."""
+    store = DataStore()
+    collector = _make_collector([])
+    chain = _hash_chain(LONG_IDS)
+
+    def apply(event):
+        update = collector._parser.parse(kv_payload(mapping_event(event)), NODE_ID)
+        assert update is not None
+        collector._write_kv_update(update)
+
+    try:
+        apply(["BlockStored", [101], None, SHORT_IDS, BLOCK_SIZE, None, "GPU"])
+        apply(["BlockStored", [102], 101, LONG_IDS[BLOCK_SIZE:], BLOCK_SIZE, None, "GPU"])
+        assert store.get_layer_prefix_hit_rate(NODE_ID, chain, Layer.GPU) == 1.0
+        apply(["BlockRemoved", [removed_hash], "GPU", 0])
+        assert store.get_layer_prefix_hit_rate(NODE_ID, chain, Layer.GPU) == expected_hit
+        apply(["AllBlocksCleared"])
+        assert store.get_layer_prefix_hit_rate(NODE_ID, chain, Layer.GPU) == 0.0
+    finally:
+        collector.stop()
