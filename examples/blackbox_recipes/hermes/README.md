@@ -61,8 +61,3 @@ The launcher records the inference result and framework logs. It does not turn a
 task reward into a launcher success/failure gate; inspect the task result and
 framework trajectory for the run you care about. Hermes-local diagnostics stay
 inside the sandbox.
-
-The earlier end-to-end run used a separate legacy SDK/host compatibility setup.
-It does not validate the simplified current-SDK deployment. Rebuild the sidecar
-after runner changes and rerun an end-to-end rollout with the current SDK and
-clean inference dependencies before claiming end-to-end readiness.
