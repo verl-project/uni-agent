@@ -106,6 +106,7 @@ include = ["uni_agent*"]
 
 [tool.setuptools.package-data]
 uni_agent = ["version/*"]
+"uni_agent.sandbox" = ["snapshot_runner.sh"]
 "uni_agent.agent_aware_router" = [
   "configs/*.yaml",
 ]

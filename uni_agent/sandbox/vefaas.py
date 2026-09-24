@@ -6,10 +6,11 @@ import os
 import random
 import uuid
 from time import monotonic
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from .base import ExecResult, Sandbox, _to_str
 from .registry import register_sandbox
+from .snapshot_shell import SnapshotShell
 
 if TYPE_CHECKING:
     import aiohttp
@@ -21,6 +22,15 @@ logger = logging.getLogger(__name__)
 
 #: swerex server port inside the sandbox (veFaaS routes the function URL here).
 _RUNTIME_PORT = 8000
+
+# The swerex server is a PyInstaller binary whose LD_LIBRARY_PATH points at its
+# extraction dir (/tmp/_MEI*); its libstdc++ breaks image tools such as apt-get.
+# Restore the original value and export SHELL as tmux did.
+_SHELL_PRELUDE = (
+    'if [ -n "${LD_LIBRARY_PATH_ORIG+x}" ]; then export LD_LIBRARY_PATH="$LD_LIBRARY_PATH_ORIG"; '
+    "unset LD_LIBRARY_PATH_ORIG; else case ${LD_LIBRARY_PATH-} in */_MEI*) unset LD_LIBRARY_PATH;; esac; fi; "
+    'export SHELL="${SHELL:-$BASH}"'
+)
 
 
 def _to_vefaas_image(image: str) -> str:
@@ -114,6 +124,18 @@ class _VefaasRuntime:
         self._instance_name = instance_name
         self._timeout = timeout
         self._proxy = proxy
+        self._session: aiohttp.ClientSession | None = None
+        self._closed = False
+        self._close_lock = asyncio.Lock()
+
+    def _get_session(self) -> aiohttp.ClientSession:
+        import aiohttp
+
+        if self._closed:
+            raise RuntimeError("veFaaS runtime client is closed")
+        if self._session is None:
+            self._session = aiohttp.ClientSession()
+        return self._session
 
     @property
     def _headers(self) -> dict[str, str]:
@@ -129,16 +151,15 @@ class _VefaasRuntime:
 
         total = timeout if timeout is not None else self._timeout
         headers = {**self._headers, "X-Request-ID": uuid.uuid4().hex}
-        connector = aiohttp.TCPConnector(force_close=True)
-        async with aiohttp.ClientSession(connector=connector, proxy=self._proxy) as session:
-            async with session.post(
-                f"{self._base_url}/{endpoint}",
-                json=payload.model_dump() if payload is not None else None,
-                headers=headers,
-                timeout=aiohttp.ClientTimeout(total=total),
-            ) as resp:
-                await self._raise_for_error(resp)
-                return output_cls(**(await resp.json()))
+        async with self._get_session().post(
+            f"{self._base_url}/{endpoint}",
+            json=payload.model_dump() if payload is not None else None,
+            headers=headers,
+            proxy=self._proxy,
+            timeout=aiohttp.ClientTimeout(total=total),
+        ) as resp:
+            await self._raise_for_error(resp)
+            return output_cls(**(await resp.json()))
 
     async def _raise_for_error(self, resp: aiohttp.ClientResponse) -> None:
         """Raise the exception a swerex server reported over HTTP.
@@ -173,14 +194,14 @@ class _VefaasRuntime:
 
         total = timeout if timeout is not None else self._timeout
         try:
-            connector = aiohttp.TCPConnector(force_close=True)
-            async with aiohttp.ClientSession(connector=connector, proxy=self._proxy) as session:
-                async with session.get(
-                    f"{self._base_url}/is_alive",
-                    headers=self._headers,
-                    timeout=aiohttp.ClientTimeout(total=total),
-                ) as resp:
-                    return resp.status == 200
+            async with self._get_session().get(
+                f"{self._base_url}/is_alive",
+                headers=self._headers,
+                proxy=self._proxy,
+                timeout=aiohttp.ClientTimeout(total=total),
+            ) as resp:
+                await resp.read()  # Consume the body so the connection can be reused.
+                return resp.status == 200
         except Exception:
             return False
 
@@ -215,12 +236,19 @@ class _VefaasRuntime:
         return resp.content
 
     async def close(self) -> None:
-        try:
-            from swerex.runtime.abstract import CloseResponse
+        async with self._close_lock:
+            if self._closed:
+                return
+            try:
+                from swerex.runtime.abstract import CloseResponse
 
-            await self._post("close", None, CloseResponse)
-        except Exception:
-            logger.debug("veFaaS runtime close() failed", exc_info=True)
+                await self._post("close", None, CloseResponse)
+            except Exception:
+                logger.debug("veFaaS runtime close() failed", exc_info=True)
+            finally:
+                self._closed = True
+                if self._session is not None:
+                    await self._session.close()
 
 
 def _get_vefaas_client(
@@ -263,6 +291,8 @@ def _get_vefaas_client(
 class VefaasSandbox(Sandbox):
     """Creates a Volcengine veFaaS sandbox and drives it over swerex."""
 
+    supports_shell: ClassVar[bool] = True
+
     def __init__(
         self,
         *,
@@ -279,6 +309,7 @@ class VefaasSandbox(Sandbox):
         self._client: Any | None = None
         self._sandbox_id: str | None = None
         self._runtime: _VefaasRuntime | None = None
+        self._started = False
 
     @classmethod
     def from_config(cls, config: SandboxConfig) -> VefaasSandbox:
@@ -296,7 +327,9 @@ class VefaasSandbox(Sandbox):
     # ----- control plane -----
     async def start(self) -> None:
         if self._runtime is not None:
-            return  # already started
+            if self._started:
+                return
+            raise RuntimeError("veFaaS startup is incomplete; stop() before retrying")
 
         import volcenginesdkvefaas
 
@@ -327,12 +360,14 @@ class VefaasSandbox(Sandbox):
             instance_name=sandbox_id,
             proxy=os.getenv("SANDBOX_PROXY"),
         )
-        await runtime.wait_until_alive(timeout=self.startup_timeout)
+        # Retain ownership during startup so stop() also closes failed probes.
         self._runtime = runtime
-        await self.exec_shell("DEBIAN_FRONTEND=noninteractive apt-get install -y -qq tmux", timeout=300.0)
+        await runtime.wait_until_alive(timeout=self.startup_timeout)
+        self._started = True
 
     async def stop(self) -> None:
         # Idempotent via the None checks below: a second call finds nothing to do.
+        self._started = False
         if self._runtime is not None:
             await self._runtime.close()
             self._runtime = None
@@ -350,6 +385,28 @@ class VefaasSandbox(Sandbox):
         if self._runtime is None:
             raise RuntimeError("VefaasSandbox not started; call start() first")
         return self._runtime
+
+    async def open_shell(
+        self,
+        *,
+        cwd: str | None = None,
+        env: dict[str, str] | None = None,
+    ) -> SnapshotShell:
+        """Stateful shell costing one ``execute`` request per command.
+
+        The initial state is captured from ``bash -i`` so the image's bashrc (e.g. conda
+        activation) applies as it did under tmux.
+        """
+        self._require_runtime()
+        shell = SnapshotShell(
+            self, env=env, cwd=cwd, generation_attr="_runtime", interactive=True, prelude=_SHELL_PRELUDE
+        )
+        try:
+            await shell.open()
+        except BaseException:
+            await shell.close()
+            raise
+        return shell
 
     # ----- data plane -----
     async def is_alive(self) -> bool:
