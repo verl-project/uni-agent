@@ -24,6 +24,7 @@ from tensordict.tensorclass import NonTensorData, NonTensorStack
 
 from uni_agent.gateway.session import SessionHandle, Trajectory
 from uni_agent.logging import LogContext, sample_logging
+from uni_agent.metrics.model import MetricsFragment
 from uni_agent.rl_insight.adapter import agent_loop_session
 from uni_agent.tasks import TaskResult
 from verl.tools.tool_registry import initialize_tools_from_config
@@ -39,6 +40,7 @@ logger = logging.getLogger(__name__)
 
 
 TrajectoryPostprocessor = Callable[..., list[Trajectory] | Awaitable[list[Trajectory]]]
+_AGENT_METRICS_FRAGMENT_FIELD = "agent_metrics_fragment"
 
 
 @dataclass
@@ -107,6 +109,18 @@ def _log_scope(log_context: LogContext | None):
     if log_context is None:
         return contextlib.nullcontext()
     return sample_logging.from_context(log_context)
+
+
+def _attach_agent_metrics_fragment(
+    trajectories: list[Trajectory],
+    metrics_fragment: MetricsFragment | None,
+) -> list[Trajectory]:
+    """Attach one session fragment to the final trajectory retained by Framework."""
+    if not trajectories or metrics_fragment is None:
+        return trajectories
+    extra_fields = dict(trajectories[-1].extra_fields or {})
+    extra_fields[_AGENT_METRICS_FRAGMENT_FIELD] = metrics_fragment.to_dict()
+    return [*trajectories[:-1], replace(trajectories[-1], extra_fields=extra_fields)]
 
 
 @ray.remote
@@ -760,6 +774,12 @@ class GatewayAgentFramework(AgentFramework):
             session_id=session_id,
         )
         trace_identity = session_trace.identity
+        event_context = {
+            "episode_id": session_id,
+            "session_id": session_id,
+            "runner_name": runner_name,
+            "global_step": global_steps,
+        }
         if self._log_dir:
             log_root = Path(self._log_dir)
             run_dir = (log_root if global_steps is None else log_root / f"step_{int(global_steps)}") / session_id
@@ -779,7 +799,7 @@ class GatewayAgentFramework(AgentFramework):
         async with _log_scope(parent_log):
             session = await self.gateway_manager.create_session(
                 session_id,
-                metadata={"_trace_identity": trace_identity},
+                metadata={"_trace_identity": trace_identity, "_event_context": event_context},
                 sampling_params=dict(sampling_params),
             )
             logger.info(
@@ -834,7 +854,14 @@ class GatewayAgentFramework(AgentFramework):
                     raise TypeError(
                         f"Agent runner {runner_name!r} must return TaskResult or None, got {type(task_result).__name__}"
                     )
-                session_trajectories = await self.gateway_manager.finalize_session(session_id)
+                finalize_session_result = getattr(self.gateway_manager, "finalize_session_result", None)
+                if finalize_session_result is None:
+                    session_trajectories = await self.gateway_manager.finalize_session(session_id)
+                    metrics_fragment = None
+                else:
+                    finalization_result = await finalize_session_result(session_id)
+                    session_trajectories = finalization_result.trajectories
+                    metrics_fragment = finalization_result.metrics_fragment
                 session_trajectories = _select_session_trajectories(
                     session_id,
                     session_trajectories,
@@ -884,6 +911,8 @@ class GatewayAgentFramework(AgentFramework):
                     trajectories=[],
                 )
                 return session_trajectories, sample_fields
+
+            session_trajectories = _attach_agent_metrics_fragment(session_trajectories, metrics_fragment)
 
             if self.reward_loop_worker_handles and self._custom_reward_function_configured:
                 annotations = await self._score_trajectories(

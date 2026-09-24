@@ -12,6 +12,7 @@ import asyncio
 import ray
 
 from uni_agent.gateway.config import GatewayActorConfig
+from uni_agent.gateway.session import SessionFinalizationResult
 from verl.workers.rollout.llm_server import LLMServerClient
 
 
@@ -33,7 +34,6 @@ class GatewayManager:
             raise ValueError("gateway_count must be positive")
         if gateway_actor_config is None:
             raise ValueError("gateway_actor_config is required when gateway_count > 0")
-
         from uni_agent.gateway.gateway import GatewayActor
 
         # Round-robin across alive CPU nodes so gateway actors do not all pack onto
@@ -43,15 +43,16 @@ class GatewayManager:
         if not node_ids:
             raise RuntimeError("No alive CPU nodes available for GatewayActor placement")
 
-        self.gateways = [
-            GatewayActor.options(
+        self.gateways = []
+        for i in range(gateway_count):
+            actor_class = GatewayActor.options(
                 scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                     node_id=node_ids[i % len(node_ids)],
                     soft=True,
                 ),
-            ).remote(gateway_actor_config, backend=llm_client)
-            for i in range(gateway_count)
-        ]
+            )
+            gateway = actor_class.remote(gateway_actor_config, backend=llm_client)
+            self.gateways.append(gateway)
         ray.get([gateway.start.remote() for gateway in self.gateways])
         self.gateway_count = len(self.gateways)
         self.active_sessions_per_gateway = [0 for _ in self.gateways]
@@ -93,11 +94,15 @@ class GatewayManager:
 
     async def finalize_session(self, session_id: str):
         """Finalize a session on its owning actor, release the route, and return its trajectories."""
+        return (await self.finalize_session_result(session_id)).trajectories
+
+    async def finalize_session_result(self, session_id: str) -> SessionFinalizationResult:
+        """Finalize a routed session and return trajectories plus metrics."""
         gateway, gateway_index = self._get_gateway(session_id)
-        trajectories = await gateway.finalize_session.remote(session_id=session_id)
+        result = await gateway.finalize_session_result.remote(session_id=session_id)
         self._session_to_gateway_index.pop(session_id, None)
         self.active_sessions_per_gateway[gateway_index] -= 1
-        return trajectories
+        return result
 
     async def abort_session(self, session_id: str) -> None:
         """Abort a routed session on its owning actor and release the route."""

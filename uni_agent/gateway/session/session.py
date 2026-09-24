@@ -10,9 +10,11 @@ import time
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any
+from uuid import uuid4
 
 from fastapi import HTTPException
 
+from uni_agent.events import GENERATION_FINISHED, GENERATION_PREPARED, EventContext, EventPublisher
 from uni_agent.gateway.session.codec import MessageCodec
 from uni_agent.gateway.session.types import InternalGenerationRequest, SessionHandle, Trajectory
 from uni_agent.rl_insight.adapter import start_generation_span
@@ -175,6 +177,15 @@ class GenerationOutcome:
     completion_tokens: int
 
 
+@dataclass(slots=True)
+class _InflightExactRequest:
+    """One shared backend execution and its event correlation identity."""
+
+    future: asyncio.Future[tuple[bool, Any, int | None, int | None]]
+    generation_id: str
+    attempt_id: str
+
+
 class GatewaySession:
     """Behavior-bearing state container for one gateway session.
 
@@ -195,6 +206,8 @@ class GatewaySession:
         enable_last_assistant_rollback: bool = True,
         coalesce_reserved_exact_requests: bool = True,
         metadata: dict[str, Any] | None = None,
+        event_publisher: EventPublisher | None = None,
+        event_context: EventContext | None = None,
     ):
         """Create an active session bound to a handle and model codec."""
         if prompt_length is not None and prompt_length <= 0:
@@ -214,13 +227,12 @@ class GatewaySession:
         self._coalesce_reserved_exact_requests = coalesce_reserved_exact_requests
         self._metadata = dict(metadata or {})
         self._trace_identity = dict(self._metadata.get("_trace_identity") or {})
+        self._event_publisher = event_publisher
+        self._event_context = event_context or EventContext(session_id=handle.session_id)
         self.active_chains: list[ChainState] = []
         self.materialized_chains: list[MaterializedChain] = []
         self.reserved_chain_ids: set[int] = set()
-        self._inflight_exact_requests: dict[
-            str,
-            asyncio.Future[tuple[bool, Any, int | None, int | None]],
-        ] = {}
+        self._inflight_exact_requests: dict[str, _InflightExactRequest] = {}
         self._next_chain_id = 1
         self._order_seq = 0
         self._rollback_count = 0
@@ -235,6 +247,11 @@ class GatewaySession:
         """Return a copy of the trusted per-session sampling defaults."""
         return dict(self._sampling_params)
 
+    @property
+    def event_context(self) -> EventContext:
+        """Return the immutable session-level event correlation context."""
+        return self._event_context
+
     async def run_generation(self, request: InternalGenerationRequest, backend) -> GenerationOutcome:
         """Run one provider-normalized generation request and return its business outcome.
 
@@ -248,13 +265,29 @@ class GatewaySession:
         # Same-session requests overlap backend generation and commit in backend
         # completion order. That order also determines which trajectory an optional
         # RewardLoopWorker treats as the session's final scoring input.
+        request_started_ns = time.perf_counter_ns()
         reserved_chain_id: int | None = None
         request_fingerprint = (
             self._compute_request_fingerprint(request) if self._coalesce_reserved_exact_requests else None
         )
-        owner_future: asyncio.Future[tuple[bool, Any, int | None, int | None]] | None = None
-        joined_future: asyncio.Future[tuple[bool, Any, int | None, int | None]] | None = None
+        generation_id = uuid4().hex
+        attempt_id = uuid4().hex
+        owner_request: _InflightExactRequest | None = None
+        joined_request: _InflightExactRequest | None = None
         encoded: EncodedData | None = None
+        prepare_duration_ns: int | None = None
+        backend_duration_ns: int | None = None
+        decode_duration_ns: int | None = None
+        context_tokens: int | None = None
+        max_new_tokens: int | None = None
+        actual_completion_tokens: int | None = None
+        finish_reason: str | None = None
+        result_chain_id: int | None = None
+        coalesced = False
+        backend_called = False
+        capacity_exhausted = False
+        status = "error"
+        error_type: str | None = None
         generation_span = start_generation_span(self._trace_identity)
         try:
             async with self.request_lock:
@@ -266,9 +299,27 @@ class GatewaySession:
                 # Prepare can touch codec and multimodal extractor state, so only
                 # backend generation runs outside the session lock.
                 if request_fingerprint is not None:
-                    joined_future = self._inflight_exact_requests.get(request_fingerprint)
-                if joined_future is None:
-                    encoded = await self._prepare_generation_inputs(request)
+                    joined_request = self._inflight_exact_requests.get(request_fingerprint)
+                if joined_request is None:
+                    prepare_started_ns = time.perf_counter_ns()
+                    try:
+                        encoded = await self._prepare_generation_inputs(request)
+                    finally:
+                        prepare_duration_ns = time.perf_counter_ns() - prepare_started_ns
+                    context_tokens = len(encoded.context_ids)
+                    raw_max_new_tokens = encoded.sampling_params.get("max_tokens")
+                    max_new_tokens = raw_max_new_tokens if isinstance(raw_max_new_tokens, int) else None
+                    self._publish_generation_event(
+                        GENERATION_PREPARED,
+                        generation_id=generation_id,
+                        attempt_id=attempt_id,
+                        chain_id=encoded.chain_id,
+                        payload={
+                            "context_tokens": context_tokens,
+                            "max_new_tokens": max_new_tokens,
+                            "capacity_exhausted": encoded.capacity_exhausted,
+                        },
+                    )
                     if encoded.capacity_exhausted:
                         logger.warning(
                             "Trajectory capacity prevents generation (max_trajectory_length): "
@@ -288,6 +339,11 @@ class GatewaySession:
                             prompt_tokens=len(encoded.context_ids),
                             chain_id=encoded.chain_id,
                         )
+                        status = "success"
+                        capacity_exhausted = True
+                        finish_reason = "length"
+                        actual_completion_tokens = 0
+                        result_chain_id = encoded.chain_id
                         return GenerationOutcome(
                             assistant_msg=empty_msg,
                             finish_reason="length",
@@ -300,14 +356,27 @@ class GatewaySession:
                     # Request ownership also covers first turns and new chains,
                     # which have no existing chain to reserve.
                     if request_fingerprint is not None:
-                        owner_future = asyncio.get_running_loop().create_future()
-                        self._inflight_exact_requests[request_fingerprint] = owner_future
+                        owner_request = _InflightExactRequest(
+                            future=asyncio.get_running_loop().create_future(),
+                            generation_id=generation_id,
+                            attempt_id=attempt_id,
+                        )
+                        self._inflight_exact_requests[request_fingerprint] = owner_request
+                else:
+                    generation_id = joined_request.generation_id
+                    attempt_id = joined_request.attempt_id
+                    coalesced = True
 
-            if joined_future is not None:
-                succeeded, value, chain_id, turn = await asyncio.shield(joined_future)
+            if joined_request is not None:
+                succeeded, value, chain_id, turn = await asyncio.shield(joined_request.future)
                 if not succeeded:
                     raise value
                 outcome = value
+                status = "success"
+                context_tokens = outcome.prompt_tokens
+                actual_completion_tokens = outcome.completion_tokens
+                finish_reason = outcome.finish_reason
+                result_chain_id = chain_id
                 generation_span.success(
                     prompt_tokens=outcome.prompt_tokens,
                     completion_tokens=outcome.completion_tokens,
@@ -321,15 +390,20 @@ class GatewaySession:
             if encoded is None:
                 raise RuntimeError("generation input preparation did not produce a request")
 
+            backend_called = True
+            backend_started_ns = time.perf_counter_ns()
             try:
-                output = await backend.generate(
-                    request_id=self.handle.session_id,
-                    prompt_ids=encoded.context_ids,
-                    sampling_params=encoded.sampling_params,
-                    image_data=encoded.image_data,
-                    video_data=encoded.video_data,
-                    mm_processor_kwargs=encoded.mm_processor_kwargs,
-                )
+                try:
+                    output = await backend.generate(
+                        request_id=self.handle.session_id,
+                        prompt_ids=encoded.context_ids,
+                        sampling_params=encoded.sampling_params,
+                        image_data=encoded.image_data,
+                        video_data=encoded.video_data,
+                        mm_processor_kwargs=encoded.mm_processor_kwargs,
+                    )
+                finally:
+                    backend_duration_ns = time.perf_counter_ns() - backend_started_ns
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e)) from e
             except Exception as e:
@@ -386,11 +460,15 @@ class GatewaySession:
                 # Decode runs under request_lock so this session's prepare/commit and
                 # decode stay serialized. It does not serialize decode across sessions,
                 # which share the actor codec.
-                assistant_msg, finish_reason = await self._codec.decode_response(
-                    response_ids,
-                    tools=encoded.tools,
-                    stop_reason=output.stop_reason,
-                )
+                decode_started_ns = time.perf_counter_ns()
+                try:
+                    assistant_msg, finish_reason = await self._codec.decode_response(
+                        response_ids,
+                        tools=encoded.tools,
+                        stop_reason=output.stop_reason,
+                    )
+                finally:
+                    decode_duration_ns = time.perf_counter_ns() - decode_started_ns
                 chain_id = self._commit_generation_to_chain(encoded, assistant_msg)
                 if (
                     finish_reason == "length"
@@ -420,10 +498,13 @@ class GatewaySession:
                     prompt_tokens=len(encoded.context_ids),
                     completion_tokens=len(response_ids),
                 )
-                if owner_future is not None and request_fingerprint is not None:
+                status = "success"
+                actual_completion_tokens = len(response_ids)
+                result_chain_id = chain_id
+                if owner_request is not None and request_fingerprint is not None:
                     self._resolve_inflight_exact_request(
                         request_fingerprint,
-                        owner_future,
+                        owner_request,
                         (True, outcome, chain_id, self._order_seq),
                     )
                 generation_span.success(
@@ -436,23 +517,48 @@ class GatewaySession:
                 )
                 return outcome
         except BaseException as exc:
-            if owner_future is not None and reserved_chain_id is not None:
+            status = "cancelled" if isinstance(exc, asyncio.CancelledError) else "error"
+            error_type = type(exc).__name__
+            if owner_request is not None and reserved_chain_id is not None:
                 # Release the chain before waking retry waiters so an immediate
                 # follow-up can select it instead of creating a sibling.
                 await asyncio.shield(self._release_chain_reservation(reserved_chain_id))
                 reserved_chain_id = None
-            if owner_future is not None and request_fingerprint is not None:
+            if owner_request is not None and request_fingerprint is not None:
                 self._resolve_inflight_exact_request(
                     request_fingerprint,
-                    owner_future,
+                    owner_request,
                     (False, exc, reserved_chain_id, None),
                 )
             generation_span.failure(exc)
             raise
         finally:
             generation_span.report()
-            if reserved_chain_id is not None:
-                await asyncio.shield(self._release_chain_reservation(reserved_chain_id))
+            try:
+                if reserved_chain_id is not None:
+                    await asyncio.shield(self._release_chain_reservation(reserved_chain_id))
+            finally:
+                self._publish_generation_event(
+                    GENERATION_FINISHED,
+                    generation_id=generation_id,
+                    attempt_id=attempt_id,
+                    chain_id=result_chain_id,
+                    payload={
+                        "status": status,
+                        "duration_ns": time.perf_counter_ns() - request_started_ns,
+                        "prepare_duration_ns": prepare_duration_ns,
+                        "backend_duration_ns": backend_duration_ns,
+                        "decode_duration_ns": decode_duration_ns,
+                        "context_tokens": context_tokens,
+                        "max_new_tokens": max_new_tokens,
+                        "actual_completion_tokens": actual_completion_tokens,
+                        "finish_reason": finish_reason,
+                        "coalesced": coalesced,
+                        "backend_called": backend_called,
+                        "capacity_exhausted": capacity_exhausted,
+                        "error_type": error_type,
+                    },
+                )
 
     async def finalize(self) -> list[Trajectory]:
         """Close the session and return its materialized token trajectories."""
@@ -484,6 +590,37 @@ class GatewaySession:
             self.materialized_chains = []
             self.reserved_chain_ids.clear()
             self._touch()
+
+    def _publish_generation_event(
+        self,
+        event_type: str,
+        *,
+        generation_id: str,
+        attempt_id: str,
+        chain_id: int | None,
+        payload: dict[str, Any],
+    ) -> None:
+        """Publish one best-effort generation fact without affecting the request."""
+        if self._event_publisher is None:
+            return
+        try:
+            self._event_publisher.publish(
+                event_type,
+                payload,
+                context=self._event_context.overlay(
+                    EventContext(
+                        generation_id=generation_id,
+                        attempt_id=attempt_id,
+                        chain_id=chain_id,
+                    )
+                ),
+            )
+        except Exception:
+            logger.exception(
+                "Failed to publish Gateway event %s for session %s",
+                event_type,
+                self.handle.session_id,
+            )
 
     def snapshot_state(self) -> dict[str, Any]:
         """Return a JSON-serializable snapshot for actor state inspection."""
@@ -774,14 +911,14 @@ class GatewaySession:
     def _resolve_inflight_exact_request(
         self,
         request_fingerprint: str,
-        future: asyncio.Future[tuple[bool, Any, int | None, int | None]],
+        inflight_request: _InflightExactRequest,
         result: tuple[bool, Any, int | None, int | None],
     ) -> None:
-        if self._inflight_exact_requests.get(request_fingerprint) is not future:
+        if self._inflight_exact_requests.get(request_fingerprint) is not inflight_request:
             return
         self._inflight_exact_requests.pop(request_fingerprint, None)
-        if not future.done():
-            future.set_result(result)
+        if not inflight_request.future.done():
+            inflight_request.future.set_result(result)
 
     def _copy_trajectory_buffer(self, buffer: TrajectoryBuffer) -> TrajectoryBuffer:
         return TrajectoryBuffer(

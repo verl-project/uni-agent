@@ -12,7 +12,8 @@ import torch
 
 from tests.uni_agent.support import logging_runner
 from uni_agent.framework.framework import GatewayAgentFramework, _align_routed_experts
-from uni_agent.gateway.session import SessionHandle, Trajectory
+from uni_agent.gateway.session import SessionFinalizationResult, SessionHandle, Trajectory
+from uni_agent.metrics import AggregationType, MetricsFragment, MetricSummary
 from uni_agent.tasks import TaskResult
 from verl.utils import tensordict_utils as tu
 
@@ -236,6 +237,7 @@ async def test_from_config_warns_for_unsupported_colocated_hybrid_reward(
         ),
         ({}, {"enable_tool_parser_cache": False}, True, False, {}, {}),
         ({}, {"coalesce_reserved_exact_requests": False}, True, True, {}, {}),
+        ({}, {"collectors": {"task_metrics": {"mode": "primary"}}}, True, True, {}, {}),
     ],
 )
 def test_build_gateway_manager_wires_gateway_config_defaults(
@@ -265,7 +267,13 @@ def test_build_gateway_manager_wires_gateway_config_defaults(
     captured = {}
 
     class _FakeGatewayManager:
-        def __init__(self, *, llm_client, gateway_count, gateway_actor_config):
+        def __init__(
+            self,
+            *,
+            llm_client,
+            gateway_count,
+            gateway_actor_config,
+        ):
             captured["llm_client"] = llm_client
             captured["gateway_count"] = gateway_count
             captured["gateway_actor_config"] = gateway_actor_config
@@ -276,8 +284,7 @@ def test_build_gateway_manager_wires_gateway_config_defaults(
         lambda cfg: _RolloutConfig() if "multi_turn" in cfg else _ModelConfig(),
     )
     monkeypatch.setattr(entry_module, "GatewayManager", _FakeGatewayManager)
-
-    llm_client = object()
+    llm_client = types.SimpleNamespace()
     config = OmegaConf.create(
         {
             "data": data_config,
@@ -312,6 +319,9 @@ def test_build_gateway_manager_wires_gateway_config_defaults(
     assert captured["gateway_actor_config"].enable_tool_parser_cache is expected_cache
     assert captured["gateway_actor_config"].coalesce_reserved_exact_requests is agent_framework_config.get(
         "coalesce_reserved_exact_requests", True
+    )
+    assert captured["gateway_actor_config"].task_metrics_mode == (
+        agent_framework_config.get("collectors", {}).get("task_metrics", {}).get("mode", "off")
     )
     assert captured["gateway_actor_config"].hf_model_type == "deepseek_v4"
     assert isinstance(captured["gateway_actor_config"].apply_chat_template_kwargs, dict)
@@ -462,6 +472,41 @@ class _FakeGatewayManager:
 
     async def abort_session(self, session_id: str) -> None:
         self.aborted_sessions.append(session_id)
+
+
+class _MetricsGatewayManager(_FakeGatewayManager):
+    def __init__(self, finalized_by_session_prefix: dict[str, list[Trajectory]], metrics_fragment: MetricsFragment):
+        super().__init__(finalized_by_session_prefix)
+        self._metrics_fragment = metrics_fragment
+
+    async def finalize_session_result(self, session_id: str) -> SessionFinalizationResult:
+        self.finalized_sessions.append(session_id)
+        return SessionFinalizationResult(
+            trajectories=self._lookup(session_id),
+            metrics_fragment=self._metrics_fragment,
+        )
+
+
+def _metrics_fragment(episode_id: str = "episode-1") -> MetricsFragment:
+    return MetricsFragment(
+        episode_id=episode_id,
+        source_role="gateway",
+        source_instance="gateway-1",
+        fragment_id=f"gateway-1:gateway:{episode_id}",
+        schema_version=1,
+        revision=3,
+        complete=True,
+        metrics={
+            "gateway.requests": MetricSummary(
+                aggregation=AggregationType.SUM,
+                count=2,
+                total=2,
+                minimum=1,
+                maximum=1,
+                last=1,
+            )
+        },
+    )
 
 
 def _build_prompts(
@@ -1521,7 +1566,8 @@ async def test_generate_sequences_batches_length_trajectory_before_normal_trajec
 @pytest.mark.level0
 @pytest.mark.asyncio
 async def test_generate_sequences_selects_longest_model_token_trajectory(fake_tq):
-    runtime = _FakeGatewayManager(
+    fragment = _metrics_fragment("episode-longest")
+    runtime = _MetricsGatewayManager(
         {
             "session-sample-0-rollout-0": [
                 _trajectory(
@@ -1535,7 +1581,8 @@ async def test_generate_sequences_selects_longest_model_token_trajectory(fake_tq
                     num_turns=2,
                 ),
             ]
-        }
+        },
+        fragment,
     )
     framework = await _build_framework_with_agent_runners(
         agent_runners={
@@ -1555,6 +1602,8 @@ async def test_generate_sequences_selects_longest_model_token_trajectory(fake_tq
     assert batch["fields"]["responses"][0].tolist() == [30, 31, 32]
     assert batch["fields"]["response_mask"][0].tolist() == [1, 1, 1]
     assert batch["fields"]["num_turns"].tolist() == [2]
+    [extra_fields] = tu.get(batch["fields"], "extra_fields")
+    assert extra_fields["agent_metrics_fragment"] == fragment.to_dict()
 
 
 @pytest.mark.cpu
@@ -1578,13 +1627,15 @@ async def test_framework_rejects_unknown_trajectory_selection(fake_tq):
 @pytest.mark.asyncio
 async def test_trajectory_postprocessor_applies_kwargs_before_scoring_and_tq(monkeypatch, fake_tq):
     _POSTPROCESSOR_CALLS.clear()
-    runtime = _FakeGatewayManager(
+    fragment = _metrics_fragment("episode-postprocessed")
+    runtime = _MetricsGatewayManager(
         {
             "session-sample-0-rollout-0": [
                 _trajectory(response_ids=[20]),
                 _trajectory(response_ids=[30]),
             ]
-        }
+        },
+        fragment,
     )
     framework = await _build_framework_with_agent_runners(
         agent_runners={"runner": _inline_runner_config(_async_noop_runner)},
@@ -1613,6 +1664,9 @@ async def test_trajectory_postprocessor_applies_kwargs_before_scoring_and_tq(mon
     fields = fake_tq.batch_puts[0]["fields"]
     assert [response.tolist() for response in fields["responses"]] == [[30], [20]]
     assert [score.tolist() for score in fields["rm_scores"]] == [[0.5], [0.5]]
+    extra_fields = tu.get(fields, "extra_fields")
+    assert "agent_metrics_fragment" not in extra_fields[0]
+    assert extra_fields[1]["agent_metrics_fragment"] == fragment.to_dict()
 
 
 @pytest.mark.cpu

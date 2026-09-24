@@ -10,11 +10,19 @@ from __future__ import annotations
 import asyncio
 import logging
 from typing import Any
+from uuid import uuid4
 
 import ray
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from uni_agent.events import (
+    SESSION_CLOSED,
+    SESSION_OPENED,
+    EventContext,
+    EventPublisher,
+    LocalEventBus,
+)
 from uni_agent.gateway.adapters.anthropic import (
     anthropic_build_response,
     anthropic_error_body,
@@ -32,9 +40,11 @@ from uni_agent.gateway.config import GatewayActorConfig
 from uni_agent.gateway.session import (
     GatewaySession,
     MessageCodec,
+    SessionFinalizationResult,
     SessionHandle,
     Trajectory,
 )
+from uni_agent.metrics import GatewayTaskMetricsProjector
 from verl.utils.net_utils import is_valid_ipv6_address
 from verl.workers.rollout.utils import run_uvicorn
 
@@ -85,6 +95,23 @@ class _GatewayActor:
         self._enable_last_assistant_rollback = config.enable_last_assistant_rollback
         self._coalesce_reserved_exact_requests = config.coalesce_reserved_exact_requests
         self._sessions: dict[str, GatewaySession] = {}
+        self._event_bus: LocalEventBus | None = None
+        self._event_source_instance: str | None = None
+        self._event_publisher: EventPublisher | None = None
+        self._task_metrics_projector: GatewayTaskMetricsProjector | None = None
+        if config.task_metrics_mode != "off":
+            self._event_bus = LocalEventBus()
+            self._event_source_instance = f"gateway-{uuid4().hex}"
+            self._event_publisher = EventPublisher(
+                self._event_bus,
+                run_id=f"gateway-run-{uuid4().hex}",
+                producer_id=self._event_source_instance,
+            )
+            self._task_metrics_projector = GatewayTaskMetricsProjector(
+                self._event_bus,
+                source_instance=self._event_source_instance,
+            )
+        self._event_runtime_closed = False
         self._app = FastAPI()
         self._server_port: int | None = None
         self._server_task: asyncio.Task | None = None
@@ -151,6 +178,41 @@ class _GatewayActor:
         if session is None:
             raise KeyError(f"Unknown session_id: {session_id}")
         return session
+
+    @staticmethod
+    def _build_event_context(session_id: str, metadata: dict[str, Any] | None) -> EventContext:
+        raw_context = (metadata or {}).get("_event_context")
+        if not isinstance(raw_context, dict):
+            raw_context = {}
+        raw_global_step = raw_context.get("global_step")
+        global_step = (
+            raw_global_step if isinstance(raw_global_step, int) and not isinstance(raw_global_step, bool) else None
+        )
+        runner_name = raw_context.get("runner_name")
+        return EventContext(
+            episode_id=str(raw_context.get("episode_id") or session_id),
+            session_id=session_id,
+            runner_name=str(runner_name) if runner_name is not None else None,
+            global_step=global_step,
+        )
+
+    def _publish_session_event(
+        self,
+        event_type: str,
+        context: EventContext,
+        *,
+        revision: int,
+        close_reason: str | None = None,
+    ) -> None:
+        if self._event_publisher is None:
+            return
+        payload: dict[str, Any] = {"revision": revision}
+        if close_reason is not None:
+            payload["close_reason"] = close_reason
+        try:
+            self._event_publisher.publish(event_type, payload, context=context)
+        except Exception:
+            logger.exception("Failed to publish Gateway event %s for session %s", event_type, context.session_id)
 
     async def _handle_openai_chat_completions(
         self,
@@ -238,16 +300,21 @@ class _GatewayActor:
 
     async def shutdown(self) -> None:
         """Stop the FastAPI server backing this gateway actor."""
-        if self._server_task is None:
-            return
-        self._server_task.cancel()
-        try:
-            await self._server_task
-        except asyncio.CancelledError:
-            pass
-        self._server_task = None
-        self._server_port = None
-        self._server_base_url = None
+        if self._server_task is not None:
+            self._server_task.cancel()
+            try:
+                await self._server_task
+            except asyncio.CancelledError:
+                pass
+            self._server_task = None
+            self._server_port = None
+            self._server_base_url = None
+        if not self._event_runtime_closed:
+            if self._task_metrics_projector is not None:
+                self._task_metrics_projector.close()
+            if self._event_bus is not None:
+                self._event_bus.close()
+            self._event_runtime_closed = True
 
     async def create_session(
         self,
@@ -264,6 +331,7 @@ class _GatewayActor:
             session_id=session_id,
             base_url=f"{self._server_base_url}/sessions/{session_id}/v1",
         )
+        event_context = self._build_event_context(session_id, metadata)
         self._sessions[session_id] = GatewaySession(
             handle=handle,
             codec=self._codec,
@@ -273,15 +341,31 @@ class _GatewayActor:
             enable_last_assistant_rollback=self._enable_last_assistant_rollback,
             coalesce_reserved_exact_requests=self._coalesce_reserved_exact_requests,
             metadata=metadata,
+            event_publisher=self._event_publisher,
+            event_context=event_context,
         )
+        self._publish_session_event(SESSION_OPENED, event_context, revision=1)
         return handle
 
     async def finalize_session(self, session_id: str) -> list[Trajectory]:
         """Finalize a session, remove it from the actor, and return its trajectories."""
+        return (await self.finalize_session_result(session_id)).trajectories
+
+    async def finalize_session_result(self, session_id: str) -> SessionFinalizationResult:
+        """Finalize a session and return trajectories plus its metrics fragment."""
         session = self._get_session(session_id)
         trajectories = await session.finalize()
+        self._publish_session_event(SESSION_CLOSED, session.event_context, revision=2, close_reason="finalized")
+        metrics_fragment = (
+            self._task_metrics_projector.finalize_session(session_id)
+            if self._task_metrics_projector is not None
+            else None
+        )
         self._sessions.pop(session_id, None)
-        return trajectories
+        return SessionFinalizationResult(
+            trajectories=trajectories,
+            metrics_fragment=metrics_fragment,
+        )
 
     async def abort_session(self, session_id: str) -> None:
         """Abort a session and remove it from the actor if it still exists."""
@@ -289,6 +373,9 @@ class _GatewayActor:
         if session is None:
             return  # Already finalized or aborted — treat as idempotent.
         await session.abort()
+        self._publish_session_event(SESSION_CLOSED, session.event_context, revision=2, close_reason="aborted")
+        if self._task_metrics_projector is not None:
+            self._task_metrics_projector.discard_session(session_id)
         self._sessions.pop(session_id, None)
 
     async def get_session_state(self, session_id: str) -> dict[str, Any]:

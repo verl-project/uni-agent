@@ -47,6 +47,10 @@ def build_gateway_manager(*, config, llm_client) -> GatewayManager:
             raise ValueError("allowed_request_sampling_param_keys must be a list of strings or null")
         allowed_sampling_keys = set(allowed_sampling_keys)
 
+    collectors_cfg = af_cfg.get("collectors") or {}
+    task_metrics_cfg = collectors_cfg.get("task_metrics") or {}
+    task_metrics_mode = task_metrics_cfg.get("mode", "off")
+
     # Match AgentLoopWorker pattern: self-load tokenizer/processor via HFModelConfig.
     rollout_config: RolloutConfig = omega_conf_to_dataclass(rollout_cfg)
     model_config: HFModelConfig = omega_conf_to_dataclass(model_cfg)
@@ -64,8 +68,8 @@ def build_gateway_manager(*, config, llm_client) -> GatewayManager:
         enable_last_assistant_rollback=af_cfg.get("enable_last_assistant_rollback", True),
         allowed_request_sampling_param_keys=allowed_sampling_keys,
         coalesce_reserved_exact_requests=af_cfg.get("coalesce_reserved_exact_requests", True),
+        task_metrics_mode=task_metrics_mode,
     )
-
     return GatewayManager(
         llm_client=llm_client,
         gateway_count=int(af_cfg["gateway_count"]),
