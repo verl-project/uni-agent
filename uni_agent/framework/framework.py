@@ -24,6 +24,15 @@ from tensordict.tensorclass import NonTensorData, NonTensorStack
 
 from uni_agent.gateway.session import SessionHandle, Trajectory
 from uni_agent.logging import LogContext, sample_logging
+from uni_agent.metrics.model import MetricsFragment
+from uni_agent.metrics.prompt import (
+    PROMPT_METRICS_EXPORT_OWNER_FIELD,
+    PROMPT_METRICS_SUMMARY_FIELD,
+    TRAINER_METRICS_EXPORT_OWNER,
+    EpisodeMetricsObservation,
+    EpisodeMetricsStatus,
+    aggregate_prompt_metrics,
+)
 from uni_agent.rl_insight.adapter import agent_loop_session
 from uni_agent.tasks import TaskResult
 from verl.tools.tool_registry import initialize_tools_from_config
@@ -39,6 +48,8 @@ logger = logging.getLogger(__name__)
 
 
 TrajectoryPostprocessor = Callable[..., list[Trajectory] | Awaitable[list[Trajectory]]]
+_AGENT_METRICS_FRAGMENT_FIELD = "agent_metrics_fragment"
+_EPISODE_METRICS_OBSERVATION_ATTR = "_uni_agent_metrics_observation"
 
 
 @dataclass
@@ -94,6 +105,18 @@ class _RunnerConfig:
             raise ValueError(f"agent_runners.{runner_name}: {exc}") from exc
 
 
+@dataclass(slots=True)
+class _EpisodeOutcome:
+    episode_id: str
+    trajectories: list[Trajectory]
+    sample_fields: dict[str, object]
+    metrics_fragment: MetricsFragment | None
+
+    def __iter__(self):
+        yield self.trajectories
+        yield self.sample_fields
+
+
 def _materialize_runner(runner_fqn: str, runner_kwargs: dict[str, object]):
     runner = load_class_from_fqn(runner_fqn, description="agent runner")
     if isinstance(runner, type):
@@ -107,6 +130,18 @@ def _log_scope(log_context: LogContext | None):
     if log_context is None:
         return contextlib.nullcontext()
     return sample_logging.from_context(log_context)
+
+
+def _attach_agent_metrics_fragment(
+    trajectories: list[Trajectory],
+    metrics_fragment: MetricsFragment | None,
+) -> list[Trajectory]:
+    """Attach one session fragment to the final trajectory retained by Framework."""
+    if not trajectories or metrics_fragment is None:
+        return trajectories
+    extra_fields = dict(trajectories[-1].extra_fields or {})
+    extra_fields[_AGENT_METRICS_FRAGMENT_FIELD] = metrics_fragment.to_dict()
+    return [*trajectories[:-1], replace(trajectories[-1], extra_fields=extra_fields)]
 
 
 @ray.remote
@@ -318,6 +353,7 @@ class GatewayAgentFramework(AgentFramework):
         rollout_config=None,
         log_dir: str | None = None,
         mask_unfinished_episode: bool = False,
+        task_metrics_mode: str = "off",
         trajectory_postprocessor: TrajectoryPostprocessor | None = None,
         trajectory_postprocessor_kwargs: dict[str, object] | None = None,
     ):
@@ -340,6 +376,10 @@ class GatewayAgentFramework(AgentFramework):
         self._semaphore_loop: asyncio.AbstractEventLoop | None = None
         self._log_dir = log_dir
         self._mask_unfinished_episode = mask_unfinished_episode
+        if task_metrics_mode not in {"off", "shadow", "primary"}:
+            raise ValueError(f"Unknown task metrics mode: {task_metrics_mode}")
+        self._task_metrics_mode = task_metrics_mode
+        self._task_metrics_enabled = task_metrics_mode != "off"
         self._trajectory_postprocessor = trajectory_postprocessor
         self._trajectory_postprocessor_kwargs = trajectory_postprocessor_kwargs or {}
 
@@ -388,6 +428,15 @@ class GatewayAgentFramework(AgentFramework):
         if type(mask_unfinished_episode) is not bool:
             raise ValueError("actor_rollout_ref.rollout.custom.agent_framework.mask_unfinished_episode must be a bool")
 
+        collectors_cfg = af_cfg.get("collectors", {}) or {}
+        task_metrics_cfg = collectors_cfg.get("task_metrics", {}) or {}
+        task_metrics_mode = task_metrics_cfg.get("mode", "off")
+        if not isinstance(task_metrics_mode, str) or task_metrics_mode not in {"off", "shadow", "primary"}:
+            raise ValueError(
+                "actor_rollout_ref.rollout.custom.agent_framework.collectors.task_metrics.mode "
+                f"must be one of 'off', 'shadow', or 'primary', got {task_metrics_mode!r}"
+            )
+
         postprocessor_fqn = af_cfg.get("trajectory_postprocessor_fqn")
         postprocessor_kwargs = af_cfg.get("trajectory_postprocessor_kwargs")
         if postprocessor_kwargs is None:
@@ -423,6 +472,7 @@ class GatewayAgentFramework(AgentFramework):
             rollout_config=config.actor_rollout_ref.rollout,
             log_dir=log_dir,
             mask_unfinished_episode=mask_unfinished_episode,
+            task_metrics_mode=task_metrics_mode,
             trajectory_postprocessor=trajectory_postprocessor,
             trajectory_postprocessor_kwargs=trajectory_postprocessor_kwargs,
         )
@@ -626,20 +676,38 @@ class GatewayAgentFramework(AgentFramework):
         success_outputs = 0
         unfinished_episodes = 0
         failure_reasons: list[str] = []
+        metrics_observations: list[EpisodeMetricsObservation] = []
         for session_index, outcome in enumerate(outcomes):
             if isinstance(outcome, Exception):
                 failed_sessions += 1
                 failure_reasons.append(_short_failure_reason(outcome))
+                if self._task_metrics_enabled:
+                    observation = getattr(outcome, _EPISODE_METRICS_OBSERVATION_ATTR, None)
+                    if observation is None:
+                        observation = EpisodeMetricsObservation(
+                            episode_id=f"{uid}:session-{session_index}",
+                            status=EpisodeMetricsStatus.FAILED,
+                        )
+                    metrics_observations.append(observation)
                 continue
             # Propagate control-flow exceptions such as CancelledError/SystemExit;
             # only ordinary Exceptions are treated as isolated rollout failures.
             if isinstance(outcome, BaseException):
                 raise outcome
 
-            trajectories, session_sample_fields = outcome
+            trajectories = outcome.trajectories
+            session_sample_fields = outcome.sample_fields
             if not trajectories:
                 failed_sessions += 1
                 failure_reasons.append(f"empty trajectories for uid={uid} session_index={session_index}")
+                if self._task_metrics_enabled:
+                    metrics_observations.append(
+                        EpisodeMetricsObservation(
+                            episode_id=outcome.episode_id,
+                            status=EpisodeMetricsStatus.EMPTY,
+                            fragments=(() if outcome.metrics_fragment is None else (outcome.metrics_fragment,)),
+                        )
+                    )
                 continue
 
             try:
@@ -655,20 +723,37 @@ class GatewayAgentFramework(AgentFramework):
                 logger.exception(f"TQ write failed for uid={uid} session={session_index}: {e}")
                 failed_sessions += 1
                 failure_reasons.append(f"TQ write error: {e}")
+                status = EpisodeMetricsStatus.FAILED
             else:
                 success_sessions += 1
                 success_outputs += len(trajectories)
+                status = EpisodeMetricsStatus.SUCCESS
                 # One session is one episode; its trajectories all carry the same
                 # session-level completion flag, so this counts episodes, not tokens.
                 if any(traj.finished is False for traj in trajectories):
                     unfinished_episodes += 1
 
+            if self._task_metrics_enabled:
+                metrics_observations.append(
+                    EpisodeMetricsObservation(
+                        episode_id=outcome.episode_id,
+                        status=status,
+                        fragments=(() if outcome.metrics_fragment is None else (outcome.metrics_fragment,)),
+                    )
+                )
+
+        terminal_tag: dict[str, object]
         if success_sessions > 0:
-            await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "finished"})
+            terminal_tag = {"status": "finished"}
             failed_uids = 0
         else:
-            await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "failure"})
+            terminal_tag = {"status": "failure"}
             failed_uids = 1
+        if self._task_metrics_enabled:
+            terminal_tag[PROMPT_METRICS_SUMMARY_FIELD] = aggregate_prompt_metrics(metrics_observations).to_dict()
+            if self._task_metrics_mode == "primary":
+                terminal_tag[PROMPT_METRICS_EXPORT_OWNER_FIELD] = TRAINER_METRICS_EXPORT_OWNER
+        await tq.async_kv_put(key=uid, partition_id=partition_id, tag=terminal_tag)
 
         return {
             "num_success_sessions": success_sessions,
@@ -687,7 +772,7 @@ class GatewayAgentFramework(AgentFramework):
         session_index: int,
         global_steps: int | None,
         sampling_params: dict[str, object],
-    ) -> tuple[list[Trajectory], dict[str, object]]:
+    ) -> _EpisodeOutcome:
         # Lazy-init semaphores on first use and rebind if the running loop
         # changed: asyncio.Semaphore binds to the loop at construction, but
         # Ray actors may run sessions on a different loop than __init__.
@@ -760,6 +845,12 @@ class GatewayAgentFramework(AgentFramework):
             session_id=session_id,
         )
         trace_identity = session_trace.identity
+        event_context = {
+            "episode_id": session_id,
+            "session_id": session_id,
+            "runner_name": runner_name,
+            "global_step": global_steps,
+        }
         if self._log_dir:
             log_root = Path(self._log_dir)
             run_dir = (log_root if global_steps is None else log_root / f"step_{int(global_steps)}") / session_id
@@ -779,7 +870,7 @@ class GatewayAgentFramework(AgentFramework):
         async with _log_scope(parent_log):
             session = await self.gateway_manager.create_session(
                 session_id,
-                metadata={"_trace_identity": trace_identity},
+                metadata={"_trace_identity": trace_identity, "_event_context": event_context},
                 sampling_params=dict(sampling_params),
             )
             logger.info(
@@ -834,7 +925,14 @@ class GatewayAgentFramework(AgentFramework):
                     raise TypeError(
                         f"Agent runner {runner_name!r} must return TaskResult or None, got {type(task_result).__name__}"
                     )
-                session_trajectories = await self.gateway_manager.finalize_session(session_id)
+                finalize_session_result = getattr(self.gateway_manager, "finalize_session_result", None)
+                if finalize_session_result is None:
+                    session_trajectories = await self.gateway_manager.finalize_session(session_id)
+                    metrics_fragment = None
+                else:
+                    finalization_result = await finalize_session_result(session_id)
+                    session_trajectories = finalization_result.trajectories
+                    metrics_fragment = finalization_result.metrics_fragment
                 session_trajectories = _select_session_trajectories(
                     session_id,
                     session_trajectories,
@@ -848,9 +946,26 @@ class GatewayAgentFramework(AgentFramework):
                 except Exception:
                     logger.exception("session %s: Gateway abort failed during parent cancellation", session_id)
                 raise
-            except Exception:
+            except Exception as error:
                 logger.exception("session %s failed (runner=%s); aborting session", session_id, runner_name)
-                await self.gateway_manager.abort_session(session_id)
+                metrics_fragment = None
+                try:
+                    abort_session_result = getattr(self.gateway_manager, "abort_session_result", None)
+                    if abort_session_result is None:
+                        await self.gateway_manager.abort_session(session_id)
+                    else:
+                        metrics_fragment = (await abort_session_result(session_id)).metrics_fragment
+                except Exception:
+                    logger.exception("session %s: Gateway abort failed after episode error", session_id)
+                setattr(
+                    error,
+                    _EPISODE_METRICS_OBSERVATION_ATTR,
+                    EpisodeMetricsObservation(
+                        episode_id=session_id,
+                        status=EpisodeMetricsStatus.FAILED,
+                        fragments=(() if metrics_fragment is None else (metrics_fragment,)),
+                    ),
+                )
                 session_trace.finish(
                     runner_name=runner_name,
                     status="failure",
@@ -883,7 +998,14 @@ class GatewayAgentFramework(AgentFramework):
                     status="empty",
                     trajectories=[],
                 )
-                return session_trajectories, sample_fields
+                return _EpisodeOutcome(
+                    episode_id=session_id,
+                    trajectories=session_trajectories,
+                    sample_fields=sample_fields,
+                    metrics_fragment=metrics_fragment,
+                )
+
+            session_trajectories = _attach_agent_metrics_fragment(session_trajectories, metrics_fragment)
 
             if self.reward_loop_worker_handles and self._custom_reward_function_configured:
                 annotations = await self._score_trajectories(
@@ -927,7 +1049,12 @@ class GatewayAgentFramework(AgentFramework):
                 reward_source=reward_source,
                 finished=result_trajectories[0].finished if result_trajectories else None,
             )
-            return result_trajectories, sample_fields
+            return _EpisodeOutcome(
+                episode_id=session_id,
+                trajectories=result_trajectories,
+                sample_fields=sample_fields,
+                metrics_fragment=metrics_fragment,
+            )
 
     async def _cancel_runner_task(self, object_ref, session_id: str) -> None:
         """Cancel a dispatched runner Ray task after its session timed out.

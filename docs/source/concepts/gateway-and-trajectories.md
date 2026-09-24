@@ -330,6 +330,31 @@ Important knobs include:
 - `rollout.multi_turn.format`: model-specific Tool parser.
 - `transfer_queue.enable`: enables asynchronous trajectory storage.
 
+### Task Metrics Export
+
+`collectors.task_metrics.mode=shadow` writes bounded prompt summaries for parity checks but does not claim a tracking owner. `primary` marks the trainer as the single exporter. To consume those summaries through veRL's supported custom-sampler seam, select the adapter matching the trainer mode and enable its primary gate:
+
+```yaml
+actor_rollout_ref:
+  rollout:
+    custom:
+      agent_framework:
+        collectors:
+          task_metrics:
+            mode: primary
+trainer:
+  v1:
+    sampler:
+      custom_sampler:
+        path: /absolute/path/to/uni_agent/metrics/replay_buffer.py
+        name: PromptMetricsReplayBufferAsync
+      sampler_kwargs:
+        agent_metrics:
+          mode: primary
+```
+
+Use `PromptMetricsReplayBuffer` for sync training. If another custom sampler already owns this veRL extension point, compose it with `PromptMetricsReplayBufferMixin` instead of installing two samplers. Missing or incomplete summaries are exported as coverage counters; they are never converted into zero metric values. The current trainer seam exports `sum`, `min`, and `max` exactly. Weighted `mean` and generic `last` metrics remain explicitly unsupported until veRL exposes matching reduction rules.
+
 ## Sampling Configuration
 
 `actor_rollout_ref.rollout.temperature`, `top_p`, and `top_k` provide the Gateway

@@ -47,6 +47,23 @@ def build_gateway_manager(*, config, llm_client) -> GatewayManager:
             raise ValueError("allowed_request_sampling_param_keys must be a list of strings or null")
         allowed_sampling_keys = set(allowed_sampling_keys)
 
+    collectors_cfg = af_cfg.get("collectors") or {}
+    task_metrics_cfg = collectors_cfg.get("task_metrics") or {}
+    task_metrics_mode = task_metrics_cfg.get("mode", "off")
+    direct_state_sync_cfg = collectors_cfg.get("direct_state_sync") or {}
+    direct_state_sync_enabled = direct_state_sync_cfg.get("enabled", False)
+    global_telemetry_cfg = collectors_cfg.get("global_telemetry") or {}
+    global_telemetry_enabled = global_telemetry_cfg.get("enabled", False)
+    global_telemetry_event_types = global_telemetry_cfg.get(
+        "event_types",
+        ("SessionOpened", "GenerationFinished", "SessionClosed"),
+    )
+    if not isinstance(global_telemetry_event_types, list | tuple) and not OmegaConf.is_list(
+        global_telemetry_event_types
+    ):
+        raise ValueError("global_telemetry.event_types must be a list of event names")
+    global_telemetry_event_types = tuple(global_telemetry_event_types)
+
     # Match AgentLoopWorker pattern: self-load tokenizer/processor via HFModelConfig.
     rollout_config: RolloutConfig = omega_conf_to_dataclass(rollout_cfg)
     model_config: HFModelConfig = omega_conf_to_dataclass(model_cfg)
@@ -64,13 +81,44 @@ def build_gateway_manager(*, config, llm_client) -> GatewayManager:
         enable_last_assistant_rollback=af_cfg.get("enable_last_assistant_rollback", True),
         allowed_request_sampling_param_keys=allowed_sampling_keys,
         coalesce_reserved_exact_requests=af_cfg.get("coalesce_reserved_exact_requests", True),
+        task_metrics_mode=task_metrics_mode,
+        direct_state_sync_enabled=direct_state_sync_enabled,
+        direct_state_sync_max_queue_events=direct_state_sync_cfg.get("max_queue_events", 1024),
+        direct_state_sync_max_queue_bytes=direct_state_sync_cfg.get("max_queue_bytes", 1024 * 1024),
+        direct_state_sync_max_retries=direct_state_sync_cfg.get("max_retries", 3),
+        direct_state_sync_retry_backoff_s=direct_state_sync_cfg.get("retry_backoff_s", 0.01),
+        direct_state_sync_max_terminal_entities=direct_state_sync_cfg.get("max_terminal_entities", 4096),
+        global_telemetry_enabled=global_telemetry_enabled,
+        global_telemetry_event_types=global_telemetry_event_types,
+        global_telemetry_max_queue_events=global_telemetry_cfg.get("max_queue_events", 4096),
+        global_telemetry_max_queue_bytes=global_telemetry_cfg.get("max_queue_bytes", 8 * 1024 * 1024),
+        global_telemetry_max_batch_events=global_telemetry_cfg.get("max_batch_events", 128),
+        global_telemetry_max_batch_bytes=global_telemetry_cfg.get("max_batch_bytes", 256 * 1024),
+        global_telemetry_flush_interval_s=global_telemetry_cfg.get("flush_interval_s", 0.02),
+        global_telemetry_max_retries=global_telemetry_cfg.get("max_retries", 3),
+        global_telemetry_retry_backoff_s=global_telemetry_cfg.get("retry_backoff_s", 0.01),
     )
 
-    return GatewayManager(
-        llm_client=llm_client,
-        gateway_count=int(af_cfg["gateway_count"]),
-        gateway_actor_config=gateway_actor_config,
-    )
+    manager_kwargs = {
+        "llm_client": llm_client,
+        "gateway_count": int(af_cfg["gateway_count"]),
+        "gateway_actor_config": gateway_actor_config,
+        "direct_event_target": getattr(llm_client, "_load_balancer", None) if direct_state_sync_enabled else None,
+    }
+    global_telemetry_runtime = None
+    if global_telemetry_enabled:
+        from uni_agent.telemetry import GlobalTelemetryRuntime, GlobalTelemetryRuntimeConfig
+
+        global_telemetry_runtime = GlobalTelemetryRuntime.start(
+            GlobalTelemetryRuntimeConfig.from_mapping(global_telemetry_cfg)
+        )
+        manager_kwargs["global_telemetry_runtime"] = global_telemetry_runtime
+    try:
+        return GatewayManager(**manager_kwargs)
+    except BaseException:
+        if global_telemetry_runtime is not None:
+            global_telemetry_runtime.shutdown_blocking()
+        raise
 
 
 def build_agent_framework(

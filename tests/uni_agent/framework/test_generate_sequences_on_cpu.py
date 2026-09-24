@@ -12,7 +12,8 @@ import torch
 
 from tests.uni_agent.support import logging_runner
 from uni_agent.framework.framework import GatewayAgentFramework, _align_routed_experts
-from uni_agent.gateway.session import SessionHandle, Trajectory
+from uni_agent.gateway.session import SessionFinalizationResult, SessionHandle, Trajectory
+from uni_agent.metrics import AggregationType, MetricsFragment, MetricSummary
 from uni_agent.tasks import TaskResult
 from verl.utils import tensordict_utils as tu
 
@@ -130,6 +131,7 @@ async def _build_framework_with_agent_runners(
     trajectory_postprocessor_fqn: str | None = None,
     trajectory_postprocessor_kwargs: object | None = None,
     reward_config: dict[str, object] | None = None,
+    task_metrics_mode: str | None = None,
 ):
     from omegaconf import OmegaConf
 
@@ -143,6 +145,8 @@ async def _build_framework_with_agent_runners(
         agent_framework_cfg["trajectory_postprocessor_fqn"] = trajectory_postprocessor_fqn
     if trajectory_postprocessor_kwargs is not None:
         agent_framework_cfg["trajectory_postprocessor_kwargs"] = trajectory_postprocessor_kwargs
+    if task_metrics_mode is not None:
+        agent_framework_cfg["collectors"] = {"task_metrics": {"mode": task_metrics_mode}}
 
     config_dict: dict[str, object] = {
         "actor_rollout_ref": {
@@ -236,6 +240,9 @@ async def test_from_config_warns_for_unsupported_colocated_hybrid_reward(
         ),
         ({}, {"enable_tool_parser_cache": False}, True, False, {}, {}),
         ({}, {"coalesce_reserved_exact_requests": False}, True, True, {}, {}),
+        ({}, {"collectors": {"task_metrics": {"mode": "primary"}}}, True, True, {}, {}),
+        ({}, {"collectors": {"direct_state_sync": {"enabled": True}}}, True, True, {}, {}),
+        ({}, {"collectors": {"global_telemetry": {"enabled": True}}}, True, True, {}, {}),
     ],
 )
 def test_build_gateway_manager_wires_gateway_config_defaults(
@@ -265,10 +272,20 @@ def test_build_gateway_manager_wires_gateway_config_defaults(
     captured = {}
 
     class _FakeGatewayManager:
-        def __init__(self, *, llm_client, gateway_count, gateway_actor_config):
+        def __init__(
+            self,
+            *,
+            llm_client,
+            gateway_count,
+            gateway_actor_config,
+            direct_event_target=None,
+            global_telemetry_runtime=None,
+        ):
             captured["llm_client"] = llm_client
             captured["gateway_count"] = gateway_count
             captured["gateway_actor_config"] = gateway_actor_config
+            captured["direct_event_target"] = direct_event_target
+            captured["global_telemetry_runtime"] = global_telemetry_runtime
 
     monkeypatch.setattr(
         entry_module,
@@ -276,8 +293,20 @@ def test_build_gateway_manager_wires_gateway_config_defaults(
         lambda cfg: _RolloutConfig() if "multi_turn" in cfg else _ModelConfig(),
     )
     monkeypatch.setattr(entry_module, "GatewayManager", _FakeGatewayManager)
+    global_runtime = object()
+    global_runtime_starts = []
 
-    llm_client = object()
+    def start_global_runtime(config):
+        global_runtime_starts.append(config)
+        return global_runtime
+
+    monkeypatch.setattr(
+        "uni_agent.telemetry.GlobalTelemetryRuntime.start",
+        start_global_runtime,
+    )
+
+    direct_event_target = object()
+    llm_client = types.SimpleNamespace(_load_balancer=direct_event_target)
     config = OmegaConf.create(
         {
             "data": data_config,
@@ -313,6 +342,21 @@ def test_build_gateway_manager_wires_gateway_config_defaults(
     assert captured["gateway_actor_config"].coalesce_reserved_exact_requests is agent_framework_config.get(
         "coalesce_reserved_exact_requests", True
     )
+    assert captured["gateway_actor_config"].task_metrics_mode == (
+        agent_framework_config.get("collectors", {}).get("task_metrics", {}).get("mode", "off")
+    )
+    direct_enabled = agent_framework_config.get("collectors", {}).get("direct_state_sync", {}).get("enabled", False)
+    assert captured["gateway_actor_config"].direct_state_sync_enabled is direct_enabled
+    assert captured["direct_event_target"] is (direct_event_target if direct_enabled else None)
+    global_enabled = agent_framework_config.get("collectors", {}).get("global_telemetry", {}).get("enabled", False)
+    assert captured["gateway_actor_config"].global_telemetry_enabled is global_enabled
+    assert captured["gateway_actor_config"].global_telemetry_event_types == (
+        "SessionOpened",
+        "GenerationFinished",
+        "SessionClosed",
+    )
+    assert captured["global_telemetry_runtime"] is (global_runtime if global_enabled else None)
+    assert len(global_runtime_starts) == int(global_enabled)
     assert captured["gateway_actor_config"].hf_model_type == "deepseek_v4"
     assert isinstance(captured["gateway_actor_config"].apply_chat_template_kwargs, dict)
     assert captured["gateway_actor_config"].apply_chat_template_kwargs == expected_chat_template_kwargs
@@ -462,6 +506,57 @@ class _FakeGatewayManager:
 
     async def abort_session(self, session_id: str) -> None:
         self.aborted_sessions.append(session_id)
+
+
+class _MetricsGatewayManager(_FakeGatewayManager):
+    def __init__(self, finalized_by_session_prefix: dict[str, list[Trajectory]], metrics_fragment: MetricsFragment):
+        super().__init__(finalized_by_session_prefix)
+        self._metrics_fragment = metrics_fragment
+
+    async def finalize_session_result(self, session_id: str) -> SessionFinalizationResult:
+        self.finalized_sessions.append(session_id)
+        return SessionFinalizationResult(
+            trajectories=self._lookup(session_id),
+            metrics_fragment=self._metrics_fragment,
+        )
+
+
+class _PerSessionMetricsGatewayManager(_FakeGatewayManager):
+    async def finalize_session_result(self, session_id: str) -> SessionFinalizationResult:
+        self.finalized_sessions.append(session_id)
+        return SessionFinalizationResult(
+            trajectories=self._lookup(session_id),
+            metrics_fragment=_metrics_fragment(session_id),
+        )
+
+    async def abort_session_result(self, session_id: str) -> SessionFinalizationResult:
+        self.aborted_sessions.append(session_id)
+        return SessionFinalizationResult(
+            trajectories=[],
+            metrics_fragment=_metrics_fragment(session_id),
+        )
+
+
+def _metrics_fragment(episode_id: str = "episode-1") -> MetricsFragment:
+    return MetricsFragment(
+        episode_id=episode_id,
+        source_role="gateway",
+        source_instance="gateway-1",
+        fragment_id=f"gateway-1:gateway:{episode_id}",
+        schema_version=1,
+        revision=3,
+        complete=True,
+        metrics={
+            "gateway.requests": MetricSummary(
+                aggregation=AggregationType.SUM,
+                count=2,
+                total=2,
+                minimum=1,
+                maximum=1,
+                last=1,
+            )
+        },
+    )
 
 
 def _build_prompts(
@@ -1521,7 +1616,8 @@ async def test_generate_sequences_batches_length_trajectory_before_normal_trajec
 @pytest.mark.level0
 @pytest.mark.asyncio
 async def test_generate_sequences_selects_longest_model_token_trajectory(fake_tq):
-    runtime = _FakeGatewayManager(
+    fragment = _metrics_fragment("episode-longest")
+    runtime = _MetricsGatewayManager(
         {
             "session-sample-0-rollout-0": [
                 _trajectory(
@@ -1535,7 +1631,8 @@ async def test_generate_sequences_selects_longest_model_token_trajectory(fake_tq
                     num_turns=2,
                 ),
             ]
-        }
+        },
+        fragment,
     )
     framework = await _build_framework_with_agent_runners(
         agent_runners={
@@ -1555,6 +1652,8 @@ async def test_generate_sequences_selects_longest_model_token_trajectory(fake_tq
     assert batch["fields"]["responses"][0].tolist() == [30, 31, 32]
     assert batch["fields"]["response_mask"][0].tolist() == [1, 1, 1]
     assert batch["fields"]["num_turns"].tolist() == [2]
+    [extra_fields] = tu.get(batch["fields"], "extra_fields")
+    assert extra_fields["agent_metrics_fragment"] == fragment.to_dict()
 
 
 @pytest.mark.cpu
@@ -1578,13 +1677,15 @@ async def test_framework_rejects_unknown_trajectory_selection(fake_tq):
 @pytest.mark.asyncio
 async def test_trajectory_postprocessor_applies_kwargs_before_scoring_and_tq(monkeypatch, fake_tq):
     _POSTPROCESSOR_CALLS.clear()
-    runtime = _FakeGatewayManager(
+    fragment = _metrics_fragment("episode-postprocessed")
+    runtime = _MetricsGatewayManager(
         {
             "session-sample-0-rollout-0": [
                 _trajectory(response_ids=[20]),
                 _trajectory(response_ids=[30]),
             ]
-        }
+        },
+        fragment,
     )
     framework = await _build_framework_with_agent_runners(
         agent_runners={"runner": _inline_runner_config(_async_noop_runner)},
@@ -1613,6 +1714,9 @@ async def test_trajectory_postprocessor_applies_kwargs_before_scoring_and_tq(mon
     fields = fake_tq.batch_puts[0]["fields"]
     assert [response.tolist() for response in fields["responses"]] == [[30], [20]]
     assert [score.tolist() for score in fields["rm_scores"]] == [[0.5], [0.5]]
+    extra_fields = tu.get(fields, "extra_fields")
+    assert "agent_metrics_fragment" not in extra_fields[0]
+    assert extra_fields[1]["agent_metrics_fragment"] == fragment.to_dict()
 
 
 @pytest.mark.cpu
@@ -1784,6 +1888,119 @@ async def test_generate_sequences_marks_prompt_failure_when_all_sessions_fail(fa
     assert fake_tq.puts == [
         {"key": "uid-0", "partition_id": "val", "tag": {"status": status}} for status in ("running", "failure")
     ]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_prompt_metrics_summary_retains_fragment_when_postprocessing_drops_trajectory(fake_tq):
+    runtime = _PerSessionMetricsGatewayManager({"session-sample-0-rollout-0": [_trajectory()]})
+    framework = await _build_framework_with_agent_runners(
+        agent_runners={"runner": _inline_runner_config(_async_noop_runner)},
+        gateway_manager=runtime,
+        trajectory_postprocessor_fqn=f"{__name__}._empty_trajectory_postprocessor",
+        task_metrics_mode="primary",
+    )
+
+    with pytest.raises(RuntimeError, match="All rollouts failed"):
+        await framework.generate_sequences(_build_prompts(count=1, global_steps=9))
+
+    summary = fake_tq.puts[-1]["tag"]["agent_metrics_summary"]
+    assert fake_tq.puts[-1]["tag"]["status"] == "failure"
+    assert fake_tq.puts[-1]["tag"]["agent_metrics_export_owner"] == "trainer"
+    assert summary["episode_count"] == 1
+    assert summary["empty_episodes"] == 1
+    assert summary["failed_episodes"] == 0
+    assert summary["fragment_count"] == 1
+    assert summary["complete"] is True
+    assert summary["metrics"]["gateway.requests"]["sum"] == 2
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_prompt_metrics_summary_retains_abort_fragment_for_failed_episode(fake_tq):
+    async def failing_runner(**kwargs):
+        raise RuntimeError("runner failed")
+
+    runtime = _PerSessionMetricsGatewayManager({})
+    framework = await _build_framework_with_agent_runners(
+        agent_runners={"runner": _inline_runner_config(failing_runner)},
+        gateway_manager=runtime,
+        task_metrics_mode="primary",
+    )
+
+    with pytest.raises(RuntimeError, match="All rollouts failed"):
+        await framework.generate_sequences(_build_prompts(count=1, global_steps=9))
+
+    summary = fake_tq.puts[-1]["tag"]["agent_metrics_summary"]
+    assert summary["failed_episodes"] == 1
+    assert summary["fragment_count"] == 1
+    assert summary["complete"] is True
+    assert len(runtime.aborted_sessions) == 1
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_prompt_metrics_shadow_mode_does_not_claim_trainer_export(fake_tq):
+    runtime = _PerSessionMetricsGatewayManager({"session-sample-0-rollout-0": [_trajectory()]})
+    framework = await _build_framework_with_agent_runners(
+        agent_runners={"runner": _inline_runner_config(_async_noop_runner)},
+        gateway_manager=runtime,
+        task_metrics_mode="shadow",
+    )
+
+    await framework.generate_sequences(_build_prompts(count=1, global_steps=9))
+
+    terminal_tag = fake_tq.puts[-1]["tag"]
+    assert "agent_metrics_summary" in terminal_tag
+    assert "agent_metrics_export_owner" not in terminal_tag
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_prompt_metrics_summary_marks_legacy_manager_fragment_missing(fake_tq):
+    runtime = _FakeGatewayManager({"session-sample-0-rollout-0": [_trajectory()]})
+    framework = await _build_framework_with_agent_runners(
+        agent_runners={"runner": _inline_runner_config(_async_noop_runner)},
+        gateway_manager=runtime,
+        task_metrics_mode="primary",
+    )
+
+    await framework.generate_sequences(_build_prompts(count=1, global_steps=9))
+
+    summary = fake_tq.puts[-1]["tag"]["agent_metrics_summary"]
+    assert fake_tq.puts[-1]["tag"]["status"] == "finished"
+    assert summary["successful_episodes"] == 1
+    assert summary["fragment_count"] == 0
+    assert summary["complete"] is False
+    assert summary["incomplete_reasons"][0].startswith("missing metrics fragment for episode ")
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_prompt_metrics_summary_uses_legacy_abort_fallback(fake_tq):
+    async def failing_runner(**kwargs):
+        raise RuntimeError("legacy runner failed")
+
+    runtime = _FakeGatewayManager({})
+    framework = await _build_framework_with_agent_runners(
+        agent_runners={"runner": _inline_runner_config(failing_runner)},
+        gateway_manager=runtime,
+        task_metrics_mode="primary",
+    )
+
+    with pytest.raises(RuntimeError, match="All rollouts failed"):
+        await framework.generate_sequences(_build_prompts(count=1, global_steps=9))
+
+    summary = fake_tq.puts[-1]["tag"]["agent_metrics_summary"]
+    assert summary["failed_episodes"] == 1
+    assert summary["fragment_count"] == 0
+    assert summary["complete"] is False
+    assert len(runtime.aborted_sessions) == 1
 
 
 @pytest.mark.cpu

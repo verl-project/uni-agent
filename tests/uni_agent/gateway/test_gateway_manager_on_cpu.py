@@ -72,6 +72,103 @@ async def test_gateway_manager_balances_concurrent_session_creation():
 
 @pytest.mark.cpu
 @pytest.mark.level0
+@pytest.mark.asyncio
+async def test_gateway_manager_finalization_result_preserves_legacy_list_contract():
+    from uni_agent.gateway.manager import GatewayManager
+    from uni_agent.gateway.session import SessionFinalizationResult, Trajectory
+
+    trajectory = Trajectory(prompt_ids=[1], response_ids=[2], response_mask=[1])
+
+    async def finalize(session_id: str):
+        assert session_id in {"new-contract", "legacy-contract"}
+        return SessionFinalizationResult(trajectories=[trajectory], metrics_fragment=None)
+
+    class _FinalizeGateway:
+        finalize_session_result = _FakeRemoteMethod(finalize)
+
+    manager = GatewayManager.__new__(GatewayManager)
+    manager.gateways = [_FinalizeGateway()]
+    manager.gateway_count = 1
+    manager.active_sessions_per_gateway = [2]
+    manager._session_to_gateway_index = {"new-contract": 0, "legacy-contract": 0}
+
+    result = await manager.finalize_session_result("new-contract")
+    trajectories = await manager.finalize_session("legacy-contract")
+
+    assert result.trajectories == [trajectory]
+    assert trajectories == [trajectory]
+    assert manager.active_sessions_per_gateway == [0]
+    assert manager._session_to_gateway_index == {}
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_gateway_manager_abort_result_preserves_legacy_none_contract():
+    from uni_agent.gateway.manager import GatewayManager
+    from uni_agent.gateway.session import SessionFinalizationResult
+
+    finalization = SessionFinalizationResult(trajectories=[], metrics_fragment=None)
+
+    async def abort(session_id: str):
+        assert session_id in {"new-contract", "legacy-contract"}
+        return finalization
+
+    class _AbortGateway:
+        abort_session_result = _FakeRemoteMethod(abort)
+
+    manager = GatewayManager.__new__(GatewayManager)
+    manager.gateways = [_AbortGateway()]
+    manager.gateway_count = 1
+    manager.active_sessions_per_gateway = [2]
+    manager._session_to_gateway_index = {"new-contract": 0, "legacy-contract": 0}
+
+    result = await manager.abort_session_result("new-contract")
+    legacy_result = await manager.abort_session("legacy-contract")
+
+    assert result is finalization
+    assert legacy_result is None
+    assert manager.active_sessions_per_gateway == [0]
+    assert manager._session_to_gateway_index == {}
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_gateway_manager_closes_global_runtime_when_gateway_shutdown_fails():
+    from uni_agent.gateway.manager import GatewayManager
+
+    async def fail_shutdown():
+        raise RuntimeError("gateway shutdown failed")
+
+    class _FailingGateway:
+        shutdown = _FakeRemoteMethod(fail_shutdown)
+
+    class _Runtime:
+        def __init__(self):
+            self.closed = False
+
+        async def shutdown(self):
+            self.closed = True
+
+    runtime = _Runtime()
+    manager = GatewayManager.__new__(GatewayManager)
+    manager.gateways = [_FailingGateway()]
+    manager.gateway_count = 1
+    manager.active_sessions_per_gateway = [0]
+    manager._session_to_gateway_index = {}
+    manager.global_telemetry_runtime = runtime
+
+    with pytest.raises(RuntimeError, match="gateway shutdown failed"):
+        await manager.shutdown()
+
+    assert runtime.closed
+    assert manager.gateways == []
+    assert manager.global_telemetry_runtime is None
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_gateway_manager_rejects_zero_gateway_count():
     """``GatewayManager`` raises ``ValueError`` when ``gateway_count=0``, rather
     than silently spawning a half-initialized manager."""
@@ -152,7 +249,7 @@ async def test_gateway_manager_finalizes_each_session_on_its_owning_gateway(ray_
     manager = GatewayManager(
         llm_client=RecordingLLMClient("OK"),
         gateway_count=2,
-        gateway_actor_config=GatewayActorConfig(tokenizer=FakeTokenizer()),
+        gateway_actor_config=GatewayActorConfig(tokenizer=FakeTokenizer(), task_metrics_mode="primary"),
     )
 
     session_a = await manager.create_session("session-a")
@@ -169,11 +266,15 @@ async def test_gateway_manager_finalizes_each_session_on_its_owning_gateway(ray_
             )
             assert chat.status_code == 200
 
-    trajectories_a = await manager.finalize_session("session-a")
+    finalization_a = await manager.finalize_session_result("session-a")
+    trajectories_a = finalization_a.trajectories
     trajectories_b = await manager.finalize_session("session-b")
 
     assert len(trajectories_a) == 1
     assert len(trajectories_b) == 1
+    assert finalization_a.metrics_fragment is not None
+    assert finalization_a.metrics_fragment.complete
+    assert finalization_a.metrics_fragment.metrics["gateway.requests"].value == 1
 
     await manager.shutdown()
 

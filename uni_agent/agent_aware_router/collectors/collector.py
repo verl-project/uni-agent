@@ -22,7 +22,7 @@ import threading
 import time
 from collections import defaultdict
 from concurrent.futures import Future
-from typing import Any
+from typing import Any, Callable
 
 from ..config.collector import CollectorConfig
 from ..debug import get_debug_var, is_debug_enabled
@@ -71,7 +71,10 @@ _CUMULATIVE_KEYS: tuple[str, ...] = (
 # releases carry no token list, so the release-side ``INFLIGHT_TOKENS`` delta
 # is folded from this row — same acquire-record / release-consume shape as the
 # per-request "turn" counter below.
-_PROMPT_LEN_KEY = "prompt_len"
+TURN_ROW_KEY = "turn"
+PROMPT_LEN_ROW_KEY = "prompt_len"
+StickyUpdateHandler = Callable[[StickyUpdate], None]
+MetricsUpdateHandler = Callable[[MetricsUpdate], None]
 
 
 def _avg(delta_sum: float, delta_cnt: float) -> float:
@@ -84,6 +87,78 @@ def _ms(value: float) -> str:
     return f"{value * 1000:.1f}" if value == value else "-"
 
 
+def commit_inflight_delta(store: DataStore, update: MetricsUpdate) -> dict[str, float]:
+    """Commit one inflight-family delta update — the family's single shared write.
+
+    Batch the parser's signed deltas in one locked PerReplica write. Turn lives
+    in PerRequestStore (separate lock); look it up first so it joins this batch
+    (no second PerReplica lock cycle). Turn fires only on dispatch/release.
+    verl #7115 releases carry no token list, so the release-side
+    ``INFLIGHT_TOKENS`` delta is folded from the acquire-time per-request
+    ``prompt_len`` row — same acquire-record / release-consume shape as the turn.
+
+    The legacy Collector write path and the Router inflight Projector (when it
+    owns the family) both call this function, so the store state, insight
+    ``WriteEvent`` stream, and their semantics stay identical regardless of
+    which owner commits. Returns the store's post-write values.
+    """
+    deltas = dict(update.metrics)
+    is_acquire = MetricKey.DISPATCHED_COUNT in deltas
+    is_release = MetricKey.COMPLETED_COUNT in deltas
+    if is_acquire:
+        if update.request_id is None:
+            logger.debug("dispatch (DISPATCHED_COUNT) update missing request_id — skipping turn")
+        else:
+            deltas[MetricKey.INFLIGHT_TURN_SUM] = store.incr_per_request(update.request_id, TURN_ROW_KEY)
+            store.set_per_request(update.request_id, PROMPT_LEN_ROW_KEY, deltas.get(MetricKey.INFLIGHT_TOKENS, 0))
+    elif is_release:
+        if update.request_id is None:
+            logger.debug("release (COMPLETED_COUNT) update missing request_id — skipping turn/token subtraction")
+        else:
+            deltas[MetricKey.INFLIGHT_TURN_SUM] = -store.get_per_request(update.request_id, TURN_ROW_KEY, 0)
+            deltas[MetricKey.INFLIGHT_TOKENS] = -store.get_per_request(update.request_id, PROMPT_LEN_ROW_KEY, 0)
+    new_values = store.incr_metrics(update.node_id, deltas)
+    if is_acquire or is_release:
+        emitter.on_write(
+            WriteEvent(
+                kind=WriteKind.ACQUIRE if is_acquire else WriteKind.RELEASE,
+                node=update.node_id,
+                deltas=deltas,
+                new_values=new_values,
+                turn_sum=new_values.get(MetricKey.INFLIGHT_TURN_SUM),
+                inflight_count=new_values.get(MetricKey.INFLIGHT_COUNT),
+            )
+        )
+    return new_values
+
+
+def log_dispatch_stats(store: DataStore, last_log: float) -> float:
+    """Emit per-replica dispatched/completed/inflight_turn_sum/prompt_len_sum counters at most every interval.
+
+    Reads each dispatched replica's cumulative counters from PerReplicaStore and
+    logs them (the ``router-dispatch`` line); the plot derives trailing-5-min
+    dispatched / completed / avg-turn / RPM / avg-prompt-len from their per-replica
+    deltas. Time-throttled so the cadence is load-independent (idle stretches emit
+    nothing). Returns the caller's throttle timestamp to retain across calls.
+    """
+    now = time.monotonic()
+    if now - last_log < _DISPATCH_LOG_INTERVAL_S:
+        return last_log
+    for rep in store.get_metric_node_ids():
+        snap = store.get_metrics(rep)
+        dispatched = snap.get(MetricKey.DISPATCHED_COUNT, 0)
+        if not dispatched:  # skip replicas that never received a dispatch
+            continue
+        completed = snap.get(MetricKey.COMPLETED_COUNT, 0)
+        inflight_turn_sum = snap.get(MetricKey.INFLIGHT_TURN_SUM, 0)
+        prompt_len_sum = snap.get(MetricKey.PROMPT_LEN_SUM, 0)
+        logger.info(
+            f"router-dispatch replica={rep} dispatched={dispatched} completed={completed} "
+            f"inflight_turn_sum={inflight_turn_sum} prompt_len_sum={prompt_len_sum}"
+        )
+    return now
+
+
 class Collector:
     """Unified collector — composes Transport + Parser.
 
@@ -92,9 +167,22 @@ class Collector:
         parser: Parser instance (vLLM KV, vLLM Metrics, etc.)
     """
 
-    def __init__(self, transport: Transport, parser: Parser) -> None:
+    def __init__(
+        self,
+        transport: Transport,
+        parser: Parser,
+        *,
+        sticky_update_handler: StickyUpdateHandler | None = None,
+        sticky_update_observer: StickyUpdateHandler | None = None,
+        inflight_update_handler: MetricsUpdateHandler | None = None,
+        inflight_update_observer: MetricsUpdateHandler | None = None,
+    ) -> None:
         self._transport = transport
         self._parser = parser
+        self._sticky_update_handler = sticky_update_handler
+        self._sticky_update_observer = sticky_update_observer
+        self._inflight_update_handler = inflight_update_handler
+        self._inflight_update_observer = inflight_update_observer
         self._data_store = DataStore()
         self._future: Future | None = None
         self._loop: asyncio.AbstractEventLoop = asyncio.new_event_loop()
@@ -127,9 +215,19 @@ class Collector:
             if isinstance(result, KVCacheUpdate):
                 self._write_kv_update(result)
             elif isinstance(result, MetricsUpdate):
-                self._write_metrics_update(result)
+                if result.is_delta and self._inflight_update_handler is not None:
+                    self._inflight_update_handler(result)
+                else:
+                    self._write_metrics_update(result)
+                if result.is_delta and self._inflight_update_observer is not None:
+                    self._inflight_update_observer(result)
             elif isinstance(result, StickyUpdate):
-                self._write_sticky_update(result)
+                if self._sticky_update_handler is None:
+                    self._write_sticky_update(result)
+                else:
+                    self._sticky_update_handler(result)
+                if self._sticky_update_observer is not None:
+                    self._sticky_update_observer(result)
             else:
                 # None is normal for statistic parsers that skip an event
                 # (e.g. StickyParser on_release); demote to debug to avoid per-turn noise.
@@ -198,60 +296,16 @@ class Collector:
     def _write_metrics_update(self, update: MetricsUpdate) -> None:
         """Write MetricsUpdate via DataStore, then forward to the insight emitter.
 
-        Delta updates (acquire/release) route to ``incr_metrics``; the in-flight
-        turn sum (``INFLIGHT_TURN_SUM``) and the release-side token delta
-        (``INFLIGHT_TOKENS``) are folded into the same locked write from
-        per-request rows recorded at dispatch — acquire records the request's
-        current turn and prompt length, release subtracts both (release changes
-        neither, so it subtracts what acquire recorded). verl #7115 releases
-        carry no token list, which is why the length lives in a per-request row
-        rather than the release event.
-        Both acquire and release refresh the throttled ``router-dispatch``
-        snapshot. Absolute (non-delta) updates are polled gauges, handled
-        below. When rl-insight emit is on, each write also builds a
-        :class:`WriteEvent` from the store's returned post-write values and hands
-        it to the emitter (the 14 B-class signals).
+        Delta updates (acquire/release) commit through :func:`commit_inflight_delta`
+        — the single shared commit for the inflight family, also used by the
+        Router inflight Projector when it owns the family — and refresh the
+        throttled ``router-dispatch`` snapshot. Absolute (non-delta) updates are
+        polled gauges, handled below. When rl-insight emit is on, each write also
+        builds a :class:`WriteEvent` from the store's returned post-write values
+        and hands it to the emitter (the 14 B-class signals).
         """
         if update.is_delta:
-            # Batch the parser's signed deltas in one locked PerReplica write.
-            # Turn lives in PerRequestStore (separate lock); look it up first so
-            # it joins this batch (no second PerReplica lock cycle). Turn fires
-            # only on dispatch/release.
-            deltas = dict(update.metrics)
-            is_acquire = MetricKey.DISPATCHED_COUNT in deltas
-            is_release = MetricKey.COMPLETED_COUNT in deltas
-            if is_acquire:
-                if update.request_id is None:
-                    logger.debug("dispatch (DISPATCHED_COUNT) update missing request_id — skipping turn")
-                else:
-                    deltas[MetricKey.INFLIGHT_TURN_SUM] = self._data_store.incr_per_request(update.request_id, "turn")
-                    self._data_store.set_per_request(
-                        update.request_id, _PROMPT_LEN_KEY, deltas.get(MetricKey.INFLIGHT_TOKENS, 0)
-                    )
-            elif is_release:
-                if update.request_id is None:
-                    logger.debug(
-                        "release (COMPLETED_COUNT) update missing request_id — skipping turn/token subtraction"
-                    )
-                else:
-                    deltas[MetricKey.INFLIGHT_TURN_SUM] = -self._data_store.get_per_request(
-                        update.request_id, "turn", 0
-                    )
-                    deltas[MetricKey.INFLIGHT_TOKENS] = -self._data_store.get_per_request(
-                        update.request_id, _PROMPT_LEN_KEY, 0
-                    )
-            new_values = self._data_store.incr_metrics(update.node_id, deltas)
-            if is_acquire or is_release:
-                emitter.on_write(
-                    WriteEvent(
-                        kind=WriteKind.ACQUIRE if is_acquire else WriteKind.RELEASE,
-                        node=update.node_id,
-                        deltas=deltas,
-                        new_values=new_values,
-                        turn_sum=new_values.get(MetricKey.INFLIGHT_TURN_SUM),
-                        inflight_count=new_values.get(MetricKey.INFLIGHT_COUNT),
-                    )
-                )
+            commit_inflight_delta(self._data_store, update)
             self._maybe_log_dispatch_stats()
             return
         snapshots = self._data_store.refresh_metrics({update.node_id: update.metrics})
@@ -290,29 +344,8 @@ class Collector:
             logger.warning(f"unknown StickyUpdate action: {update.action}")
 
     def _maybe_log_dispatch_stats(self) -> None:
-        """Emit per-replica dispatched/completed/inflight_turn_sum/prompt_len_sum counters at most every interval.
-
-        Reads each dispatched replica's cumulative counters from PerReplicaStore and
-        logs them (the ``router-dispatch`` line); the plot derives trailing-5-min
-        dispatched / completed / avg-turn / RPM / avg-prompt-len from their per-replica
-        deltas. Time-throttled so the cadence is load-independent (idle stretches emit nothing).
-        """
-        now = time.monotonic()
-        if now - self._dispatch_last_log < _DISPATCH_LOG_INTERVAL_S:
-            return
-        self._dispatch_last_log = now
-        for rep in self._data_store.get_metric_node_ids():
-            snap = self._data_store.get_metrics(rep)
-            dispatched = snap.get(MetricKey.DISPATCHED_COUNT, 0)
-            if not dispatched:  # skip replicas that never received a dispatch
-                continue
-            completed = snap.get(MetricKey.COMPLETED_COUNT, 0)
-            inflight_turn_sum = snap.get(MetricKey.INFLIGHT_TURN_SUM, 0)
-            prompt_len_sum = snap.get(MetricKey.PROMPT_LEN_SUM, 0)
-            logger.info(
-                f"router-dispatch replica={rep} dispatched={dispatched} completed={completed} "
-                f"inflight_turn_sum={inflight_turn_sum} prompt_len_sum={prompt_len_sum}"
-            )
+        """Refresh the throttled ``router-dispatch`` snapshot (see :func:`log_dispatch_stats`)."""
+        self._dispatch_last_log = log_dispatch_stats(self._data_store, self._dispatch_last_log)
 
     def _log_evidence_window(self, node_id: str) -> None:
         """Emit a windowed evidence summary for one replica.
@@ -395,6 +428,9 @@ class Collector:
             self._loop_thread.join(timeout=10)
             self._loop_thread = None
 
+        if not self._loop.is_running() and not self._loop.is_closed():
+            self._loop.close()
+
         self._future = None
 
 
@@ -468,13 +504,23 @@ def get_collector(
         from .parse.basic.sticky import StickyParser
         from .transport.callback import CallbackTransport
 
-        return Collector(CallbackTransport(balancer_handler), StickyParser())
+        return Collector(
+            CallbackTransport(balancer_handler),
+            StickyParser(),
+            sticky_update_handler=getattr(balancer_handler, "_router_sticky_update_handler", None),
+            sticky_update_observer=getattr(balancer_handler, "_router_sticky_update_observer", None),
+        )
 
     if name == "inflight_stat":
         from .parse.basic.inflight import InflightParser
         from .transport.callback import CallbackTransport
 
-        return Collector(CallbackTransport(balancer_handler), InflightParser())
+        return Collector(
+            CallbackTransport(balancer_handler),
+            InflightParser(),
+            inflight_update_handler=getattr(balancer_handler, "_router_inflight_update_handler", None),
+            inflight_update_observer=getattr(balancer_handler, "_router_inflight_update_observer", None),
+        )
 
     raise ValueError(
         f"Unknown collector: '{name}'. Available: ['vllm_metrics', 'vllm_zmq', 'sticky_stat', 'inflight_stat']"

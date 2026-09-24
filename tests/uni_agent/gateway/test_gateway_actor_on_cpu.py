@@ -67,7 +67,12 @@ def test_gateway_actor_config_rejects_non_positive_prompt_length(prompt_length):
 @pytest.mark.level0
 @pytest.mark.parametrize(
     "field",
-    ["enable_last_assistant_rollback", "enable_tool_parser_cache", "coalesce_reserved_exact_requests"],
+    [
+        "enable_last_assistant_rollback",
+        "enable_tool_parser_cache",
+        "coalesce_reserved_exact_requests",
+        "direct_state_sync_enabled",
+    ],
 )
 @pytest.mark.parametrize("value", ["true", 1, None])
 def test_gateway_actor_config_rejects_non_bool_options(field, value):
@@ -83,6 +88,55 @@ def test_gateway_actor_config_enables_last_assistant_rollback_by_default():
     from uni_agent.gateway.config import GatewayActorConfig
 
     assert GatewayActorConfig(tokenizer=FakeTokenizer()).enable_last_assistant_rollback is True
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize(
+    "field",
+    [
+        "direct_state_sync_max_queue_events",
+        "direct_state_sync_max_queue_bytes",
+        "direct_state_sync_max_retries",
+        "direct_state_sync_max_terminal_entities",
+    ],
+)
+def test_gateway_actor_config_rejects_non_positive_direct_budgets(field):
+    from uni_agent.gateway.config import GatewayActorConfig
+
+    with pytest.raises(ValueError, match=field):
+        GatewayActorConfig(tokenizer=FakeTokenizer(), **{field: 0})
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize("mode", ["enabled", True, None])
+def test_gateway_actor_config_rejects_unknown_task_metrics_mode(mode):
+    from uni_agent.gateway.config import GatewayActorConfig
+
+    with pytest.raises(ValueError, match="task_metrics_mode"):
+        GatewayActorConfig(tokenizer=FakeTokenizer(), task_metrics_mode=mode)
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_gateway_actor_keeps_task_metrics_runtime_off_by_default():
+    from uni_agent.gateway.config import GatewayActorConfig
+    from uni_agent.gateway.gateway import _GatewayActor
+
+    actor = _GatewayActor(GatewayActorConfig(tokenizer=FakeTokenizer()), SequencedBackend([]))
+    actor._server_base_url = "http://gateway.local"
+
+    await actor.create_session("metrics-off")
+    finalization = await actor.finalize_session_result("metrics-off")
+
+    assert actor._event_bus is None
+    assert actor._event_publisher is None
+    assert actor._task_metrics_projector is None
+    assert actor._direct_bridge is None
+    assert finalization.metrics_fragment is None
+    await actor.shutdown()
 
 
 @pytest.mark.cpu
@@ -1246,15 +1300,32 @@ async def test_gateway_actor_continuation_preserves_prompt_and_generation_masks(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("coalesce", [True, False])
 async def test_gateway_actor_parallel_same_session_requests(coalesce):
+    from uni_agent.events import GENERATION_FINISHED, DeliveryMode, Scope, SubscriptionSpec
     from uni_agent.gateway.config import GatewayActorConfig
     from uni_agent.gateway.gateway import _GatewayActor
 
     backend = RecordingConcurrentBackend(["FIRST", "SECOND"], delay=0.05)
     actor = _GatewayActor(
-        GatewayActorConfig(tokenizer=FakeTokenizer(), coalesce_reserved_exact_requests=coalesce), backend
+        GatewayActorConfig(
+            tokenizer=FakeTokenizer(),
+            coalesce_reserved_exact_requests=coalesce,
+            task_metrics_mode="primary",
+        ),
+        backend,
     )
     actor._server_base_url = "http://gateway.local"
     await actor.create_session("session-parallel")
+    generation_events = []
+    event_subscription = actor._event_bus.subscribe(
+        SubscriptionSpec(
+            subscription_id="test-generation-identity",
+            event_types=(GENERATION_FINISHED,),
+            producer_ids=(actor._event_source_instance,),
+            scope=Scope.LOCAL,
+            delivery=DeliveryMode.INLINE,
+        ),
+        generation_events.append,
+    )
 
     async def send_request():
         return await actor._handle_openai_chat_completions(
@@ -1263,7 +1334,8 @@ async def test_gateway_actor_parallel_same_session_requests(coalesce):
         )
 
     first, second = await asyncio.gather(send_request(), send_request())
-    trajectories = await actor.finalize_session("session-parallel")
+    finalization = await actor.finalize_session_result("session-parallel")
+    trajectories = finalization.trajectories
 
     assert json.loads(first.body)["choices"][0]["finish_reason"] == "stop"
     assert json.loads(second.body)["choices"][0]["finish_reason"] == "stop"
@@ -1275,6 +1347,147 @@ async def test_gateway_actor_parallel_same_session_requests(coalesce):
     )
     if coalesce:
         assert json.loads(first.body)["choices"] == json.loads(second.body)["choices"]
+    fragment = finalization.metrics_fragment
+    assert fragment is not None and fragment.complete
+    assert fragment.episode_id == "session-parallel"
+    assert fragment.metrics["gateway.requests"].value == 2
+    assert fragment.metrics["gateway.request_s"].count == 2
+    expected_backend_calls = 1 if coalesce else 2
+    assert fragment.metrics["gateway.encode_s"].count == expected_backend_calls
+    assert fragment.metrics["gateway.backend_generate_s"].count == expected_backend_calls
+    assert fragment.metrics["gateway.decode_s"].count == expected_backend_calls
+    assert len(generation_events) == 2
+    expected_identity_count = 1 if coalesce else 2
+    assert len({event.context.generation_id for event in generation_events}) == expected_identity_count
+    assert len({event.context.attempt_id for event in generation_events}) == expected_identity_count
+    assert sorted(event.payload["coalesced"] for event in generation_events) == (
+        [False, True] if coalesce else [False, False]
+    )
+    event_subscription.close()
+    await actor.shutdown()
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_gateway_actor_finalizes_zero_request_session_with_complete_empty_fragment():
+    from uni_agent.gateway.config import GatewayActorConfig
+    from uni_agent.gateway.gateway import _GatewayActor
+
+    actor = _GatewayActor(
+        GatewayActorConfig(tokenizer=FakeTokenizer(), task_metrics_mode="primary"),
+        SequencedBackend([]),
+    )
+    actor._server_base_url = "http://gateway.local"
+    await actor.create_session(
+        "empty-session",
+        metadata={
+            "_event_context": {
+                "episode_id": "episode-empty",
+                "runner_name": "runner-a",
+                "global_step": 9,
+            }
+        },
+    )
+
+    finalization = await actor.finalize_session_result("empty-session")
+
+    assert finalization.trajectories == []
+    assert finalization.metrics_fragment is not None
+    assert finalization.metrics_fragment.complete
+    assert finalization.metrics_fragment.episode_id == "episode-empty"
+    assert finalization.metrics_fragment.metrics == {}
+    await actor.shutdown()
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_gateway_actor_metrics_include_failed_request_without_partial_trajectory():
+    from fastapi import HTTPException
+
+    from uni_agent.gateway.config import GatewayActorConfig
+    from uni_agent.gateway.gateway import _GatewayActor
+
+    actor = _GatewayActor(
+        GatewayActorConfig(tokenizer=FakeTokenizer(), task_metrics_mode="primary"),
+        FailingBackend("boom"),
+    )
+    actor._server_base_url = "http://gateway.local"
+    await actor.create_session("failed-session")
+
+    with pytest.raises(HTTPException, match="RuntimeError: boom"):
+        await actor._handle_openai_chat_completions(
+            "failed-session",
+            {"model": "dummy-model", "messages": [{"role": "user", "content": "fail"}]},
+        )
+    finalization = await actor.finalize_session_result("failed-session")
+
+    assert finalization.trajectories == []
+    fragment = finalization.metrics_fragment
+    assert fragment is not None and fragment.complete
+    assert fragment.metrics["gateway.requests"].value == 1
+    assert fragment.metrics["gateway.backend_generate_s"].count == 1
+    assert "gateway.decode_s" not in fragment.metrics
+    await actor.shutdown()
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_gateway_actor_abort_result_preserves_metrics_without_trajectories():
+    from uni_agent.gateway.config import GatewayActorConfig
+    from uni_agent.gateway.gateway import _GatewayActor
+
+    actor = _GatewayActor(
+        GatewayActorConfig(tokenizer=FakeTokenizer(), task_metrics_mode="primary"),
+        SequencedBackend([]),
+    )
+    actor._server_base_url = "http://gateway.local"
+    await actor.create_session("aborted-session")
+
+    finalization = await actor.abort_session_result("aborted-session")
+
+    assert finalization.trajectories == []
+    assert finalization.metrics_fragment is not None
+    assert finalization.metrics_fragment.complete
+    assert finalization.metrics_fragment.episode_id == "aborted-session"
+    assert finalization.metrics_fragment.metrics == {}
+    assert await actor.abort_session("aborted-session") is None
+    await actor.shutdown()
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_gateway_actor_metrics_do_not_swallow_request_cancellation():
+    from uni_agent.gateway.config import GatewayActorConfig
+    from uni_agent.gateway.gateway import _GatewayActor
+
+    actor = _GatewayActor(
+        GatewayActorConfig(tokenizer=FakeTokenizer(), task_metrics_mode="primary"),
+        RecordingConcurrentBackend(["UNUSED"], delay=10),
+    )
+    actor._server_base_url = "http://gateway.local"
+    await actor.create_session("cancelled-session")
+    request = asyncio.create_task(
+        actor._handle_openai_chat_completions(
+            "cancelled-session",
+            {"model": "dummy-model", "messages": [{"role": "user", "content": "cancel"}]},
+        )
+    )
+    await asyncio.sleep(0)
+    request.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await request
+    finalization = await actor.finalize_session_result("cancelled-session")
+
+    assert finalization.trajectories == []
+    fragment = finalization.metrics_fragment
+    assert fragment is not None and fragment.complete
+    assert fragment.metrics["gateway.requests"].value == 1
+    await actor.shutdown()
 
 
 @pytest.mark.cpu

@@ -63,9 +63,30 @@ def _router_config():
     )
 
 
-def _make_balancer(servers=None):
+def _make_balancer(servers=None, max_num_seqs=None, router_state_mode=None):
+    """Build a balancer over the given servers (default two).
+
+    ``_FakeCollectorManager`` is injected through the Balancer's
+    ``provider_factory`` seam — real statistic collectors run (the
+    Balancer-callback chain), network collectors are stubbed, and the real
+    singleton-backed ``DataStore`` is shared with strategy reads.
+
+    ``max_num_seqs`` overrides the capacity the Balancer resolved at construction
+    (tests pass plain-string servers with no ``get_rollout_config``, so the
+    Balancer's RPC resolution falls back to its default). Applied the same way
+    the Balancer applies it in ``__init__``: via ``strategy.set_capacity(...)``.
+    """
     from uni_agent.agent_aware_router.balancer import KVCAwareBalancer
 
     if servers is None:
         servers = {"s0": "h0", "s1": "h1"}
-    return KVCAwareBalancer(servers, _router_config(), provider_factory=_FakeCollectorManager)
+    balancer = KVCAwareBalancer(
+        servers,
+        _router_config(),
+        provider_factory=_FakeCollectorManager,
+        router_state_mode=router_state_mode,
+    )
+    if max_num_seqs is not None:
+        if hasattr(balancer._strategy, "set_capacity"):
+            balancer._strategy.set_capacity(max_num_seqs, 2048)
+    return balancer
