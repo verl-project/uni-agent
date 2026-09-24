@@ -1027,6 +1027,7 @@ class GatewayAgentFramework(AgentFramework):
             "reward_score": traj.reward_score,
             "reward_metrics": dict(traj.reward_metrics),
             "materialization_reason": extra.get("materialization_reason"),
+            "trajectory_annotations": extra.get("trajectory_annotations"),
             "prompt_len": len(traj.prompt_ids),
             "response_len": len(traj.response_ids),
             "model_token_count": sum(traj.response_mask) if traj.response_mask else 0,
