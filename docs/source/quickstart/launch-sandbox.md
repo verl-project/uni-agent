@@ -69,6 +69,29 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
     `entrypoint` and `command` in `sandbox_kwargs`. Run `docker login <registry>` first when
     pulling from a private registry.
 
+    Docker command timeouts retire the entire sandbox: the provider removes the
+    container and its processes before `exec` returns the standard timeout result
+    (`exit_code=-1`). Cancellation also removes the container before propagating
+    `CancelledError`. Killing only the local `docker exec` process would leave the
+    command running inside the container. A normal nonzero command exit does not
+    retire the sandbox.
+
+    **Migration:** callers that previously continued an episode after a Docker
+    command timeout must end that episode and start a fresh sandbox for any retry.
+    The interrupted workspace is discarded. Agent execution and reward verification
+    share the same container for successful episodes.
+
+    Startup failures and cancellation clean up containers using a unique ownership
+    label, so a name collision does not delete another sandbox. Teardown commands
+    are bounded to 30 seconds each. Cleanup failures raise an error and retain the
+    ownership label for a subsequent `stop()` retry; they do not report successful
+    removal. After a daemon outage, inspect `docker ps -a --filter label=uni-agent.sandbox`
+    for containers needing cleanup. Do not reuse a fixed `container_name` across
+    concurrent tasks or mount the same writable host workspace into their containers.
+
+    See [local Docker oracle verification](oracle-verification.md#local-docker-smoke-test)
+    for a small SWE-Bench check before increasing concurrency.
+
 === "veFaaS"
 
     **Remote cloud service.** [veFaaS](https://www.volcengine.com/product/vefaas) provides elastic, isolated sandboxes on Volcengine.
