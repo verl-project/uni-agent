@@ -353,6 +353,11 @@ async def test_first_assistant_rewrite_reuses_chain_without_stale_response():
     assert chain.buffer.response_ids == incremental_ids + _ids("FIXED")
     assert chain.buffer.response_mask == [0] * len(incremental_ids) + [1] * len("FIXED")
     assert chain.buffer.response_logprobs == [0.0] * len(incremental_ids) + [-0.1] * len("FIXED")
+    await _run(session, SequencedBackend(["SUB"]), [{"role": "user", "content": "subagent"}])
+    trajectory, sibling = await session.finalize()
+    assert "rollback_count" not in sibling.extra_fields
+    assert trajectory.extra_fields["rollback_count"] == 1
+    assert trajectory.extra_fields["rollback_dropped_trainable_tokens_total"] == len("FORMAT_ERROR")
 
 
 @pytest.mark.cpu
@@ -921,6 +926,7 @@ async def test_multiple_chains_parallel_new_siblings_reuse_session_request_id():
     request_ids = [call["request_id"] for call in backend.calls]
     assert request_ids == ["parallel-new-siblings"] * 3
     assert session.snapshot_state()["active_chain_ids"] == [1, 2, 3]
+    assert session.snapshot_state()["num_coalesced_requests"] == 0
     trajectories = await session.finalize()
     assert sorted(_decode_response_ids(trajectory.response_ids) for trajectory in trajectories) == ["A", "B", "C"]
 
@@ -929,8 +935,9 @@ async def test_multiple_chains_parallel_new_siblings_reuse_session_request_id():
 @pytest.mark.level0
 @pytest.mark.asyncio
 @pytest.mark.parametrize("chain_path", ["first", "existing", "new"])
-async def test_exact_retry_reuses_inflight_generation(chain_path):
+async def test_exact_retry_reuses_inflight_generation(chain_path, caplog):
     """Let an exact in-flight retry reuse the owner result without forking."""
+    caplog.set_level("INFO", logger="uni_agent.gateway.session.session")
     session = _session("singleflight", coalesce_reserved_exact_requests=True)
     first_messages = [{"role": "user", "content": "first turn"}]
     if chain_path != "first":
@@ -949,12 +956,19 @@ async def test_exact_retry_reuses_inflight_generation(chain_path):
     owner = asyncio.create_task(_run(session, backend, continuation))
     await backend.wait_for_calls(1)
     duplicate = asyncio.create_task(_run(session, backend, continuation))
+    second_duplicate = asyncio.create_task(_run(session, backend, continuation))
     await asyncio.sleep(0)
 
     assert len(backend.calls) == 1
+    assert session.snapshot_state()["num_coalesced_requests"] == 2
+    assert sum(record.getMessage().startswith("Exact in-flight request coalesced") for record in caplog.records) == 1
     backend.release_call(0)
-    assert await owner == await duplicate
+    assert await owner == await duplicate == await second_duplicate
     trajectories = await session.finalize()
+    assert trajectories[-1].extra_fields["num_coalesced_requests"] == 2
+    if chain_path == "new":
+        assert "num_coalesced_requests" not in trajectories[0].extra_fields
+    assert sum(record.getMessage().startswith("Session finalized with") for record in caplog.records) == 1
     assert len(trajectories) == (2 if chain_path == "new" else 1)
     assert sum(_decode_response_ids(t.response_ids).endswith("SECOND") for t in trajectories) == 1
 
@@ -989,10 +1003,12 @@ async def test_exact_retry_reuses_failure_and_allows_a_later_retry(existing_chai
     assert all(isinstance(result, HTTPException) and result.status_code == 500 for result in results)
     assert session.reserved_chain_ids == set()
     assert session._inflight_exact_requests == {}
+    assert session.snapshot_state()["num_coalesced_requests"] == 1
 
     await _run(session, SequencedBackend(["RECOVERED"]), continuation)
     [trajectory] = await session.finalize()
     assert _decode_response_ids(trajectory.response_ids).endswith("RECOVERED")
+    assert "num_coalesced_requests" not in trajectory.extra_fields
 
 
 @pytest.mark.cpu
@@ -1028,6 +1044,8 @@ async def test_first_turn_coalescing_cancellation(cancel_owner):
     assert session._inflight_exact_requests == {}
     [trajectory] = await session.finalize()
     assert _decode_response_ids(trajectory.response_ids) == expected
+    assert session.snapshot_state()["num_coalesced_requests"] == 1
+    assert trajectory.extra_fields.get("num_coalesced_requests", 0) == (0 if cancel_owner else 1)
 
 
 @pytest.mark.cpu
@@ -1205,6 +1223,43 @@ async def test_multiple_chains_length_exhaustion_closes_selected_chain_and_order
     assert _decode_response_ids(trajectories[0].response_ids) == "SUB"
     assert _decode_response_ids(trajectories[1].response_ids) == "MAIN1"
     assert trajectories[1].extra_fields["materialization_reason"] == "max_trajectory_length"
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_chain_observability_survives_continuation_and_capacity_rollback():
+    prompt = [{"role": "user", "content": "main"}]
+    continuation = [*prompt, {"role": "assistant", "content": "FIRST"}, {"role": "user", "content": "next"}]
+    rewrite = [*continuation, {"role": "user", "content": "correction " * 20}]
+    session = _session(
+        "chain-observability",
+        prompt_length=_prompt_length(prompt),
+        response_length=_prompt_length(rewrite) - _prompt_length(prompt) - 1,
+        enable_last_assistant_rollback=True,
+    )
+    backend = _ControlledParallelBackend(["FIRST"])
+    owner = asyncio.create_task(_run(session, backend, prompt))
+    await backend.wait_for_calls(1)
+    waiter = asyncio.create_task(_run(session, backend, prompt))
+    await asyncio.sleep(0)
+    backend.release_call(0)
+    await asyncio.gather(owner, waiter)
+
+    backend = SequencedBackend(["SECOND", "SHOULD_NOT_RUN"])
+    await _run(session, backend, continuation)
+    outcome = await _run(session, backend, rewrite)
+    [trajectory] = await session.finalize()
+
+    assert outcome.finish_reason == "length"
+    assert len(backend.calls) == 1
+    assert "SECOND" not in _decode_response_ids(trajectory.response_ids)
+    assert trajectory.extra_fields == {
+        "materialization_reason": "max_trajectory_length",
+        "num_coalesced_requests": 1,
+        "rollback_count": 1,
+        "rollback_dropped_trainable_tokens_total": len("SECOND"),
+    }
 
 
 @pytest.mark.cpu

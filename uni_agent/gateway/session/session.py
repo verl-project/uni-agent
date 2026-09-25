@@ -95,6 +95,17 @@ class ChainState:
     video_data: list[Any] | None
     last_assistant_start: LastAssistantStart
     updated_seq: int
+    num_coalesced_requests: int = 0
+    rollback_count: int = 0
+    rollback_dropped_trainable_tokens_total: int = 0
+
+
+@dataclass
+class InflightRequest:
+    """Owner result and waiters to attribute when its generation commits."""
+
+    future: asyncio.Future[tuple[bool, Any, int | None, int | None]]
+    waiter_count: int = 0
 
 
 @dataclass
@@ -217,14 +228,12 @@ class GatewaySession:
         self.active_chains: list[ChainState] = []
         self.materialized_chains: list[MaterializedChain] = []
         self.reserved_chain_ids: set[int] = set()
-        self._inflight_exact_requests: dict[
-            str,
-            asyncio.Future[tuple[bool, Any, int | None, int | None]],
-        ] = {}
+        self._inflight_exact_requests: dict[str, InflightRequest] = {}
         self._next_chain_id = 1
         self._order_seq = 0
         self._rollback_count = 0
         self._rollback_dropped_trainable_tokens_total = 0
+        self._coalesced_request_count = 0
         self.phase = SessionPhase.ACTIVE
         self.created_at = time.time()
         self.updated_at = self.created_at
@@ -252,8 +261,8 @@ class GatewaySession:
         request_fingerprint = (
             self._compute_request_fingerprint(request) if self._coalesce_reserved_exact_requests else None
         )
-        owner_future: asyncio.Future[tuple[bool, Any, int | None, int | None]] | None = None
-        joined_future: asyncio.Future[tuple[bool, Any, int | None, int | None]] | None = None
+        owner_request: InflightRequest | None = None
+        joined_request: InflightRequest | None = None
         encoded: EncodedData | None = None
         generation_span = start_generation_span(self._trace_identity)
         try:
@@ -266,8 +275,10 @@ class GatewaySession:
                 # Prepare can touch codec and multimodal extractor state, so only
                 # backend generation runs outside the session lock.
                 if request_fingerprint is not None:
-                    joined_future = self._inflight_exact_requests.get(request_fingerprint)
-                if joined_future is None:
+                    joined_request = self._inflight_exact_requests.get(request_fingerprint)
+                    if joined_request is not None:
+                        joined_request.waiter_count += 1
+                if joined_request is None:
                     encoded = await self._prepare_generation_inputs(request)
                     if encoded.capacity_exhausted:
                         logger.warning(
@@ -300,11 +311,21 @@ class GatewaySession:
                     # Request ownership also covers first turns and new chains,
                     # which have no existing chain to reserve.
                     if request_fingerprint is not None:
-                        owner_future = asyncio.get_running_loop().create_future()
-                        self._inflight_exact_requests[request_fingerprint] = owner_future
+                        owner_request = InflightRequest(asyncio.get_running_loop().create_future())
+                        self._inflight_exact_requests[request_fingerprint] = owner_request
 
-            if joined_future is not None:
-                succeeded, value, chain_id, turn = await asyncio.shield(joined_future)
+            if joined_request is not None:
+                self._coalesced_request_count += 1
+                if self._coalesced_request_count == 1:
+                    logger.warning(
+                        "Exact in-flight request coalesced: session=%s fingerprint=%s role=waiter. "
+                        "The waiter shares the owner's backend generation and trajectory result. "
+                        "Set coalesce_reserved_exact_requests=false to preserve independent "
+                        "same-session sampling.",
+                        self.handle.session_id,
+                        request_fingerprint[:12],
+                    )
+                succeeded, value, chain_id, turn = await asyncio.shield(joined_request.future)
                 if not succeeded:
                     raise value
                 outcome = value
@@ -392,6 +413,10 @@ class GatewaySession:
                     stop_reason=output.stop_reason,
                 )
                 chain_id = self._commit_generation_to_chain(encoded, assistant_msg)
+                if owner_request is not None and owner_request.waiter_count:
+                    # Attribute at commit, even if waiters cancel or resume after finalize.
+                    _, chain = self._find_active_chain(chain_id)
+                    chain.num_coalesced_requests += owner_request.waiter_count
                 if (
                     finish_reason == "length"
                     and self._trajectory_capacity is not None
@@ -420,10 +445,10 @@ class GatewaySession:
                     prompt_tokens=len(encoded.context_ids),
                     completion_tokens=len(response_ids),
                 )
-                if owner_future is not None and request_fingerprint is not None:
+                if owner_request is not None and request_fingerprint is not None:
                     self._resolve_inflight_exact_request(
                         request_fingerprint,
-                        owner_future,
+                        owner_request,
                         (True, outcome, chain_id, self._order_seq),
                     )
                 generation_span.success(
@@ -436,15 +461,15 @@ class GatewaySession:
                 )
                 return outcome
         except BaseException as exc:
-            if owner_future is not None and reserved_chain_id is not None:
+            if owner_request is not None and reserved_chain_id is not None:
                 # Release the chain before waking retry waiters so an immediate
                 # follow-up can select it instead of creating a sibling.
                 await asyncio.shield(self._release_chain_reservation(reserved_chain_id))
                 reserved_chain_id = None
-            if owner_future is not None and request_fingerprint is not None:
+            if owner_request is not None and request_fingerprint is not None:
                 self._resolve_inflight_exact_request(
                     request_fingerprint,
-                    owner_future,
+                    owner_request,
                     (False, exc, reserved_chain_id, None),
                 )
             generation_span.failure(exc)
@@ -463,6 +488,16 @@ class GatewaySession:
                 raise RuntimeError(f"Session {self.handle.session_id} is finalized")
             self._touch()
             self._materialize_active_chains()
+            if self._coalesced_request_count or self._rollback_count:
+                logger.info(
+                    "Session finalized with session=%s trajectories=%s num_coalesced_requests=%s "
+                    "rollback_count=%s rollback_dropped_trainable_tokens_total=%s",
+                    self.handle.session_id,
+                    len(self.materialized_chains),
+                    self._coalesced_request_count,
+                    self._rollback_count,
+                    self._rollback_dropped_trainable_tokens_total,
+                )
             self.reserved_chain_ids.clear()
             self.phase = SessionPhase.FINALIZED
             self._touch()
@@ -499,6 +534,7 @@ class GatewaySession:
             "active_chain_tip_hashes": {chain.chain_id: chain.message_tip_hash for chain in self.active_chains},
             "rollback_count": self._rollback_count,
             "rollback_dropped_trainable_tokens_total": self._rollback_dropped_trainable_tokens_total,
+            "num_coalesced_requests": self._coalesced_request_count,
         }
 
     async def _prepare_generation_inputs(
@@ -774,14 +810,14 @@ class GatewaySession:
     def _resolve_inflight_exact_request(
         self,
         request_fingerprint: str,
-        future: asyncio.Future[tuple[bool, Any, int | None, int | None]],
+        owner_request: InflightRequest,
         result: tuple[bool, Any, int | None, int | None],
     ) -> None:
-        if self._inflight_exact_requests.get(request_fingerprint) is not future:
+        if self._inflight_exact_requests.get(request_fingerprint) is not owner_request:
             return
         self._inflight_exact_requests.pop(request_fingerprint, None)
-        if not future.done():
-            future.set_result(result)
+        if not owner_request.future.done():
+            owner_request.future.set_result(result)
 
     def _copy_trajectory_buffer(self, buffer: TrajectoryBuffer) -> TrajectoryBuffer:
         return TrajectoryBuffer(
@@ -827,9 +863,11 @@ class GatewaySession:
             tip_hash=tip_hash,
         )
 
-    def _record_rollback_stats(self, encoded: EncodedData) -> None:
+    def _record_rollback_stats(self, encoded: EncodedData, chain: ChainState) -> None:
         if not encoded.rollback_applied:
             return
+        chain.rollback_count += 1
+        chain.rollback_dropped_trainable_tokens_total += encoded.rollback_dropped_trainable_tokens
         self._rollback_count += 1
         self._rollback_dropped_trainable_tokens_total += encoded.rollback_dropped_trainable_tokens
 
@@ -842,7 +880,6 @@ class GatewaySession:
         assert len(message_prefix_hashes) == len(message_history)
         if encoded.last_assistant_start is None:
             raise RuntimeError("last assistant start is missing")
-        self._record_rollback_stats(encoded)
         if encoded.chain_id is None:
             order_seq = self._next_order_seq()
             chain_id = self._allocate_chain_id()
@@ -862,9 +899,10 @@ class GatewaySession:
             return chain_id
 
         chain_index, previous_chain = self._find_active_chain(encoded.chain_id)
+        self._record_rollback_stats(encoded, previous_chain)
         order_seq = self._next_order_seq()
-        self.active_chains[chain_index] = ChainState(
-            chain_id=previous_chain.chain_id,
+        self.active_chains[chain_index] = replace(
+            previous_chain,
             message_history=message_history,
             message_tip_hash=message_prefix_hashes[-1],
             active_tool_schemas=encoded.tools,
@@ -880,9 +918,9 @@ class GatewaySession:
         if encoded.chain_id is None:
             raise RuntimeError("length-exhausted chain id is missing")
         chain_index, chain = self._find_active_chain(encoded.chain_id)
+        self._record_rollback_stats(encoded, chain)
         if encoded.rollback_applied and chain.last_assistant_start.response_ids_len == 0:
             # No trainable response prefix survives this rollback.
-            self._record_rollback_stats(encoded)
             del self.active_chains[chain_index]
             return
         chain_to_materialize = chain
@@ -906,7 +944,6 @@ class GatewaySession:
                 order_seq=order_seq,
             )
         )
-        self._record_rollback_stats(encoded)
         del self.active_chains[chain_index]
 
     def _find_active_chain(self, chain_id: int) -> tuple[int, ChainState]:
@@ -958,6 +995,13 @@ class GatewaySession:
             trajectory_extra_fields["max_global_steps"] = max(mark[1] for mark in marks)
         if extra_fields:
             trajectory_extra_fields.update(extra_fields)
+        if chain.num_coalesced_requests:
+            trajectory_extra_fields["num_coalesced_requests"] = chain.num_coalesced_requests
+        if chain.rollback_count:
+            trajectory_extra_fields["rollback_count"] = chain.rollback_count
+            trajectory_extra_fields["rollback_dropped_trainable_tokens_total"] = (
+                chain.rollback_dropped_trainable_tokens_total
+            )
         mm_processor_kwargs = self._codec.mm_processor_kwargs
         if mm_processor_kwargs:
             trajectory_extra_fields["mm_processor_kwargs"] = mm_processor_kwargs

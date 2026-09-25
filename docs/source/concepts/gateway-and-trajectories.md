@@ -177,6 +177,21 @@ actor_rollout_ref:
 `rollout.n` creates separate Gateway sessions, so its samples are not coalesced
 with one another. The option name is retained for configuration compatibility;
 coalescing also applies when no existing chain is reserved.
+`GatewaySession.snapshot_state()` reports the cumulative number of joined waiters
+in `num_coalesced_requests`, including waiters that later cancel. The first
+coalesce in a session emits a warning with a short request fingerprint and the
+option to disable coalescing for independent sampling. Finalization logs the
+session totals for coalescing, rollback count, and dropped trainable tokens.
+
+Each trajectory's `extra_fields` records its own chain's
+`num_coalesced_requests`, `rollback_count`, and
+`rollback_dropped_trainable_tokens_total` when the corresponding operation occurs.
+Waiters are attributed to the owner's chain at successful commit, including
+first-turn and new-chain owners. These counters survive later continuations and
+rollbacks of that chain. Coalesces whose owner fails to commit, and operations on
+chains removed completely by rollback, remain visible only in session totals.
+The Framework includes the per-trajectory counters in its summary log,
+`trajectory.json`, and TransferQueue metadata.
 
 When a client rewrites only the most recent Assistant message, the Gateway rolls
 the matching chain back to the start of that Assistant turn and re-encodes the
