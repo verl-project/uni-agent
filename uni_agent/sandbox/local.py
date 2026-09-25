@@ -2,19 +2,31 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .base import ExecResult, Sandbox, _to_str
 from .registry import register_sandbox
+
+if TYPE_CHECKING:
+    from .base import SandboxConfig
 
 
 @register_sandbox("local")
 class LocalSandbox(Sandbox):
     """Runs commands on the host via ``asyncio`` subprocesses (no container).
 
-    File operations use the host filesystem directly. Constructed with no args,
-    so it uses the base :meth:`Sandbox.from_config` (which ignores the config
-    fields).
+    File operations use the host filesystem directly.
     """
+
+    @classmethod
+    def from_config(cls, config: SandboxConfig) -> LocalSandbox:
+        if config.image is not None:
+            raise ValueError("LocalSandbox does not accept an image; use provider='docker' to run one locally")
+        if config.image_mounts:
+            raise NotImplementedError("LocalSandbox does not support image mounts")
+        if config.executable_paths:
+            raise NotImplementedError("LocalSandbox does not support executable path overrides")
+        return cls()
 
     async def start(self) -> None:
         pass

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import uuid
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
@@ -9,7 +10,7 @@ from .base import ExecResult, Sandbox, _to_str
 from .registry import register_sandbox
 
 if TYPE_CHECKING:
-    from .base import SandboxConfig
+    from .base import ImageMount, SandboxConfig
 
 
 def _positive_timeout(name: str, value: float | None) -> float | None:
@@ -23,22 +24,31 @@ def _positive_timeout(name: str, value: float | None) -> float | None:
 
 @register_sandbox("docker")
 class DockerSandbox(Sandbox):
-    """Run an isolated sandbox from an image available to a local Docker daemon."""
+    """Run an isolated sandbox from an image available to a local Docker daemon.
+
+    Image mounts require a daemon backed by the containerd image store.
+    """
 
     def __init__(
         self,
         *,
         image: str = "python:3.12",
+        runtime_timeout: float = 3600.0,
         docker_binary: str = "docker",
         container_name: str | None = None,
         run_args: list[str] | None = None,
         pull_policy: str = "missing",
         pull_timeout: float | None = None,
         start_timeout: float | None = None,
-        entrypoint: str = "sleep",
-        command: list[str] | None = None,
+        image_mounts: list[ImageMount] | None = None,
+        executable_paths: dict[str, str] | None = None,
     ) -> None:
+        if not math.isfinite(runtime_timeout) or runtime_timeout <= 0:
+            raise ValueError("runtime_timeout must be finite and positive")
         self.image = image
+        self.runtime_timeout = float(runtime_timeout)
+        self.image_mounts = list(image_mounts or [])
+        self.executable_paths = dict(executable_paths or {})
         self.docker_binary = docker_binary
         self.container_name = container_name
         self.run_args = list(run_args or [])
@@ -47,13 +57,17 @@ class DockerSandbox(Sandbox):
         self.pull_policy = pull_policy
         self.pull_timeout = _positive_timeout("pull_timeout", pull_timeout)
         self.start_timeout = _positive_timeout("start_timeout", start_timeout)
-        self.entrypoint = entrypoint
-        self.command = list(command or ["infinity"])
         self._container_name: str | None = None
 
     @classmethod
     def from_config(cls, config: SandboxConfig) -> DockerSandbox:
-        return cls(image=config.image, **config.sandbox_kwargs)
+        return cls(
+            image=config.image,
+            runtime_timeout=config.runtime_timeout,
+            image_mounts=config.image_mounts,
+            executable_paths=config.executable_paths,
+            **config.sandbox_kwargs,
+        )
 
     async def _run_docker(self, *args: str, timeout: float | None = None) -> ExecResult:
         try:
@@ -82,45 +96,52 @@ class DockerSandbox(Sandbox):
             stderr=_to_str(stderr),
         )
 
-    async def _has_image(self) -> bool:
-        return (await self._run_docker("image", "inspect", self.image)).exit_code == 0
+    async def _has_image(self, image: str) -> bool:
+        return (await self._run_docker("image", "inspect", image)).exit_code == 0
 
-    async def _pull_image(self) -> None:
+    async def _pull_image(self, image: str) -> None:
         """Fetch the image up front so the pull is bounded by ``pull_timeout``, not by ``docker run``."""
         try:
-            pulled = await self._run_docker("pull", self.image, timeout=self.pull_timeout)
+            pulled = await self._run_docker("pull", image, timeout=self.pull_timeout)
         except asyncio.TimeoutError as exc:
-            raise TimeoutError(
-                f"Pulling Docker image {self.image!r} exceeded pull_timeout={self.pull_timeout:g}s"
-            ) from exc
+            if self.pull_timeout is None:
+                raise TimeoutError(f"Pulling Docker image {image!r} timed out") from exc
+            raise TimeoutError(f"Pulling Docker image {image!r} exceeded pull_timeout={self.pull_timeout:g}s") from exc
         if pulled.exit_code != 0:
             detail = pulled.stderr.strip() or pulled.stdout.strip()
-            raise RuntimeError(f"Failed to pull Docker image {self.image!r}: {detail}")
+            raise RuntimeError(f"Failed to pull Docker image {image!r}: {detail}")
+
+    async def _prepare_image(self, image: str) -> None:
+        """Apply ``pull_policy`` to one task or mounted image."""
+        if self.pull_policy == "always":
+            await self._pull_image(image)
+            return
+        if await self._has_image(image):
+            return
+        if self.pull_policy == "never":
+            raise RuntimeError(f"Docker image {image!r} is not available locally")
+        await self._pull_image(image)
 
     async def start(self) -> None:
         if self._container_name is not None:
             return
 
-        if self.pull_policy == "never":
-            inspected = await self._run_docker("image", "inspect", self.image)
-            if inspected.exit_code != 0:
-                detail = inspected.stderr.strip() or inspected.stdout.strip()
-                raise RuntimeError(f"Docker image {self.image!r} is not available locally: {detail}")
-
-        # A separate `docker pull` to time-bound the pull on its own
-        pull_policy = self.pull_policy
-        if self.pull_timeout is not None and pull_policy != "never":
-            if pull_policy == "always" or not await self._has_image():
-                await self._pull_image()
-            pull_policy = "never"
+        images = dict.fromkeys([self.image, *(mount.image for mount in self.image_mounts)])
+        for image in images:
+            await self._prepare_image(image)
 
         name = self.container_name or f"uni-agent-{uuid.uuid4().hex[:12]}"
-        args = ["run", "--rm", "-d", "--name", name, "--pull", pull_policy]
-        if self.entrypoint:
-            args.extend(["--entrypoint", self.entrypoint])
+        args = ["run", "--rm", "-d", "--name", name, "--pull", "never", "--entrypoint", "sleep"]
+        for mount in self.image_mounts:
+            args.extend(
+                [
+                    "--mount",
+                    f"type=image,source={mount.image},destination={mount.mount_path}",
+                ]
+            )
         args.extend(self.run_args)
         args.append(self.image)
-        args.extend(self.command)
+        args.append(str(math.ceil(self.runtime_timeout)))
 
         try:
             started = await self._run_docker(*args, timeout=self.start_timeout)
@@ -135,6 +156,7 @@ class DockerSandbox(Sandbox):
             detail = started.stderr.strip() or started.stdout.strip()
             raise RuntimeError(f"Failed to start Docker sandbox from {self.image!r}: {detail}")
         self._container_name = name
+        await self._setup_executable_paths(self.executable_paths)
 
     async def stop(self) -> None:
         name, self._container_name = self._container_name, None

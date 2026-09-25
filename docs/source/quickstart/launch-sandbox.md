@@ -47,6 +47,11 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
     config = SandboxConfig(
         provider="docker",
         image="python:3.12",
+        runtime_timeout=3600,
+        image_mounts=[
+            {"image": "<tool-image>", "mount_path": "/opt/tool"},
+        ],
+        executable_paths={"tool": "/opt/tool/bin/tool"},
         sandbox_kwargs={
             # "missing" (default), "always", or "never".
             "pull_policy": "missing",
@@ -61,13 +66,15 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
 
     The provider starts an ephemeral container, executes commands with `docker exec`,
     transfers files with `docker cp`, and removes the container when the sandbox exits.
-    Setting `pull_timeout` moves the pull into its own `docker pull` step so a stalled
-    registry fails with a clear error instead of eating the whole startup budget
-    (`SANDBOX_STARTUP_TIMEOUT`, 600s by default, which bounds pull and start together);
-    `start_timeout` then bounds only `docker run`. Both are unset by default.
-    The default container command is `sleep infinity`; images without `sleep` can override
-    `entrypoint` and `command` in `sandbox_kwargs`. Run `docker login <registry>` first when
-    pulling from a private registry.
+    Before `docker run`, the provider applies `pull_policy` uniformly to the task image
+    and all mounted images. `pull_timeout` bounds each required `docker pull`, while
+    `start_timeout` bounds only `docker run`; both are unset by default. The whole startup
+    is also bounded by `SANDBOX_STARTUP_TIMEOUT` (600s by default).
+    The container entrypoint is fixed to `sleep`, with `runtime_timeout` passed as
+    its duration so the container exits at the configured lifetime. Task images must
+    therefore provide `sleep`. Docker image mounts require the containerd image store;
+    their source images are prepared according to `pull_policy` before `docker run`.
+    Run `docker login <registry>` first when pulling from a private registry.
 
 === "veFaaS"
 
@@ -138,9 +145,16 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
         provider="modal",
         image="python:3.12",
         runtime_timeout=3600,
+        image_mounts=[
+            {"image": "<tool-image>", "mount_path": "/opt/tool"},
+        ],
+        executable_paths={"tool": "/opt/tool/bin/tool"},
         sandbox_kwargs={"app_name": "agent-sandbox"},
     )
     ```
+
+    Modal builds each configured image and mounts it into the running
+    Sandbox with `Sandbox.mount_image`.
 
 === "OpenYuanrong"
 
@@ -173,14 +187,16 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
         provider="openyuanrong",
         image="python:3.12",
         runtime_timeout=3600,
+        image_mounts=[
+            {"image": "<tool-image>", "mount_path": "/opt/tool"},
+        ],
+        executable_paths={"tool": "/opt/tool/bin/tool"},
         sandbox_kwargs={
             "cpu": 1000,
             "memory": 2048,
             "cpu_limit": 4000,
             "mem_limit": 8192,
             "idle_timeout": 7200,
-            # Mount a image (e.g. a tool runtime) at a target path.
-            "mounts": [{"target": "/opt/tool", "image_url": "<image-url>"}],
             # Reverse tunnel: let the sandbox reach a local gateway via 127.0.0.1:<proxy_port>.
             "upstream": "<gateway-host>:<gateway-port>",
             "proxy_port": 38197,
@@ -189,6 +205,10 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
         },
     )
     ```
+
+`image_mounts` allows Uni-Agent to attach self-contained runtime images for black-box
+agent harnesses to task sandboxes while keeping harness dependencies isolated
+from task images; `executable_paths` exposes selected runtime commands.
 
 ### Start and Stop the Sandbox
 

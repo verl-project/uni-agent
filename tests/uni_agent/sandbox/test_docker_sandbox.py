@@ -20,6 +20,7 @@ def test_registry_builds_docker_sandbox_from_config():
     config = SandboxConfig(
         provider="docker",
         image="example:local",
+        runtime_timeout=123,
         sandbox_kwargs={"run_args": ["--network", "none"]},
     )
 
@@ -28,6 +29,7 @@ def test_registry_builds_docker_sandbox_from_config():
     assert SANDBOX_MODULES["docker"] == "uni_agent.sandbox.docker"
     assert isinstance(sandbox, DockerSandbox)
     assert sandbox.image == "example:local"
+    assert sandbox.runtime_timeout == 123
     assert sandbox.run_args == ["--network", "none"]
     assert sandbox.pull_policy == "missing"
     assert "_exec" in DockerSandbox.__dict__
@@ -68,7 +70,7 @@ def test_start_requires_local_image_and_builds_detached_run(monkeypatch):
             "--network",
             "none",
             "example:local",
-            "infinity",
+            "3600",
         ),
     ]
     assert sandbox._container_name == "agent-test"
@@ -76,18 +78,22 @@ def test_start_requires_local_image_and_builds_detached_run(monkeypatch):
 
 @pytest.mark.cpu
 @pytest.mark.level0
-def test_start_pulls_missing_image_through_docker_run(monkeypatch):
+def test_start_pulls_missing_task_image_before_docker_run(monkeypatch):
     sandbox = DockerSandbox(image="registry.example.com/agent:latest", container_name="agent-test")
     calls: list[tuple[str, ...]] = []
 
     async def fake_run(*args: str, timeout=None):
         calls.append(args)
+        if args[:2] == ("image", "inspect"):
+            return ExecResult(exit_code=1, stdout="", stderr="No such image")
         return _ok("container-id\n")
 
     monkeypatch.setattr(sandbox, "_run_docker", fake_run)
     asyncio.run(sandbox.start())
 
     assert calls == [
+        ("image", "inspect", "registry.example.com/agent:latest"),
+        ("pull", "registry.example.com/agent:latest"),
         (
             "run",
             "--rm",
@@ -95,13 +101,85 @@ def test_start_pulls_missing_image_through_docker_run(monkeypatch):
             "--name",
             "agent-test",
             "--pull",
-            "missing",
+            "never",
             "--entrypoint",
             "sleep",
             "registry.example.com/agent:latest",
-            "infinity",
-        )
+            "3600",
+        ),
     ]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_start_pulls_and_adds_image_mount(monkeypatch):
+    config = SandboxConfig(
+        provider="docker",
+        image="example/task:latest",
+        image_mounts=[{"image": "example/tool:latest", "mount_path": "/opt/tool"}],
+        sandbox_kwargs={"container_name": "agent-test"},
+    )
+    sandbox = build_sandbox(config)
+    assert isinstance(sandbox, DockerSandbox)
+    calls: list[tuple[tuple[str, ...], float | None]] = []
+
+    async def fake_run(*args: str, timeout=None):
+        calls.append((args, timeout))
+        if args[:2] == ("image", "inspect"):
+            return ExecResult(exit_code=1, stdout="", stderr="No such image")
+        return _ok("container-id\n")
+
+    monkeypatch.setattr(sandbox, "_run_docker", fake_run)
+    asyncio.run(sandbox.start())
+
+    assert calls == [
+        (("image", "inspect", "example/task:latest"), None),
+        (("pull", "example/task:latest"), None),
+        (("image", "inspect", "example/tool:latest"), None),
+        (("pull", "example/tool:latest"), None),
+        (
+            (
+                "run",
+                "--rm",
+                "-d",
+                "--name",
+                "agent-test",
+                "--pull",
+                "never",
+                "--entrypoint",
+                "sleep",
+                "--mount",
+                "type=image,source=example/tool:latest,destination=/opt/tool",
+                "example/task:latest",
+                "3600",
+            ),
+            None,
+        ),
+    ]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_start_rejects_missing_image_mount_with_never_pull_policy(monkeypatch):
+    config = SandboxConfig(
+        provider="docker",
+        image="example/task:latest",
+        image_mounts=[{"image": "example/tool:latest", "mount_path": "/opt/tool"}],
+        sandbox_kwargs={"pull_policy": "never"},
+    )
+    sandbox = build_sandbox(config)
+    assert isinstance(sandbox, DockerSandbox)
+
+    async def fake_run(*args: str, timeout=None):
+        if args == ("image", "inspect", "example/task:latest"):
+            return _ok("sha256:image\n")
+        return ExecResult(exit_code=1, stdout="", stderr="No such image")
+
+    monkeypatch.setattr(sandbox, "_run_docker", fake_run)
+
+    with pytest.raises(RuntimeError, match="example/tool.*not available locally"):
+        asyncio.run(sandbox.start())
+    assert sandbox._container_name is None
 
 
 @pytest.mark.cpu
@@ -128,7 +206,7 @@ def test_rejects_unknown_pull_policy():
 
 @pytest.mark.cpu
 @pytest.mark.level0
-@pytest.mark.parametrize("name", ["pull_timeout", "start_timeout"])
+@pytest.mark.parametrize("name", ["runtime_timeout", "pull_timeout", "start_timeout"])
 def test_rejects_non_positive_timeouts(name: str):
     with pytest.raises(ValueError, match=name):
         DockerSandbox(**{name: 0})
@@ -169,7 +247,7 @@ def test_pull_timeout_pulls_missing_image_separately(monkeypatch):
                 "--entrypoint",
                 "sleep",
                 "example:local",
-                "infinity",
+                "3600",
             ),
             120.0,
         ),
