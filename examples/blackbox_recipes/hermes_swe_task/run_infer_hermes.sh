@@ -18,7 +18,7 @@ mkdir -p "${OUTPUT_DIR}"
 ARGS=(
     --data-path "${DATA_PATH}"
     --model-path "${MODEL_PATH}"
-    --task-config "${TASK_CONFIG:-examples/blackbox_recipes/hermes/task_config_hermes.yaml}"
+    --task-config "${TASK_CONFIG:-examples/blackbox_recipes/hermes_swe_task/task_config_hermes.yaml}"
     --tool-parser "${TOOL_PARSER:-qwen3_coder}"
     --tensor-parallel-size "${TENSOR_PARALLEL_SIZE:-1}"
     --nnodes "${NNODES:-1}"
@@ -28,14 +28,15 @@ ARGS=(
     --concurrency "${CONCURRENCY:-1}" --gateway-count "${GATEWAY_COUNT:-1}"
     --log-dir "${OUTPUT_DIR}/logs" --result-path "${OUTPUT_DIR}/result.json"
 )
-if [[ "${LANGUAGE_MODEL_ONLY:-0}" == "1" ]]; then
+if [[ "${LANGUAGE_MODEL_ONLY:-1}" == "1" ]]; then
     ARGS+=(--language-model-only)
 fi
 
 # Ray applies this runtime environment to the driver and its workers. The file
 # belongs to the operator and stays outside the uploaded working directory.
 # Submission waits and propagates failures; the launcher never manages Ray.
+: "${RAY_API_SERVER_ADDRESS:?Set RAY_API_SERVER_ADDRESS to the Ray Jobs API address}"
 "${RAY_BIN}" job submit \
-    --address "${RAY_API_SERVER_ADDRESS:-http://127.0.0.1:8265}" \
+    --address "${RAY_API_SERVER_ADDRESS}" \
     --runtime-env "${RAY_RUNTIME_ENV}" --working-dir . \
     -- "${PYTHON_BIN}" examples/inference/parallel_infer_verl.py "${ARGS[@]}"

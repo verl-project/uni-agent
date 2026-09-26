@@ -119,7 +119,6 @@ def build_runner_command(
         ]
     )
     return (
-        f"umask 077; mkdir -p {q(hermes_home)}; "
         f"{path_setup}"
         f"env {assignments} {q(tool_python)} {q(runner_script)} "
         f"--result-path {q(result_path)} --messages-path {q(messages_path)} --log-path {q(log_path)} "

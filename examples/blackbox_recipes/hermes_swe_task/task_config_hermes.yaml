@@ -28,9 +28,6 @@
     run_timeout: 7200
     terminal_timeout: 600
     conda_env_path: /opt/miniconda3/envs/testbed
-    tool_python: /opt/hermes/bin/python
-    runner_script: /opt/hermes/bin/run_hermes.py
-    approval_mode: "off"
     sampling_params_override:
       temperature: 0.8
       top_p: 0.9

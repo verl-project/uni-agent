@@ -33,6 +33,7 @@ def test_inference_sampling_uses_run_options_and_preserves_length_configuration(
         concurrency=4,
         task_config="/not-loaded-until-task-preparation.yaml",
         log_dir="/tmp/test-inference",
+        language_model_only=False,
         num_workers=1,
         max_model_len=32768,
         max_num_seqs=16,
@@ -69,3 +70,45 @@ def test_inference_sampling_uses_run_options_and_preserves_length_configuration(
         assert not task_runner.runner_kwargs
     else:
         assert task_runner.runner_kwargs.task_config_path == args.task_config
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_inference_language_model_only_wires_vllm_and_rejects_other_engines():
+    args = Namespace(
+        temperature=0.4,
+        top_p=0.85,
+        top_k=20,
+        allowed_request_sampling_param_keys=["temperature", "top_p", "top_k"],
+        n=1,
+        nnodes=1,
+        n_gpus_per_node=1,
+        model_path="/tmp/test-model",
+        engine="vllm",
+        tensor_parallel_size=1,
+        gpu_memory_utilization=0.8,
+        enable_rollout_routing_replay=False,
+        language_model_only=True,
+        tool_parser="qwen3_coder",
+        gateway_count=1,
+        concurrency=1,
+        task_config="/not-loaded-until-task-preparation.yaml",
+        log_dir="/tmp/test-inference",
+        num_workers=1,
+        max_model_len=32768,
+        max_num_seqs=16,
+        enable_mooncake=False,
+        kv_events=False,
+        router_config_path="uni_agent/agent_aware_router/configs/agent_aware_router.yaml",
+        simulated_runner_fqn=None,
+        load_threshold=0.5,
+        prompt_length=2048,
+        response_length=8192,
+    )
+
+    config = init_config(args, served_model_name="policy")
+    assert config.actor_rollout_ref.rollout.engine_kwargs.vllm.language_model_only is True
+
+    args.engine = "sglang"
+    with pytest.raises(ValueError, match="only with --engine vllm"):
+        init_config(args, served_model_name="policy")
