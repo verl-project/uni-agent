@@ -129,6 +129,14 @@ def init_config(args: argparse.Namespace, *, served_model_name: str):
             getattr(args, "kv_cache_dtype", "auto"),
             force_add=True,
         )
+        OmegaConf.update(
+            config,
+            "actor_rollout_ref.rollout.engine_kwargs.vllm.language_model_only",
+            bool(getattr(args, "language_model_only", False)),
+            force_add=True,
+        )
+    elif getattr(args, "language_model_only", False):
+        raise ValueError("--language-model-only is supported only with --engine vllm")
 
     # Gateway tool-call parser: the gateway decodes tool calls from raw tokens, so
     # this must match the model's chat template (the analog of vLLM's
@@ -316,6 +324,11 @@ def main() -> None:
         "--result-path",
         default=None,
         help="Optional path to write a JSON result file (mean rm_score and per-session scores).",
+    )
+    parser.add_argument(
+        "--language-model-only",
+        action="store_true",
+        help="Set vLLM engine_kwargs.vllm.language_model_only for text-only model checkpoints.",
     )
     parser.add_argument(
         "--limit",
