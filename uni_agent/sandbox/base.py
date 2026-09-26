@@ -141,7 +141,7 @@ class SandboxConfig(BaseModel):
     )
     runtime_timeout: float = Field(
         default=3600.0,
-        description="Max sandbox runtime/lifetime (seconds) before it is killed; used by remote providers.",
+        description="Max sandbox runtime/lifetime in seconds.",
     )
     image: str | None = Field(
         default=None,
@@ -345,15 +345,24 @@ class Sandbox(abc.ABC):
         """Force configured executables into ``/usr/bin`` after startup and mounts."""
         for name, source in executable_paths.items():
             target = f"/usr/bin/{name}"
-            linked = await self.exec(["ln", "-sfn", source, target])
-            if linked.exit_code != 0:
-                detail = linked.stderr.strip() or linked.stdout.strip()
-                raise RuntimeError(f"failed to link executable {name!r} to {target!r}: {detail}")
+            current = await self.exec_shell(f"command -v {shlex.quote(name)}")
+            current_path = current.stdout.strip() if current.exit_code == 0 else ""
+            targets = [target]
+            if current_path.startswith("/") and current_path not in {source, target}:
+                targets.append(current_path)
+            for link_path in targets:
+                linked = await self.exec(["ln", "-sfn", source, link_path])
+                if linked.exit_code != 0:
+                    detail = linked.stderr.strip() or linked.stdout.strip()
+                    raise RuntimeError(f"failed to link executable {name!r} to {link_path!r}: {detail}")
             resolved = await self.exec_shell(f"command -v {shlex.quote(name)}")
             actual = resolved.stdout.strip()
-            if resolved.exit_code != 0 or actual != target:
-                detail = actual or resolved.stderr.strip() or "command not found"
-                raise RuntimeError(f"executable {name!r} resolves to {detail!r}, expected {target!r}")
+            if resolved.exit_code != 0 or not actual:
+                detail = resolved.stderr.strip() or "command not found"
+                raise RuntimeError(f"failed to resolve configured executable {name!r}: {detail}")
+            same_file = await self.exec(["test", actual, "-ef", source])
+            if same_file.exit_code != 0:
+                raise RuntimeError(f"executable {name!r} resolves to {actual!r}, not configured source {source!r}")
 
     async def _run_start(self) -> None:
         """Run :meth:`start`, bounding it by the ``SANDBOX_STARTUP_TIMEOUT`` env cap (``<=0`` disables)."""

@@ -62,20 +62,27 @@ def test_setup_executable_paths_force_links_into_usr_bin():
     asyncio.run(sandbox._setup_executable_paths({"claude": "/opt/claude-code/bin/claude"}))
 
     assert sandbox.calls == [
+        ["bash", "-c", "command -v claude"],
         ["ln", "-sfn", "/opt/claude-code/bin/claude", "/usr/bin/claude"],
         ["bash", "-c", "command -v claude"],
+        ["test", "/usr/bin/claude", "-ef", "/opt/claude-code/bin/claude"],
     ]
 
 
 @pytest.mark.cpu
 @pytest.mark.level0
-def test_setup_executable_paths_rejects_a_higher_priority_command():
+def test_setup_executable_paths_overrides_a_higher_priority_command():
     sandbox = _LinkSandbox(resolved_path="/usr/local/bin/claude")
 
-    with pytest.raises(RuntimeError, match="/usr/local/bin/claude.*expected.*/usr/bin/claude"):
-        asyncio.run(sandbox._setup_executable_paths({"claude": "/opt/claude-code/bin/claude"}))
+    asyncio.run(sandbox._setup_executable_paths({"claude": "/opt/claude-code/bin/claude"}))
 
-    assert sandbox.calls[-1] == ["bash", "-c", "command -v claude"]
+    assert sandbox.calls == [
+        ["bash", "-c", "command -v claude"],
+        ["ln", "-sfn", "/opt/claude-code/bin/claude", "/usr/bin/claude"],
+        ["ln", "-sfn", "/opt/claude-code/bin/claude", "/usr/local/bin/claude"],
+        ["bash", "-c", "command -v claude"],
+        ["test", "/usr/local/bin/claude", "-ef", "/opt/claude-code/bin/claude"],
+    ]
 
 
 @pytest.mark.cpu
