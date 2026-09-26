@@ -94,6 +94,7 @@ def test_command_does_not_contain_prompt_or_key():
     assert "prompt" not in command and "api_key" not in command
     assert "HERMES_INTERACTIVE=0" in command
     assert "HERMES_YOLO_MODE=1" in command
+    assert "umask" not in command
     assert "TERMINAL_TIMEOUT=600" in command
     assert "TERMINAL_TIMEOUT=600.0" not in command
     assert "'/custom env/testbed/bin'" in command
