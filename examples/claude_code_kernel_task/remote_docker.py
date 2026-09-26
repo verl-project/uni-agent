@@ -12,7 +12,7 @@ from uni_agent.sandbox.docker import DockerSandbox
 from uni_agent.sandbox.registry import register_sandbox
 
 if TYPE_CHECKING:
-    from uni_agent.sandbox.base import SandboxConfig
+    from uni_agent.sandbox.base import ImageMount, SandboxConfig
 
 
 @register_sandbox("triton_remote_docker")
@@ -31,11 +31,11 @@ class RemoteDockerSandbox(DockerSandbox):
         pull_policy: str = "never",
         env: dict[str, str] | None = None,
         cwd: str | None = None,
+        image_mounts: list[ImageMount] | None = None,
+        executable_paths: dict[str, str] | None = None,
     ) -> None:
         if not docker_host:
             raise ValueError("docker_host is required")
-        if not math.isfinite(runtime_timeout) or runtime_timeout <= 0:
-            raise ValueError("runtime_timeout must be finite and positive")
 
         args = list(run_args or [])
         args.extend(["--volume", f"{npu_lock_dir}:{npu_lock_dir}"])
@@ -45,20 +45,26 @@ class RemoteDockerSandbox(DockerSandbox):
             args.extend(["--env", f"{key}={value}"])
 
         self.docker_host = docker_host
-        self.runtime_timeout = runtime_timeout
         super().__init__(
             image=image,
+            runtime_timeout=runtime_timeout,
             docker_binary=docker_binary,
             run_args=args,
             pull_policy=pull_policy,
             start_timeout=60,
-            entrypoint="sleep",
-            command=[str(math.ceil(runtime_timeout))],
+            image_mounts=image_mounts,
+            executable_paths=executable_paths,
         )
 
     @classmethod
     def from_config(cls, config: SandboxConfig) -> RemoteDockerSandbox:
-        return cls(image=config.image, runtime_timeout=config.runtime_timeout, **config.sandbox_kwargs)
+        return cls(
+            image=config.image,
+            runtime_timeout=config.runtime_timeout,
+            image_mounts=config.image_mounts,
+            executable_paths=config.executable_paths,
+            **config.sandbox_kwargs,
+        )
 
     async def _run_docker(self, *args: str, timeout: float | None = None) -> ExecResult:
         if timeout is None and (args[:2] == ("image", "inspect") or args[:1] == ("rm",)):

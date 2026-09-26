@@ -1,7 +1,6 @@
 # Claude Code tasks running in an OpenYuanrong sandbox. The task image is
 # remapped to the internal registry and the prebuilt Claude Code sidecar is
-# mounted at /opt/claude-code. OpenYuanRong prepends its bin directory to the
-# task image's existing PATH.
+# mounted at /opt/claude-code. Its executable is linked to /usr/bin/claude.
 - name: swe_bench
   sandbox:
     provider: openyuanrong
@@ -9,13 +8,13 @@
     image_map:
       - from: "swebench/**"
         to: "swr.cn-east-3.myhuaweicloud.com/openyuanrong/swe-bench-verified/**:v2"
+    image_mounts:
+      - image: swr.cn-east-3.myhuaweicloud.com/openyuanrong/claude-code-tool:20260910
+        mount_path: /opt/claude-code
+    executable_paths:
+      claude: /opt/claude-code/bin/claude
     sandbox_kwargs:
-      add_to_path:
-        - /opt/claude-code/bin
       proxy_port: 38197
-      mounts:
-        - target: /opt/claude-code
-          image_url: swr.cn-east-3.myhuaweicloud.com/openyuanrong/claude-code-tool:20260910
   agent:
     name: claude_code
     max_turns: 200
@@ -40,13 +39,13 @@
     image_map:
       - from: "swerebench/sweb.eval.x86_64.**"
         to: "swr.cn-east-3.myhuaweicloud.com/openyuanrong/swe-rebench/**:latest"
+    image_mounts:
+      - image: swr.cn-east-3.myhuaweicloud.com/openyuanrong/claude-code-tool:20260910
+        mount_path: /opt/claude-code
+    executable_paths:
+      claude: /opt/claude-code/bin/claude
     sandbox_kwargs:
-      add_to_path:
-        - /opt/claude-code/bin
       proxy_port: 38197
-      mounts:
-        - target: /opt/claude-code
-          image_url: swr.cn-east-3.myhuaweicloud.com/openyuanrong/claude-code-tool:20260910
   agent:
     name: claude_code
     max_turns: 200

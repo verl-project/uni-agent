@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     import aiohttp
     from swerex.runtime.abstract import Command
 
-    from .base import SandboxConfig
+    from .base import ImageMount, SandboxConfig
 
 logger = logging.getLogger(__name__)
 
@@ -269,10 +269,15 @@ class VefaasSandbox(Sandbox):
         image: str = "enterprise-public-2-cn-beijing.cr.volces.com/vefaas-public/python:3.12",
         runtime_timeout: float = 3600.0,
         startup_timeout: float = 120.0,
+        image_mounts: list[ImageMount] | None = None,
+        executable_paths: dict[str, str] | None = None,
     ) -> None:
+        if image_mounts:
+            raise NotImplementedError("VefaasSandbox does not support image mounts now")
         self.image = image
         self.runtime_timeout = runtime_timeout
         self.startup_timeout = startup_timeout
+        self.executable_paths = dict(executable_paths or {})
         # A sandbox binds to one (function_id, function_route) pair for its whole
         # lifetime; when several are configured, one pair is picked at random.
         self._function_id, self._function_route = _select_function_pair()
@@ -290,6 +295,8 @@ class VefaasSandbox(Sandbox):
         return cls(
             image=_to_vefaas_image(config.image),
             runtime_timeout=config.runtime_timeout,
+            image_mounts=config.image_mounts,
+            executable_paths=config.executable_paths,
             **config.sandbox_kwargs,
         )
 
@@ -330,6 +337,7 @@ class VefaasSandbox(Sandbox):
         await runtime.wait_until_alive(timeout=self.startup_timeout)
         self._runtime = runtime
         await self.exec_shell("DEBIAN_FRONTEND=noninteractive apt-get install -y -qq tmux", timeout=300.0)
+        await self._setup_executable_paths(self.executable_paths)
 
     async def stop(self) -> None:
         # Idempotent via the None checks below: a second call finds nothing to do.

@@ -29,11 +29,11 @@
     image_map:
       - from: "swerebench/sweb.eval.x86_64.**"
         to: "swr.cn-east-3.myhuaweicloud.com/openyuanrong/swe-rebench/**:latest"
+    image_mounts:
+      - image: swr.cn-east-3.myhuaweicloud.com/openyuanrong/mini-swe-agent-tool:20260910
+        mount_path: /opt/mini-swe-agent
     sandbox_kwargs:
       proxy_port: 38197
-      mounts:
-        - target: /opt/mini-swe-agent
-          image_url: swr.cn-east-3.myhuaweicloud.com/openyuanrong/mini-swe-agent-tool:20260910
   agent:
     name: mini_swe_agent
     step_limit: 100
@@ -49,11 +49,11 @@
     image_map:
       - from: "swebench/**"
         to: "swr.cn-east-3.myhuaweicloud.com/openyuanrong/swe-bench-verified/**:v2"
+    image_mounts:
+      - image: swr.cn-east-3.myhuaweicloud.com/openyuanrong/mini-swe-agent-tool:20260910
+        mount_path: /opt/mini-swe-agent
     sandbox_kwargs:
       proxy_port: 38197
-      mounts:
-        - target: /opt/mini-swe-agent
-          image_url: swr.cn-east-3.myhuaweicloud.com/openyuanrong/mini-swe-agent-tool:20260910
   agent:
     name: mini_swe_agent
     step_limit: 100

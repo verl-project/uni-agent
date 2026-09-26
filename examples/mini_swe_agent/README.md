@@ -109,8 +109,8 @@ bash examples/mini_swe_agent/build_tool.sh \
     --registry swr.cn-east-3.myhuaweicloud.com/openyuanrong
 ```
 
-> The image URL is referenced from `task_config_mini_swe_agent.yaml`
-> (`sandbox.sandbox_kwargs.mounts[].image_url`), **not** from the training script.
+> The image is referenced from `task_config_mini_swe_agent.yaml`
+> (`sandbox.image_mounts[].image`), **not** from the training script.
 > If the sandbox service cannot pull it, change that URL (or push to a registry it
 > can reach) and keep the two in sync.
 
@@ -168,7 +168,7 @@ touching the training script:
 | Key | Default | Description |
 |-----|---------|-------------|
 | `sandbox.image_map` | `swebench/**` → `swr.cn-east-3.myhuaweicloud.com/openyuanrong/swebench/**` (and `swerebench/**`) | Prefixes canonical SWE image refs with the sandbox registry; keeps `swebench/` / `swerebench/` and the source tag |
-| `sandbox.sandbox_kwargs.mounts[].image_url` | `swr.cn-east-3.myhuaweicloud.com/openyuanrong/mini-swe-agent-tool:latest` | Sidecar tool image mounted at `/opt/mini-swe-agent` |
+| `sandbox.image_mounts[]` | `image: .../mini-swe-agent-tool:latest`, `mount_path: /opt/mini-swe-agent` | Provider-independent sidecar tool-image mount |
 | `sandbox.sandbox_kwargs.proxy_port` | `38197` | Sandbox-internal reverse-tunnel port — **single source of truth** |
 | `sandbox.sandbox_kwargs.cpu/memory/…` | provider defaults | Sandbox resource sizes (pass through to the openyuanrong SDK) |
 | `agent.step_limit` | `100` | mini-swe-agent max agent steps |
@@ -180,7 +180,7 @@ touching the training script:
 
 > `agent.tool_python` / `agent.run_agent_script` are **required**: they name paths
 > inside the prebuilt tool image and are tied to its Dockerfile layout. If you
-> build a custom tool image, set them (and the mount in `sandbox_kwargs.mounts`)
+> build a custom tool image, set them (and the mount in `sandbox.image_mounts`)
 > together.
 
 Runtime-managed (do **not** set in the YAML): `sandbox.sandbox_kwargs.upstream`
@@ -261,7 +261,7 @@ toward a zero reward.
 |---|---|
 | `OPENYUANRONG_SERVER_ADDRESS and OPENYUANRONG_TOKEN ... must be set` | Credentials missing; export both before `run_train.sh` |
 | Sandbox cannot pull the SWE image | The canonical ref is mapped by `sandbox.image_map` in the task YAML; edit the `to:` targets (or add a rule) so it points at the registry the sandbox service can reach |
-| Sandbox cannot pull the **tool** image | `mounts[].image_url` in the task YAML must be a full, pullable address — push it with `build_tool.sh --registry <registry>` |
+| Sandbox cannot pull the **tool** image | `image_mounts[].image` in the task YAML must be a full, pullable address — push it with `build_tool.sh --registry <registry>` |
 | Agent never reaches the policy / requests fail inside the sandbox | Reverse tunnel misconfigured: `proxy_port` must be set in `sandbox_kwargs` (single source of truth) and the provider must be `openyuanrong`; `run_task` injects `upstream` + rewrites `base_url` |
 | `ValueError: ... supported only on 'openyuanrong' ...` | `proxy_port` configured on a non-Yuanrong sandbox provider — switch the provider or drop `proxy_port` |
 | Sessions aborted at a round number | `SESSION_TIMEOUT_SECONDS` too low for your episode lengths (recipe default `3600`) — raise it when legitimate runs are being cut short |

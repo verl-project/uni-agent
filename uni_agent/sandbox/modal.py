@@ -4,7 +4,7 @@ import asyncio
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from .base import ExecResult, Sandbox, _to_str
+from .base import ExecResult, ImageMount, Sandbox, _to_str
 from .registry import register_sandbox
 
 if TYPE_CHECKING:
@@ -29,19 +29,29 @@ class ModalSandbox(Sandbox):
         app_name: str = "agent-sandbox",
         runtime_timeout: float = 3600.0,
         startup_command: list[str] | tuple[str, ...] = ("sleep", "infinity"),
+        image_mounts: list[ImageMount] | None = None,
+        executable_paths: dict[str, str] | None = None,
         **modal_sandbox_kwargs,
     ):
         self.image = image
         self.app_name = app_name
         self.runtime_timeout = runtime_timeout
         self.startup_command = list(startup_command)
+        self.image_mounts = list(image_mounts or [])
+        self.executable_paths = dict(executable_paths or {})
         self.modal_sandbox_kwargs = dict(modal_sandbox_kwargs)
         self._app = None
         self._sandbox: modal.Sandbox | None = None
 
     @classmethod
     def from_config(cls, config: SandboxConfig) -> ModalSandbox:
-        return cls(image=config.image, runtime_timeout=config.runtime_timeout, **config.sandbox_kwargs)
+        return cls(
+            image=config.image,
+            runtime_timeout=config.runtime_timeout,
+            image_mounts=config.image_mounts,
+            executable_paths=config.executable_paths,
+            **config.sandbox_kwargs,
+        )
 
     # ----- control plane -----
     async def start(self) -> None:
@@ -51,6 +61,11 @@ class ModalSandbox(Sandbox):
 
         self._app = await modal.App.lookup.aio(self.app_name, create_if_missing=True)
         image = modal.Image.from_registry(self.image)
+        mounted_images = []
+        for mount in self.image_mounts:
+            mounted_image = modal.Image.from_registry(mount.image)
+            await mounted_image.build.aio(self._app)
+            mounted_images.append((mount, mounted_image))
         self._sandbox = await modal.Sandbox.create.aio(
             *self.startup_command,
             image=image,
@@ -58,6 +73,9 @@ class ModalSandbox(Sandbox):
             timeout=int(self.runtime_timeout),
             **self.modal_sandbox_kwargs,
         )
+        for mount, mounted_image in mounted_images:
+            await self._sandbox.mount_image.aio(mount.mount_path, mounted_image)
+        await self._setup_executable_paths(self.executable_paths)
 
     async def stop(self) -> None:
         if self._sandbox is not None:
