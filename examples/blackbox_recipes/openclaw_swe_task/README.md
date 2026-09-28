@@ -1,9 +1,9 @@
 # OpenClaw SWE-bench recipe
 
 This recipe runs the pinned OpenClaw CLI inside a task sandbox and sends its
-model requests through the Uni-Agent gateway. OpenClaw keeps its native JSON
-and SQLite trajectory audit; the framework owns the task reward. The recipe is
-inference-only and does not add a training entrypoint.
+model requests through the Uni-Agent gateway. OpenClaw's native JSON result and
+the framework trajectory own completion reporting; the framework owns the task
+reward. The recipe is inference-only and does not add a training entrypoint.
 
 ## Build the sidecar
 
@@ -41,8 +41,8 @@ bash examples/blackbox_recipes/openclaw_swe_task/run_infer_openclaw.sh
 hardware settings are explicit environment overrides. `OUTPUT_DIR/result.json`
 contains framework scores and `OUTPUT_DIR/logs/` contains task logs and
 trajectories. The launcher checks one finished trajectory entry per scored
-session. A result of reward 0 is valid ordinary inference; the OpenClaw SQLite
-audit remains a separate agent-level check.
+session. A result of reward 0 is valid ordinary inference. OpenClaw's native
+`meta.aborted` and fallback fields remain part of agent completion handling.
 
 The agent follows the mini-swe-agent input contract: it accepts an optional
 system message followed by exactly one user message, then passes only the user

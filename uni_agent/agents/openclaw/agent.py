@@ -13,7 +13,7 @@ import logging
 import re
 import shlex
 import uuid
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 from pydantic import Field
@@ -275,14 +275,6 @@ class OpenClawAgent(Agent):
                     "session_id": episode_id,
                     "state_dir": state_dir,
                 }
-            else:
-                audit_path = f"{root}/audit_trajectory.py"
-                await sandbox.write_file(audit_path, Path(__file__).with_name("trajectory.py").read_text(encoding="utf-8"))
-                audit_argv = ["python3", audit_path, state_dir, episode_id, model.model_name]
-                audit_proc = await sandbox.exec(audit_argv, timeout=60, workdir=workspace)
-                audit_result = parse_openclaw_result(audit_proc.stdout or "")
-                if audit_proc.exit_code != 0 or not isinstance(audit_result, dict):
-                    audit_result = {"verified": False, "errors": ["audit_process_failed"]}
         except (TimeoutError, OSError) as exc:
             failure = {
                 "error_kind": "timeout" if isinstance(exc, TimeoutError) else "startup_failure",
@@ -290,7 +282,7 @@ class OpenClawAgent(Agent):
                 "exit_code": -1 if isinstance(exc, TimeoutError) else None,
             }
         finally:
-            # Remove credentials only; preserve SQLite state for task-level auditing.
+            # Remove the credentials-bearing config before sandbox teardown.
             try:
                 cleanup = await sandbox.exec_shell(f"rm -f {_shell_quote_path(config_path)}", timeout=30)
                 if cleanup.exit_code != 0:
@@ -319,9 +311,6 @@ class OpenClawAgent(Agent):
         fallback_used = trace.get("fallbackUsed") if isinstance(trace, dict) else None
         if fallback_used is True:
             info["trajectory_rejected"] = "model_fallback"
-        info["trajectory_audit"] = audit_result
-        if audit_result.get("verified") is not True:
-            info.setdefault("trajectory_rejected", "sqlite_audit_failed")
         finished = (
             proc.exit_code == 0
             and isinstance(meta, dict)

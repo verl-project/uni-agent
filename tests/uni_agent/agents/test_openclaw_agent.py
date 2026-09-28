@@ -28,8 +28,6 @@ class FakeSandbox:
 
     async def exec(self, argv, **kwargs):
         self.commands.append((argv, kwargs))
-        if argv[0] == "python3":
-            return SimpleNamespace(exit_code=0, stdout=json.dumps({"verified": self.mode != "audit_failure"}), stderr="")
         if self.mode in {"timeout", "timeout_cleanup"}:
             raise TimeoutError("deadline")
         if self.mode == "exit_timeout":
@@ -69,7 +67,7 @@ def run_agent(mode):
 def test_success():
     result, sandbox = run_agent("success")
     assert result.finished
-    assert len(sandbox.commands) == 2
+    assert len(sandbox.commands) == 1
     launch_command = " ".join(sandbox.commands[0][0])
     assert "--message-file" in launch_command
     message_path = sandbox.commands[0][0][-1]
@@ -77,12 +75,6 @@ def test_success():
     assert "follow repository policy" not in sandbox.files[message_path]
     assert "solve 中文 ' $(false)" in sandbox.files[message_path]
     assert "solve" not in launch_command
-
-
-@pytest.mark.cpu
-@pytest.mark.level0
-def test_audit_failure():
-    assert not run_agent("audit_failure")[0].finished
 
 
 @pytest.mark.cpu
