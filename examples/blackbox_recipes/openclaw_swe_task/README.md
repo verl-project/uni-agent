@@ -40,12 +40,13 @@ bash examples/blackbox_recipes/openclaw_swe_task/run_infer_openclaw.sh
 `LIMIT`, `N`, `CONCURRENCY`, and `GATEWAY_COUNT` default to `1`; model and
 hardware settings are explicit environment overrides. `OUTPUT_DIR/result.json`
 contains framework scores and `OUTPUT_DIR/logs/` contains task logs and
-trajectories. A result of reward 0 is valid ordinary inference. For a
-single-task acceptance run, verify one scored session, one raw framework
-trajectory with `finished=true`, and the OpenClaw SQLite audit separately.
+trajectories. The launcher checks one finished trajectory entry per scored
+session. A result of reward 0 is valid ordinary inference; the OpenClaw SQLite
+audit remains a separate agent-level check.
 
-The agent accepts an optional system message followed by exactly one user
-message and writes the combined prompt to a private episode file. Credentials
+The agent follows the mini-swe-agent input contract: it accepts an optional
+system message followed by exactly one user message, then passes only the user
+task to the CLI. Put effective instructions in the user message. Credentials
 and diagnostics are redacted before they are returned to the framework.
 
 ## Scope and tests

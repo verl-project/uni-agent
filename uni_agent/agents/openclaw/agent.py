@@ -131,9 +131,9 @@ def build_openclaw_config(*, base_url: str, api_key: str, model_name: str, works
 
 
 def _extract_user_prompt(messages: list[dict[str, Any]]) -> str:
+    """Extract the user task using the mini-swe-agent message contract."""
     if not isinstance(messages, list) or not messages or len(messages) > 2:
         raise ValueError(f"openclaw accepts at most 2 messages (system?, user), got {len(messages)}")
-    system_parts: list[str] = []
     user_parts: list[str] = []
     saw_user = False
     for index, message in enumerate(messages):
@@ -150,15 +150,12 @@ def _extract_user_prompt(messages: list[dict[str, Any]]) -> str:
         if role == "system":
             if saw_user:
                 raise ValueError("openclaw system messages must precede the user message")
-            system_parts.append(content)
         else:
             user_parts.append(content)
             saw_user = True
     if len(user_parts) != 1:
         raise ValueError("openclaw requires exactly one 'user' message")
-    if not system_parts:
-        return user_parts[0]
-    return "System instructions:\n" + "\n\n".join(system_parts) + "\n\nUser task:\n" + user_parts[0]
+    return user_parts[0]
 
 
 def _redact(value: Any, secret: str) -> Any:
