@@ -65,11 +65,17 @@ def test_validate_messages_accepts_system_user_prefix_and_rejects_other_roles():
     validate_messages(
         [
             {"role": "system", "content": "rules"},
-            {"role": "system", "content": "more rules"},
             {"role": "user", "content": "issue"},
-            {"role": "user", "content": "details"},
         ]
     )
+    with pytest.raises(ValueError, match="at most 2"):
+        validate_messages(
+            [
+                {"role": "system", "content": "rules"},
+                {"role": "user", "content": "issue"},
+                {"role": "user", "content": "details"},
+            ]
+        )
     with pytest.raises(ValueError, match="only supports"):
         validate_messages([{"role": "assistant", "content": "hidden context"}, {"role": "user", "content": "issue"}])
 

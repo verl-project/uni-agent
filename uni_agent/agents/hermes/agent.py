@@ -67,8 +67,8 @@ def _message_text(message: object, index: int) -> str:
 
 def validate_messages(messages: list[dict[str, Any]]) -> None:
     """Validate the system/user prefix accepted by the Hermes runner."""
-    if not isinstance(messages, list) or not messages:
-        raise ValueError("hermes requires a non-empty messages list")
+    if not isinstance(messages, list) or not messages or len(messages) > 2:
+        raise ValueError("hermes accepts at most 2 messages (system?, user)")
     saw_user = False
     for index, message in enumerate(messages):
         if not isinstance(message, dict):
@@ -80,8 +80,8 @@ def validate_messages(messages: list[dict[str, Any]]) -> None:
             raise ValueError("hermes system messages must precede user messages")
         _message_text(message, index)
         saw_user = saw_user or role == "user"
-    if not saw_user:
-        raise ValueError("hermes requires at least one user message")
+    if sum(message.get("role") == "user" for message in messages) != 1:
+        raise ValueError("hermes requires exactly one 'user' message")
 
 
 def build_runner_command(
@@ -287,9 +287,12 @@ class HermesAgent(Agent):
         info = {
             "run_id": run_id,
             "status": envelope.get("status"),
+            "exit_code": process.exit_code,
             "process_exit_code": process.exit_code,
             "stop_reason": envelope.get("stop_reason"),
         }
+        if envelope["finished"] is not True:
+            info["error_kind"] = "timeout" if envelope.get("status") == "timeout" else "agent_failure"
         return AgentResult(
             output=envelope,
             transcript=list(messages),

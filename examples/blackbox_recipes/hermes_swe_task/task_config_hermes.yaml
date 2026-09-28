@@ -1,4 +1,5 @@
-# Hermes black-box SWE-bench recipe.
+# Hermes inference-only black-box SWE-bench recipe.
+# Timeout values are seconds; provider defaults supply resources not listed here.
 #
 # The dataset row contributes only the canonical task image and metadata.  The
 # runner overwrites agent.model.* from the live Uni-Agent gateway session and
@@ -11,11 +12,6 @@
       - from: "swebench/**"
         to: "swr.cn-east-3.myhuaweicloud.com/openyuanrong/swe-bench-verified/**:v2"
     sandbox_kwargs:
-      cpu: 1000
-      memory: 2048
-      cpu_limit: 4000
-      mem_limit: 8192
-      idle_timeout: 7200
       proxy_port: 38197
       tunnel_connect_timeout: 60
       mounts:
