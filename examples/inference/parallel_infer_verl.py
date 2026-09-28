@@ -313,7 +313,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--served-model-name",
-        default=int(os.getenv("LIMIT", "1")),
+        default=None,
         help="Model name sent on chat-completions requests (default: basename of --model-path).",
     )
     parser.add_argument(
@@ -340,7 +340,7 @@ def main() -> None:
         "--max-samples",
         dest="limit",
         type=int,
-        default=None,
+        default=int(os.getenv("LIMIT", "1")),
         help="Only run the first N samples (smoke testing); omit for the full dataset.",
     )
 
