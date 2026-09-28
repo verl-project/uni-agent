@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-# Build with context examples/blackbox_recipes/openclaw (Linux amd64 only).
+# Build with context examples/blackbox_recipes/openclaw_swe_task (Linux amd64 only).
 # The final stage is a mounted tool image; the runtime stage only supplies its files.
 FROM ubuntu:22.04@sha256:4f838adc7181d9039ac795a7d0aba05a9bd9ecd480d294483169c5def983b64d AS runtime
 ARG NODE_VERSION=22.22.3

@@ -131,12 +131,34 @@ def build_openclaw_config(*, base_url: str, api_key: str, model_name: str, works
 
 
 def _extract_user_prompt(messages: list[dict[str, Any]]) -> str:
-    if len(messages) > 2:
+    if not isinstance(messages, list) or not messages or len(messages) > 2:
         raise ValueError(f"openclaw accepts at most 2 messages (system?, user), got {len(messages)}")
-    prompt = next((message.get("content") for message in messages if message.get("role") == "user"), None)
-    if not isinstance(prompt, str) or not prompt.strip():
-        raise ValueError("openclaw requires a non-empty user prompt")
-    return prompt
+    system_parts: list[str] = []
+    user_parts: list[str] = []
+    saw_user = False
+    for index, message in enumerate(messages):
+        if not isinstance(message, dict):
+            raise ValueError(f"openclaw message {index} must be an object")
+        role = message.get("role")
+        content = message.get("content")
+        if role not in {"system", "user"}:
+            raise ValueError(
+                f"openclaw only supports initial system/user messages; message {index} has role {role!r}"
+            )
+        if not isinstance(content, str) or not content.strip():
+            raise ValueError(f"openclaw message {index} must have non-empty string content")
+        if role == "system":
+            if saw_user:
+                raise ValueError("openclaw system messages must precede the user message")
+            system_parts.append(content)
+        else:
+            user_parts.append(content)
+            saw_user = True
+    if len(user_parts) != 1:
+        raise ValueError("openclaw requires exactly one 'user' message")
+    if not system_parts:
+        return user_parts[0]
+    return "System instructions:\n" + "\n\n".join(system_parts) + "\n\nUser task:\n" + user_parts[0]
 
 
 def _redact(value: Any, secret: str) -> Any:
@@ -187,7 +209,7 @@ class OpenClawAgent(Agent):
         if len(prompt.encode("utf-8")) > cfg.max_prompt_bytes:
             raise ValueError(f"openclaw prompt exceeds max_prompt_bytes={cfg.max_prompt_bytes}")
 
-        workspace = workdir or "/workspace"
+        workspace = workdir or "/testbed"
         episode_id = uuid.uuid4().hex
         root = str(PurePosixPath(cfg.state_root) / episode_id)
         config_path = f"{root}/openclaw.json"
@@ -245,13 +267,21 @@ class OpenClawAgent(Agent):
                 timeout=cfg.run_timeout,
                 workdir=workspace,
             )
-            audit_path = f"{root}/audit_trajectory.py"
-            await sandbox.write_file(audit_path, Path(__file__).with_name("trajectory.py").read_text(encoding="utf-8"))
-            audit_argv = ["python3", audit_path, state_dir, episode_id, model.model_name]
-            audit_proc = await sandbox.exec(audit_argv, timeout=60, workdir=workspace)
-            audit_result = parse_openclaw_result(audit_proc.stdout or "")
-            if audit_proc.exit_code != 0 or not isinstance(audit_result, dict):
-                audit_result = {"verified": False, "errors": ["audit_process_failed"]}
+            if proc.exit_code == -1:
+                failure = {
+                    "error_kind": "timeout",
+                    "error_type": "sandbox_timeout",
+                    "session_id": episode_id,
+                    "state_dir": state_dir,
+                }
+            else:
+                audit_path = f"{root}/audit_trajectory.py"
+                await sandbox.write_file(audit_path, Path(__file__).with_name("trajectory.py").read_text(encoding="utf-8"))
+                audit_argv = ["python3", audit_path, state_dir, episode_id, model.model_name]
+                audit_proc = await sandbox.exec(audit_argv, timeout=60, workdir=workspace)
+                audit_result = parse_openclaw_result(audit_proc.stdout or "")
+                if audit_proc.exit_code != 0 or not isinstance(audit_result, dict):
+                    audit_result = {"verified": False, "errors": ["audit_process_failed"]}
         except (TimeoutError, OSError) as exc:
             failure = {
                 "error_kind": "timeout" if isinstance(exc, TimeoutError) else "startup_failure",

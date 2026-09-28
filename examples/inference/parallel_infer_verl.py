@@ -58,7 +58,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(
 logger = logging.getLogger(__name__)
 
 
-GLOBAL_CONCURRENCY = int(os.getenv("GLOBAL_CONCURRENCY", 128))
+GLOBAL_CONCURRENCY = int(os.getenv("GLOBAL_CONCURRENCY", 1))
 PARTITION_ID = "val"
 
 DEFAULT_TEMPERATURE = 0.8
@@ -149,7 +149,8 @@ def init_config(args: argparse.Namespace, *, served_model_name: str):
     rollout.mode = "async"
     # Standalone inference has no trainer to broadcast weights.
     rollout.load_format = "auto"
-    rollout.prompt_length = DEFAULT_PROMPT_LENGTH
+    prompt_length = getattr(args, "prompt_length", DEFAULT_PROMPT_LENGTH)
+    rollout.prompt_length = prompt_length
     rollout.response_length = response_length
     rollout.max_model_len = rollout.prompt_length + rollout.response_length
     rollout.tensor_model_parallel_size = args.tensor_parallel_size
@@ -166,13 +167,16 @@ def init_config(args: argparse.Namespace, *, served_model_name: str):
             getattr(args, "kv_cache_dtype", "auto"),
             force_add=True,
         )
-    if args.language_model_only:
         OmegaConf.update(
             config,
             "actor_rollout_ref.rollout.engine_kwargs.vllm.language_model_only",
-            True,
+            bool(getattr(args, "language_model_only", False)),
             force_add=True,
         )
+    elif getattr(args, "language_model_only", False):
+        raise ValueError("--language-model-only is supported only with --engine vllm")
+    if getattr(args, "disable_thinking", False):
+        OmegaConf.update(config, "data.apply_chat_template_kwargs.enable_thinking", False, force_add=True)
     # Gateway tool-call parser: the gateway decodes tool calls from raw tokens, so
     # this must match the model's chat template (the analog of vLLM's
     # --tool-call-parser, e.g. qwen3_coder for Qwen3-Coder, hermes for Qwen3).
@@ -201,7 +205,7 @@ def init_config(args: argparse.Namespace, *, served_model_name: str):
 
     # Data.
     config.data.return_raw_chat = True
-    config.data.max_prompt_length = DEFAULT_PROMPT_LENGTH
+    config.data.max_prompt_length = prompt_length
     config.data.max_response_length = response_length
 
     return config
@@ -216,7 +220,7 @@ def _build_prompts(samples: list, uids: list):
         tensor_dict={
             "raw_prompt": [sample.get("prompt") for sample in samples],
             "uid": list(uids),
-            "tools_kwargs": [sample["extra_info"]["tools_kwargs"] for sample in samples],
+            "tools_kwargs": tools_kwargs,
         },
         non_tensor_dict={"global_steps": None, "validate": True},
     )
@@ -360,8 +364,14 @@ def main() -> None:
     )
     parser.add_argument(
         "--result-path",
-        default=None,
+        default=int(os.getenv("LIMIT", "1")),
         help="Optional path to write a JSON result file (mean rm_score and per-session scores).",
+    )
+    parser.add_argument(
+        "--prompt-length",
+        type=int,
+        default=int(os.getenv("PROMPT_LENGTH", DEFAULT_PROMPT_LENGTH)),
+        help="Prompt-token budget passed to the verl rollout and data config.",
     )
     parser.add_argument(
         "--limit",
@@ -407,18 +417,30 @@ def main() -> None:
         help="Enable R3 routed-expert capture in the rollout engine for routing-replay diagnostics.",
     )
     parser.add_argument("--nnodes", type=int, default=1, help="Number of nodes to run the engine on.")
-    parser.add_argument("--n-gpus-per-node", type=int, default=8, help="Number of GPUs per node.")
+    parser.add_argument("--n-gpus-per-node", type=int, default=1, help="Number of GPUs per node.")
     parser.add_argument(
-        "--tensor-parallel-size", "--tp", dest="tensor_parallel_size", type=int, default=4, help="Tensor parallel size."
+        "--tensor-parallel-size", "--tp", dest="tensor_parallel_size", type=int, default=1, help="Tensor parallel size."
     )
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.9, help="Engine GPU memory fraction.")
     parser.add_argument(
-        "--language-model-only", action="store_true", help="Enable text-only vLLM language-model mode."
+        "--kv-cache-dtype",
+        default="auto",
+        help="vLLM KV-cache dtype, for example 'auto' or 'fp8'.",
+    )
+    parser.add_argument(
+        "--language-model-only",
+        action="store_true",
+        help="Load only the language-model component (required for text-only Qwen3.5 vLLM runs).",
+    )
+    parser.add_argument(
+        "--disable-thinking",
+        action="store_true",
+        help="Disable thinking in the model chat template.",
     )
     parser.add_argument(
         "--gateway-count",
         type=int,
-        default=4,
+        default=1,
         help="Number of gateway actors fronting the engine (each serves many concurrent sessions).",
     )
     parser.add_argument(
