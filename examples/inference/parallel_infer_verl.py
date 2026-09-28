@@ -1,8 +1,8 @@
-"""Parallel agent inference over a verl-launched engine, through the training path.
+"""Parallel agent inference over a verl-launched engine and agent framework.
 
 Same job as ``parallel_infer_api.py`` (run each row's task, report a score), but verl
-brings the engine up and rollouts flow through the *exact* training stack -- the agent
-framework adapter + TransferQueue (TQ):
+brings the engine up and rollouts flow through the agent framework adapter and
+TransferQueue (TQ):
 
     verl LLMServerManager (vLLM / SGLang)
     ->  AgentFrameworkRolloutAdapter.generate_sequences   (fire-and-forget -> TQ)
