@@ -364,7 +364,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--result-path",
-        default=int(os.getenv("LIMIT", "1")),
+        default=None,
         help="Optional path to write a JSON result file (mean rm_score and per-session scores).",
     )
     parser.add_argument(
@@ -378,7 +378,7 @@ def main() -> None:
         "--max-samples",
         dest="limit",
         type=int,
-        default=None,
+        default=int(os.getenv("LIMIT", "1")),
         help="Only run the first N samples (smoke testing); omit for the full dataset.",
     )
 
