@@ -143,10 +143,14 @@ def parse_agent_result(stdout: str, exit_code: int) -> dict[str, Any]:
 
 
 def _extract_prompt(messages: list[dict[str, Any]]) -> str:
-    """Validate the shared system/user input contract and make one CLI prompt."""
+    """Extract the user task using the mini-swe-agent message contract.
+
+    The Codex sidecar accepts one task string.  Like mini-swe-agent, an optional
+    leading system message is accepted for framework compatibility but is not
+    sent to the sidecar; callers must put task instructions in the user message.
+    """
     if not isinstance(messages, list) or not messages or len(messages) > 2:
         raise ValueError("codex accepts at most 2 messages (system?, user)")
-    system_parts: list[str] = []
     user_parts: list[str] = []
     saw_user = False
     for index, message in enumerate(messages):
@@ -161,22 +165,19 @@ def _extract_prompt(messages: list[dict[str, Any]]) -> str:
         if role == "system":
             if saw_user:
                 raise ValueError("codex system messages must precede the user message")
-            system_parts.append(content)
         else:
             user_parts.append(content)
             saw_user = True
     if len(user_parts) != 1:
         raise ValueError("codex requires exactly one 'user' message")
-    if not system_parts:
-        return user_parts[0]
-    return "System instructions:\n" + "\n\n".join(system_parts) + "\n\nUser task:\n" + user_parts[0]
+    return user_parts[0]
 
 
 class CodexConfig(AgentConfig):
     """Launch parameters for Codex inside the configured sandbox."""
 
     name: str = "codex"
-    run_timeout: float = Field(default=7200.0, description="Maximum wall-clock time for one Codex episode.")
+    run_timeout: float = Field(default=7200.0, gt=0, description="Maximum wall-clock time for one Codex episode.")
     conda_env_path: str | None = Field(
         default=None,
         description="Task-image path of the Conda environment; unset leaves the launch unactivated.",

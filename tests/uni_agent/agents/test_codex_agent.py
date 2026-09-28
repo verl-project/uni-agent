@@ -153,5 +153,5 @@ def test_codex_agent_runs_and_returns_agent_result():
     assert sandbox.calls[0]["workdir"] == "/testbed"
     assert "CONDA_PREFIX=/custom/conda/envs/testbed" in sandbox.calls[0]["script"]
     assert 'PATH=/custom/conda/envs/testbed/bin:/custom/conda/bin:"$PATH"' in sandbox.calls[0]["script"]
-    expected_prompt = "System instructions:\nfollow repository policy\n\nUser task:\nfix bug"
-    assert base64.b64encode(expected_prompt.encode()).decode() in sandbox.calls[0]["script"]
+    assert base64.b64encode(b"fix bug").decode() in sandbox.calls[0]["script"]
+    assert base64.b64encode(b"follow repository policy").decode() not in sandbox.calls[0]["script"]

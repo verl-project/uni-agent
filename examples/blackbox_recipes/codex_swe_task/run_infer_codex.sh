@@ -90,12 +90,13 @@ fi
     --working-dir . \
     -- "${PYTHON_BIN}" examples/inference/parallel_infer_verl.py "${ARGS[@]}"
 
-"${PYTHON_BIN}" - "${RESULT_PATH}" "${LIMIT}" "${N}" <<'PY'
+"${PYTHON_BIN}" - "${RESULT_PATH}" "${LOG_DIR}" "${LIMIT}" "${N}" <<'PY'
 import json
 import sys
 from pathlib import Path
 
-result_path, limit, n = Path(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3])
+result_path, log_dir = Path(sys.argv[1]), Path(sys.argv[2])
+limit, n = int(sys.argv[3]), int(sys.argv[4])
 payload = json.loads(result_path.read_text(encoding="utf-8"))
 scores = payload.get("scores")
 count = int(payload.get("num_scored_sessions", -1))
@@ -103,5 +104,13 @@ if not isinstance(scores, list) or count != len(scores) or count < 1:
     raise SystemExit(f"inference result is incomplete: sessions={count}, scores={scores!r}")
 if limit > 0 and count != limit * max(1, n):
     raise SystemExit(f"unexpected session count: expected {limit * max(1, n)}, got {count}")
-print(f"validated {count} scored session(s); inspect {result_path} and {result_path.parent / 'logs'} for trajectories")
+trajectory_paths = sorted(log_dir.rglob("trajectory.json"))
+if len(trajectory_paths) != count:
+    raise SystemExit(f"expected {count} trajectory files, found {len(trajectory_paths)} under {log_dir}")
+for path in trajectory_paths:
+    trajectory = json.loads(path.read_text(encoding="utf-8"))
+    items = trajectory.get("trajectories", [])
+    if trajectory.get("num_trajectories") != 1 or len(items) != 1 or items[0].get("finished") is not True:
+        raise SystemExit(f"expected one finished trajectory entry in {path}")
+print(f"validated {count} scored session(s) and one finished trajectory per session")
 PY

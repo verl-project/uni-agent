@@ -46,12 +46,17 @@ and `DISABLE_THINKING` accept `1/0` or `true/false` and default to enabled for
 the text-only Qwen setup. `OUTPUT_DIR/result.json` stores scores and
 `OUTPUT_DIR/logs/` stores framework/task trajectories. The launcher rejects a
 pre-existing result or log file and checks that the expected number of sessions
-was scored; reward 0 remains a valid inference result.
+was scored with one finished trajectory entry per session; reward 0 remains a
+valid inference result.
 
 The launcher does not claim that `finished` or reward means SWE-bench solved.
 For a single-task acceptance run, inspect the result and the raw trajectory in
 `logs/` and verify one session, one trajectory entry, `finished=true`, and the
 task reward separately.
+
+The Codex adapter follows the mini-swe-agent input contract: it accepts an
+optional leading system message but passes only the single user task to the
+CLI. Put effective instructions in the user message.
 
 ## Scope and tests
 
