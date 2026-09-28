@@ -10,6 +10,7 @@ REGISTRY=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --registry) REGISTRY="$2"; shift 2 ;;
+    --tag) IMAGE_TAG="$2"; shift 2 ;;
     --version) CODEX_VERSION="$2"; shift 2 ;;
     --npm-registry) NPM_REGISTRY="$2"; shift 2 ;;
     *) echo "Unknown arg: $1" >&2; exit 1 ;;

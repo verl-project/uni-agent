@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import re
 import shlex
 import uuid
 from pathlib import PurePosixPath
@@ -26,6 +27,16 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+_MAX_DIAGNOSTIC_CHARS = 4000
+
+
+def _diagnostic(value: str | None, secret: str = "") -> str:
+    text = value or ""
+    if secret and secret != "EMPTY":
+        text = text.replace(secret, "<redacted>")
+    text = re.sub(r"(?i)(bearer\s+)[^\s\"']+", r"\1<redacted>", text)
+    return text.strip()[-_MAX_DIAGNOSTIC_CHARS:]
+
 
 def build_agent_command(
     *,
@@ -35,7 +46,7 @@ def build_agent_command(
     model_name: str,
     api_key: str,
     conda_env_path: str | None = None,
-    path: str,
+    path: str | None = None,
     project_dir: str = "/testbed",
 ) -> str:
     """Build the shell command that pipes a task into the Codex sidecar.
@@ -51,8 +62,13 @@ def build_agent_command(
             f"CONDA_DEFAULT_ENV={shlex.quote(env_dir.name)} "
             f"CONDA_PREFIX={shlex.quote(str(env_dir))} "
         )
+    path_value = path
+    if path_value is None and conda_env_path:
+        env_dir = PurePosixPath(conda_env_path)
+        path_value = f"{env_dir / 'bin'}:{env_dir.parent.parent / 'bin'}"
+    path_setup = f"PATH={shlex.quote(path_value)}:\"$PATH\" " if path_value else ""
     env = (
-        f"{conda_env_vars}PATH={shlex.quote(path)}:\"$PATH\" "
+        f"{conda_env_vars}{path_setup}"
         f"CODEX_API_BASE={shlex.quote(gateway_url)} "
         f"CODEX_MODEL={shlex.quote(model_name)} "
         f"CODEX_API_KEY={shlex.quote(api_key)} "
@@ -126,6 +142,36 @@ def parse_agent_result(stdout: str, exit_code: int) -> dict[str, Any]:
     return result
 
 
+def _extract_prompt(messages: list[dict[str, Any]]) -> str:
+    """Validate the shared system/user input contract and make one CLI prompt."""
+    if not isinstance(messages, list) or not messages or len(messages) > 2:
+        raise ValueError("codex accepts at most 2 messages (system?, user)")
+    system_parts: list[str] = []
+    user_parts: list[str] = []
+    saw_user = False
+    for index, message in enumerate(messages):
+        if not isinstance(message, dict):
+            raise ValueError(f"codex message {index} must be an object")
+        role = message.get("role")
+        content = message.get("content")
+        if role not in {"system", "user"}:
+            raise ValueError(f"codex only supports initial system/user messages; message {index} has role {role!r}")
+        if not isinstance(content, str) or not content.strip():
+            raise ValueError(f"codex message {index} must have non-empty string content")
+        if role == "system":
+            if saw_user:
+                raise ValueError("codex system messages must precede the user message")
+            system_parts.append(content)
+        else:
+            user_parts.append(content)
+            saw_user = True
+    if len(user_parts) != 1:
+        raise ValueError("codex requires exactly one 'user' message")
+    if not system_parts:
+        return user_parts[0]
+    return "System instructions:\n" + "\n\n".join(system_parts) + "\n\nUser task:\n" + user_parts[0]
+
+
 class CodexConfig(AgentConfig):
     """Launch parameters for Codex inside the configured sandbox."""
 
@@ -135,8 +181,11 @@ class CodexConfig(AgentConfig):
         default=None,
         description="Task-image path of the Conda environment; unset leaves the launch unactivated.",
     )
-    path: str = Field(description="Colon-separated PATH entries to prepend inside the task sandbox.")
-    tool_script: str = Field(description="Sidecar entrypoint, normally /opt/codex/bin/run_agent.sh.")
+    path: str | None = Field(
+        default=None,
+        description="Optional colon-separated PATH entries; unset derives the task Conda bin paths.",
+    )
+    tool_script: str = Field(default="/opt/codex/bin/run_agent.sh", description="Sidecar entrypoint.")
 
 
 @register_agent("codex")
@@ -156,12 +205,7 @@ class CodexAgent(Agent):
         base_url = cfg.model.base_url
         if not base_url:
             raise ValueError("codex: config.model.base_url is not set (the gateway/vLLM policy endpoint)")
-        user_messages = [message.get("content") for message in messages if message.get("role") == "user"]
-        if len(user_messages) != 1:
-            raise ValueError("codex requires exactly one 'user' message")
-        user_prompt = user_messages[0]
-        if not isinstance(user_prompt, str) or not user_prompt.strip():
-            raise ValueError("codex requires a non-empty user prompt")
+        user_prompt = _extract_prompt(messages)
         model_name = cfg.model.model_name
         if not model_name:
             raise ValueError("codex: set config.model.model_name (the model Codex sends)")
@@ -185,16 +229,28 @@ class CodexAgent(Agent):
         logger.info("codex: launch in %s", project_dir)
         proc = await sandbox.exec_shell(command, timeout=cfg.run_timeout, workdir=project_dir)
         parsed = parse_agent_result(proc.stdout or "", proc.exit_code)
-        out_tail = (proc.stdout or "").strip()[-4000:]
-        err_tail = (proc.stderr or "").strip()[-2000:]
+        out_tail = _diagnostic(proc.stdout, api_key)
+        err_tail = _diagnostic(proc.stderr, api_key)
         if proc.exit_code != 0 or parsed.get("error") or not parsed.get("content"):
-            logger.warning("codex: result=%s stdout_tail=%s stderr_tail=%s", parsed, out_tail, err_tail)
+            logger.warning(
+                "codex: status=%s stdout_tail=%s stderr_tail=%s",
+                parsed.get("exit_status"),
+                out_tail,
+                err_tail,
+            )
         return AgentResult(
             output=parsed,
             transcript=list(messages),
             info={
                 **parsed,
                 "exit_code": proc.exit_code,
+                "error_kind": (
+                    None
+                    if parsed.get("ok") is True
+                    else "timeout"
+                    if parsed.get("exit_status") == "timeout"
+                    else "agent_failure"
+                ),
                 "stdout_tail": out_tail,
                 "stderr_tail": err_tail,
             },

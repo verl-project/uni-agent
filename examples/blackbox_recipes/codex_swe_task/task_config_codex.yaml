@@ -1,4 +1,5 @@
-# Codex task configuration for the updated agents/sandbox/tasks architecture.
+# Codex inference-only task configuration for the agents/sandbox/tasks architecture.
+# Timeout values are seconds; provider defaults supply resources not listed here.
 # The task layer owns sandbox lifecycle and reward; the Codex Agent owns only
 # the sidecar launch and result normalization.
 - name: swe_bench
@@ -17,8 +18,6 @@
     name: codex
     run_timeout: 7200
     conda_env_path: /opt/miniconda3/envs/testbed
-    path: /opt/miniconda3/envs/testbed/bin:/opt/miniconda3/bin
-    tool_script: /opt/codex/bin/run_agent.sh
   prompt_template:
     - role: user
       content: |-
