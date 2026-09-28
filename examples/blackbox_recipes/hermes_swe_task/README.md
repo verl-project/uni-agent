@@ -61,8 +61,8 @@ override the recipe config. `RAY_API_SERVER_ADDRESS` is required and must be
 the Ray Jobs API address reachable from the submitting host; the launcher does
 not assume a localhost/default port.
 The launcher waits for submission, rejects stale result/log files, and checks
-the scored-session count. It returns nonzero if inference fails or the result
-is incomplete.
+the scored-session count plus one finished trajectory entry per session. It
+returns nonzero if inference fails or the result is incomplete.
 
 ## Completion
 
