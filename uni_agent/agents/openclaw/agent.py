@@ -222,7 +222,10 @@ class OpenClawAgent(Agent):
         )
         prepared = await sandbox.exec_shell(f"umask 077; mkdir -p {_shell_quote_path(root)}", timeout=30)
         if prepared.exit_code != 0:
-            return AgentResult(finished=False, info={"error_kind": "startup_failure", "session_id": episode_id})
+            return AgentResult(
+                finished=False,
+                info={"error_kind": "startup_failure", "exit_code": prepared.exit_code, "session_id": episode_id},
+            )
         failure = None
         cleanup_error = None
         try:
@@ -268,6 +271,7 @@ class OpenClawAgent(Agent):
                 failure = {
                     "error_kind": "timeout",
                     "error_type": "sandbox_timeout",
+                    "exit_code": -1,
                     "session_id": episode_id,
                     "state_dir": state_dir,
                 }
@@ -283,6 +287,7 @@ class OpenClawAgent(Agent):
             failure = {
                 "error_kind": "timeout" if isinstance(exc, TimeoutError) else "startup_failure",
                 "error_type": type(exc).__name__, "session_id": episode_id, "state_dir": state_dir,
+                "exit_code": -1 if isinstance(exc, TimeoutError) else None,
             }
         finally:
             # Remove credentials only; preserve SQLite state for task-level auditing.
@@ -300,6 +305,7 @@ class OpenClawAgent(Agent):
         payload = parse_openclaw_result(proc.stdout or "")
         info: dict[str, Any] = {
             "exit_code": proc.exit_code,
+            "error_kind": None,
             "stdout_tail": _diagnostic(proc.stdout, model.api_key),
             "stderr_tail": _diagnostic(proc.stderr, model.api_key),
             "cleanup_error": cleanup_error,
@@ -336,7 +342,7 @@ class OpenClawAgent(Agent):
             info["error_kind"] = "agent_failure"
         elif info.get("trajectory_rejected"):
             info["error_kind"] = "trajectory_rejected"
-        if cleanup_error is not None:
-            info.setdefault("error_kind", "cleanup_failure")
+        if cleanup_error is not None and info.get("error_kind") is None:
+            info["error_kind"] = "cleanup_failure"
         return AgentResult(output=_redact(payload or {}, model.api_key), transcript=list(messages),
                            info=_redact(info, model.api_key), finished=finished)
