@@ -33,14 +33,14 @@ repository; this recipe does not include the legacy SDK bridge.
 ## Inference
 
 Install Uni-Agent and the repository's inference dependencies, including the
-pinned `verl` submodule. Use the standard SWE-bench preprocessor documented by
-the task; input rows must already contain `extra_info.tools_kwargs.task`.
-Start/configure Ray separately. Provide a protected runtime-env YAML outside
-the checkout with `PYTHONPATH: verl` under `env_vars`, plus the provider's
-`OPENYUANRONG_SERVER_ADDRESS` and `OPENYUANRONG_TOKEN`. Ray applies these to the
-job driver and workers. Protect Ray's control plane and do not check credentials
-into source control or place that file in the uploaded working directory.
-Data, model and output paths must be available to the execution workers.
+pinned `verl` submodule. Use the standard SWE-bench preprocessor; input rows
+must already contain `extra_info.tools_kwargs.task`. Start/configure Ray
+separately. Provide a protected runtime-env YAML outside the checkout with
+`PYTHONPATH: verl` under `env_vars`, plus the provider settings needed by the
+execution environment. Ray applies these to the job driver and workers.
+Protect Ray's control plane and do not check credentials into source control or
+place that file in the uploaded working directory. Data, model and output paths
+must be available to the execution workers.
 
 ```bash
 DATA_PATH=/absolute/preprocessed-swe-bench.parquet \
@@ -60,7 +60,9 @@ it to `0` only for a model/engine that does not support the option. Configure `N
 override the recipe config. `RAY_API_SERVER_ADDRESS` is required and must be
 the Ray Jobs API address reachable from the submitting host; the launcher does
 not assume a localhost/default port.
-The launcher waits for submission and returns nonzero if inference fails.
+The launcher waits for submission, rejects stale result/log files, and checks
+the scored-session count. It returns nonzero if inference fails or the result
+is incomplete.
 
 ## Completion
 
@@ -70,5 +72,7 @@ remain unfinished. Ordinary inference may legitimately return reward 0.
 
 The launcher records the inference result and framework logs. It does not turn a
 task reward into a launcher success/failure gate; inspect the task result and
-framework trajectory for the run you care about. Hermes-local diagnostics stay
-inside the sandbox.
+framework trajectory for the run you care about. A single-task acceptance run
+must separately verify one scored session, one raw trajectory entry,
+`finished=true`, and the task reward. Hermes-local diagnostics stay inside the
+sandbox.
