@@ -290,6 +290,7 @@ class HermesAgent(Agent):
             "exit_code": process.exit_code,
             "process_exit_code": process.exit_code,
             "stop_reason": envelope.get("stop_reason"),
+            "error_kind": None,
         }
         if envelope["finished"] is not True:
             info["error_kind"] = "timeout" if envelope.get("status") == "timeout" else "agent_failure"
