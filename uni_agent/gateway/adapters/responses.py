@@ -82,8 +82,7 @@ def _content_to_text(content: Any, *, param: str) -> str:
         salvaged = content.get("text", content.get("content", content.get("refusal")))
         if salvaged is not None:
             return _content_to_text(salvaged, param=param)
-        logger.warning("Dropping unknown Responses content block %r at %s", block_type, param)
-        return ""
+        raise MalformedRequestError(f"Unsupported Responses content block {block_type!r} at {param}")
     if isinstance(content, int | float | bool):
         return str(content)
     raise MalformedRequestError(f"Unsupported content value at {param}: {type(content).__name__}")
@@ -199,11 +198,28 @@ def _flatten_tool(
             namespaced.update(child_names)
         return converted, kinds, namespaced
 
-    if tool_type in _IGNORED_TOOL_TYPES or tool_type in _HOSTED_TOOL_TYPES:
-        return [], {}, set()
+    if tool_type in _IGNORED_TOOL_TYPES:
+        raise MalformedRequestError(f"Responses tool type {tool_type!r} is not supported by this gateway")
+    if tool_type in _HOSTED_TOOL_TYPES:
+        source = tool.get("function") if isinstance(tool.get("function"), dict) else tool
+        name = source.get("name") or tool_type
+        if not isinstance(name, str) or not name:
+            raise MalformedRequestError(f"Hosted Responses tool {tool_type!r} requires a name")
+        qualified_name = f"{namespace}{_NAMESPACE_SEPARATOR}{name}" if namespace else name
+        parameters = _clean_schema(
+            source.get("parameters", source.get("input_schema", {"type": "object", "properties": {}}))
+        )
+        declaration = {
+            "type": "function",
+            "function": {
+                "name": qualified_name,
+                "description": str(source.get("description") or ""),
+                "parameters": parameters,
+            },
+        }
+        return [declaration], {qualified_name: str(tool_type)}, {qualified_name} if namespace else set()
     if tool_type not in {"function", "custom"}:
-        logger.warning("Ignoring unsupported Responses tool type %r", tool_type)
-        return [], {}, set()
+        raise MalformedRequestError(f"Unsupported Responses tool type {tool_type!r}")
     if drop_deferred and tool.get("defer_loading"):
         return [], {}, set()
 
@@ -393,11 +409,7 @@ def _messages_from_input(payload: dict[str, Any]) -> list[dict[str, Any]]:
             pending = None
             messages.append({"role": "user", "content": ""})
             continue
-        degraded = _content_to_text(item.get("content", item.get("text", "")), param=param)
-        if degraded:
-            _flush_assistant_pending(messages, pending)
-            pending = None
-            messages.append({"role": "user", "content": degraded})
+        raise MalformedRequestError(f"Unsupported Responses input item type {item_type!r} at {param}")
     _flush_assistant_pending(messages, pending)
     if not any(message.get("role") in {"system", "user"} for message in messages):
         messages.append({"role": "user", "content": ""})
@@ -418,6 +430,21 @@ def responses_to_internal(
         raise MalformedRequestError("stored Responses are not supported")
     if payload.get("previous_response_id") is not None:
         raise MalformedRequestError("previous_response_id is not supported; send the full input history")
+
+    text_config = payload.get("text")
+    if text_config is not None:
+        if not isinstance(text_config, dict):
+            raise MalformedRequestError("text must be an object")
+        response_format = text_config.get("format")
+        if response_format is not None:
+            if not isinstance(response_format, dict) or response_format.get("type") != "text":
+                raise MalformedRequestError(
+                    "Only Responses text.format.type='text' is supported; structured output is not enabled"
+                )
+
+    parallel_tool_calls = payload.get("parallel_tool_calls", True)
+    if type(parallel_tool_calls) is not bool:
+        raise MalformedRequestError("parallel_tool_calls must be a boolean")
 
     tool_choice = payload.get("tool_choice", "auto")
     if isinstance(tool_choice, dict):
@@ -508,7 +535,12 @@ def _output_items(outcome: GenerationOutcome, payload: dict[str, Any]) -> list[d
                 "content": [{"type": "output_text", "text": content, "annotations": [], "logprobs": []}],
             }
         )
-    for tool_call in message.get("tool_calls") or []:
+    tool_calls = message.get("tool_calls") or []
+    if payload.get("parallel_tool_calls", True) is False and len(tool_calls) > 1:
+        raise MalformedRequestError(
+            "Model returned multiple tool calls while parallel_tool_calls=false"
+        )
+    for tool_call in tool_calls:
         if not isinstance(tool_call, dict):
             continue
         function = tool_call.get("function") or {}

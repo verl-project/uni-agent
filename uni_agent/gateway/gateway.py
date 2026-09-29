@@ -234,7 +234,11 @@ class _GatewayActor:
                 model=model,
             )
         outcome = await session.run_generation(internal, self._backend)
-        return JSONResponse(responses_build_response(outcome, payload=payload, model=model))
+        try:
+            response = responses_build_response(outcome, payload=payload, model=model)
+        except MalformedRequestError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return JSONResponse(response)
 
     async def _handle_anthropic_messages(
         self,

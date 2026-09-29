@@ -161,6 +161,135 @@ def test_responses_length_status_and_error_envelope():
     assert responses_error_body(400, "bad", param="input")["error"]["type"] == "invalid_request_error"
 
 
+def test_responses_tool_choice_none_disables_tools():
+    from uni_agent.gateway.adapters.responses import responses_to_internal
+
+    internal = responses_to_internal(
+        _request(tool_choice="none"),
+        base_sampling_params={},
+        allowed_sampling_keys=ALLOWED_SAMPLING_KEYS,
+    )
+    assert internal["tools"] is None
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"text": {"format": {"type": "json_schema", "name": "result", "schema": {}}}},
+    ],
+)
+def test_responses_rejects_unsupported_capability_flags(overrides):
+    from uni_agent.gateway.adapters.responses import responses_to_internal
+    from uni_agent.gateway.adapters.types import MalformedRequestError
+
+    with pytest.raises(MalformedRequestError):
+        responses_to_internal(
+            _request(**overrides),
+            base_sampling_params={},
+            allowed_sampling_keys=ALLOWED_SAMPLING_KEYS,
+        )
+
+
+def test_responses_accepts_parallel_tool_calls_false_for_single_call():
+    from uni_agent.gateway.adapters.responses import responses_to_internal
+
+    internal = responses_to_internal(
+        _request(parallel_tool_calls=False),
+        base_sampling_params={},
+        allowed_sampling_keys=ALLOWED_SAMPLING_KEYS,
+    )
+    assert internal["messages"][1]["role"] == "user"
+
+
+def test_responses_rejects_multiple_tool_calls_when_parallel_disabled():
+    from uni_agent.gateway.adapters.responses import responses_build_response
+    from uni_agent.gateway.adapters.types import MalformedRequestError
+
+    with pytest.raises(MalformedRequestError):
+        responses_build_response(
+            _outcome(
+                tool_calls=[
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {"name": "exec", "arguments": {"input": "pwd"}},
+                    },
+                    {
+                        "id": "call-2",
+                        "type": "function",
+                        "function": {"name": "exec", "arguments": {"input": "ls"}},
+                    },
+                ]
+            ),
+            payload=_request(parallel_tool_calls=False),
+            model="policy",
+        )
+
+
+def test_responses_rejects_unknown_tool_type_instead_of_dropping_it():
+    from uni_agent.gateway.adapters.responses import responses_to_internal
+    from uni_agent.gateway.adapters.types import MalformedRequestError
+
+    with pytest.raises(MalformedRequestError):
+        responses_to_internal(
+            _request(tools=[{"type": "future_hosted_tool", "name": "lookup"}]),
+            base_sampling_params={},
+            allowed_sampling_keys=ALLOWED_SAMPLING_KEYS,
+        )
+
+
+def test_responses_preserves_known_hosted_tool_as_parser_declaration():
+    from uni_agent.gateway.adapters.responses import responses_to_internal
+
+    internal = responses_to_internal(
+        _request(tools=[{"type": "web_search", "description": "Search the web"}]),
+        base_sampling_params={},
+        allowed_sampling_keys=ALLOWED_SAMPLING_KEYS,
+    )
+    assert internal["tools"] == [
+        {
+            "type": "function",
+            "function": {
+                "name": "web_search",
+                "description": "Search the web",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
+
+
+def test_responses_rejects_unknown_input_item_instead_of_degrading_it():
+    from uni_agent.gateway.adapters.responses import responses_to_internal
+    from uni_agent.gateway.adapters.types import MalformedRequestError
+
+    with pytest.raises(MalformedRequestError):
+        responses_to_internal(
+            _request(input=[{"type": "future_input_item", "content": "not understood"}]),
+            base_sampling_params={},
+            allowed_sampling_keys=ALLOWED_SAMPLING_KEYS,
+        )
+
+
+def test_responses_rejects_unknown_content_block_instead_of_dropping_it():
+    from uni_agent.gateway.adapters.responses import responses_to_internal
+    from uni_agent.gateway.adapters.types import MalformedRequestError
+
+    with pytest.raises(MalformedRequestError):
+        responses_to_internal(
+            _request(
+                input=[
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "future_content_block", "value": "not understood"}],
+                    }
+                ]
+            ),
+            base_sampling_params={},
+            allowed_sampling_keys=ALLOWED_SAMPLING_KEYS,
+        )
+
+
 @pytest.mark.asyncio
 async def test_responses_stream_emits_heartbeats_and_custom_events():
     from uni_agent.gateway.adapters.responses import responses_stream_response
