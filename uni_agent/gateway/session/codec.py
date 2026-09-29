@@ -444,6 +444,12 @@ class MessageCodec:
         for tool_call in tool_calls:
             normalized_tool_call = dict(tool_call)
             normalized_tool_call.pop("id", None)
+            normalized_tool_call["type"] = "function"
+            function = normalized_tool_call.get("function")
+            if isinstance(function, dict) and "arguments" in function:
+                normalized_function = dict(function)
+                normalized_function["arguments"] = normalize_tool_arguments(function["arguments"])
+                normalized_tool_call["function"] = normalized_function
             normalized_tool_calls.append(normalized_tool_call)
         normalized["tool_calls"] = normalized_tool_calls
         return normalized

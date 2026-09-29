@@ -186,6 +186,10 @@ def _normalize_message(message: Any) -> dict[str, Any]:
         normalized["tool_calls"] = _normalize_tool_calls(message["tool_calls"])
     if "tool_call_id" in message:
         normalized["tool_call_id"] = str(message["tool_call_id"])
+    if "tools" in message:
+        if not isinstance(message["tools"], list):
+            raise MalformedRequestError("message.tools must be a list")
+        normalized["tools"] = message["tools"]
     if "reasoning_content" in message:
         reasoning_content = message["reasoning_content"]
         if reasoning_content is not None and not isinstance(reasoning_content, str):

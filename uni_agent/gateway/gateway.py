@@ -29,6 +29,7 @@ from uni_agent.gateway.adapters.openai import (
 )
 from uni_agent.gateway.adapters.responses import (
     responses_build_response,
+    responses_error_body,
     responses_stream_response,
     responses_to_internal,
 )
@@ -102,6 +103,8 @@ class _GatewayActor:
         def _error_body_for_path(path: str, status_code: int, message: str) -> dict[str, Any]:
             if path.endswith("/v1/messages"):
                 return anthropic_error_body(status_code, message)
+            if path.endswith("/v1/responses"):
+                return responses_error_body(status_code, message)
             return openai_error_body(status_code, message)
 
         @self._app.exception_handler(HTTPException)
@@ -223,11 +226,15 @@ class _GatewayActor:
         except MalformedRequestError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-        outcome = await session.run_generation(internal, self._backend)
         model = str(payload.get("model") or "unknown")
         if payload.get("stream") is True:
-            return responses_stream_response(outcome, model=model)
-        return JSONResponse(responses_build_response(outcome, model=model))
+            return responses_stream_response(
+                lambda: session.run_generation(internal, self._backend),
+                payload=payload,
+                model=model,
+            )
+        outcome = await session.run_generation(internal, self._backend)
+        return JSONResponse(responses_build_response(outcome, payload=payload, model=model))
 
     async def _handle_anthropic_messages(
         self,

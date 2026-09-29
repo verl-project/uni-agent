@@ -5,6 +5,7 @@ from .openai import (
     openai_stream_response,
     openai_to_internal,
 )
+from .responses import responses_build_response, responses_error_body, responses_stream_response, responses_to_internal
 from .types import MalformedRequestError
 
 __all__ = [
@@ -17,4 +18,8 @@ __all__ = [
     "openai_error_body",
     "openai_stream_response",
     "openai_to_internal",
+    "responses_build_response",
+    "responses_error_body",
+    "responses_stream_response",
+    "responses_to_internal",
 ]
