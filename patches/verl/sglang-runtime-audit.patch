@@ -1,0 +1,385 @@
+diff --git a/verl/trainer/config/rollout/rollout.yaml b/verl/trainer/config/rollout/rollout.yaml
+index 99ca1864..c445fe7e 100644
+--- a/verl/trainer/config/rollout/rollout.yaml
++++ b/verl/trainer/config/rollout/rollout.yaml
+@@ -278,6 +278,10 @@ checkpoint_engine:
+   # Target class for checkpoint engine config
+   _target_: verl.workers.config.CheckpointEngineConfig
+
++  # Whether placement workers initialize checkpoint engines and weight-update adapters.
++  # Training keeps this enabled; standalone inference with fixed weights may disable it.
++  enabled: true
++
+   # Backend for checkpoint engine: naive, nccl, nixl, hccl
+   backend: naive
+
+diff --git a/verl/workers/config/rollout.py b/verl/workers/config/rollout.py
+index fa8441c7..0ca3858f 100644
+--- a/verl/workers/config/rollout.py
++++ b/verl/workers/config/rollout.py
+@@ -129,6 +129,11 @@ class CheckpointEngineConfig(BaseConfig):
+
+     _mutable_fields = {"backend"}
+
++    # Whether rollout placement workers initialize checkpoint engines and
++    # backend-specific weight-update adapters. Keep enabled for training; a
++    # standalone inference entrypoint with no trainer weight source may opt out.
++    enabled: bool = True
++
+     # Backend for checkpoint engine: naive, nccl, nixl, hccl
+     backend: Optional[str] = "naive"
+     # Bucket size in MB to transfer multiple weights at one time
+diff --git a/verl/workers/rollout/replica.py b/verl/workers/rollout/replica.py
+index 1b7c8c76..a0559ecb 100644
+--- a/verl/workers/rollout/replica.py
++++ b/verl/workers/rollout/replica.py
+@@ -36,6 +36,19 @@ logger = logging.getLogger(__file__)
+ CONTROL_METHOD_CONCURRENCY = 16
+
+
++class _StandalonePlacementWorker:
++    """Reserve a rollout placement slot without loading weight-sync runtimes.
++
++    Ray actor handles expose ``__ray_call__`` for the node/device discovery used
++    by rollout server launchers. Fixed-weight standalone inference needs that
++    placement lifetime, but it has no trainer weight source and therefore does
++    not need a checkpoint engine or backend-specific server adapter.
++    """
++
++    def __init__(self, replica_rank: int) -> None:
++        self.replica_rank = replica_rank
++
++
+ class TokenOutput(BaseModel):
+     token_ids: list[int]
+     """response token ids"""
+@@ -227,6 +240,15 @@ class RolloutReplica(ABC):
+
+     def get_ray_class_with_init_args(self) -> RayClassWithInitArgs:
+         """Get rollout worker actor class for colocated and standalone mode."""
++        checkpoint_workers_enabled = getattr(self.config.checkpoint_engine, "enabled", True)
++        if not checkpoint_workers_enabled:
++            if self.rollout_mode is not RolloutMode.STANDALONE:
++                raise ValueError("checkpoint_engine.enabled=False is supported only for standalone rollout")
++            return RayClassWithInitArgs(
++                cls=ray.remote(_StandalonePlacementWorker),
++                replica_rank=self.replica_rank,
++            )
++
+         from verl.checkpoint_engine.base import CheckpointEngineWorker
+
+         rollout_worker_actor_cls = ray.remote(CheckpointEngineWorker)
+diff --git a/verl/workers/rollout/sglang_rollout/async_sglang_server.py b/verl/workers/rollout/sglang_rollout/async_sglang_server.py
+index 70cd649b..4032f245 100644
+--- a/verl/workers/rollout/sglang_rollout/async_sglang_server.py
++++ b/verl/workers/rollout/sglang_rollout/async_sglang_server.py
+@@ -18,29 +18,14 @@ import json
+ import logging
+ import os
+ import secrets
++import sys
+ from pathlib import Path
+ from typing import Any, Optional
+
+ import ray
+-import sglang
+-import sglang.srt.entrypoints.engine
+ import torch
+ from packaging import version
+ from ray.actor import ActorHandle
+-from sglang.srt.entrypoints.http_server import (
+-    ServerArgs,
+-    _GlobalState,
+-    app,
+-    set_global_state,
+-)
+-from sglang.srt.managers.io_struct import (
+-    ContinueGenerationReqInput,
+-    GenerateReqInput,
+-    PauseGenerationReqInput,
+-    ReleaseMemoryOccupationReqInput,
+-    ResumeMemoryOccupationReqInput,
+-)
+-from sglang.srt.managers.tokenizer_manager import ServerStatus
+
+ from verl.plugin.platform import get_platform
+ from verl.utils.config import omega_conf_to_dataclass
+@@ -55,7 +40,6 @@ from verl.utils.profiler import (
+ from verl.utils.tracking import RLInsightLogger
+ from verl.workers.config import HFModelConfig, RolloutConfig
+ from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
+-from verl.workers.rollout.sglang_rollout.sglang_rollout import _set_envs_and_config
+ from verl.workers.rollout.sglang_rollout.utils import (
+     SGLANG_LORA_NAME,
+     lora_rank_of,
+@@ -67,6 +51,52 @@ from verl.workers.rollout.utils import get_max_position_embeddings, run_uvicorn
+ logger = logging.getLogger(__file__)
+ logger.setLevel(logging.INFO)
+
++
++def _server_args_has_field(server_args_type: type, field_name: str) -> bool:
++    """Check a ServerArgs field across SGLang's config-record implementations."""
++    try:
++        return any(field.name == field_name for field in dataclasses.fields(server_args_type))
++    except TypeError:
++        pass
++
++    try:
++        import msgspec.structs
++
++        return any(field.name == field_name for field in msgspec.structs.fields(server_args_type))
++    except (AttributeError, ImportError, TypeError):
++        annotations = getattr(server_args_type, "__annotations__", {})
++        return field_name in annotations
++
++
++def _load_sglang_runtime() -> None:
++    """Import SGLang only inside its Ray server actor's selected runtime."""
++    global sglang, ServerArgs, _GlobalState, app, set_global_state
++    global ContinueGenerationReqInput, GenerateReqInput, PauseGenerationReqInput
++    global ReleaseMemoryOccupationReqInput, ResumeMemoryOccupationReqInput, ServerStatus
++    global _set_envs_and_config
++
++    import importlib
++
++    sglang = importlib.import_module("sglang")
++    importlib.import_module("sglang.srt.entrypoints.engine")
++    http_server = importlib.import_module("sglang.srt.entrypoints.http_server")
++    io_struct = importlib.import_module("sglang.srt.managers.io_struct")
++    tokenizer_manager = importlib.import_module("sglang.srt.managers.tokenizer_manager")
++    rollout_module = importlib.import_module("verl.workers.rollout.sglang_rollout.sglang_rollout")
++
++    ServerArgs = http_server.ServerArgs
++    _GlobalState = http_server._GlobalState
++    app = http_server.app
++    set_global_state = http_server.set_global_state
++    ContinueGenerationReqInput = io_struct.ContinueGenerationReqInput
++    GenerateReqInput = io_struct.GenerateReqInput
++    PauseGenerationReqInput = io_struct.PauseGenerationReqInput
++    ReleaseMemoryOccupationReqInput = io_struct.ReleaseMemoryOccupationReqInput
++    ResumeMemoryOccupationReqInput = io_struct.ResumeMemoryOccupationReqInput
++    ServerStatus = tokenizer_manager.ServerStatus
++    _set_envs_and_config = rollout_module._set_envs_and_config
++
++
+ visible_devices_keyword = get_visible_devices_keyword()
+
+
+@@ -149,11 +179,20 @@ class SGLangHttpServer:
+         disaggregation_role: str = "null",
+         disaggregation_bootstrap_port: Optional[int] = None,
+     ):
++        os.environ[visible_devices_keyword] = cuda_visible_devices
++        _load_sglang_runtime()
+         print(
+             f"SGLang http server: {rollout_mode=}, {replica_rank=}, {node_rank=}, "
+             f"{nnodes=}, {cuda_visible_devices=}, role={disaggregation_role}"
+         )
+-        os.environ[visible_devices_keyword] = cuda_visible_devices
++        logger.info(
++            "sglang runtime identity: pid=%s python=%s sglang_version=%s sglang_module=%s "
++            "torch_version=%s torch_module=%s ray_version=%s ray_module=%s "
++            "replica_rank=%s node_rank=%s CUDA_VISIBLE_DEVICES=%s",
++            os.getpid(), sys.executable, sglang.__version__, sglang.__file__,
++            torch.__version__, torch.__file__, ray.__version__, ray.__file__,
++            replica_rank, node_rank, cuda_visible_devices,
++        )
+
+         assert disaggregation_role in ("null", "prefill", "decode"), (
+             f"disaggregation_role must be 'null'|'prefill'|'decode', got {disaggregation_role!r}"
+@@ -179,6 +218,7 @@ class SGLangHttpServer:
+         self.node_rank = node_rank
+         self.nnodes = nnodes
+         self.base_gpu_id = base_gpu_id
++        self._request_stop_tokenizer = None
+         # model weights version, set by ServerAdapter when update weights.
+         self.global_steps = None
+
+@@ -237,6 +277,22 @@ class SGLangHttpServer:
+         assert self._server_port is not None, "http server is not launched, port is None"
+         return self._server_address, self._server_port
+
++    def get_runtime_identity(self) -> dict[str, Any]:
++        """Return package and device identity from this SGLang server actor."""
++        return {
++            "pid": os.getpid(),
++            "python_executable": sys.executable,
++            "sglang_version": sglang.__version__,
++            "sglang_module_file": sglang.__file__,
++            "torch_version": torch.__version__,
++            "torch_module_file": torch.__file__,
++            "ray_version": ray.__version__,
++            "ray_module_file": ray.__file__,
++            "replica_rank": self.replica_rank,
++            "node_rank": self.node_rank,
++            "cuda_visible_devices": os.environ.get(visible_devices_keyword),
++        }
++
+     async def set_pd_peer(self, decode_peers: list, bootstrap_host: str):
+         assert isinstance(decode_peers, list) and decode_peers
+         self._pd_decode_peers = list(decode_peers)
+@@ -372,7 +428,7 @@ class SGLangHttpServer:
+             args["enable_metrics"] = True
+
+         # enable_weights_cpu_backup is supported in sglang>=0.5.3
+-        if "enable_weights_cpu_backup" in [f.name for f in dataclasses.fields(ServerArgs)]:
++        if _server_args_has_field(ServerArgs, "enable_weights_cpu_backup"):
+             # HYBRID mode also needs CPU weight backup so that:
+             #   1. sleep() can release GPU weights to free memory for the training engine.
+             #   2. naive update_weights() can call resume(tags=["weights"]) to reload weights
+@@ -554,6 +610,7 @@ class SGLangHttpServer:
+         bootstrap_port: Optional[int] = None,
+         bootstrap_room: Optional[int] = None,
+     ) -> TokenOutput:
++        logger.info("sglang request dispatch: request_id=%s prompt_tokens=%s", request_id, len(prompt_ids))
+         # PD top-level dispatch: prefill mints a bootstrap_room and fans out
+         # paired local-prefill + remote-decode calls; decode returns the tokens
+         # (prefill only materialises KV and pushes via NIXL). Random peer
+@@ -593,6 +650,64 @@ class SGLangHttpServer:
+                 f"({self.config.max_model_len})."
+             )
+
++        # Some checkpoints omit EOS metadata from config.json even though the
++        # tokenizer declares the actual turn terminator.  Pass those ids at
++        # request level as well as through SGLang's model config so stop
++        # handling remains correct for isolated language-model-only actors.
++        tokenizer = getattr(self.tokenizer_manager, "tokenizer", None)
++        tokenizer_source = "manager"
++        if tokenizer is None:
++            # SGLang's tokenizer manager can omit the tokenizer object in an
++            # isolated actor even though the scheduler owns one. Load the same
++            # local tokenizer once in this actor so request-level stop controls
++            # are still explicit and auditable.
++            if self._request_stop_tokenizer is None:
++                try:
++                    import importlib
++
++                    tokenizer_module = importlib.import_module("sglang.srt.utils.hf_transformers")
++                    self._request_stop_tokenizer = tokenizer_module.get_tokenizer(self.model_config.local_path)
++                except Exception as exc:  # pragma: no cover - runtime fallback
++                    logger.warning("unable to load request stop tokenizer: %s", exc)
++            tokenizer = self._request_stop_tokenizer
++            tokenizer_source = "actor-local"
++        tokenizer_eos = getattr(tokenizer, "eos_token_id", None)
++        if tokenizer is not None and tokenizer_eos is not None:
++            stop_token_ids = set(sampling_params.get("stop_token_ids") or ())
++            if isinstance(tokenizer_eos, (list, tuple, set)):
++                stop_token_ids.update(tokenizer_eos)
++            else:
++                stop_token_ids.add(tokenizer_eos)
++            stop_token_ids.update(getattr(tokenizer, "additional_stop_token_ids", None) or ())
++            sampling_params["stop_token_ids"] = stop_token_ids
++            # ``skip_tokenizer_init=True`` is used by the language-model-only
++            # actor.  In that mode the scheduler cannot evaluate string stop
++            # sequences, even though this actor has loaded a tokenizer for
++            # deriving EOS ids.  Passing ``stop=<|im_end|>`` here makes
++            # SGLang raise ``ValueError`` before generation and the gateway
++            # exposes it as the client's ``BadRequestError``.  Token-id stops
++            # remain supported without a scheduler tokenizer.
++            tokenizer_eos_text = getattr(tokenizer, "eos_token", None)
++            if tokenizer_source == "manager" and isinstance(tokenizer_eos_text, str) and tokenizer_eos_text:
++                existing_stop = sampling_params.get("stop")
++                if existing_stop is None:
++                    stop_sequences: list[str] = []
++                elif isinstance(existing_stop, str):
++                    stop_sequences = [existing_stop]
++                else:
++                    stop_sequences = list(existing_stop)
++                if tokenizer_eos_text not in stop_sequences:
++                    stop_sequences.append(tokenizer_eos_text)
++                sampling_params["stop"] = stop_sequences[0] if len(stop_sequences) == 1 else stop_sequences
++            if os.environ.get("UNI_AGENT_SGLANG_RESPONSE_DIAGNOSTICS") == "1":
++                logger.warning(
++                    "sglang request stop controls: request_id=%s source=%s stop_token_ids=%s stop=%s",
++                    request_id,
++                    tokenizer_source,
++                    sorted(stop_token_ids),
++                    sampling_params.get("stop"),
++                )
++
+         if "max_new_tokens" in sampling_params:
+             max_new_tokens = sampling_params.pop("max_new_tokens")
+         elif "max_tokens" in sampling_params:
+@@ -658,6 +773,27 @@ class SGLangHttpServer:
+         meta_info = output.get("meta_info", {})
+         finish_reason = meta_info.get("finish_reason")
+         finish_reason = finish_reason["type"] if finish_reason else None
++        if os.environ.get("UNI_AGENT_SGLANG_RESPONSE_DIAGNOSTICS") == "1":
++            diagnostic_ids = list(output.get("output_ids", []))
++            diagnostic_tail = ""
++            try:
++                tokenizer = getattr(self.tokenizer_manager, "tokenizer", None) or self._request_stop_tokenizer
++                if tokenizer is not None and diagnostic_ids:
++                    diagnostic_tail = tokenizer.decode(
++                        diagnostic_ids[-256:], skip_special_tokens=False
++                    )[-512:]
++            except Exception as exc:  # pragma: no cover - diagnostic-only best effort
++                diagnostic_tail = f"<decode-error:{type(exc).__name__}>"
++            logger.warning(
++                "sglang response diagnostic: request_id=%s output_tokens=%s finish_reason=%s "
++                "first_ids=%s last_ids=%s tail=%r",
++                request_id,
++                len(diagnostic_ids),
++                finish_reason,
++                diagnostic_ids[:8],
++                diagnostic_ids[-8:],
++                diagnostic_tail,
++            )
+         if return_logprob:
+             token_ids = list(output.get("output_ids", []))
+             output_token_logprobs = meta_info.get("output_token_logprobs") or []
+@@ -841,17 +977,48 @@ class SGLangReplica(RolloutReplica):
+                 name = f"sglang_server_teacher_{self.replica_rank}_{node_rank}{self.name_suffix}"
+             else:
+                 name = f"sglang_server_{self.replica_rank}_{node_rank}{self.name_suffix}"
++            server_runtime_env = {
++                "env_vars": {
++                    **{var: "1" for var in get_platform().ray_noset_envvars()},
++                    **get_platform().rollout_env_vars(),
++                }
++            }
++            sglang_python = os.environ.get("UNI_AGENT_SGLANG_PYTHON")
++            sglang_pythonpath = os.environ.get("UNI_AGENT_SGLANG_PYTHONPATH")
++            if bool(sglang_python) != bool(sglang_pythonpath):
++                raise ValueError("UNI_AGENT_SGLANG_PYTHON and UNI_AGENT_SGLANG_PYTHONPATH must be set together")
++            if sglang_python and sglang_pythonpath:
++                server_runtime_env["py_executable"] = sglang_python
++                server_runtime_env["env_vars"]["PYTHONPATH"] = sglang_pythonpath
++            sglang_ld_library_path = os.environ.get("UNI_AGENT_SGLANG_LD_LIBRARY_PATH")
++            if sglang_ld_library_path:
++                server_runtime_env["env_vars"]["LD_LIBRARY_PATH"] = sglang_ld_library_path
++            sglang_cuda_home = os.environ.get("UNI_AGENT_SGLANG_CUDA_HOME")
++            sglang_path = os.environ.get("UNI_AGENT_SGLANG_PATH")
++            if sglang_cuda_home:
++                server_runtime_env["env_vars"]["CUDA_HOME"] = sglang_cuda_home
++                server_runtime_env["env_vars"]["CUDA_PATH"] = sglang_cuda_home
++            sglang_cpath = os.environ.get("UNI_AGENT_SGLANG_CPATH")
++            if sglang_cpath:
++                server_runtime_env["env_vars"]["CPATH"] = sglang_cpath
++                server_runtime_env["env_vars"]["CPLUS_INCLUDE_PATH"] = sglang_cpath
++            for source_key, target_key in (
++                ("UNI_AGENT_SGLANG_CUDAHOSTCXX", "CUDAHOSTCXX"),
++                ("UNI_AGENT_SGLANG_CC", "CC"),
++                ("UNI_AGENT_SGLANG_CXX", "CXX"),
++            ):
++                compiler = os.environ.get(source_key)
++                if compiler:
++                    server_runtime_env["env_vars"][target_key] = compiler
++            if sglang_path:
++                server_runtime_env["env_vars"]["PATH"] = sglang_path
++
+             server = self.server_class.options(
+                 scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
+                     node_id=node_id,
+                     soft=False,
+                 ),
+-                runtime_env={
+-                    "env_vars": {
+-                        **{var: "1" for var in get_platform().ray_noset_envvars()},
+-                        **get_platform().rollout_env_vars(),
+-                    }
+-                },
++                runtime_env=server_runtime_env,
+                 name=name,
+                 max_concurrency=self.max_concurrency,
+             ).remote(

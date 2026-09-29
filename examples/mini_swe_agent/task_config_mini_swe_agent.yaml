@@ -45,15 +45,17 @@
 - name: swe_bench
   sandbox:
     provider: openyuanrong
-    runtime_timeout: 7200
+    runtime_timeout: 10800
     image_map:
       - from: "swebench/**"
         to: "swr.cn-east-3.myhuaweicloud.com/openyuanrong/swe-bench-verified/**:v2"
     sandbox_kwargs:
       proxy_port: 38197
+      idle_timeout: 10800
       mounts:
         - target: /opt/mini-swe-agent
           image_url: swr.cn-east-3.myhuaweicloud.com/openyuanrong/mini-swe-agent-tool:20260910
+  eval_timeout: 1800
   agent:
     name: mini_swe_agent
     step_limit: 100

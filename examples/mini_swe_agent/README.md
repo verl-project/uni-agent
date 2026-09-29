@@ -235,6 +235,77 @@ rewritten through the reverse tunnel when `proxy_port` is set).
 | `VAL_BEFORE_TRAIN` | `true` | Run validation before the first step |
 | `CKPTS_DIR` | `checkpoints/${PROJECT_NAME}/${EXPERIMENT_NAME}` | Checkpoint root |
 
+## Single-task inference
+
+The inference launcher supports both rollout engines. It keeps vLLM as the
+default and passes the selected engine through the existing verl
+LLMServerManager path. Qwen3.5 text-only serving uses the
+language_model_only option; the selected engine must support this model mode.
+For SGLang release/v0.5.20, apply the narrowly scoped compatibility patch at
+../../patches/sglang/qwen3_5_language_model_only.patch before starting the
+SGLang environment.
+
+The fixed-weight standalone inference path also needs the pinned verl adapter
+patch. From the repository root, apply it to the checked-out `verl` submodule:
+
+```bash
+git -C verl apply ../patches/verl/sglang-runtime-audit.patch
+```
+
+These patches are source-level compatibility adapters for the locked refs; they
+do not contain hostnames, model paths, credentials, GPU-specific process IDs,
+or experiment artifacts.
+
+Keep SGLang and its CUDA 13.0 PyTorch stack in the repository-local
+`.envs/sglang-v0.5.20` environment. The Ray job driver and general workers stay in
+the selected driver environment; only the SGLang HTTP server actor uses the
+isolated Python and actor-specific package path. The launcher does not install or
+upgrade packages in the driver environment. FlashInfer cubins, Triton, Hugging
+Face, and temporary files are redirected under the checkout's `.cache/` and
+`.tmp/` directories.
+
+The launcher requires an existing one-row SWE-bench parquet, a local model
+directory, and the path to a permission-0600 OpenYuanRong credential file.
+It passes only the file path to Ray; the sandbox provider reads the allow-listed
+settings inside the worker and maps the legacy AKernel token only when its
+endpoint matches the OpenYuanRong endpoint.
+
+For the remote single-node 8-GPU smoke, configure ENGINE=vllm or ENGINE=sglang,
+TENSOR_PARALLEL_SIZE=8, N_GPUS_PER_NODE=8, LIMIT=1, N=1, CONCURRENCY=1, and
+GATEWAY_COUNT=1. The launcher writes each run under a fresh artifacts/run_id
+directory and keeps Ray temporary files, logs, caches and model outputs under
+the checkout root.
+
+    DATA_PATH=/path/to/one-row-swe-bench.parquet
+    MODEL_PATH=/path/to/Qwen3.5-9B
+    OPENYUANRONG_CREDENTIAL_FILE=/path/to/protected/openyuanrong.env
+    ENGINE=sglang
+    TENSOR_PARALLEL_SIZE=8
+    N_GPUS_PER_NODE=8
+    LANGUAGE_MODEL_ONLY=1
+    LIMIT=1 N=1 CONCURRENCY=1 GATEWAY_COUNT=1
+    bash examples/mini_swe_agent/run_infer_mini_swe_agent.sh
+
+The launcher records a pre-run manifest and, after engine initialization, the
+resolved config, effective runtime manifest, peak-GPU snapshot, and GPU
+process-to-UUID mapping in the run directory. After the run, validate the
+formal SGLang result (including actor identity, session/request linkage, one raw
+trajectory, token/logprob alignment, and SWE-bench resolution) with:
+
+    python examples/mini_swe_agent/verify_single_swe_rollout.py \
+        --run-dir artifacts/<run_id> \
+        --backend sglang \
+        --expected-instance-id astropy__astropy-12907
+
+For a vLLM control whose task may remain unresolved, use the same verifier with
+`--backend vllm --protocol-only`; this still requires a submitted task, completed
+verifier, one scored session, and one complete trajectory.
+
+If host-memory evidence shows an OOM during CUDA graph capture, set
+`ENFORCE_EAGER=1` for both backend runs. This disables CUDA graphs without
+changing model, data, tensor-parallel shape, or sampling; the value is recorded
+in each run manifest.
+
 ### How the time budgets relate
 
 - `agent.step_limit` caps the number of agent turns.

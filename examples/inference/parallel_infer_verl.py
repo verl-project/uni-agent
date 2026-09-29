@@ -28,12 +28,16 @@ endpoint is the gateway session, bound by the runner, not a flag.
 """
 
 import argparse
+import importlib
 import json
 import logging
 import os
+import socket
+import sys
 import time
 from collections import defaultdict
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 import numpy as np
@@ -110,8 +114,10 @@ def init_config(args: argparse.Namespace, *, served_model_name: str):
     config.actor_rollout_ref.model.path = os.path.expanduser(args.model_path)
     rollout.name = args.engine
     rollout.mode = "async"
+    rollout.enforce_eager = bool(getattr(args, "enforce_eager", False))
     # Standalone inference has no trainer to broadcast weights.
     rollout.load_format = "auto"
+    rollout.checkpoint_engine.enabled = False
     rollout.prompt_length = DEFAULT_PROMPT_LENGTH
     rollout.response_length = response_length
     rollout.max_model_len = rollout.prompt_length + rollout.response_length
@@ -129,6 +135,13 @@ def init_config(args: argparse.Namespace, *, served_model_name: str):
             getattr(args, "kv_cache_dtype", "auto"),
             force_add=True,
         )
+    if getattr(args, "language_model_only", False):
+        OmegaConf.update(
+            config,
+            f"actor_rollout_ref.rollout.engine_kwargs.{args.engine}.language_model_only",
+            True,
+            force_add=True,
+        )
 
     # Gateway tool-call parser: the gateway decodes tool calls from raw tokens, so
     # this must match the model's chat template (the analog of vLLM's
@@ -142,6 +155,7 @@ def init_config(args: argparse.Namespace, *, served_model_name: str):
             "task": {
                 "runner_fqn": "uni_agent.framework.task_runner.run_task",
                 "dispatch_mode": "ray_task",
+                "trajectory_selection": "all",
                 "max_concurrent_sessions": max(0, args.concurrency),
                 "runner_kwargs": {
                     "task_config_path": args.task_config,
@@ -275,10 +289,142 @@ def _report(
             "mean_rm_score_over_prompts": mean_over_prompts,
             "scores": scores,
             "scores_by_uid": per_uid,
+            "uid_status": uid_status,
+            "final_tq_keys": read["final_keys"],
+            "all_tq_trajectory_keys": read["traj_keys"],
         }
         with open(result_path, "w") as f:
             json.dump(payload, f, indent=2)
         logger.info(f"wrote result file to: {result_path}")
+
+
+def _write_runtime_manifest(
+    log_dir: str,
+    *,
+    args: argparse.Namespace,
+    config,
+    samples: list[dict],
+    served_model_name: str,
+    server_addresses: list[str],
+    server_identities: list[dict[str, Any]] | None = None,
+) -> None:
+    """Persist a credential-free record of the effective inference runtime."""
+    if not log_dir:
+        return
+
+    backend_module_name = "sglang" if args.engine == "sglang" else "vllm"
+    engine_actor_identities = server_identities or []
+    if args.engine == "sglang":
+        if not engine_actor_identities:
+            raise RuntimeError("SGLang server actors did not return runtime identity")
+        identity = engine_actor_identities[0]
+        backend_runtime = {
+            "module": "sglang",
+            "version": identity.get("sglang_version"),
+            "module_file": identity.get("sglang_module_file"),
+            "python_executable": identity.get("python_executable"),
+            "torch_version": identity.get("torch_version"),
+            "torch_module_file": identity.get("torch_module_file"),
+            "ray_version": identity.get("ray_version"),
+            "ray_module_file": identity.get("ray_module_file"),
+        }
+    else:
+        backend_module = importlib.import_module(backend_module_name)
+        torch_module = importlib.import_module("torch")
+        backend_runtime = {
+            "module": backend_module_name,
+            "version": getattr(backend_module, "__version__", None),
+            "module_file": getattr(backend_module, "__file__", None),
+            "python_executable": sys.executable,
+            "torch_version": torch_module.__version__,
+            "torch_module_file": torch_module.__file__,
+            "ray_version": ray.__version__,
+            "ray_module_file": ray.__file__,
+        }
+    rollout = config.actor_rollout_ref.rollout
+    framework = rollout.custom.agent_framework
+    task_runner = framework.agent_runners.task
+    selected_engine_kwargs = OmegaConf.to_container(
+        rollout.engine_kwargs.get(args.engine, {}), resolve=True
+    )
+    instance_ids = []
+    for sample in samples:
+        direct_instance_id = sample.get("instance_id")
+        if direct_instance_id is not None:
+            instance_ids.append(direct_instance_id)
+            continue
+        extra_info = sample.get("extra_info")
+        if isinstance(extra_info, dict):
+            tools_kwargs = extra_info.get("tools_kwargs")
+            task = tools_kwargs.get("task") if isinstance(tools_kwargs, dict) else None
+            metadata = task.get("metadata") if isinstance(task, dict) else None
+            instance_ids.append(metadata.get("instance_id") if isinstance(metadata, dict) else None)
+
+    manifest = {
+        "run_id": os.getenv("RUN_ID"),
+        "host": socket.gethostname(),
+        "pid": os.getpid(),
+        "python_executable": sys.executable,
+        "ray_temp_dir": os.getenv("RAY_TMPDIR"),
+        "cuda_visible_devices": os.getenv("CUDA_VISIBLE_DEVICES"),
+        "engine": str(rollout.name),
+        "backend_runtime": backend_runtime,
+        "engine_actor_identities": engine_actor_identities,
+        "engine_server_addresses": server_addresses,
+        "model": {
+            "path": os.path.expanduser(args.model_path),
+            "served_model_name": served_model_name,
+            "language_model_only": bool(selected_engine_kwargs.get("language_model_only", False)),
+            "engine_kwargs": selected_engine_kwargs,
+        },
+        "input": {
+            "data_path": os.path.expanduser(args.data_path),
+            "task_config": args.task_config,
+            "num_prompts": len(samples),
+            "instance_ids": instance_ids,
+            "n": int(args.n),
+        },
+        "rollout": {
+            "tensor_parallel_size": int(rollout.tensor_model_parallel_size),
+            "data_parallel_size": int(rollout.data_parallel_size),
+            "pipeline_parallel_size": int(rollout.pipeline_model_parallel_size),
+            "nnodes": int(rollout.nnodes),
+            "n_gpus_per_node": int(rollout.n_gpus_per_node),
+            "seed": int(rollout.seed),
+            "temperature": float(rollout.temperature),
+            "top_p": float(rollout.top_p),
+            "top_k": int(rollout.top_k),
+            "response_length": int(rollout.response_length),
+            "calculate_log_probs": bool(rollout.calculate_log_probs),
+            "enforce_eager": bool(rollout.enforce_eager),
+            "gateway_count": int(framework.gateway_count),
+            "dispatch_mode": str(task_runner.dispatch_mode),
+            "max_concurrent_sessions": int(task_runner.max_concurrent_sessions),
+            "trajectory_selection": str(task_runner.trajectory_selection),
+            "checkpoint_workers_enabled": bool(rollout.checkpoint_engine.enabled),
+        },
+    }
+    output_path = Path(log_dir).expanduser() / "runtime_manifest.json"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = output_path.with_suffix(".json.tmp")
+    temporary_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    os.replace(temporary_path, output_path)
+    logger.info("wrote runtime manifest to: %s", output_path)
+
+    resolved_config = {
+        "run_id": manifest["run_id"],
+        "engine": manifest["engine"],
+        "engine_kwargs": manifest["model"]["engine_kwargs"],
+        "model": manifest["model"],
+        "input": manifest["input"],
+        "rollout": manifest["rollout"],
+        "engine_server_addresses": manifest["engine_server_addresses"],
+    }
+    resolved_path = output_path.parent.parent / "resolved_config.json"
+    resolved_temporary = resolved_path.with_suffix(".json.tmp")
+    resolved_temporary.write_text(json.dumps(resolved_config, indent=2), encoding="utf-8")
+    os.replace(resolved_temporary, resolved_path)
+    logger.info("wrote resolved config to: %s", resolved_path)
 
 
 def main() -> None:
@@ -356,6 +502,16 @@ def main() -> None:
         help="Inference engine backend.",
     )
     parser.add_argument(
+        "--language-model-only",
+        action="store_true",
+        help="Load the text model path without its multimodal encoder when supported by the selected engine.",
+    )
+    parser.add_argument(
+        "--enforce-eager",
+        action="store_true",
+        help="Disable engine CUDA graph capture for memory-constrained inference runs.",
+    )
+    parser.add_argument(
         "--enable-rollout-routing-replay",
         action="store_true",
         help="Enable R3 routed-expert capture in the rollout engine for routing-replay diagnostics.",
@@ -417,6 +573,20 @@ def main() -> None:
     config = init_config(args, served_model_name=served_model_name)
     tq.init(config.transfer_queue)
     llm_server_manager = LLMServerManager.create(config=config)
+    server_identities = []
+    if args.engine == "sglang":
+        server_identities = ray.get(
+            [handle.get_runtime_identity.remote() for handle in llm_server_manager.server_handles]
+        )
+    _write_runtime_manifest(
+        args.log_dir,
+        args=args,
+        config=config,
+        samples=samples,
+        served_model_name=served_model_name,
+        server_addresses=list(llm_server_manager.server_addresses),
+        server_identities=server_identities,
+    )
 
     # 2. Framework rollout adapter over the engine.
     adapter = AgentFrameworkRolloutAdapter.create(

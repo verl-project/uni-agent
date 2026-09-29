@@ -10,6 +10,7 @@ import asyncio
 import logging
 import os
 import shlex
+import stat
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -43,6 +44,103 @@ def _load_sdk() -> Any:
     return yr_sandbox
 
 
+_CREDENTIAL_FILE_KEY = "OPENYUANRONG_CREDENTIAL_FILE"
+_CREDENTIAL_FILE_KEYS = {
+    "AKERNEL_SERVER_ADDRESS",
+    "AKERNEL_TOKEN",
+    "DEPLOYMENT",
+    "OPENYUANRONG_GATEWAY_ADDRESS",
+    "OPENYUANRONG_GATEWAY_TLS",
+    "OPENYUANRONG_SERVER_ADDRESS",
+    "OPENYUANRONG_TLS",
+    "OPENYUANRONG_TLS_VERIFY",
+    "OPENYUANRONG_TOKEN",
+    "OPENYUANRONG_TUNNEL_SSL_VERIFY",
+    "TUNNEL_SSL_VERIFY",
+}
+
+
+def _is_jwt_shaped(value: str | None) -> bool:
+    return bool(value and all(value.split(".")) and len(value.split(".")) == 3)
+
+
+def _environment_flag(value: str | None, default: bool) -> bool:
+    if value is None or not value.strip():
+        return default
+    return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _load_protected_environment_file() -> None:
+    """Load allow-listed sandbox settings from a mode-0600 env file."""
+    raw_path = os.getenv(_CREDENTIAL_FILE_KEY)
+    if not raw_path:
+        return
+    path = Path(raw_path).expanduser()
+    try:
+        metadata = path.lstat()
+    except OSError as exc:
+        raise RuntimeError("OpenYuanRong credential file is unavailable") from exc
+    if not stat.S_ISREG(metadata.st_mode):
+        raise PermissionError("OpenYuanRong credential file must be a regular file")
+    if metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) != 0o600:
+        raise PermissionError("OpenYuanRong credential file must be owned by the process user with mode 600")
+
+    values: dict[str, str] = {}
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].lstrip()
+        key, separator, value = line.partition("=")
+        key = key.strip()
+        if not separator or key not in _CREDENTIAL_FILE_KEYS:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            parts = shlex.split(value, posix=True)
+            if len(parts) != 1:
+                raise ValueError("malformed value in OpenYuanRong credential file")
+            value = parts[0]
+        values[key] = value
+
+    file_server = values.get("OPENYUANRONG_SERVER_ADDRESS")
+    legacy_server = values.get("AKERNEL_SERVER_ADDRESS")
+    current_server = os.getenv("OPENYUANRONG_SERVER_ADDRESS") or file_server or legacy_server
+    if not os.getenv("OPENYUANRONG_SERVER_ADDRESS") and current_server:
+        os.environ["OPENYUANRONG_SERVER_ADDRESS"] = current_server
+
+    current_token = os.getenv("OPENYUANRONG_TOKEN") or values.get("OPENYUANRONG_TOKEN")
+    legacy_token = values.get("AKERNEL_TOKEN")
+    # The deployed yr_sandbox endpoint validates JWT-shaped tokens. Some
+    # protected files retain both names during the AKERNEL -> OpenYuanRong
+    # migration; bridge the legacy key only when both names target one server.
+    use_legacy_token = (
+        current_server == legacy_server
+        and bool(current_server)
+        and not _is_jwt_shaped(current_token)
+        and _is_jwt_shaped(legacy_token)
+    )
+    if use_legacy_token:
+        current_token = legacy_token
+    if current_token and (use_legacy_token or not os.getenv("OPENYUANRONG_TOKEN")):
+        os.environ["OPENYUANRONG_TOKEN"] = current_token
+
+    for key in (
+        "DEPLOYMENT",
+        "OPENYUANRONG_GATEWAY_ADDRESS",
+        "OPENYUANRONG_GATEWAY_TLS",
+        "OPENYUANRONG_TLS",
+        "OPENYUANRONG_TLS_VERIFY",
+        "OPENYUANRONG_TUNNEL_SSL_VERIFY",
+    ):
+        if key in values:
+            os.environ.setdefault(key, values[key])
+    tunnel_ssl_verify = values.get("TUNNEL_SSL_VERIFY") or os.getenv("TUNNEL_SSL_VERIFY")
+    if "OPENYUANRONG_TUNNEL_SSL_VERIFY" not in os.environ and tunnel_ssl_verify:
+        os.environ["OPENYUANRONG_TUNNEL_SSL_VERIFY"] = tunnel_ssl_verify
+
+
 def _connection_config(sdk: Any) -> Any:
     """Build an SDK ``ConnectionConfig`` from the ``OPENYUANRONG_*`` env vars.
 
@@ -50,11 +148,13 @@ def _connection_config(sdk: Any) -> Any:
 
     * ``OPENYUANRONG_TLS`` → ``use_tls`` (SDK default ``True``)
     * ``OPENYUANRONG_GATEWAY_ADDRESS`` → ``gateway_address`` (SDK default ``None``)
-    * ``OPENYUANRONG_GATEWAY_TLS`` → ``gateway_use_tls`` (SDK default ``False``)
+    * ``OPENYUANRONG_GATEWAY_TLS`` → ``gateway_use_tls`` when explicitly set; if the gateway address
+      is omitted or equals the server address, it inherits the effective control-plane TLS setting.
     * ``OPENYUANRONG_TLS_VERIFY`` → ``verify_tls`` (SDK default ``False``)
     * ``OPENYUANRONG_TUNNEL_SSL_VERIFY`` → ``YR_TUNNEL_SSL_VERIFY`` (tunnel
       client default ``"1"``; process-env only, no ``ConnectionConfig`` field)
     """
+    _load_protected_environment_file()
     server = os.getenv("OPENYUANRONG_SERVER_ADDRESS")
     token = os.getenv("OPENYUANRONG_TOKEN")
     if not server or not token:
@@ -63,17 +163,19 @@ def _connection_config(sdk: Any) -> Any:
         )
     kwargs: dict[str, Any] = {"server_address": server, "token": token}
     tls = os.getenv("OPENYUANRONG_TLS")
-    if tls:
-        kwargs["use_tls"] = tls != "0"
+    if tls and tls.strip():
+        kwargs["use_tls"] = _environment_flag(tls, True)
     gateway_address = os.getenv("OPENYUANRONG_GATEWAY_ADDRESS")
     if gateway_address:
         kwargs["gateway_address"] = gateway_address
     gateway_tls = os.getenv("OPENYUANRONG_GATEWAY_TLS")
-    if gateway_tls:
-        kwargs["gateway_use_tls"] = gateway_tls != "0"
+    if gateway_tls and gateway_tls.strip():
+        kwargs["gateway_use_tls"] = _environment_flag(gateway_tls, False)
+    elif not gateway_address or gateway_address.rstrip("/") == server.rstrip("/"):
+        kwargs["gateway_use_tls"] = _environment_flag(tls, True)
     tls_verify = os.getenv("OPENYUANRONG_TLS_VERIFY")
-    if tls_verify:
-        kwargs["verify_tls"] = tls_verify != "0"
+    if tls_verify and tls_verify.strip():
+        kwargs["verify_tls"] = _environment_flag(tls_verify, False)
     tunnel_ssl_verify = os.getenv("OPENYUANRONG_TUNNEL_SSL_VERIFY")
     if tunnel_ssl_verify:
         os.environ["YR_TUNNEL_SSL_VERIFY"] = tunnel_ssl_verify
