@@ -1,0 +1,38 @@
+--- a/python/sglang/srt/server_args.py
++++ b/python/sglang/srt/server_args.py
+@@ -333,5 +333,6 @@
+     LANGUAGE_MODEL_ONLY_ARCHITECTURES = (
+         "MuseGlimmerForConditionalGeneration",
+         "Cosmos3ForConditionalGeneration",
+         "Cosmos3EdgeForConditionalGeneration",
++        "Qwen3_5ForConditionalGeneration",
+     )
+
+--- a/python/sglang/srt/managers/scheduler.py
++++ b/python/sglang/srt/managers/scheduler.py
+@@
+                 self.tokenizer = get_tokenizer(
+                     get_serving().tokenizer_path,
+                     tokenizer_mode=get_serving().tokenizer_mode,
+                     trust_remote_code=get_model().trust_remote_code,
+                     revision=get_model().revision,
+                     tokenizer_backend=get_serving().tokenizer_backend,
+                 )
+
++        # Some checkpoints (including Qwen3.5 language-model-only exports)
++        # leave eos_token_id out of config.json and generation_config.json while
++        # declaring it in tokenizer_config.json. ModelConfig derives
++        # hf_eos_token_id before this tokenizer is available, so use the loaded
++        # tokenizer as the authoritative fallback for request termination.
++        if self.tokenizer is not None:
++            eos_token_ids = set(self.model_config.hf_eos_token_id or ())
++            tokenizer_eos = getattr(self.tokenizer, "eos_token_id", None)
++            if tokenizer_eos is not None:
++                if isinstance(tokenizer_eos, (list, tuple, set)):
++                    eos_token_ids.update(tokenizer_eos)
++                else:
++                    eos_token_ids.add(tokenizer_eos)
++            eos_token_ids.update(getattr(self.tokenizer, "additional_stop_token_ids", None) or ())
++            if eos_token_ids and eos_token_ids != self.model_config.hf_eos_token_id:
++                self.model_config.hf_eos_token_id = eos_token_ids
++                logger.info("Using tokenizer stop token ids as EOS fallback: %s", sorted(eos_token_ids))

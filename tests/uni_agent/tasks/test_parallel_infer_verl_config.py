@@ -25,6 +25,7 @@ def test_inference_sampling_uses_run_options_and_preserves_length_configuration(
         n_gpus_per_node=1,
         model_path="/tmp/test-model",
         engine="vllm",
+        language_model_only=False,
         tensor_parallel_size=1,
         gpu_memory_utilization=0.8,
         enable_rollout_routing_replay=False,
@@ -69,3 +70,42 @@ def test_inference_sampling_uses_run_options_and_preserves_length_configuration(
         assert not task_runner.runner_kwargs
     else:
         assert task_runner.runner_kwargs.task_config_path == args.task_config
+        if entrypoint is init_config:
+            assert task_runner.trajectory_selection == "all"
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize("engine", ["vllm", "sglang"])
+def test_parallel_infer_routes_language_model_only_to_selected_engine(engine):
+    args = Namespace(
+        temperature=0.4,
+        top_p=0.85,
+        top_k=20,
+        allowed_request_sampling_param_keys=[],
+        n=1,
+        nnodes=1,
+        n_gpus_per_node=8,
+        model_path="/model",
+        engine=engine,
+        language_model_only=True,
+        enforce_eager=True,
+        tensor_parallel_size=8,
+        gpu_memory_utilization=0.9,
+        enable_rollout_routing_replay=False,
+        tool_parser="qwen3_coder",
+        gateway_count=1,
+        concurrency=1,
+        task_config="/task.yaml",
+        log_dir="/logs",
+        response_length=1024,
+    )
+
+    config = init_config(args, served_model_name="policy")
+    rollout = config.actor_rollout_ref.rollout
+
+    assert rollout.name == engine
+    assert rollout.enforce_eager is True
+    assert rollout.checkpoint_engine.enabled is False
+    assert rollout.engine_kwargs[engine].language_model_only is True
+    assert rollout.custom.agent_framework.agent_runners.task.trajectory_selection == "all"
