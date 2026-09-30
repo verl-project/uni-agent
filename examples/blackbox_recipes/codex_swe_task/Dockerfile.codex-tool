@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # Codex native sidecar tool image.
 #
 # The npm package contains a statically linked Linux x64 Codex binary plus
@@ -16,7 +17,6 @@ RUN if [ -n "${NPM_REGISTRY}" ]; then npm config set registry "${NPM_REGISTRY}";
     && mkdir -p /opt/codex/vendor/x86_64-unknown-linux-musl /opt/codex/bin \
     && cp -a "${vendor_root}/." /opt/codex/vendor/x86_64-unknown-linux-musl/ \
     && /opt/codex/vendor/x86_64-unknown-linux-musl/bin/codex --version
-COPY run_agent.sh /opt/codex/bin/run_agent.sh
-RUN chmod 0755 /opt/codex/bin/run_agent.sh
+COPY --chmod=0755 run_agent.sh /opt/codex/bin/run_agent.sh
 FROM scratch
 COPY --from=builder /opt/codex /
