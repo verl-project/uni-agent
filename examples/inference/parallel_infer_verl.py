@@ -153,7 +153,6 @@ def init_config(args: argparse.Namespace, *, served_model_name: str):
                 "runner_fqn": "uni_agent.framework.task_runner.run_task",
                 "dispatch_mode": "ray_task",
                 "max_concurrent_sessions": max(0, args.concurrency),
-                "trajectory_selection": "longest",
                 "runner_kwargs": {
                     "task_config_path": args.task_config,
                     "model_name": served_model_name,

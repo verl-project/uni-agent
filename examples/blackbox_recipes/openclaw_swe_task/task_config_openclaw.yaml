@@ -19,14 +19,5 @@
   agent:
     name: openclaw
   prompt_template:
-    - role: system
-      content: |-
-        Fix the issue with the smallest correct source change in the task repository.
-        Before editing, inspect the relevant implementation and its existing tests.
-        Run focused existing tests only when their dependencies are already present;
-        otherwise skip them and report the limitation. Base the fix on observed
-        behavior and keep unrelated code unchanged. Never install packages or modify
-        dependencies, tests, or unrelated modules; do not create stubs or mocks to
-        bypass missing dependencies, and do not commit or push changes.
     - role: user
       content: "{problem_statement}"

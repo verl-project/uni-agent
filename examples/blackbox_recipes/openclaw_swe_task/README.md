@@ -41,13 +41,15 @@ bash examples/blackbox_recipes/openclaw_swe_task/run_infer_openclaw.sh
 hardware settings are explicit environment overrides. `OUTPUT_DIR/result.json`
 contains framework scores and `OUTPUT_DIR/logs/` contains task logs and
 trajectories. The launcher checks one finished trajectory entry per scored
-session. A result of reward 0 is valid ordinary inference. OpenClaw's native
+session without selecting or discarding other trajectories. A result of reward 0
+is valid ordinary inference. OpenClaw's native
 `meta.aborted` and fallback fields remain part of agent completion handling.
 
-The agent follows the mini-swe-agent input contract: it accepts an optional
-system message followed by exactly one user message, then passes only the user
-task to the CLI. Put effective instructions in the user message. Credentials
-and diagnostics are redacted before they are returned to the framework.
+The agent follows the mini-swe-agent input contract: from at most two initial
+messages, it passes the user task to the CLI and ignores an optional system
+message. The recipe's prompt template therefore emits a single user message.
+Credentials and diagnostics are redacted before they are returned to the
+framework.
 
 ## Scope and tests
 

@@ -45,16 +45,15 @@ class FakeSandbox:
         )
 
 
-def run_agent(mode):
+def run_agent(mode, messages=None):
     sandbox = FakeSandbox(mode)
     cfg = OpenClawConfig(model=ModelConfig(base_url="http://endpoint/v1", model_name="policy"))
+    if messages is None:
+        messages = [{"role": "user", "content": "solve 中文 ' $(false)"}]
     result = asyncio.run(
         OpenClawAgent(cfg).run(
             sandbox=sandbox,
-            messages=[
-                {"role": "system", "content": "follow repository policy"},
-                {"role": "user", "content": "solve 中文 ' $(false)"},
-            ],
+            messages=messages,
             workdir="/workspace",
         )
     )
@@ -72,9 +71,22 @@ def test_success():
     assert "--message-file" in launch_command
     message_path = sandbox.commands[0][0][-1]
     message_path = message_path.split("--message-file", 1)[1].split()[0].strip("'\"")
-    assert "follow repository policy" not in sandbox.files[message_path]
     assert "solve 中文 ' $(false)" in sandbox.files[message_path]
     assert "solve" not in launch_command
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_optional_system_message_is_ignored():
+    result, sandbox = run_agent(
+        "success",
+        messages=[
+            {"role": "system", "content": "follow repository policy"},
+            {"role": "user", "content": "solve 中文 ' $(false)"},
+        ],
+    )
+    assert result.finished
+    assert all("follow repository policy" not in content for content in sandbox.files.values())
 
 
 @pytest.mark.cpu
