@@ -1,9 +1,9 @@
 - name: swe_bench
   sandbox:
-    provider: modal
+    provider: e2b
   agent:
     name: react
-    max_steps: 100
+    max_steps: 200
     tools:
       - name: str_replace_editor
       - name: stateful_shell
@@ -15,8 +15,8 @@
           GIT_PAGER: "cat"
       - name: submit
     sampling_params_override:
-      temperature: 0.8
-      top_p: 0.9
+      temperature: 1.0
+      top_p: 0.95
   prompt_template:
     - role: system
       content: You are a helpful assistant that can interact with a computer to solve tasks.
