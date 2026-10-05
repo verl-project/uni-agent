@@ -23,6 +23,7 @@ AGENT_MODULES: dict[str, str] = {
     "claude_code": "uni_agent.agents.claude_code.agent",
     "mini_swe_agent": "uni_agent.agents.mini_swe_agent.agent",
     "mem_agent": "uni_agent.agents.mem_agent.agent",
+    "deepeyes": "uni_agent.agents.deepeyes.agent",
 }
 
 
