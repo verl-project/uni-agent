@@ -347,6 +347,14 @@ Important knobs include:
 
 ## Sampling Configuration
 
+OpenAI Chat Completions accepts `max_completion_tokens` as an alias for
+`max_tokens`. The adapter normalizes it to the canonical `max_tokens` sampling
+parameter before applying the request allowlist and native trajectory-capacity
+limit. The alias must be a positive integer, not a boolean. If both spellings
+are supplied, they must contain the same positive integer; conflicting values
+are rejected rather than silently choosing one. An omitted limit retains the
+session default. This alias does not enable additional sampling overrides.
+
 `actor_rollout_ref.rollout.temperature`, `top_p`, and `top_k` provide the Gateway
 session defaults (`rollout.val_kwargs` supplies validation sampling). Agent HTTP
 requests can override only `max_tokens` and `stop` by default. Configure

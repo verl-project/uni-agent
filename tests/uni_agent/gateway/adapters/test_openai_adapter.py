@@ -1,8 +1,92 @@
+import copy
 import json
 
 import pytest
 
 ALLOWED_SAMPLING_KEYS = frozenset({"temperature", "top_p", "top_k", "max_tokens", "stop"})
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize(
+    "limits", [{"max_tokens": 32}, {"max_completion_tokens": 32}, {"max_tokens": 32, "max_completion_tokens": 32}]
+)
+def test_openai_output_limit_alias_preserves_sampling_policy_and_inputs(limits):
+    from uni_agent.gateway.adapters.openai import openai_to_internal
+
+    payload = {"messages": [{"role": "user", "content": "hello"}], "temperature": 0.9, **limits}
+    before = copy.deepcopy(payload)
+    defaults = {"max_tokens": 16, "temperature": 0.5, "top_p": 0.8}
+    request = openai_to_internal(
+        payload,
+        base_sampling_params=defaults,
+        allowed_sampling_keys=frozenset({"max_tokens", "stop"}),
+    )
+
+    assert request["sampling_params"] == {"max_tokens": 32, "temperature": 0.5, "top_p": 0.8}
+    assert payload == before
+    assert defaults == {"max_tokens": 16, "temperature": 0.5, "top_p": 0.8}
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize("value", [0, -1, True, False, 1.0, "32", None, [], {}])
+def test_openai_completion_token_limit_rejects_non_positive_integers(value):
+    from uni_agent.gateway.adapters.openai import openai_to_internal
+    from uni_agent.gateway.adapters.types import MalformedRequestError
+
+    with pytest.raises(MalformedRequestError, match="max_completion_tokens must be a positive integer"):
+        openai_to_internal(
+            {"messages": [{"role": "user", "content": "hello"}], "max_completion_tokens": value},
+            base_sampling_params={},
+            allowed_sampling_keys=ALLOWED_SAMPLING_KEYS,
+        )
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize("legacy_limit", [16, 0, -1, True, False, 32.0, "32", None])
+def test_openai_output_limit_alias_rejects_conflicting_or_invalid_legacy_limit(legacy_limit):
+    from uni_agent.gateway.adapters.openai import openai_to_internal
+    from uni_agent.gateway.adapters.types import MalformedRequestError
+
+    with pytest.raises(MalformedRequestError, match="must specify the same positive integer"):
+        openai_to_internal(
+            {
+                "messages": [{"role": "user", "content": "hello"}],
+                "max_tokens": legacy_limit,
+                "max_completion_tokens": 32,
+            },
+            base_sampling_params={},
+            allowed_sampling_keys=ALLOWED_SAMPLING_KEYS,
+        )
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize("allowed", [frozenset(), frozenset({"max_completion_tokens"})])
+def test_openai_output_limit_alias_does_not_bypass_canonical_permission(allowed):
+    from uni_agent.gateway.adapters.openai import openai_to_internal
+
+    request = openai_to_internal(
+        {"messages": [{"role": "user", "content": "hello"}], "max_completion_tokens": 32},
+        base_sampling_params={"max_tokens": 16},
+        allowed_sampling_keys=allowed,
+    )
+    assert request["sampling_params"] == {"max_tokens": 16}
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_openai_omitted_output_limit_preserves_session_default():
+    from uni_agent.gateway.adapters.openai import openai_to_internal
+
+    request = openai_to_internal(
+        {"messages": [{"role": "user", "content": "hello"}]},
+        base_sampling_params={"max_tokens": 16},
+        allowed_sampling_keys=ALLOWED_SAMPLING_KEYS,
+    )
+    assert request["sampling_params"] == {"max_tokens": 16}
 
 
 @pytest.mark.cpu
