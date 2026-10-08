@@ -57,7 +57,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(
 logger = logging.getLogger(__name__)
 
 
-GLOBAL_CONCURRENCY = int(os.getenv("GLOBAL_CONCURRENCY", 1))
+GLOBAL_CONCURRENCY = int(os.getenv("GLOBAL_CONCURRENCY", 128))
 PARTITION_ID = "val"
 
 DEFAULT_TEMPERATURE = 0.8
@@ -357,7 +357,7 @@ def main() -> None:
         "--max-samples",
         dest="limit",
         type=int,
-        default=int(os.getenv("LIMIT", "1")),
+        default=None,
         help="Only run the first N samples (smoke testing); omit for the full dataset.",
     )
 
@@ -406,9 +406,9 @@ def main() -> None:
         help="Enable R3 routed-expert capture in the rollout engine for routing-replay diagnostics.",
     )
     parser.add_argument("--nnodes", type=int, default=1, help="Number of nodes to run the engine on.")
-    parser.add_argument("--n-gpus-per-node", type=int, default=1, help="Number of GPUs per node.")
+    parser.add_argument("--n-gpus-per-node", type=int, default=8, help="Number of GPUs per node.")
     parser.add_argument(
-        "--tensor-parallel-size", "--tp", dest="tensor_parallel_size", type=int, default=1, help="Tensor parallel size."
+        "--tensor-parallel-size", "--tp", dest="tensor_parallel_size", type=int, default=4, help="Tensor parallel size."
     )
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.9, help="Engine GPU memory fraction.")
     parser.add_argument(
@@ -434,7 +434,7 @@ def main() -> None:
     parser.add_argument(
         "--gateway-count",
         type=int,
-        default=1,
+        default=4,
         help="Number of gateway actors fronting the engine (each serves many concurrent sessions).",
     )
     parser.add_argument(

@@ -1,13 +1,96 @@
 from __future__ import annotations
 
-from argparse import Namespace
+import os
+from argparse import ArgumentParser, Namespace
 
+import hydra
 import pytest
+from omegaconf import OmegaConf, open_dict
 
 pytest.importorskip("ray")
 
 from examples.agent_aware_router.run_infer import init_config as init_router_config
+from examples.inference import parallel_infer_verl
 from examples.inference.parallel_infer_verl import init_config
+
+
+def _parse_inference_args(monkeypatch, *argv):
+    parse_args = ArgumentParser.parse_args
+    captured = None
+
+    class ParsedArgs(Exception):
+        pass
+
+    def capture(parser):
+        nonlocal captured
+        captured = parse_args(parser, ["--task-config", "/unused.yaml", *argv])
+        raise ParsedArgs
+
+    monkeypatch.setattr(ArgumentParser, "parse_args", capture)
+    with pytest.raises(ParsedArgs):
+        parallel_infer_verl.main()
+    return captured
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_shared_inference_preserves_defaults_and_accepts_recipe_overrides(monkeypatch):
+    monkeypatch.setenv("LIMIT", "7")
+    with monkeypatch.context() as context:
+        args = _parse_inference_args(context)
+    assert args.limit is None
+    assert args.concurrency == int(os.getenv("GLOBAL_CONCURRENCY", 128))
+    assert (args.n_gpus_per_node, args.tensor_parallel_size, args.gateway_count) == (8, 4, 4)
+
+    args = _parse_inference_args(
+        monkeypatch,
+        "--limit",
+        "1",
+        "--concurrency",
+        "1",
+        "--n-gpus-per-node",
+        "1",
+        "--tensor-parallel-size",
+        "1",
+        "--gateway-count",
+        "1",
+    )
+    assert (args.limit, args.concurrency, args.n_gpus_per_node, args.tensor_parallel_size, args.gateway_count) == (
+        1,
+        1,
+        1,
+        1,
+        1,
+    )
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize("configured", [None, False, True])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_language_model_only_is_opt_in_and_preserves_config(monkeypatch, configured, enabled):
+    args = _parse_inference_args(monkeypatch, *(["--language-model-only"] if enabled else []))
+    compose = hydra.compose
+
+    def compose_with_engine_setting(*args, **kwargs):
+        config = compose(*args, **kwargs)
+        engine = config.actor_rollout_ref.rollout.engine_kwargs.vllm
+        with open_dict(engine):
+            if configured is None:
+                engine.pop("language_model_only", None)
+            else:
+                engine.language_model_only = configured
+        return config
+
+    monkeypatch.setattr(hydra, "compose", compose_with_engine_setting)
+    config = init_config(args, served_model_name="policy")
+    engine = config.actor_rollout_ref.rollout.engine_kwargs.vllm
+    if enabled:
+        assert engine.language_model_only is True
+    elif configured is None:
+        assert "language_model_only" not in engine
+    else:
+        assert OmegaConf.select(engine, "language_model_only") is configured
 
 
 @pytest.mark.cpu
