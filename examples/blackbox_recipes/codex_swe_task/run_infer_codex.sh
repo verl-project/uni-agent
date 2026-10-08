@@ -25,7 +25,6 @@ NNODES="${NNODES:-1}"
 N_GPUS_PER_NODE="${N_GPUS_PER_NODE:-1}"
 TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-1}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.9}"
-PROMPT_LENGTH="${PROMPT_LENGTH:-4096}"
 RESPONSE_LENGTH="${RESPONSE_LENGTH:-65536}"
 KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-auto}"
 LANGUAGE_MODEL_ONLY="${LANGUAGE_MODEL_ONLY:-1}"
@@ -59,7 +58,6 @@ ARGS=(
     --task-config "${TASK_CONFIG}"
     --engine "${ENGINE}"
     --tool-parser "${TOOL_PARSER}"
-    --prompt-length "${PROMPT_LENGTH}"
     --response-length "${RESPONSE_LENGTH}"
     --kv-cache-dtype "${KV_CACHE_DTYPE}"
     --nnodes "${NNODES}"
@@ -102,8 +100,12 @@ scores = payload.get("scores")
 count = int(payload.get("num_scored_sessions", -1))
 if not isinstance(scores, list) or count != len(scores) or count < 1:
     raise SystemExit(f"inference result is incomplete: sessions={count}, scores={scores!r}")
-if limit > 0 and count != limit * max(1, n):
-    raise SystemExit(f"unexpected session count: expected {limit * max(1, n)}, got {count}")
+num_prompts = int(payload.get("num_prompts", -1))
+if num_prompts < 1 or (limit > 0 and num_prompts > limit):
+    raise SystemExit(f"invalid selected prompt count: {num_prompts} (limit={limit})")
+expected = num_prompts * max(1, n)
+if count != expected:
+    raise SystemExit(f"unexpected session count: expected {expected}, got {count}")
 trajectory_paths = sorted(log_dir.rglob("trajectory.json"))
 if len(trajectory_paths) != count:
     raise SystemExit(f"expected {count} trajectory files, found {len(trajectory_paths)} under {log_dir}")
