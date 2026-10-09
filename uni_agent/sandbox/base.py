@@ -349,6 +349,12 @@ class Sandbox(abc.ABC):
             current_path = current.stdout.strip() if current.exit_code == 0 else ""
             targets = [target]
             if current_path.startswith("/") and current_path not in {source, target}:
+                logger.warning(
+                    "overriding sandbox executable %r at %s with %s",
+                    name,
+                    current_path,
+                    source,
+                )
                 targets.append(current_path)
             for link_path in targets:
                 linked = await self.exec(["ln", "-sfn", source, link_path])

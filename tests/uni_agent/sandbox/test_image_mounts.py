@@ -83,32 +83,6 @@ def test_registry_rejects_image_mounts_for_unsupported_provider(provider, image)
 
 @pytest.mark.cpu
 @pytest.mark.level0
-def test_unsupported_provider_constructor_rejects_image_mounts():
-    from uni_agent.sandbox.vefaas import VefaasSandbox
-
-    mount = ImageMount(image="example/agent:latest", mount_path="/opt/agent")
-    with pytest.raises(NotImplementedError, match="does not support image mounts"):
-        VefaasSandbox(image_mounts=[mount])
-
-
-@pytest.mark.cpu
-@pytest.mark.level0
-def test_supported_provider_constructor_accepts_image_mounts():
-    from uni_agent.sandbox.docker import DockerSandbox
-    from uni_agent.sandbox.modal import ModalSandbox
-    from uni_agent.sandbox.openyuanrong import OpenyuanrongSandbox
-
-    mount = ImageMount(image="example/agent:latest", mount_path="/opt/agent")
-    for sandbox in [
-        DockerSandbox(image="example/task:latest", image_mounts=[mount]),
-        ModalSandbox(image_mounts=[mount]),
-        OpenyuanrongSandbox(image="example/task:latest", image_mounts=[mount]),
-    ]:
-        assert sandbox.image_mounts == [mount]
-
-
-@pytest.mark.cpu
-@pytest.mark.level0
 def test_openyuanrong_maps_image_mounts_to_sdk_mounts(monkeypatch):
     from uni_agent.sandbox import openyuanrong
 

@@ -273,11 +273,12 @@ class VefaasSandbox(Sandbox):
         executable_paths: dict[str, str] | None = None,
     ) -> None:
         if image_mounts:
-            raise NotImplementedError("VefaasSandbox does not support image mounts now")
+            raise NotImplementedError("VefaasSandbox does not support image mounts")
+        if executable_paths:
+            raise NotImplementedError("VefaasSandbox does not support executable path overrides")
         self.image = image
         self.runtime_timeout = runtime_timeout
         self.startup_timeout = startup_timeout
-        self.executable_paths = dict(executable_paths or {})
         # A sandbox binds to one (function_id, function_route) pair for its whole
         # lifetime; when several are configured, one pair is picked at random.
         self._function_id, self._function_route = _select_function_pair()
@@ -337,7 +338,6 @@ class VefaasSandbox(Sandbox):
         await runtime.wait_until_alive(timeout=self.startup_timeout)
         self._runtime = runtime
         await self.exec_shell("DEBIAN_FRONTEND=noninteractive apt-get install -y -qq tmux", timeout=300.0)
-        await self._setup_executable_paths(self.executable_paths)
 
     async def stop(self) -> None:
         # Idempotent via the None checks below: a second call finds nothing to do.

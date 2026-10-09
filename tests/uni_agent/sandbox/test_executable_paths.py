@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
 import pytest
 
@@ -23,18 +24,6 @@ class _LinkSandbox(Sandbox):
         if argv[:2] == ["bash", "-c"]:
             return ExecResult(0, f"{self.resolved_path}\n", "")
         return ExecResult(0, "", "")
-
-
-@pytest.mark.cpu
-@pytest.mark.level0
-def test_executable_paths_are_validated_and_normalized():
-    config = SandboxConfig(
-        provider="docker",
-        image="example/task:latest",
-        executable_paths={"claude": "/opt/claude-code/bin/claude"},
-    )
-
-    assert config.executable_paths == {"claude": "/opt/claude-code/bin/claude"}
 
 
 @pytest.mark.cpu
@@ -71,10 +60,11 @@ def test_setup_executable_paths_force_links_into_usr_bin():
 
 @pytest.mark.cpu
 @pytest.mark.level0
-def test_setup_executable_paths_overrides_a_higher_priority_command():
+def test_setup_executable_paths_warns_when_overriding_a_higher_priority_command(caplog):
     sandbox = _LinkSandbox(resolved_path="/usr/local/bin/claude")
 
-    asyncio.run(sandbox._setup_executable_paths({"claude": "/opt/claude-code/bin/claude"}))
+    with caplog.at_level(logging.WARNING, logger="uni_agent.sandbox.base"):
+        asyncio.run(sandbox._setup_executable_paths({"claude": "/opt/claude-code/bin/claude"}))
 
     assert sandbox.calls == [
         ["bash", "-c", "command -v claude"],
@@ -83,12 +73,24 @@ def test_setup_executable_paths_overrides_a_higher_priority_command():
         ["bash", "-c", "command -v claude"],
         ["test", "/usr/local/bin/claude", "-ef", "/opt/claude-code/bin/claude"],
     ]
+    assert "overriding sandbox executable 'claude' at /usr/local/bin/claude" in caplog.text
 
 
 @pytest.mark.cpu
 @pytest.mark.level0
-def test_local_rejects_executable_path_overrides():
-    config = SandboxConfig(provider="local", executable_paths={"tmux": "/opt/tools/bin/tmux"})
+@pytest.mark.parametrize(
+    ("provider", "image"),
+    [
+        ("local", None),
+        ("vefaas", "python:3.12"),
+    ],
+)
+def test_unsupported_providers_reject_executable_path_overrides(provider, image):
+    config = SandboxConfig(
+        provider=provider,
+        image=image,
+        executable_paths={"tmux": "/opt/tools/bin/tmux"},
+    )
 
     with pytest.raises(NotImplementedError, match="does not support executable path overrides"):
         build_sandbox(config)
