@@ -22,6 +22,13 @@ The sidecar is mounted at `/opt/openclaw`. Record the published digest in
 `task_config_openclaw.yaml`; the task image still owns `/testbed` and its own
 Python environment.
 
+Like mini-swe-agent, `agent.conda_env_path` binds the task image's existing
+Conda environment. The adapter sets `CONDA_PREFIX`, `CONDA_DEFAULT_ENV`, and
+the launch PATH, and derives OpenClaw's native `tools.exec.pathPrepend` because
+its exec tool rebuilds PATH. Leave this option unset for images without Conda.
+The pinned CLI filters `CONDA_*` from exec subprocesses; the derived PATH
+selects the task environment's executables and Python packages.
+
 ## Run inference
 
 Prepare SWE-bench rows with the repository preprocessor. The task YAML renders

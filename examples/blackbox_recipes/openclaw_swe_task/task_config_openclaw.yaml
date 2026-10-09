@@ -18,6 +18,7 @@
           image_url: swr.cn-east-3.myhuaweicloud.com/openyuanrong/openclaw-tool@sha256:90cef4641f82a955692385c48cb4db01a3bd73fc6f68f37962a58717ce547c13
   agent:
     name: openclaw
+    conda_env_path: /opt/miniconda3/envs/testbed
   prompt_template:
     - role: user
       content: |-

@@ -62,7 +62,13 @@ def parse_openclaw_result(stdout: str) -> dict[str, Any] | None:
 
 
 def build_openclaw_config(
-    *, base_url: str, api_key: str, model_name: str, workspace: str, timeout_seconds: int
+    *,
+    base_url: str,
+    api_key: str,
+    model_name: str,
+    workspace: str,
+    timeout_seconds: int,
+    conda_env_path: str | None = None,
 ) -> dict[str, Any]:
     """Build an isolated OpenClaw config for one episode.
 
@@ -70,6 +76,7 @@ def build_openclaw_config(
     outer sandbox responsibility; OpenClaw's exec permission is not a network
     sandbox.
     """
+    env_dir = PurePosixPath(conda_env_path) if conda_env_path else None
     return {
         "models": {
             "mode": "replace",
@@ -125,6 +132,8 @@ def build_openclaw_config(
                 "host": "gateway",
                 "security": "full",
                 "ask": "off",
+                # OpenClaw rebuilds exec's PATH instead of inheriting the launch PATH.
+                "pathPrepend": [str(env_dir / "bin"), str(env_dir.parent.parent / "bin")] if env_dir else [],
                 "applyPatch": {"enabled": False},
                 "timeoutSeconds": min(timeout_seconds, 600),
             },
@@ -176,6 +185,11 @@ class OpenClawConfig(AgentConfig):
     tool_command: str = Field(default="/opt/openclaw/bin/openclaw")
     state_root: str = Field(default="/tmp/uni-agent-openclaw")
     max_prompt_bytes: int = Field(default=4 * 1024 * 1024, ge=1)
+    conda_env_path: str | None = Field(
+        default=None,
+        description="Task-image conda environment bound around the launch and exec tools; "
+        "unset for images without conda.",
+    )
 
 
 @register_agent("openclaw")
@@ -208,6 +222,7 @@ class OpenClawAgent(Agent):
             model_name=model.model_name,
             workspace=workspace,
             timeout_seconds=cfg.cli_timeout_seconds,
+            conda_env_path=cfg.conda_env_path,
         )
         prepared = await sandbox.exec_shell(f"umask 077; mkdir -p {_shell_quote_path(root)}", timeout=30)
         if prepared.exit_code != 0:
@@ -243,7 +258,13 @@ class OpenClawAgent(Agent):
                 "OPENCLAW_NO_RESPAWN": "1",
             }
             tool_dir = str(PurePosixPath(cfg.tool_command).parent)
-            launch_script = f'export PATH={_shell_quote_path(tool_dir)}:"${{PATH:-}}"; exec {shlex.join(argv)}'
+            path_prefix = [tool_dir]
+            if cfg.conda_env_path:
+                env_dir = PurePosixPath(cfg.conda_env_path)
+                env.update(CONDA_DEFAULT_ENV=env_dir.name, CONDA_PREFIX=str(env_dir))
+                path_prefix.extend([str(env_dir / "bin"), str(env_dir.parent.parent / "bin")])
+            launch_path = ":".join(_shell_quote_path(path) for path in path_prefix)
+            launch_script = f'export PATH={launch_path}:"${{PATH:-}}"; exec {shlex.join(argv)}'
             proc = await sandbox.exec(
                 ["bash", "-c", launch_script],
                 env=env,
