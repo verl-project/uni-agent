@@ -230,3 +230,22 @@ async def test_verl_parser_cache_ignores_tool_schema(monkeypatch):
     await codec._process_tool_calls_verl([ord("y")], _equivalent_tools(), "hermes")
 
     assert lookups == ["hermes"]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_sglang_qwen3_parser_uses_driver_safe_verl_grammar(monkeypatch):
+    from uni_agent.gateway.session.codec import MessageCodec
+
+    lookups = []
+    _install_fake_verl(monkeypatch, lookups)
+    codec = MessageCodec(
+        FakeTokenizer(),
+        tool_parser_name="qwen3_coder",
+        rollout_backend="sglang",
+    )
+
+    await codec.decode_response([ord("x")], tools=TOOLS)
+
+    assert lookups == ["qwen3_coder"]
