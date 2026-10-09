@@ -181,8 +181,10 @@ def _flatten_tool(
         if not isinstance(nested_tools, list):
             raise MalformedRequestError("Namespace tools require a tools list")
         container = name.strip()
-        next_namespace = namespace if container in ("", _DEFAULT_NAMESPACE) else (
-            f"{namespace}{_NAMESPACE_SEPARATOR}{container}" if namespace else container
+        next_namespace = (
+            namespace
+            if container in ("", _DEFAULT_NAMESPACE)
+            else (f"{namespace}{_NAMESPACE_SEPARATOR}{container}" if namespace else container)
         )
         converted: list[dict[str, Any]] = []
         kinds: dict[str, str] = {}
@@ -333,7 +335,9 @@ def _messages_from_input(payload: dict[str, Any]) -> list[dict[str, Any]]:
         if item_type in _SKIPPED_ITEM_TYPES:
             continue
         if item_type == "message":
-            role = item.get("role", "user")
+            role = item.get("role")
+            if not isinstance(role, str) or role not in {"system", "developer", "user", "assistant"}:
+                raise MalformedRequestError(f"Unsupported Responses message role {role!r} at {param}.role")
             content = _content_to_chat_content(item.get("content", ""), param=f"{param}.content")
             if role == "assistant":
                 if isinstance(content, list):
@@ -344,16 +348,7 @@ def _messages_from_input(payload: dict[str, Any]) -> list[dict[str, Any]]:
             pending = None
             if role == "developer":
                 role = "system"
-            if role not in {"system", "user", "tool"}:
-                logger.warning("Mapping unknown Responses role %r to user", role)
-                role = "user"
-            message: dict[str, Any] = {"role": role, "content": content}
-            if role == "tool":
-                call_id = item.get("tool_call_id") or item.get("call_id")
-                if not call_id:
-                    raise MalformedRequestError("tool message requires tool_call_id")
-                message["tool_call_id"] = str(call_id)
-            messages.append(message)
+            messages.append({"role": role, "content": content})
             continue
         if item_type == "reasoning":
             summary = _content_to_text(item.get("summary") or item.get("content") or [], param=param)
@@ -392,9 +387,7 @@ def _messages_from_input(payload: dict[str, Any]) -> list[dict[str, Any]]:
             messages.append({"role": "tool", "tool_call_id": str(call_id), "content": output})
             continue
         if item_type in {"web_search_call", "computer_call", "tool_search_call"}:
-            name = {"web_search_call": "web_search", "computer_call": "computer"}.get(
-                item_type, "tool_search"
-            )
+            name = {"web_search_call": "web_search", "computer_call": "computer"}.get(item_type, "tool_search")
             raw_arguments = item.get("action", item.get("actions", item.get("arguments", {})))
             ensure_pending()["tool_calls"].append(
                 {
@@ -424,6 +417,8 @@ def responses_to_internal(
 ) -> InternalGenerationRequest:
     if not isinstance(payload, dict):
         raise MalformedRequestError("Request body must be a JSON object")
+    if "max_tokens" in payload:
+        raise MalformedRequestError("max_tokens is not a Responses field; use max_output_tokens")
     if payload.get("background") is True:
         raise MalformedRequestError("background Responses are not supported")
     if payload.get("store") is True:
@@ -446,15 +441,24 @@ def responses_to_internal(
     if type(parallel_tool_calls) is not bool:
         raise MalformedRequestError("parallel_tool_calls must be a boolean")
 
-    tool_choice = payload.get("tool_choice", "auto")
-    if isinstance(tool_choice, dict):
-        choice_type = tool_choice.get("type")
-        if choice_type in {"auto", "none"}:
-            tool_choice = choice_type
-        else:
-            raise MalformedRequestError("Responses tool_choice with a specific function is not supported")
-    if not isinstance(tool_choice, str) or tool_choice not in {"auto", "none"}:
-        raise MalformedRequestError("tool_choice must be auto, none, or a supported object")
+    if parallel_tool_calls is False:
+        raise MalformedRequestError("parallel_tool_calls=false is not supported")
+
+    tool_choice_payload = payload.get("tool_choice", "auto")
+    if isinstance(tool_choice_payload, str):
+        tool_choice = tool_choice_payload.lower()
+        if tool_choice not in {"auto", "none"}:
+            raise MalformedRequestError(
+                f'tool_choice="{tool_choice_payload}" is not supported (only "auto" / "none" are supported)'
+            )
+    elif isinstance(tool_choice_payload, dict):
+        if tool_choice_payload.get("type") == "function":
+            raise MalformedRequestError(
+                'tool_choice with a specific function is not supported (only "auto" / "none" are supported)'
+            )
+        raise MalformedRequestError('tool_choice object is not supported (only "auto" / "none" are supported)')
+    else:
+        raise MalformedRequestError("tool_choice must be a string or object")
 
     converted_tools, _, _ = _convert_tools(_collect_tool_defs(payload), drop_deferred=True)
     chat_payload: dict[str, Any] = {
@@ -467,8 +471,6 @@ def responses_to_internal(
             chat_payload[key] = payload[key]
     if payload.get("max_output_tokens") is not None:
         chat_payload["max_tokens"] = payload["max_output_tokens"]
-    elif payload.get("max_tokens") is not None:
-        chat_payload["max_tokens"] = payload["max_tokens"]
     return openai_to_internal(
         chat_payload,
         base_sampling_params=base_sampling_params,
@@ -536,10 +538,6 @@ def _output_items(outcome: GenerationOutcome, payload: dict[str, Any]) -> list[d
             }
         )
     tool_calls = message.get("tool_calls") or []
-    if payload.get("parallel_tool_calls", True) is False and len(tool_calls) > 1:
-        raise MalformedRequestError(
-            "Model returned multiple tool calls while parallel_tool_calls=false"
-        )
     for tool_call in tool_calls:
         if not isinstance(tool_call, dict):
             continue
@@ -616,7 +614,7 @@ def _response_base(
         "store": False,
         "temperature": payload.get("temperature"),
         "text": payload.get("text", {"format": {"type": "text"}}),
-        "tool_choice": payload.get("tool_choice", "auto"),
+        "tool_choice": payload.get("tool_choice", "auto").lower(),
         "tools": payload.get("tools") or [],
         "top_p": payload.get("top_p"),
         "truncation": payload.get("truncation", "disabled"),
@@ -710,46 +708,80 @@ def responses_stream_response(
                 yield _event_to_sse(event("response.output_item.added", output_index=output_index, item=in_flight))
                 if item_type == "reasoning":
                     text = item["summary"][0]["text"]
-                    yield _event_to_sse(event(
-                        "response.reasoning_summary_text.delta",
-                        item_id=item["id"], output_index=output_index, summary_index=0, delta=text,
-                    ))
-                    yield _event_to_sse(event(
-                        "response.reasoning_summary_text.done",
-                        item_id=item["id"], output_index=output_index, summary_index=0, text=text,
-                    ))
+                    yield _event_to_sse(
+                        event(
+                            "response.reasoning_summary_text.delta",
+                            item_id=item["id"],
+                            output_index=output_index,
+                            summary_index=0,
+                            delta=text,
+                        )
+                    )
+                    yield _event_to_sse(
+                        event(
+                            "response.reasoning_summary_text.done",
+                            item_id=item["id"],
+                            output_index=output_index,
+                            summary_index=0,
+                            text=text,
+                        )
+                    )
                 elif item_type == "message":
                     text = item["content"][0]["text"]
-                    yield _event_to_sse(event(
-                        "response.output_text.delta",
-                        item_id=item["id"], output_index=output_index, content_index=0, delta=text,
-                    ))
-                    yield _event_to_sse(event(
-                        "response.output_text.done",
-                        item_id=item["id"], output_index=output_index, content_index=0, text=text,
-                    ))
+                    yield _event_to_sse(
+                        event(
+                            "response.output_text.delta",
+                            item_id=item["id"],
+                            output_index=output_index,
+                            content_index=0,
+                            delta=text,
+                        )
+                    )
+                    yield _event_to_sse(
+                        event(
+                            "response.output_text.done",
+                            item_id=item["id"],
+                            output_index=output_index,
+                            content_index=0,
+                            text=text,
+                        )
+                    )
                 elif item_type == "custom_tool_call":
-                    yield _event_to_sse(event(
-                        "response.custom_tool_call_input.delta",
-                        item_id=item["id"], output_index=output_index, delta=item["input"],
-                    ))
-                    yield _event_to_sse(event(
-                        "response.custom_tool_call_input.done",
-                        item_id=item["id"], output_index=output_index, input=item["input"],
-                    ))
+                    yield _event_to_sse(
+                        event(
+                            "response.custom_tool_call_input.delta",
+                            item_id=item["id"],
+                            output_index=output_index,
+                            delta=item["input"],
+                        )
+                    )
+                    yield _event_to_sse(
+                        event(
+                            "response.custom_tool_call_input.done",
+                            item_id=item["id"],
+                            output_index=output_index,
+                            input=item["input"],
+                        )
+                    )
                 else:
-                    yield _event_to_sse(event(
-                        "response.function_call_arguments.delta",
-                        item_id=item["id"], output_index=output_index, delta=item["arguments"],
-                    ))
-                    yield _event_to_sse(event(
-                        "response.function_call_arguments.done",
-                        item_id=item["id"], output_index=output_index, arguments=item["arguments"],
-                    ))
+                    yield _event_to_sse(
+                        event(
+                            "response.function_call_arguments.delta",
+                            item_id=item["id"],
+                            output_index=output_index,
+                            delta=item["arguments"],
+                        )
+                    )
+                    yield _event_to_sse(
+                        event(
+                            "response.function_call_arguments.done",
+                            item_id=item["id"],
+                            output_index=output_index,
+                            arguments=item["arguments"],
+                        )
+                    )
                 yield _event_to_sse(event("response.output_item.done", output_index=output_index, item=item))
-            completed = responses_build_response(
-                outcome, payload=payload, model=model, response_id=response_id
-            )
+            completed = responses_build_response(outcome, payload=payload, model=model, response_id=response_id)
             yield _event_to_sse(event(f"response.{completed['status']}", response=completed))
         except asyncio.CancelledError:
             task.cancel()
