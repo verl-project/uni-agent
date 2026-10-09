@@ -61,7 +61,9 @@ def parse_openclaw_result(stdout: str) -> dict[str, Any] | None:
     return candidates[-1] if candidates else None
 
 
-def build_openclaw_config(*, base_url: str, api_key: str, model_name: str, workspace: str, timeout_seconds: int) -> dict[str, Any]:
+def build_openclaw_config(
+    *, base_url: str, api_key: str, model_name: str, workspace: str, timeout_seconds: int
+) -> dict[str, Any]:
     """Build an isolated OpenClaw config for one episode.
 
     The recipe intentionally allows only ``exec``. Network policy remains an
@@ -86,6 +88,7 @@ def build_openclaw_config(*, base_url: str, api_key: str, model_name: str, works
                             "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
                             "contextWindow": 32768,
                             "maxTokens": 8192,
+                            "compat": {"maxTokensField": "max_tokens"},
                         }
                     ],
                 }
@@ -147,8 +150,10 @@ def _redact(value: Any, secret: str) -> Any:
         return re.sub(r"(?i)(bearer\s+)[^\s\"']+", r"\1<redacted>", value)
     if isinstance(value, dict):
         return {
-            key: "<redacted>" if str(key).lower() in {"api_key", "apikey", "authorization", "token", "password"}
-            else _redact(item, secret) for key, item in value.items()
+            key: "<redacted>"
+            if str(key).lower() in {"api_key", "apikey", "authorization", "token", "password"}
+            else _redact(item, secret)
+            for key, item in value.items()
         }
     if isinstance(value, list):
         return [_redact(item, secret) for item in value]
@@ -164,7 +169,9 @@ class OpenClawConfig(AgentConfig):
 
     name: str = "openclaw"
     run_timeout: float = Field(default=1800.0, gt=0, description="Hard wall-clock cap for the OpenClaw CLI.")
-    cli_timeout_seconds: int = Field(default=1700, gt=0, description="OpenClaw --timeout deadline; must be below run_timeout.")
+    cli_timeout_seconds: int = Field(
+        default=1700, gt=0, description="OpenClaw --timeout deadline; must be below run_timeout."
+    )
     agent_id: str = Field(default="main", min_length=1)
     tool_command: str = Field(default="/opt/openclaw/bin/openclaw")
     state_root: str = Field(default="/tmp/uni-agent-openclaw")
@@ -236,7 +243,7 @@ class OpenClawAgent(Agent):
                 "OPENCLAW_NO_RESPAWN": "1",
             }
             tool_dir = str(PurePosixPath(cfg.tool_command).parent)
-            launch_script = f"export PATH={_shell_quote_path(tool_dir)}:\"${{PATH:-}}\"; exec {shlex.join(argv)}"
+            launch_script = f'export PATH={_shell_quote_path(tool_dir)}:"${{PATH:-}}"; exec {shlex.join(argv)}'
             proc = await sandbox.exec(
                 ["bash", "-c", launch_script],
                 env=env,
@@ -254,7 +261,9 @@ class OpenClawAgent(Agent):
         except (TimeoutError, OSError) as exc:
             failure = {
                 "error_kind": "timeout" if isinstance(exc, TimeoutError) else "startup_failure",
-                "error_type": type(exc).__name__, "session_id": episode_id, "state_dir": state_dir,
+                "error_type": type(exc).__name__,
+                "session_id": episode_id,
+                "state_dir": state_dir,
                 "exit_code": -1 if isinstance(exc, TimeoutError) else None,
             }
         finally:
@@ -309,5 +318,9 @@ class OpenClawAgent(Agent):
             info["error_kind"] = "trajectory_rejected"
         if cleanup_error is not None and info.get("error_kind") is None:
             info["error_kind"] = "cleanup_failure"
-        return AgentResult(output=_redact(payload or {}, model.api_key), transcript=list(messages),
-                           info=_redact(info, model.api_key), finished=finished)
+        return AgentResult(
+            output=_redact(payload or {}, model.api_key),
+            transcript=list(messages),
+            info=_redact(info, model.api_key),
+            finished=finished,
+        )
