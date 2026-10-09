@@ -14,8 +14,11 @@ yaml without authoring per-recipe glue:
 
 from __future__ import annotations
 
+from uuid import uuid4
+
 import ray
 from omegaconf import OmegaConf
+from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 from uni_agent.framework.base import AgentFramework
 from uni_agent.gateway.config import GatewayActorConfig
@@ -124,6 +127,7 @@ class AgentFrameworkRolloutAdapter:
 
     def __init__(self) -> None:
         self.framework_worker = None
+        self.framework_workers = []
         # Driver-owned so the gateway actors outlive the framework worker; also
         # the handle through which teardown can be driven once a call site exists.
         self.gateway_manager = None
@@ -145,23 +149,58 @@ class AgentFrameworkRolloutAdapter:
             )
 
         gateway_manager = build_gateway_manager(config=config, llm_client=llm_client)
-        framework_worker = AgentFrameworkWorker.remote(
-            config=config,
-            gateway_manager=gateway_manager,
-            reward_loop_worker_handles=reward_loop_worker_handles,
+        configured_num_workers = OmegaConf.select(
+            config, "actor_rollout_ref.rollout.agent.num_workers", default=1
         )
+        num_workers = 1 if configured_num_workers is None else int(configured_num_workers)
+        if num_workers <= 0:
+            raise ValueError(f"actor_rollout_ref.rollout.agent.num_workers must be positive, got {num_workers}")
+        node_ids = [
+            node["NodeID"]
+            for node in ray.nodes()
+            if node["Alive"] and float(node["Resources"].get("CPU", 0)) > 0
+        ]
+        if not node_ids:
+            raise RuntimeError("no alive Ray nodes with CPU resources for AgentFrameworkWorker")
+
+        framework_workers = []
+        for index in range(num_workers):
+            node_id = node_ids[index % len(node_ids)]
+            framework_workers.append(
+                AgentFrameworkWorker.options(
+                    name=f"agent_framework_worker_{index}_{uuid4().hex[:8]}",
+                    num_cpus=0,
+                    scheduling_strategy=NodeAffinitySchedulingStrategy(node_id=node_id, soft=False),
+                ).remote(
+                    config=config,
+                    gateway_manager=gateway_manager,
+                    reward_loop_worker_handles=reward_loop_worker_handles,
+                )
+            )
 
         instance = cls()
-        instance.framework_worker = framework_worker
+        # Keep the singular handle for compatibility with external code that only
+        # inspects the adapter. Dispatch always uses the complete worker list.
+        instance.framework_worker = framework_workers[0]
+        instance.framework_workers = framework_workers
         instance.gateway_manager = gateway_manager
         return instance
 
+    def _dispatch(self, prompts):
+        if not self.framework_workers:
+            raise RuntimeError("framework must be initialized before generate_sequences")
+        if len(prompts) == 0:
+            return []
+        worker_count = min(len(self.framework_workers), len(prompts))
+        chunks = prompts.chunk(worker_count)
+        return [
+            worker.generate_sequences.remote(chunk)
+            for worker, chunk in zip(self.framework_workers[:worker_count], chunks, strict=True)
+        ]
+
     def generate_sequences(self, prompts) -> None:
         """Submit a TQ batch generation task without waiting for rollout results."""
-        if self.framework_worker is None:
-            raise RuntimeError("framework must be initialized before generate_sequences")
-
-        self.framework_worker.generate_sequences.remote(prompts)
+        self._dispatch(prompts)
         return None
 
     def generate_sequences_and_wait(self, prompts) -> None:
@@ -171,8 +210,5 @@ class AgentFrameworkRolloutAdapter:
         via its ReplayBuffer); this awaits the framework worker so the caller knows every
         session's trajectory has landed in TQ, and re-raises any worker-side error.
         """
-        if self.framework_worker is None:
-            raise RuntimeError("framework must be initialized before generate_sequences")
-
-        ray.get(self.framework_worker.generate_sequences.remote(prompts))
+        ray.get(self._dispatch(prompts))
         return None
