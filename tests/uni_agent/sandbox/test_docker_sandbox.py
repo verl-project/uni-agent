@@ -32,6 +32,8 @@ def test_registry_builds_docker_sandbox_from_config():
     assert sandbox.runtime_timeout == 123
     assert sandbox.run_args == ["--network", "none"]
     assert sandbox.pull_policy == "missing"
+    assert sandbox.pull_timeout == 600
+    assert sandbox.start_timeout == 600
     assert "_exec" in DockerSandbox.__dict__
     assert "exec" not in DockerSandbox.__dict__
     assert DockerSandbox.exec is Sandbox.exec
@@ -134,9 +136,9 @@ def test_start_pulls_and_adds_image_mount(monkeypatch):
 
     assert calls == [
         (("image", "inspect", "example/task:latest"), None),
-        (("pull", "example/task:latest"), None),
+        (("pull", "example/task:latest"), 600.0),
         (("image", "inspect", "example/tool:latest"), None),
-        (("pull", "example/tool:latest"), None),
+        (("pull", "example/tool:latest"), 600.0),
         (
             (
                 "run",
@@ -153,7 +155,7 @@ def test_start_pulls_and_adds_image_mount(monkeypatch):
                 "example/task:latest",
                 "3600",
             ),
-            None,
+            600.0,
         ),
     ]
 

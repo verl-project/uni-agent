@@ -38,8 +38,8 @@ class DockerSandbox(Sandbox):
         container_name: str | None = None,
         run_args: list[str] | None = None,
         pull_policy: str = "missing",
-        pull_timeout: float | None = None,
-        start_timeout: float | None = None,
+        pull_timeout: float | None = 600.0,
+        start_timeout: float | None = 600.0,
         image_mounts: list[ImageMount] | None = None,
         executable_paths: dict[str, str] | None = None,
     ) -> None:
@@ -100,12 +100,11 @@ class DockerSandbox(Sandbox):
         return (await self._run_docker("image", "inspect", image)).exit_code == 0
 
     async def _pull_image(self, image: str) -> None:
-        """Fetch the image up front so the pull is bounded by ``pull_timeout``, not by ``docker run``."""
+        """Pull one image within ``pull_timeout``."""
         try:
             pulled = await self._run_docker("pull", image, timeout=self.pull_timeout)
         except asyncio.TimeoutError as exc:
-            if self.pull_timeout is None:
-                raise TimeoutError(f"Pulling Docker image {image!r} timed out") from exc
+            assert self.pull_timeout is not None
             raise TimeoutError(f"Pulling Docker image {image!r} exceeded pull_timeout={self.pull_timeout:g}s") from exc
         if pulled.exit_code != 0:
             detail = pulled.stderr.strip() or pulled.stdout.strip()

@@ -68,7 +68,7 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
     transfers files with `docker cp`, and removes the container when the sandbox exits.
     Before `docker run`, the provider applies `pull_policy` uniformly to the task image
     and all mounted images. `pull_timeout` bounds each required `docker pull`, while
-    `start_timeout` bounds only `docker run`; both are unset by default. The whole startup
+    `start_timeout` bounds `docker run`; both default to 600 seconds. The whole startup
     is also bounded by `SANDBOX_STARTUP_TIMEOUT` (600s by default).
     The container entrypoint is fixed to `sleep`, with `runtime_timeout` passed as
     its duration so the container exits at the configured lifetime. Task images must
