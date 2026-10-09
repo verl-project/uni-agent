@@ -3,36 +3,23 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+import torch
 from omegaconf import OmegaConf
+from tensordict import TensorDict
 
 from uni_agent.framework import entry
 
 
-class _FakeRemoteMethod:
-    def __init__(self, worker_id: int, calls: list[tuple[int, object]]) -> None:
-        self.worker_id = worker_id
-        self.calls = calls
+def _recording_worker(worker_id: int, dispatched: list[tuple[int, list[int]]]):
+    def remote(chunk):
+        dispatched.append((worker_id, chunk["index"].tolist()))
+        return worker_id
 
-    def remote(self, chunk):
-        result = (self.worker_id, chunk)
-        self.calls.append(result)
-        return result
+    return SimpleNamespace(generate_sequences=SimpleNamespace(remote=remote))
 
 
-class _FakeWorker:
-    def __init__(self, worker_id: int, calls: list[tuple[int, object]]) -> None:
-        self.generate_sequences = _FakeRemoteMethod(worker_id, calls)
-
-
-class _FakePrompts:
-    def __init__(self, size: int) -> None:
-        self.size = size
-
-    def __len__(self) -> int:
-        return self.size
-
-    def chunk(self, count: int):
-        return [f"chunk-{index}" for index in range(count)]
+def _prompts(*indices: int) -> TensorDict:
+    return TensorDict({"index": torch.tensor(list(indices))}, batch_size=[len(indices)])
 
 
 @pytest.mark.cpu
@@ -88,18 +75,21 @@ def test_rollout_adapter_create_spreads_framework_workers(monkeypatch):
 
 @pytest.mark.cpu
 @pytest.mark.level0
-def test_rollout_adapter_dispatch_chunks_across_workers(monkeypatch):
-    calls = []
+def test_rollout_adapter_rotates_workers_across_small_refills(monkeypatch):
+    dispatched = []
     adapter = entry.AgentFrameworkRolloutAdapter()
-    adapter.framework_workers = [_FakeWorker(index, calls) for index in range(3)]
+    adapter.framework_workers = [_recording_worker(index, dispatched) for index in range(3)]
 
-    refs = adapter._dispatch(_FakePrompts(5))
+    for start in range(4):
+        adapter.generate_sequences(_prompts(start))
+    adapter.generate_sequences(_prompts(10, 11, 12))
 
-    assert refs == [(0, "chunk-0"), (1, "chunk-1"), (2, "chunk-2")]
-    assert calls == refs
-    monkeypatch.setattr(entry.ray, "get", lambda object_refs: ("waited", object_refs))
-    assert adapter.generate_sequences_and_wait(_FakePrompts(2)) is None
-    assert calls[-2:] == [(0, "chunk-0"), (1, "chunk-1")]
+    assert dispatched == [(0, [0]), (1, [1]), (2, [2]), (0, [3]), (1, [10]), (2, [11]), (0, [12])]
+
+    monkeypatch.setattr(entry.ray, "get", lambda object_refs: object_refs)
+    assert adapter.generate_sequences_and_wait(_prompts(20, 21)) is None
+    assert dispatched[-2:] == [(1, [20]), (2, [21])]
+    assert adapter._dispatch(_prompts()) == []
 
 
 @pytest.mark.cpu

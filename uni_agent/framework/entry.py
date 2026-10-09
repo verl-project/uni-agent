@@ -128,6 +128,8 @@ class AgentFrameworkRolloutAdapter:
     def __init__(self) -> None:
         self.framework_worker = None
         self.framework_workers = []
+        # Streaming refills dispatch a few prompts at a time, so rotate the first worker across calls.
+        self._next_worker = 0
         # Driver-owned so the gateway actors outlive the framework worker; also
         # the handle through which teardown can be driven once a call site exists.
         self.gateway_manager = None
@@ -191,11 +193,13 @@ class AgentFrameworkRolloutAdapter:
             raise RuntimeError("framework must be initialized before generate_sequences")
         if len(prompts) == 0:
             return []
-        worker_count = min(len(self.framework_workers), len(prompts))
-        chunks = prompts.chunk(worker_count)
+        num_workers = len(self.framework_workers)
+        chunks = prompts.chunk(num_workers)
+        start = self._next_worker
+        self._next_worker = (start + len(chunks)) % num_workers
         return [
-            worker.generate_sequences.remote(chunk)
-            for worker, chunk in zip(self.framework_workers[:worker_count], chunks, strict=True)
+            self.framework_workers[(start + i) % num_workers].generate_sequences.remote(chunk)
+            for i, chunk in enumerate(chunks)
         ]
 
     def generate_sequences(self, prompts) -> None:
