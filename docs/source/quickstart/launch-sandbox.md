@@ -154,7 +154,7 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
     ```
 
     Modal builds each configured image and mounts it into the running
-    Sandbox with `Sandbox.mount_image`.
+    Sandbox with `Sandbox.mount_image`. Note that Modal SDK 1.3.4 or newer is required when using `image_mounts`.
 
 === "OpenYuanrong"
 

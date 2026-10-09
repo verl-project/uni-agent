@@ -59,6 +59,13 @@ class ModalSandbox(Sandbox):
             return  # already started
         import modal
 
+        if self.image_mounts and not hasattr(modal.Sandbox, "mount_image"):
+            installed = getattr(modal, "__version__", "unknown")
+            raise RuntimeError(
+                "Modal image mounts require modal>=1.3.4 "
+                f"(installed: {installed}); upgrade with `pip install 'modal>=1.3.4'`"
+            )
+
         self._app = await modal.App.lookup.aio(self.app_name, create_if_missing=True)
         image = modal.Image.from_registry(self.image)
         mounted_images = []

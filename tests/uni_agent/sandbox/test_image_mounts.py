@@ -192,9 +192,10 @@ def test_modal_builds_and_mounts_each_image(monkeypatch):
         return running
 
     modal = SimpleNamespace(
+        __version__="1.5.5",
         App=SimpleNamespace(lookup=_AioMethod(_lookup)),
         Image=_ImageFactory,
-        Sandbox=SimpleNamespace(create=_AioMethod(_create)),
+        Sandbox=SimpleNamespace(create=_AioMethod(_create), mount_image=object()),
     )
     monkeypatch.setitem(sys.modules, "modal", modal)
 
@@ -219,3 +220,19 @@ def test_modal_builds_and_mounts_each_image(monkeypatch):
         ("mount_image", "/opt/claude-code", "example/claude-code:latest"),
         ("mount_image", "/opt/verifier", "example/verifier:latest"),
     ]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_modal_image_mounts_require_supported_sdk(monkeypatch):
+    from uni_agent.sandbox.modal import ModalSandbox
+
+    modal = SimpleNamespace(__version__="1.2.3", Sandbox=SimpleNamespace())
+    monkeypatch.setitem(sys.modules, "modal", modal)
+    sandbox = ModalSandbox(
+        image="example/task:latest",
+        image_mounts=[ImageMount(image="example/tool:latest", mount_path="/opt/tool")],
+    )
+
+    with pytest.raises(RuntimeError, match=r"modal>=1\.3\.4.*installed: 1\.2\.3"):
+        asyncio.run(sandbox.start())
