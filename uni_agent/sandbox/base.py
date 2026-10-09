@@ -347,7 +347,7 @@ class Sandbox(abc.ABC):
             target = f"/usr/bin/{name}"
             current = await self.exec_shell(f"command -v {shlex.quote(name)}")
             current_path = current.stdout.strip() if current.exit_code == 0 else ""
-            targets = [target]
+            targets = [] if source == target else [target]
             if current_path.startswith("/") and current_path not in {source, target}:
                 logger.warning(
                     "overriding sandbox executable %r at %s with %s",
