@@ -71,7 +71,7 @@ def test_success():
     assert "--message-file" in launch_command
     message_path = sandbox.commands[0][0][-1]
     message_path = message_path.split("--message-file", 1)[1].split()[0].strip("'\"")
-    assert "solve 中文 ' $(false)" in sandbox.files[message_path]
+    assert sandbox.files[message_path] == "solve 中文 ' $(false)"
     assert "solve" not in launch_command
 
 

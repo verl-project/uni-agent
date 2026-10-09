@@ -20,4 +20,10 @@
     name: openclaw
   prompt_template:
     - role: user
-      content: "{problem_statement}"
+      content: |-
+        {problem_statement}
+
+        Recipe completion protocol: Use only tools listed in the provided tool schema (exec).
+        NO_REPLY is a text marker, not a tool; never call it.
+        After finishing and checking the task, return a brief plain-text final answer
+        without a tool call. Do not send messages or delegate to another agent.

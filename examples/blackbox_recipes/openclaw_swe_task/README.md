@@ -24,9 +24,10 @@ Python environment.
 
 ## Run inference
 
-Prepare SWE-bench rows with the repository preprocessor. The prompt comes from
-the row at runtime; the YAML contains task and sandbox defaults only. Submit a
-Ray Job with a protected runtime-env file and an explicit Ray Jobs address:
+Prepare SWE-bench rows with the repository preprocessor. The task YAML renders
+the row's `problem_statement` and the recipe completion instructions as one user
+message; the adapter passes that message unchanged through `--message-file`.
+Submit a Ray Job with a protected runtime-env file and an explicit Ray Jobs address:
 
 ```bash
 DATA_PATH=/absolute/preprocessed-swe-bench.parquet \
@@ -38,7 +39,9 @@ bash examples/blackbox_recipes/openclaw_swe_task/run_infer_openclaw.sh
 ```
 
 `LIMIT`, `N`, `CONCURRENCY`, and `GATEWAY_COUNT` default to `1`; model and
-hardware settings are explicit environment overrides. `OUTPUT_DIR/result.json`
+hardware settings are explicit environment overrides. These recipe defaults are
+passed as command-line arguments without changing shared inference defaults.
+`OUTPUT_DIR/result.json`
 contains framework scores and `OUTPUT_DIR/logs/` contains task logs and
 trajectories. The launcher checks one finished trajectory entry per scored
 session without selecting or discarding other trajectories. A result of reward 0
@@ -48,6 +51,8 @@ is valid ordinary inference. OpenClaw's native
 The agent follows the mini-swe-agent input contract: from at most two initial
 messages, it passes the user task to the CLI and ignores an optional system
 message. The recipe's prompt template therefore emits a single user message.
+The completion instructions are recipe prompt guidance and can be edited in the
+YAML; the adapter does not append instructions to the user task.
 Credentials and diagnostics are redacted before they are returned to the
 framework.
 

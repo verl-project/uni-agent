@@ -212,13 +212,7 @@ class OpenClawAgent(Agent):
         cleanup_error = None
         try:
             await sandbox.write_file(config_path, json.dumps(config, separators=(",", ":")))
-            launch_prompt = (
-                prompt + "\n\nRecipe completion protocol: Use only tools listed in the provided tool schema "
-                "(exec). NO_REPLY is a text marker, not a tool; never call it. "
-                "After finishing and checking the task, return a brief plain-text final answer "
-                "without a tool call. Do not send messages or delegate to another agent."
-            )
-            await sandbox.write_file(prompt_path, launch_prompt)
+            await sandbox.write_file(prompt_path, prompt)
             argv = [
                 cfg.tool_command,
                 "agent",
