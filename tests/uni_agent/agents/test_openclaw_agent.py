@@ -164,7 +164,7 @@ def test_redacts_payload_and_bounded_diagnostic():
 @pytest.mark.cpu
 @pytest.mark.level0
 def test_nested_parser():
-    assert parse_openclaw_result("noise\n{\"meta\":{\"a\":1}}") == {"meta": {"a": 1}}
+    assert parse_openclaw_result('noise\n{"meta":{"a":1}}') == {"meta": {"a": 1}}
 
 
 @pytest.mark.cpu
