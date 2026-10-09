@@ -14,10 +14,12 @@ yaml without authoring per-recipe glue:
 
 from __future__ import annotations
 
+import copy
+import logging
 from uuid import uuid4
 
 import ray
-from omegaconf import OmegaConf
+from omegaconf import OmegaConf, open_dict, read_write
 from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 from uni_agent.framework.base import AgentFramework
@@ -30,6 +32,9 @@ from verl.utils.transferqueue_utils import tq
 from verl.workers.config import HFModelConfig, RolloutConfig
 
 _DEFAULT_FRAMEWORK_CLASS = "uni_agent.framework.framework.GatewayAgentFramework"
+_AGENT_RUNNERS_PATH = "actor_rollout_ref.rollout.custom.agent_framework.agent_runners"
+
+logger = logging.getLogger(__name__)
 
 
 def build_gateway_manager(*, config, llm_client) -> GatewayManager:
@@ -96,6 +101,44 @@ def build_agent_framework(
     )
 
 
+def split_session_caps(config, num_workers: int) -> list:
+    """Return one config per framework worker with each runner's session cap split across workers.
+
+    ``max_concurrent_sessions`` is enforced inside each framework process, so worker ``i`` gets
+    ``cap // n`` plus one slot of the remainder and the shares sum to the configured cap. A share
+    of 0 would mean "unlimited", so fewer workers are used when a cap is below ``num_workers``.
+    """
+    runners = OmegaConf.select(config, _AGENT_RUNNERS_PATH, default=None) or {}
+    caps = {}
+    for name, runner_cfg in runners.items():
+        cap = int(runner_cfg.get("max_concurrent_sessions", 0) or 0)
+        if cap > 0:
+            caps[name] = cap
+    if not caps:
+        return [config] * num_workers
+
+    smallest_cap = min(caps.values())
+    if smallest_cap < num_workers:
+        logger.warning(
+            "max_concurrent_sessions=%s is below agent.num_workers=%s; using %s framework workers",
+            smallest_cap,
+            num_workers,
+            smallest_cap,
+        )
+        num_workers = smallest_cap
+
+    worker_configs = []
+    for index in range(num_workers):
+        worker_config = copy.deepcopy(config)
+        worker_runners = OmegaConf.select(worker_config, _AGENT_RUNNERS_PATH)
+        with read_write(worker_runners), open_dict(worker_runners):
+            for name, cap in caps.items():
+                share = cap // num_workers + (1 if index < cap % num_workers else 0)
+                worker_runners[name]["max_concurrent_sessions"] = share
+        worker_configs.append(worker_config)
+    return worker_configs
+
+
 @ray.remote
 class AgentFrameworkWorker:
     """Ray actor host: initializes TQ in this process and owns one AgentFramework.
@@ -151,22 +194,18 @@ class AgentFrameworkRolloutAdapter:
             )
 
         gateway_manager = build_gateway_manager(config=config, llm_client=llm_client)
-        configured_num_workers = OmegaConf.select(
-            config, "actor_rollout_ref.rollout.agent.num_workers", default=1
-        )
+        configured_num_workers = OmegaConf.select(config, "actor_rollout_ref.rollout.agent.num_workers", default=1)
         num_workers = 1 if configured_num_workers is None else int(configured_num_workers)
         if num_workers <= 0:
             raise ValueError(f"actor_rollout_ref.rollout.agent.num_workers must be positive, got {num_workers}")
         node_ids = [
-            node["NodeID"]
-            for node in ray.nodes()
-            if node["Alive"] and float(node["Resources"].get("CPU", 0)) > 0
+            node["NodeID"] for node in ray.nodes() if node["Alive"] and float(node["Resources"].get("CPU", 0)) > 0
         ]
         if not node_ids:
             raise RuntimeError("no alive Ray nodes with CPU resources for AgentFrameworkWorker")
 
         framework_workers = []
-        for index in range(num_workers):
+        for index, worker_config in enumerate(split_session_caps(config, num_workers)):
             node_id = node_ids[index % len(node_ids)]
             framework_workers.append(
                 AgentFrameworkWorker.options(
@@ -174,7 +213,7 @@ class AgentFrameworkRolloutAdapter:
                     num_cpus=0,
                     scheduling_strategy=NodeAffinitySchedulingStrategy(node_id=node_id, soft=False),
                 ).remote(
-                    config=config,
+                    config=worker_config,
                     gateway_manager=gateway_manager,
                     reward_loop_worker_handles=reward_loop_worker_handles,
                 )

@@ -92,6 +92,51 @@ def test_rollout_adapter_rotates_workers_across_small_refills(monkeypatch):
     assert adapter._dispatch(_prompts()) == []
 
 
+def _runner_caps_config(**caps: int):
+    runners = {name: {"runner_fqn": "pkg.runner", "max_concurrent_sessions": cap} for name, cap in caps.items()}
+    agent_framework = {"agent_runners": runners}
+    return OmegaConf.create({"actor_rollout_ref": {"rollout": {"custom": {"agent_framework": agent_framework}}}})
+
+
+def _worker_caps(worker_configs, name: str) -> list[int]:
+    return [
+        cfg.actor_rollout_ref.rollout.custom.agent_framework.agent_runners[name].max_concurrent_sessions
+        for cfg in worker_configs
+    ]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_split_session_caps_preserves_global_cap_per_runner():
+    config = _runner_caps_config(swe=10, unlimited=0)
+
+    worker_configs = entry.split_session_caps(config, 4)
+
+    assert _worker_caps(worker_configs, "swe") == [3, 3, 2, 2]
+    assert _worker_caps(worker_configs, "unlimited") == [0, 0, 0, 0]
+    assert config.actor_rollout_ref.rollout.custom.agent_framework.agent_runners.swe.max_concurrent_sessions == 10
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_split_session_caps_uses_fewer_workers_than_the_smallest_cap():
+    worker_configs = entry.split_session_caps(_runner_caps_config(swe=2, other=9), 4)
+
+    assert _worker_caps(worker_configs, "swe") == [1, 1]
+    assert _worker_caps(worker_configs, "other") == [5, 4]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_split_session_caps_without_caps_reuses_config():
+    config = _runner_caps_config(swe=0)
+
+    worker_configs = entry.split_session_caps(config, 3)
+
+    assert len(worker_configs) == 3
+    assert all(worker_config is config for worker_config in worker_configs)
+
+
 @pytest.mark.cpu
 @pytest.mark.level0
 def test_rollout_adapter_rejects_nonpositive_worker_count(monkeypatch):
