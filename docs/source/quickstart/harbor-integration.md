@@ -113,6 +113,11 @@ The evaluation commands below use these task configurations:
     - name: harbor
       agent:
         name: openhands
+        timeout_sec: 14400
+        kwargs:
+          model_info:
+            max_input_tokens: 131072
+            max_output_tokens: 16384
       harbor_env: modal
       timeout_multiplier: 1.0
     ```
@@ -182,6 +187,7 @@ ray job submit --no-wait \
     -- python3 examples/inference/parallel_infer_verl.py \
     --data-path ~/data/uni_agent/harbor_scale-ai_swe-bench-pro.parquet \
     --model-path Qwen/Qwen3.6-35B-A3B \
+    --served-model-name hosted_vllm/Qwen3.6-35B-A3B \
     --task-config examples/quickstart/harbor/task_config_openhands.yaml \
     --engine vllm \
     --tool-parser qwen3_coder \
@@ -196,6 +202,20 @@ ray job submit --no-wait \
     Ensure that `--data-path` points to a readable Parquet file at the same path on every Ray worker. Use a shared filesystem path or replicate the dataset to each worker.
 
 The runner launches the model engine, injects a session-scoped Gateway endpoint, and captures token-level trajectories. OpenHands must be able to reach the Gateway from its Harbor environment.
+
+For one-sample smoke runs, the repository provides dedicated launchers:
+
+```bash
+bash examples/quickstart/harbor/run_infer_openhands.sh
+bash examples/quickstart/harbor/run_infer_terminus2.sh
+```
+
+The smoke launchers default to Harbor Docker so the agent and Gateway stay on the
+same network. They pass `hosted_vllm/<model>` as the default
+`--served-model-name`; Harbor receives that user-provided value unchanged.
+Override `SERVED_MODEL_NAME` to select another provider-qualified name. Override
+`TASK_CONFIG` and provide `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET` to use Modal
+after making the Gateway reachable from that environment.
 
 ## Results and Rewards
 
