@@ -35,7 +35,7 @@ For each rollout session, the Agent Framework:
 2. Receives a session-scoped model `base_url`.
 3. Launches the configured Agent Runner, such as `run_task`.
 4. The runner injects the session endpoint into `agent.model`.
-5. The Agent sends OpenAI Chat Completions or Anthropic Messages requests to the session URL.
+5. The Agent sends OpenAI Chat Completions, Responses, or Anthropic Messages requests to the session URL.
 6. The Gateway forwards tokenized requests to the verl rollout engine.
 7. The managed Agent Runner returns a `TaskResult`, or `None` when it provides no episode annotations.
 8. The Framework finalizes the session, attaches reward/status/metrics, and writes trajectories to TransferQueue.
@@ -44,10 +44,36 @@ The model-facing endpoints are:
 
 ```text
 POST /sessions/{session_id}/v1/chat/completions
+POST /sessions/{session_id}/v1/responses
 POST /sessions/{session_id}/v1/messages
 ```
 
 Sessions are held in Gateway memory until they are finalized or aborted.
+
+## Responses Capability Boundaries
+
+The Responses adapter validates requests before starting generation, including
+streaming requests. Unsupported capabilities return HTTP 400.
+
+- `parallel_tool_calls` may be omitted or `true`. `false` is rejected because
+  the current backend cannot enforce a single tool call per response.
+- `tool_choice` supports the strings `auto` and `none`, normalized to lowercase.
+  `none` removes tools from the model request. Other strings and all object
+  forms are rejected; required or named tool selection is not enforced.
+- The wire field is `max_output_tokens`. The adapter maps it to the internal
+  `max_tokens` sampling key, subject to the Gateway sampling allowlist. A
+  request containing the Chat Completions field `max_tokens` is rejected,
+  including when both fields are supplied. Omission or `null` leaves the
+  configured output budget unchanged.
+- Message items require a `system`, `developer`, `user`, or `assistant` role.
+  The adapter maps `developer` to the backend's `system` role. Unknown, missing,
+  or non-string roles are rejected. Tool results use `function_call_output` or
+  `custom_tool_call_output` items with a `call_id`, rather than a `tool` message.
+
+See the [Responses API reference](https://developers.openai.com/api/reference/python/resources/responses/methods/create)
+and [message-to-item migration guide](https://developers.openai.com/api/docs/guides/migrate-to-responses)
+for the public wire format. These Gateway capability limits are narrower than
+the full OpenAI API.
 
 ## Token-Level Trajectories
 
