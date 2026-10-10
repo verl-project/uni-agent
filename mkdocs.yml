@@ -64,6 +64,7 @@ nav:
       - Agent: concepts/agent.md
       - Task and Reward: concepts/task-and-reward.md
       - Gateway and Trajectories: concepts/gateway-and-trajectories.md
+      - Agent-Aware KV Cache Offload: concepts/agent-aware-kv-offload.md
       - Logging: concepts/logging.md
       - RL-Insight Integration: concepts/rl-insight-integration.md
       - Agent Aware Router: concepts/agent-aware-router.md

@@ -322,6 +322,27 @@ def test_build_gateway_manager_wires_gateway_config_defaults(
 
 @pytest.mark.cpu
 @pytest.mark.level0
+def test_build_gateway_manager_rejects_old_gateway_kv_config(monkeypatch):
+    from uni_agent.framework import entry as entry_module
+
+    model = types.SimpleNamespace(tokenizer=None, processor=None, hf_config=types.SimpleNamespace(model_type=None))
+    rollout = types.SimpleNamespace(
+        name="vllm",
+        prompt_length=128,
+        response_length=64,
+        multi_turn=types.SimpleNamespace(format="hermes"),
+        custom=types.SimpleNamespace(agent_framework={"gateway_count": 1, "kv_cache_offload": {"enable": True}}),
+    )
+    config = types.SimpleNamespace(data={}, actor_rollout_ref=types.SimpleNamespace(model=model, rollout=rollout))
+    monkeypatch.setattr(entry_module, "omega_conf_to_dataclass", lambda cfg: cfg)
+    monkeypatch.setattr(entry_module, "GatewayManager", lambda **kwargs: kwargs["gateway_actor_config"])
+
+    with pytest.raises(ValueError, match="connector's agent_hint_config"):
+        entry_module.build_gateway_manager(config=config, llm_client=None)
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.parametrize(
     ("configured", "expected"),
     [(None, None), ([], set()), (["temperature", "max_tokens"], {"temperature", "max_tokens"})],
