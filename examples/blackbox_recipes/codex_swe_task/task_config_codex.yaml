@@ -1,0 +1,43 @@
+# Codex inference-only task configuration for the agents/sandbox/tasks architecture.
+# Timeout values are seconds; provider defaults supply resources not listed here.
+# The task layer owns sandbox lifecycle and reward; the Codex Agent owns only
+# the sidecar launch and result normalization.
+- name: swe_bench
+  sandbox:
+    provider: openyuanrong
+    runtime_timeout: 7200
+    image_map:
+      - from: "swebench/**"
+        to: "swr.cn-east-3.myhuaweicloud.com/openyuanrong/swe-bench-verified/**:v2"
+    image_mounts:
+      - image: swr.cn-east-3.myhuaweicloud.com/openyuanrong/codex-tool@sha256:c9769b8d839a8ddcc6e4178c0022ffd508322ba5ad173d8c5a9c9e0ec6082828
+        mount_path: /opt/codex
+    sandbox_kwargs:
+      proxy_port: 38197
+  agent:
+    name: codex
+    run_timeout: 7200
+    conda_env_path: /opt/miniconda3/envs/testbed
+  prompt_template:
+    - role: user
+      content: |-
+        You are a senior software engineer fixing a bug in the repository at /testbed.
+
+        <issue_description>
+        {problem_statement}
+        </issue_description>
+
+        The repository is already checked out at /testbed with its development environment fully set up. Make the minimal changes to non-test source files so the issue is resolved.
+
+        Work through the problem as follows:
+        1. Explore the relevant code and identify the root cause.
+        2. Reproduce the failure when practical.
+        3. Implement the minimal, idiomatic fix.
+        4. Run the relevant tests and verify the fix.
+        5. Briefly summarize the root cause and changes when complete.
+
+        Constraints:
+        - Do not commit changes.
+        - Do not install or modify packages.
+        - Do not modify, remove, or add test files.
+        - Work only inside /testbed.

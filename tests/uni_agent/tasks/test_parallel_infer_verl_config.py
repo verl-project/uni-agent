@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import os
+import sys
 from argparse import Namespace
 
 import pytest
 
 from examples.agent_aware_router.run_infer import init_config as init_router_config
+from examples.inference import parallel_infer_verl
 from examples.inference.parallel_infer_verl import init_config
 
 
@@ -69,3 +72,29 @@ def test_inference_sampling_uses_run_options_and_preserves_length_configuration(
         assert not task_runner.runner_kwargs
     else:
         assert task_runner.runner_kwargs.task_config_path == args.task_config
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_shared_inference_cli_preserves_existing_defaults(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["parallel_infer_verl.py", "--task-config", "unused.yaml"])
+    monkeypatch.delenv("LIMIT", raising=False)
+    parse_args = parallel_infer_verl.argparse.ArgumentParser.parse_args
+
+    class ParsedDefaults(Exception):
+        pass
+
+    def check_defaults(parser):
+        args = parse_args(parser)
+        assert args.limit is None
+        assert args.concurrency == int(os.getenv("GLOBAL_CONCURRENCY", 128))
+        assert args.n_gpus_per_node == 8
+        assert args.tensor_parallel_size == 4
+        assert args.gateway_count == 4
+        assert args.language_model_only is False
+        assert args.disable_thinking is False
+        raise ParsedDefaults
+
+    monkeypatch.setattr(parallel_infer_verl.argparse.ArgumentParser, "parse_args", check_defaults)
+    with pytest.raises(ParsedDefaults):
+        parallel_infer_verl.main()

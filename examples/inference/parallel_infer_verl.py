@@ -1,8 +1,8 @@
-"""Parallel agent inference over a verl-launched engine, through the training path.
+"""Parallel agent inference over a verl-launched engine and agent framework.
 
 Same job as ``parallel_infer_api.py`` (run each row's task, report a score), but verl
-brings the engine up and rollouts flow through the *exact* training stack -- the agent
-framework adapter + TransferQueue (TQ):
+brings the engine up and rollouts flow through the agent framework adapter and
+TransferQueue (TQ):
 
     verl LLMServerManager (vLLM / SGLang)
     ->  AgentFrameworkRolloutAdapter.generate_sequences   (fire-and-forget -> TQ)
@@ -129,6 +129,16 @@ def init_config(args: argparse.Namespace, *, served_model_name: str):
             getattr(args, "kv_cache_dtype", "auto"),
             force_add=True,
         )
+        OmegaConf.update(
+            config,
+            "actor_rollout_ref.rollout.engine_kwargs.vllm.language_model_only",
+            bool(getattr(args, "language_model_only", False)),
+            force_add=True,
+        )
+    elif getattr(args, "language_model_only", False):
+        raise ValueError("--language-model-only is supported only with --engine vllm")
+    if getattr(args, "disable_thinking", False):
+        OmegaConf.update(config, "data.apply_chat_template_kwargs.enable_thinking", False, force_add=True)
 
     # Gateway tool-call parser: the gateway decodes tool calls from raw tokens, so
     # this must match the model's chat template (the analog of vLLM's
@@ -354,6 +364,16 @@ def main() -> None:
         default="vllm",
         choices=["vllm", "sglang"],
         help="Inference engine backend.",
+    )
+    parser.add_argument(
+        "--language-model-only",
+        action="store_true",
+        help="Load only the language-model component (required for text-only Qwen3.5 vLLM runs).",
+    )
+    parser.add_argument(
+        "--disable-thinking",
+        action="store_true",
+        help="Disable thinking in the model chat template.",
     )
     parser.add_argument(
         "--enable-rollout-routing-replay",
