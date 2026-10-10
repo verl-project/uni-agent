@@ -1,0 +1,30 @@
+# OpenClaw inference-only task defaults for the current-framework SWE-bench samples.
+# Timeout values are seconds; provider defaults supply resources not listed here.
+# The sample row supplies the instance metadata and sandbox image; this file
+# selects the generic SWEBenchTask and binds the OpenClaw agent. The user prompt
+# remains required at runtime: task_runner copies the dataset raw_prompt into
+# TaskConfig.prompt, and OpenClawAgent extracts it before --message-file launch.
+- name: swe_bench
+  sandbox:
+    provider: openyuanrong
+    runtime_timeout: 7200
+    image_map:
+      - from: "swebench/**"
+        to: "swr.cn-east-3.myhuaweicloud.com/openyuanrong/swe-bench-verified/**:v2"
+    image_mounts:
+      - image: swr.cn-east-3.myhuaweicloud.com/openyuanrong/openclaw-tool@sha256:90cef4641f82a955692385c48cb4db01a3bd73fc6f68f37962a58717ce547c13
+        mount_path: /opt/openclaw
+    sandbox_kwargs:
+      proxy_port: 38197
+  agent:
+    name: openclaw
+    conda_env_path: /opt/miniconda3/envs/testbed
+  prompt_template:
+    - role: user
+      content: |-
+        {problem_statement}
+
+        Recipe completion protocol: Use only tools listed in the provided tool schema (exec).
+        NO_REPLY is a text marker, not a tool; never call it.
+        After finishing and checking the task, return a brief plain-text final answer
+        without a tool call. Do not send messages or delegate to another agent.
