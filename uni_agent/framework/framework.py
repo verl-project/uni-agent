@@ -841,11 +841,14 @@ class GatewayAgentFramework(AgentFramework):
                         raise
                 else:
                     runner = self._inline_runners[runner_name]
-                    task_result = await runner(
-                        raw_prompt=raw_prompt,
-                        session=session,
-                        sample_index=sample_index,
-                        **({"tools_kwargs": tools_kwargs} if tools_kwargs is not None else {}),
+                    task_result = await asyncio.wait_for(
+                        runner(
+                            raw_prompt=raw_prompt,
+                            session=session,
+                            sample_index=sample_index,
+                            **({"tools_kwargs": tools_kwargs} if tools_kwargs is not None else {}),
+                        ),
+                        timeout=runner_config.session_timeout_seconds,
                     )
                 if task_result is None:
                     task_result = TaskResult()
