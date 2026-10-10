@@ -2,8 +2,8 @@
 
 This example trains Qwen3.5-9B with GRPO while Claude Code solves SWE-bench
 and SWE-reBench tasks inside OpenYuanrong sandboxes. The Claude Code executable
-is supplied by a sidecar image, and `/opt/claude-code/bin` is prepended through
-OpenYuanRong's `sandbox_kwargs.add_to_path` setting.
+is supplied by a sidecar image and exposed as `/usr/bin/claude` through the
+provider-independent `sandbox.executable_paths` setting.
 
 ## Files
 
@@ -21,7 +21,7 @@ bash examples/claude_code_swe_task/build_tool.sh \
 ```
 
 Keep the pushed image tag synchronized with
-`sandbox.sandbox_kwargs.mounts[].image_url` in the task configuration.
+`sandbox.image_mounts[].image` in the task configuration.
 
 ## Launch training
 

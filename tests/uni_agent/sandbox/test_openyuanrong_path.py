@@ -1,4 +1,4 @@
-"""Unit coverage for OpenYuanrong's non-destructive PATH extension."""
+"""Unit coverage for OpenYuanRong's non-destructive PATH extension."""
 
 from __future__ import annotations
 

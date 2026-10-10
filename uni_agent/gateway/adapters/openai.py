@@ -235,6 +235,20 @@ def openai_to_internal(
     if tool_choice == "none":
         tools = None
 
+    if "max_completion_tokens" in payload:
+        limit = payload["max_completion_tokens"]
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0:
+            raise MalformedRequestError("max_completion_tokens must be a positive integer")
+        if "max_tokens" in payload and (
+            not isinstance(payload["max_tokens"], int)
+            or isinstance(payload["max_tokens"], bool)
+            or payload["max_tokens"] != limit
+        ):
+            raise MalformedRequestError("max_tokens and max_completion_tokens must specify the same positive integer")
+        # Both wire spellings use the canonical permission and backend parameter.
+        payload = dict(payload)
+        payload["max_tokens"] = payload.pop("max_completion_tokens")
+
     # Sampling params are gateway-owned allowlist merges, not message canonicalization.
     sampling_params = dict(base_sampling_params)
     for key in allowed_sampling_keys:

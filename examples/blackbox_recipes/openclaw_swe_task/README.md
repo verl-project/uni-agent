@@ -18,7 +18,8 @@ bash examples/blackbox_recipes/openclaw_swe_task/build_tool.sh \
   --registry registry.example/namespace
 ```
 
-The sidecar is mounted at `/opt/openclaw`. Record the published digest in
+The sidecar is mounted at `/opt/openclaw` through `sandbox.image_mounts`
+(`image` and `mount_path`). Record the published digest in
 `task_config_openclaw.yaml`; the task image still owns `/testbed` and its own
 Python environment.
 
