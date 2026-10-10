@@ -84,6 +84,7 @@ class _GatewayActor:
         self._response_length = config.response_length
         self._enable_last_assistant_rollback = config.enable_last_assistant_rollback
         self._coalesce_reserved_exact_requests = config.coalesce_reserved_exact_requests
+        self._trajectory_annotation_policy = config.trajectory_annotation_policy
         self._sessions: dict[str, GatewaySession] = {}
         self._app = FastAPI()
         self._server_port: int | None = None
@@ -130,7 +131,9 @@ class _GatewayActor:
                 payload = await request.json()
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
-            return await self._handle_openai_chat_completions(session_id=session_id, payload=payload)
+            return await self._handle_openai_chat_completions(
+                session_id=session_id, payload=payload, request_headers=dict(request.headers)
+            )
 
         @self._app.post("/sessions/{session_id}/v1/messages")
         async def _anthropic_messages(session_id: str, request: Request):
@@ -138,7 +141,9 @@ class _GatewayActor:
                 payload = await request.json()
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
-            return await self._handle_anthropic_messages(session_id=session_id, payload=payload)
+            return await self._handle_anthropic_messages(
+                session_id=session_id, payload=payload, request_headers=dict(request.headers)
+            )
 
     def _require_started(self) -> None:
         """Raise if the HTTP server has not been started."""
@@ -156,6 +161,7 @@ class _GatewayActor:
         self,
         session_id: str,
         payload: OpenAIChatCompletionRequest,
+        request_headers: dict[str, str] | None = None,
     ) -> JSONResponse | StreamingResponse:
         """Validate an OpenAI Chat Completions payload and serialize the session outcome."""
         session = self._sessions.get(session_id)
@@ -169,6 +175,9 @@ class _GatewayActor:
                 allowed_sampling_keys=self._allowed_request_sampling_param_keys,
             )
             _validate_sampling_params(internal["sampling_params"])
+            internal["annotation_headers"] = request_headers or {}
+            internal["annotation_body"] = dict(payload)
+            internal["annotation_protocol"] = "openai_chat"
             discarded_keys = (
                 session.sampling_params.keys()
                 & payload.keys()
@@ -194,6 +203,7 @@ class _GatewayActor:
         self,
         session_id: str,
         payload: AnthropicRequest,
+        request_headers: dict[str, str] | None = None,
     ) -> JSONResponse | StreamingResponse:
         """Validate an Anthropic Messages payload and serialize the session outcome."""
         session = self._sessions.get(session_id)
@@ -207,6 +217,9 @@ class _GatewayActor:
                 allowed_sampling_keys=self._allowed_request_sampling_param_keys,
             )
             _validate_sampling_params(internal["sampling_params"])
+            internal["annotation_headers"] = request_headers or {}
+            internal["annotation_body"] = dict(payload)
+            internal["annotation_protocol"] = "anthropic_messages"
             discarded_keys = (
                 session.sampling_params.keys()
                 & payload.keys()
@@ -273,6 +286,7 @@ class _GatewayActor:
             enable_last_assistant_rollback=self._enable_last_assistant_rollback,
             coalesce_reserved_exact_requests=self._coalesce_reserved_exact_requests,
             metadata=metadata,
+            annotation_policy=self._trajectory_annotation_policy,
         )
         return handle
 

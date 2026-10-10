@@ -1058,6 +1058,7 @@ class GatewayAgentFramework(AgentFramework):
             "rollback_count": extra.get("rollback_count"),
             "rollback_dropped_trainable_tokens_total": extra.get("rollback_dropped_trainable_tokens_total"),
             "materialization_reason": extra.get("materialization_reason"),
+            "trajectory_annotations": extra.get("trajectory_annotations"),
             "prompt_len": len(traj.prompt_ids),
             "response_len": len(traj.response_ids),
             "model_token_count": sum(traj.response_mask) if traj.response_mask else 0,
