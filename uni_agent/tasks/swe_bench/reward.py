@@ -33,6 +33,8 @@ def _make_eval_script_list(instance, specs, env_name, repo_directory, base_commi
     apply_test_patch_command = f"git apply -v - <<'{_HEREDOC_DELIMITER}'\n{test_patch}\n{_HEREDOC_DELIMITER}"
     test_cmd = MAP_REPO_VERSION_TO_SPECS[instance["repo"]][instance["version"]]["test_cmd"]
     test_command = " ".join([test_cmd, *get_test_directives(instance)])
+    if instance["repo"] == "sphinx-doc/sphinx":
+        test_command = 'PYTEST_ADDOPTS="${PYTEST_ADDOPTS:-} -rA" ' + test_command
 
     eval_commands = [
         "source /opt/miniconda3/bin/activate",
