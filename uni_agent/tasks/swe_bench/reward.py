@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import shlex
 import time
 import uuid
 
@@ -17,6 +18,7 @@ from swebench.harness.grading import get_eval_tests_report, get_resolution_statu
 from swebench.harness.log_parsers import MAP_REPO_TO_PARSER
 from swebench.harness.test_spec.python import get_test_directives
 from swebench.harness.utils import get_modified_files
+from unidiff import PatchSet
 
 logger = logging.getLogger(__name__)
 
@@ -26,11 +28,19 @@ def _make_eval_script_list(instance, specs, env_name, repo_directory, base_commi
     base_commit = instance["base_commit"]
     test_files = get_modified_files(test_patch)
     if test_files:
-        reset_tests_command = f"git checkout {base_commit} {' '.join(test_files)}"
+        test_paths = shlex.join([f":(literal){path}" for path in test_files])
+        reset_tests_command = f"git checkout {shlex.quote(base_commit)} -- {test_paths} || exit $?"
     else:
         reset_tests_command = "echo 'skip reset'"
 
-    apply_test_patch_command = f"git apply -v - <<'{_HEREDOC_DELIMITER}'\n{test_patch}\n{_HEREDOC_DELIMITER}"
+    added_test_files = [file.path for file in PatchSet(test_patch) if file.is_added_file or file.is_rename]
+    added_test_paths = shlex.join([f":(literal){path}" for path in added_test_files])
+    remove_added_tests_command = (
+        f"git rm -rf --ignore-unmatch -- {added_test_paths} || exit $?\ngit clean -fx -- {added_test_paths} || exit $?"
+        if added_test_files
+        else "echo 'skip added tests cleanup'"
+    )
+    apply_test_patch_command = f"git apply -v - <<'{_HEREDOC_DELIMITER}' || exit $?\n{test_patch}\n{_HEREDOC_DELIMITER}"
     test_cmd = MAP_REPO_VERSION_TO_SPECS[instance["repo"]][instance["version"]]["test_cmd"]
     test_command = " ".join([test_cmd, *get_test_directives(instance)])
 
@@ -54,11 +64,13 @@ def _make_eval_script_list(instance, specs, env_name, repo_directory, base_commi
         eval_commands.append(specs["install"])
     eval_commands += [
         reset_tests_command,
+        remove_added_tests_command,
         apply_test_patch_command,
         f": '{START_TEST_OUTPUT}'",
         test_command,
         f": '{END_TEST_OUTPUT}'",
         reset_tests_command,
+        remove_added_tests_command,
     ]
     return eval_commands
 
