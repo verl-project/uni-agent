@@ -77,3 +77,29 @@ class Trajectory:
     routed_experts: torch.Tensor | np.ndarray | None = None
     multi_modal_data: dict[str, Any] | None = None
     extra_fields: dict[str, Any] = field(default_factory=dict)
+
+
+class SessionRouteReleaseError(Exception):
+    """The actor dropped the session, then sticky-route release failed.
+
+    The session no longer exists on the actor, so the manager must still drop
+    its routing entry and load slot. Only the backend route may be left bound.
+    """
+
+    def __init__(self, message: str = "route release failed after session removal"):
+        super().__init__(message)
+
+
+class SessionFinalizedReleaseError(SessionRouteReleaseError):
+    """Finalize materialized trajectories, then sticky-route release failed.
+
+    The actor has already dropped the session. ``trajectories`` are the episode
+    and must be kept. Route cleanup is retried with ``abort_session``; that
+    retry does not invalidate the list.
+    """
+
+    def __init__(self, trajectories: list[Trajectory]):
+        super().__init__("route release failed after session finalize")
+        # Stored on the instance so Ray/pickle keep the list (exception state,
+        # not only ``args``). Callers read this attribute, not the message.
+        self.trajectories = list(trajectories)

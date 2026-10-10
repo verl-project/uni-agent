@@ -869,7 +869,12 @@ class GatewayAgentFramework(AgentFramework):
                 raise
             except Exception:
                 logger.exception("session %s failed (runner=%s); aborting session", session_id, runner_name)
-                await self.gateway_manager.abort_session(session_id)
+                # A cleanup failure (e.g. route release) must not replace the
+                # runner error that failure_reasons and the trace should report.
+                try:
+                    await self.gateway_manager.abort_session(session_id)
+                except Exception:
+                    logger.exception("session %s: Gateway abort failed after runner failure", session_id)
                 session_trace.finish(
                     runner_name=runner_name,
                     status="failure",

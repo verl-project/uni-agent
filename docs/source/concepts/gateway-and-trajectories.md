@@ -437,3 +437,21 @@ This context is independent of final reward-worker scores and training masks.
 For SWE-bench, the context includes `eval_exit_code`, per-test
 `eval_report.status_map`, and an `agent_error` when the agent reports one.
 These diagnostics do not change the task's resolution criteria.
+
+### Optional backend route lifecycle
+
+A backend can implement the awaitable hooks `bind_route(session_id=...)` and
+`release_route(session_id=...)`. Gateway binds the route before publishing the
+session handle and releases it after finalize or abort. Hooks may return a
+coroutine or another awaitable, such as a Ray ObjectRef. Release must support
+retries after the actor session has already been removed. Backends without these
+hooks retain their existing behavior.
+
+Cancelling session creation waits for the remote creation result and aborts any
+session it created, even when cancellation repeats during cleanup. If abort
+fails before actor session removal, Manager keeps the route available for a
+retry. Failed-bind cleanup preserves the original binding error, including when
+route release is cancelled. If finalization succeeds but route release fails, Manager
+retries release once and preserves the finalized trajectories. Other finalize
+failures retain the routing entry for an explicit abort. Cleanup errors do not
+replace the original runner exception.

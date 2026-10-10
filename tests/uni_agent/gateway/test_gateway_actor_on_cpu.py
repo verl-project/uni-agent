@@ -1753,3 +1753,149 @@ async def test_unhandled_exception_uses_provider_error_envelope(monkeypatch):
                 assert body["error"]["message"] == "Internal server error"
             finally:
                 await actor.shutdown()
+
+
+class _RouteBackend(InspectingBackend):
+    def __init__(self, *, release_error=None):
+        super().__init__()
+        self.release_error = release_error
+        self.bind_calls = []
+        self.release_calls = []
+
+    async def bind_route(self, **kwargs):
+        self.bind_calls.append(kwargs)
+
+    async def release_route(self, **kwargs):
+        self.release_calls.append(kwargs)
+        if self.release_error is not None:
+            raise self.release_error
+
+
+class _RefRouteBackend(_RouteBackend):
+    """Sync route methods returning non-coroutine awaitables, like Ray ObjectRefs."""
+
+    def bind_route(self, **kwargs):
+        return asyncio.create_task(super().bind_route(**kwargs))
+
+    def release_route(self, **kwargs):
+        return asyncio.create_task(super().release_route(**kwargs))
+
+
+@pytest.fixture
+def route_actor():
+    from uni_agent.gateway.config import GatewayActorConfig
+    from uni_agent.gateway.gateway import _GatewayActor
+
+    def build(backend):
+        actor = _GatewayActor(GatewayActorConfig(tokenizer=FakeTokenizer()), backend)
+        actor._server_base_url = "http://test"
+        return actor
+
+    return build
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+@pytest.mark.parametrize("close_method", ["finalize_session", "abort_session"])
+async def test_gateway_actor_releases_route_via_non_coroutine_awaitable(route_actor, close_method):
+    backend = _RefRouteBackend()
+    actor = route_actor(backend)
+    await actor.create_session("route-session")
+    await getattr(actor, close_method)("route-session")
+    assert backend.bind_calls == [{"session_id": "route-session"}]
+    assert backend.release_calls == [{"session_id": "route-session"}]
+    assert "route-session" not in actor._sessions
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "release_error",
+    [RuntimeError("route-release-failed"), asyncio.CancelledError()],
+)
+async def test_gateway_actor_abort_retries_failed_route_release(route_actor, release_error):
+    from uni_agent.gateway.session.types import SessionFinalizedReleaseError
+
+    backend = _RouteBackend(release_error=release_error)
+    actor = route_actor(backend)
+    await actor.create_session("route-session")
+    with pytest.raises(SessionFinalizedReleaseError) as raised:
+        await actor.finalize_session("route-session")
+    assert raised.value.__cause__ is release_error
+    assert raised.value.trajectories == []
+    assert "route-session" not in actor._sessions
+    assert backend.release_calls == [{"session_id": "route-session"}]
+    backend.release_error = None
+    await actor.abort_session("route-session")
+    assert backend.release_calls == [{"session_id": "route-session"}] * 2
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_gateway_actor_drops_session_when_bind_route_fails(route_actor):
+    from unittest.mock import AsyncMock
+
+    backend = _RouteBackend()
+    backend.bind_route = AsyncMock(side_effect=RuntimeError("bind failed"))
+    actor = route_actor(backend)
+    with pytest.raises(RuntimeError, match="bind failed"):
+        await actor.create_session("route-session")
+    assert "route-session" not in actor._sessions
+    assert backend.release_calls == [{"session_id": "route-session"}]
+    backend.bind_route.side_effect = None
+    backend.bind_route.return_value = None
+    await actor.create_session("route-session")
+    assert "route-session" in actor._sessions
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_gateway_actor_bind_error_survives_cancelled_route_release(route_actor):
+    from unittest.mock import AsyncMock
+
+    backend = _RouteBackend(release_error=asyncio.CancelledError())
+    backend.bind_route = AsyncMock(side_effect=RuntimeError("bind failed"))
+    actor = route_actor(backend)
+    with pytest.raises(RuntimeError, match="bind failed"):
+        await actor.create_session("route-session")
+    assert "route-session" not in actor._sessions
+    assert backend.release_calls == [{"session_id": "route-session"}]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_gateway_actor_repeated_cancellation_settles_route_release(route_actor):
+    from uni_agent.gateway.session.types import SessionFinalizedReleaseError
+
+    class _SlowReleaseBackend(_RouteBackend):
+        def __init__(self):
+            super().__init__()
+            self.release_started = asyncio.Event()
+            self.allow_release = asyncio.Event()
+            self.release_finished = False
+
+        async def release_route(self, **kwargs):
+            self.release_started.set()
+            await self.allow_release.wait()
+            self.release_finished = True
+
+    backend = _SlowReleaseBackend()
+    actor = route_actor(backend)
+    await actor.create_session("route-session")
+    finalize = asyncio.create_task(actor.finalize_session("route-session"))
+    await backend.release_started.wait()
+    for _ in range(3):
+        finalize.cancel()
+        await asyncio.sleep(0)
+    still_waiting = not finalize.done()
+    backend.allow_release.set()
+    with pytest.raises(SessionFinalizedReleaseError) as raised:
+        await finalize
+    assert raised.value.trajectories == []
+    assert still_waiting
+    assert backend.release_finished
