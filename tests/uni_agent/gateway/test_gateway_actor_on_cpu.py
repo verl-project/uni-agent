@@ -1753,3 +1753,234 @@ async def test_unhandled_exception_uses_provider_error_envelope(monkeypatch):
                 assert body["error"]["message"] == "Internal server error"
             finally:
                 await actor.shutdown()
+
+
+class _RouteBackend(InspectingBackend):
+    def __init__(self, *, release_error=None):
+        super().__init__()
+        self.release_error = release_error
+        self.bind_calls = []
+        self.release_calls = []
+
+    async def bind_route(self, **kwargs):
+        self.bind_calls.append(kwargs)
+
+    async def release_route(self, **kwargs):
+        self.release_calls.append(kwargs)
+        if self.release_error is not None:
+            raise self.release_error
+
+
+class _RefRouteBackend(_RouteBackend):
+    """Sync route methods returning non-coroutine awaitables, like Ray ObjectRefs."""
+
+    def bind_route(self, **kwargs):
+        return asyncio.create_task(super().bind_route(**kwargs))
+
+    def release_route(self, **kwargs):
+        return asyncio.create_task(super().release_route(**kwargs))
+
+
+@pytest.fixture
+def route_actor():
+    from uni_agent.gateway.config import GatewayActorConfig
+    from uni_agent.gateway.gateway import _GatewayActor
+
+    def build(backend):
+        actor = _GatewayActor(GatewayActorConfig(tokenizer=FakeTokenizer()), backend)
+        actor._server_base_url = "http://test"
+        return actor
+
+    return build
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+@pytest.mark.parametrize("close_method", ["finalize_session", "abort_session"])
+async def test_gateway_actor_releases_route_via_non_coroutine_awaitable(route_actor, close_method):
+    backend = _RefRouteBackend()
+    actor = route_actor(backend)
+    await actor.create_session("route-session", weight_version=3)
+    await getattr(actor, close_method)("route-session")
+    assert backend.bind_calls == [{"session_id": "route-session", "weight_version": 3}]
+    assert backend.release_calls == [{"session_id": "route-session"}]
+    assert "route-session" not in actor._sessions
+
+
+class _ServedVersionBackend(SequencedBackend):
+    """Stamp versions like verl's LLMServerClient: the step the server serves now."""
+
+    def __init__(self, steps, *, served_version):
+        super().__init__(steps)
+        self.served_version = served_version
+
+    async def generate(self, request_id, **kwargs):
+        output = await super().generate(request_id, **kwargs)
+        output.extra_fields.setdefault("min_global_steps", self.served_version)
+        output.extra_fields.setdefault("max_global_steps", self.served_version)
+        return output
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "routed, served_version, bound_version, error",
+    [(False, 3, None, None), (True, 3, 4, RuntimeError), (True, 5, 5, None), (True, 3, 3, ValueError)],
+    ids=["plain-client", "version-conflict", "newer-bound-version", "stale-bound-version"],
+)
+async def test_gateway_actor_version_binding(route_actor, routed, served_version, bound_version, error):
+    from unittest.mock import AsyncMock
+
+    backend = _ServedVersionBackend(["OK"], served_version=served_version)
+    if routed:
+        backend.bind_route = AsyncMock(return_value=bound_version)
+        backend.release_route = AsyncMock()
+    actor = route_actor(backend)
+    if error is ValueError:
+        with pytest.raises(ValueError, match="below the requested version"):
+            await actor.create_session("versions", weight_version=4)
+        assert "versions" not in actor._sessions
+        backend.release_route.assert_awaited_once_with(session_id="versions")
+        return
+    await actor.create_session("versions", weight_version=4)
+    request = actor._handle_openai_chat_completions("versions", {"messages": [{"role": "user", "content": "hi"}]})
+    if error is RuntimeError:
+        with pytest.raises(RuntimeError, match="conflicts with session weight_version"):
+            await request
+    else:
+        await request
+        [trajectory] = await actor.finalize_session("versions")
+        assert trajectory.extra_fields["min_global_steps"] == served_version
+        assert trajectory.extra_fields["max_global_steps"] == served_version
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "release_error",
+    [RuntimeError("route-release-failed"), asyncio.CancelledError()],
+)
+async def test_gateway_actor_abort_retries_failed_route_release(route_actor, release_error):
+    from uni_agent.gateway.session.types import SessionFinalizedReleaseError
+
+    backend = _RouteBackend(release_error=release_error)
+    actor = route_actor(backend)
+    await actor.create_session("route-session")
+    with pytest.raises(SessionFinalizedReleaseError) as raised:
+        await actor.finalize_session("route-session")
+    assert raised.value.__cause__ is release_error
+    assert raised.value.trajectories == []
+    assert "route-session" not in actor._sessions
+    assert backend.release_calls == [{"session_id": "route-session"}]
+    backend.release_error = None
+    await actor.abort_session("route-session")
+    assert backend.release_calls == [{"session_id": "route-session"}] * 2
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_gateway_actor_drops_session_when_bind_route_fails(route_actor):
+    from unittest.mock import AsyncMock
+
+    backend = _RouteBackend()
+    backend.bind_route = AsyncMock(side_effect=RuntimeError("bind failed"))
+    actor = route_actor(backend)
+    with pytest.raises(RuntimeError, match="bind failed"):
+        await actor.create_session("route-session", weight_version=3)
+    assert "route-session" not in actor._sessions
+    assert backend.release_calls == [{"session_id": "route-session"}]
+    backend.bind_route.side_effect = None
+    backend.bind_route.return_value = None
+    await actor.create_session("route-session", weight_version=3)
+    assert "route-session" in actor._sessions
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_gateway_actor_bind_error_survives_cancelled_route_release(route_actor):
+    from unittest.mock import AsyncMock
+
+    backend = _RouteBackend(release_error=asyncio.CancelledError())
+    backend.bind_route = AsyncMock(side_effect=RuntimeError("bind failed"))
+    actor = route_actor(backend)
+    with pytest.raises(RuntimeError, match="bind failed"):
+        await actor.create_session("route-session")
+    assert "route-session" not in actor._sessions
+    assert backend.release_calls == [{"session_id": "route-session"}]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_gateway_actor_repeated_cancellation_settles_route_release(route_actor):
+    from uni_agent.gateway.session.types import SessionFinalizedReleaseError
+
+    class _SlowReleaseBackend(_RouteBackend):
+        def __init__(self):
+            super().__init__()
+            self.release_started = asyncio.Event()
+            self.allow_release = asyncio.Event()
+            self.release_finished = False
+
+        async def release_route(self, **kwargs):
+            self.release_started.set()
+            await self.allow_release.wait()
+            self.release_finished = True
+
+    backend = _SlowReleaseBackend()
+    actor = route_actor(backend)
+    await actor.create_session("route-session")
+    finalize = asyncio.create_task(actor.finalize_session("route-session"))
+    await backend.release_started.wait()
+    for _ in range(3):
+        finalize.cancel()
+        await asyncio.sleep(0)
+    still_waiting = not finalize.done()
+    backend.allow_release.set()
+    with pytest.raises(SessionFinalizedReleaseError) as raised:
+        await finalize
+    assert raised.value.trajectories == []
+    assert still_waiting
+    assert backend.release_finished
+
+
+class _UnpinnedRouteBackend(_ServedVersionBackend):
+    """Bind like Laminar latest-version continuation: turns follow newer weights."""
+
+    async def bind_route(self, **kwargs):
+        return None
+
+    async def release_route(self, **kwargs):
+        pass
+
+    async def generate(self, request_id, **kwargs):
+        output = await super().generate(request_id, **kwargs)
+        self.served_version += 1
+        return output
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_gateway_actor_leaves_session_unpinned_when_route_binds_no_version():
+    from uni_agent.gateway.config import GatewayActorConfig
+    from uni_agent.gateway.gateway import _GatewayActor
+
+    backend = _UnpinnedRouteBackend(["first", "second"], served_version=4)
+    actor = _GatewayActor(GatewayActorConfig(tokenizer=FakeTokenizer()), backend)
+    actor._server_base_url = "http://test"
+    await actor.create_session("latest-session", weight_version=4)
+
+    messages = [{"role": "user", "content": "hi"}]
+    await actor._handle_openai_chat_completions("latest-session", {"messages": messages})
+    messages = [*messages, {"role": "assistant", "content": "first"}, {"role": "user", "content": "again"}]
+    await actor._handle_openai_chat_completions("latest-session", {"messages": messages})
+    [trajectory] = await actor.finalize_session("latest-session")
+
+    assert trajectory.extra_fields["min_global_steps"] == 4
+    assert trajectory.extra_fields["max_global_steps"] == 5

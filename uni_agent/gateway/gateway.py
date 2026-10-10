@@ -32,7 +32,9 @@ from uni_agent.gateway.config import GatewayActorConfig
 from uni_agent.gateway.session import (
     GatewaySession,
     MessageCodec,
+    SessionFinalizedReleaseError,
     SessionHandle,
+    SessionRouteReleaseError,
     Trajectory,
 )
 from verl.utils.net_utils import is_valid_ipv6_address
@@ -254,8 +256,15 @@ class _GatewayActor:
         session_id: str,
         metadata: dict[str, Any] | None = None,
         sampling_params: dict[str, Any] | None = None,
+        weight_version: int | None = None,
     ) -> SessionHandle:
-        """Create an actor-owned session and return its provider-compatible handle."""
+        """Create an actor-owned session, optionally bind its route, and return its handle.
+
+        ``weight_version`` is enforced on generations only when the backend binds
+        routes; other backends ignore it. It is the lowest acceptable version:
+        a ``bind_route`` that returns an int bound that (possibly newer) version,
+        and the session enforces the returned one. ``None`` leaves it unpinned.
+        """
         self._require_started()
         if session_id in self._sessions:
             raise RuntimeError(f"Session {session_id} already exists")
@@ -264,6 +273,7 @@ class _GatewayActor:
             session_id=session_id,
             base_url=f"{self._server_base_url}/sessions/{session_id}/v1",
         )
+        bind_route = getattr(self._backend, "bind_route", None)
         self._sessions[session_id] = GatewaySession(
             handle=handle,
             codec=self._codec,
@@ -273,23 +283,83 @@ class _GatewayActor:
             enable_last_assistant_rollback=self._enable_last_assistant_rollback,
             coalesce_reserved_exact_requests=self._coalesce_reserved_exact_requests,
             metadata=metadata,
+            # Only bind_route can pin the replica version. Plain rollout clients
+            # stamp the version the server currently serves, which lags the batch
+            # step in verl v1 trainers, so enforcing it would reject every request.
+            weight_version=weight_version if bind_route is not None else None,
         )
+        if bind_route is not None:
+            try:
+                bound_version = await bind_route(session_id=session_id, weight_version=weight_version)
+                # Sessions wait for runner admission after dispatch picked the
+                # version, so the backend may bind a newer loadable one.
+                if weight_version is not None:
+                    self._sessions[session_id].adopt_bound_weight_version(bound_version)
+            except BaseException:
+                # Manager drops its routing entry when create fails. Drop the
+                # actor session too, or this id stays occupied and cannot be
+                # created or aborted again. HTTP lookup is _sessions, so pop
+                # before release; a release error must not hide the bind error.
+                await self._discard_session_after_failed_bind(session_id)
+                raise
         return handle
 
+    async def _discard_session_after_failed_bind(self, session_id: str) -> None:
+        try:
+            await self._remove_session(session_id)
+        except (Exception, asyncio.CancelledError):
+            logger.exception("session %s: route release failed after bind_route failure", session_id)
+
     async def finalize_session(self, session_id: str) -> list[Trajectory]:
-        """Finalize a session, remove it from the actor, and return its trajectories."""
+        """Finalize a session, remove it from the actor, and return its trajectories.
+
+        Route release runs after the trajectories exist. If it fails, the session
+        is already gone, so the error carries the list instead of dropping it.
+        ``abort_session`` can retry release without redoing finalize.
+        """
         session = self._get_session(session_id)
         trajectories = await session.finalize()
-        self._sessions.pop(session_id, None)
+        try:
+            await self._remove_session(session_id)
+        except BaseException as exc:
+            # CancelledError is a BaseException. The session is already popped,
+            # so a cancel during release must still carry the trajectories.
+            raise SessionFinalizedReleaseError(trajectories) from exc
         return trajectories
 
     async def abort_session(self, session_id: str) -> None:
-        """Abort a session and remove it from the actor if it still exists."""
+        """Abort a live session and remove its route even if the session is already gone."""
         session = self._sessions.get(session_id)
-        if session is None:
-            return  # Already finalized or aborted — treat as idempotent.
-        await session.abort()
+        if session is not None:
+            await session.abort()
+        try:
+            await self._remove_session(session_id)
+        except BaseException as exc:
+            # The session is already popped, so only the route is left. Tag the
+            # failure so the manager still frees its routing slot. Retry abort
+            # to release the route again.
+            raise SessionRouteReleaseError() from exc
+
+    async def _remove_session(self, session_id: str) -> None:
         self._sessions.pop(session_id, None)
+
+        release_route = getattr(self._backend, "release_route", None)
+        if release_route is None:
+            return
+        # Pop already happened. Finish release even if this task is cancelled,
+        # then let the caller observe that cancellation (finalize wraps it).
+        # ensure_future, not create_task: backends such as Laminar's
+        # LLMServerClient return a Ray ObjectRef, which is awaitable but not a coroutine.
+        release_task = asyncio.ensure_future(release_route(session_id=session_id))
+        cancelled = False
+        while not release_task.done():
+            try:
+                await asyncio.shield(release_task)
+            except asyncio.CancelledError:
+                cancelled = True
+        release_task.result()
+        if cancelled:
+            raise asyncio.CancelledError()
 
     async def get_session_state(self, session_id: str) -> dict[str, Any]:
         """Return a snapshot of a live session's state."""

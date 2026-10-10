@@ -206,12 +206,15 @@ class GatewaySession:
         enable_last_assistant_rollback: bool = True,
         coalesce_reserved_exact_requests: bool = True,
         metadata: dict[str, Any] | None = None,
+        weight_version: int | None = None,
     ):
         """Create an active session bound to a handle and model codec."""
         if prompt_length is not None and prompt_length <= 0:
             raise ValueError(f"prompt_length must be positive when set, got {prompt_length}")
         if response_length is not None and response_length <= 0:
             raise ValueError(f"response_length must be positive when set, got {response_length}")
+        if weight_version is not None and (type(weight_version) is not int or weight_version < 0):
+            raise ValueError(f"weight_version must be a non-negative integer when set, got {weight_version!r}")
 
         self.handle = handle
         self._codec = codec
@@ -225,6 +228,7 @@ class GatewaySession:
         self._coalesce_reserved_exact_requests = coalesce_reserved_exact_requests
         self._metadata = dict(metadata or {})
         self._trace_identity = dict(self._metadata.get("_trace_identity") or {})
+        self._weight_version = weight_version
         self.active_chains: list[ChainState] = []
         self.materialized_chains: list[MaterializedChain] = []
         self.reserved_chain_ids: set[int] = set()
@@ -243,6 +247,25 @@ class GatewaySession:
     def sampling_params(self) -> dict[str, Any]:
         """Return a copy of the trusted per-session sampling defaults."""
         return dict(self._sampling_params)
+
+    def adopt_bound_weight_version(self, weight_version: int | None) -> None:
+        """Enforce the version the backend route actually bound.
+
+        The requested ``weight_version`` is the lowest acceptable version: a
+        session admitted after that version retired binds a newer one. ``None``
+        leaves the session unpinned so later turns can follow newer weights. Call
+        before the handle is published, so no generation used the old value.
+        """
+        if weight_version is None:
+            self._weight_version = None
+            return
+        if type(weight_version) is not int or weight_version < 0:
+            raise ValueError(f"bound weight_version must be a non-negative integer, got {weight_version!r}")
+        if self._weight_version is not None and weight_version < self._weight_version:
+            raise ValueError(
+                f"bound weight_version {weight_version} is below the requested version {self._weight_version}"
+            )
+        self._weight_version = weight_version
 
     async def run_generation(self, request: InternalGenerationRequest, backend) -> GenerationOutcome:
         """Run one provider-normalized generation request and return its business outcome.
@@ -343,20 +366,33 @@ class GatewaySession:
                 raise RuntimeError("generation input preparation did not produce a request")
 
             try:
-                output = await backend.generate(
-                    request_id=self.handle.session_id,
-                    prompt_ids=encoded.context_ids,
-                    sampling_params=encoded.sampling_params,
-                    image_data=encoded.image_data,
-                    video_data=encoded.video_data,
-                    mm_processor_kwargs=encoded.mm_processor_kwargs,
-                )
+                # The route bound at create_session already pins the replica
+                # version, so generate does not repeat it: verl's LLMServerClient
+                # forwards unknown kwargs into server.generate.remote, which rejects them.
+                backend_kwargs = {
+                    "prompt_ids": encoded.context_ids,
+                    "sampling_params": encoded.sampling_params,
+                    "image_data": encoded.image_data,
+                    "video_data": encoded.video_data,
+                    "mm_processor_kwargs": encoded.mm_processor_kwargs,
+                }
+                output = await backend.generate(request_id=self.handle.session_id, **backend_kwargs)
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e)) from e
             except Exception as e:
                 raise HTTPException(status_code=500, detail=f"{e.__class__.__name__}: {e}") from e
+            generation_version = (
+                output.extra_fields.get("min_global_steps"),
+                output.extra_fields.get("max_global_steps"),
+            )
+            if self._weight_version is not None and generation_version != (self._weight_version, self._weight_version):
+                raise RuntimeError(
+                    "backend generation version conflicts with session weight_version: "
+                    f"expected {(self._weight_version, self._weight_version)!r}, got {generation_version!r}"
+                )
 
             response_ids = list(output.token_ids)
+
             assistant_logprobs = None
             if encoded.sampling_params.get("logprobs", False):
                 if output.log_probs is None:
@@ -382,12 +418,7 @@ class GatewaySession:
             encoded.buffer.response_ids = list(merged_token_ids[prompt_length:])
             encoded.buffer.response_mask = list(response_mask)
             encoded.buffer.response_logprobs = list(response_logprobs or [])
-            encoded.buffer.generation_versions.append(
-                (
-                    output.extra_fields.get("min_global_steps"),
-                    output.extra_fields.get("max_global_steps"),
-                )
-            )
+            encoded.buffer.generation_versions.append(generation_version)
             self._assert_response_logprob_alignment(encoded.buffer)
 
             # R3 router replay: the backend returns routing for the full context
