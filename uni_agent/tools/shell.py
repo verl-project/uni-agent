@@ -127,15 +127,25 @@ async def open_shell_session(
 
 def _capture_wrapper(command_path: str, out: str, err: str, rc: str, *, signal: str | None, sock: str) -> str:
     """Build the shell line loading ``command_path`` under the file-capture protocol."""
+    signal_line = f"; tmux -S {shlex.quote(sock)} wait -S {shlex.quote(signal)}" if signal is not None else ""
+    exit_handler = (
+        f'__rc=$?; printf "exit:%s" "$__rc" > {shlex.quote(rc)}.part '
+        f"&& mv {shlex.quote(rc)}.part {shlex.quote(rc)}{signal_line}"
+    )
     line = (
+        # Do not replace an agent's EXIT trap. If it installs one during this
+        # command, leave that trap intact rather than claiming a known exit.
+        '__ua_capture_exit_trap=; if [ -z "$(trap -p EXIT)" ]; then '
+        f"trap {shlex.quote(exit_handler)} EXIT; "
+        '__ua_capture_exit_trap=$(trap -p EXIT); fi; '
         f'eval "$(cat {shlex.quote(command_path)})" '
         f"> {shlex.quote(out)} 2> {shlex.quote(err)}; "
-        f'__rc=$?; printf %s "$__rc" > {shlex.quote(rc)}.part '
+        '__rc=$?; if [ -n "$__ua_capture_exit_trap" ] '
+        '&& [ "$(trap -p EXIT)" = "$__ua_capture_exit_trap" ]; then trap - EXIT; fi; '
+        f'printf %s "$__rc" > {shlex.quote(rc)}.part '
         f"&& mv {shlex.quote(rc)}.part {shlex.quote(rc)}"
     )
-    if signal is not None:
-        line += f"; tmux -S {shlex.quote(sock)} wait -S {shlex.quote(signal)}"
-    return line
+    return line + signal_line
 
 
 # Best-effort tmux install when the image lacks it: first package manager on PATH,
@@ -183,6 +193,7 @@ class TmuxShell:
         self._dir = f"/tmp/uni-agent-shell/{self.session_id}"
         self._sock = f"{self._dir}/tmux.sock"
         self._counter = 0
+        self._closed = False
 
     # ----- helpers -----
     def _tmux(self, *args: str) -> list[str]:
@@ -244,6 +255,10 @@ class TmuxShell:
 
     # ----- shell actions -----
     async def start_command(self, command: str) -> int:
+        if self._closed:
+            await self.close()
+            await self.start()
+            self._closed = False
         cid = self._counter + 1
         self._counter = cid
         out, err, rc = self._paths(cid)
@@ -266,6 +281,10 @@ class TmuxShell:
         if res.exit_code != 0:
             return None  # exit-code file not written yet -> still running
         text = res.stdout.strip()
+        if text.startswith("exit:"):
+            code = int(text.removeprefix("exit:"))
+            self._closed = True
+            return code
         return int(text) if text else None
 
     async def run(self, command: str, *, timeout: float = 120.0) -> CommandResult:
