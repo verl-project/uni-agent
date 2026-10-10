@@ -1753,3 +1753,22 @@ async def test_unhandled_exception_uses_provider_error_envelope(monkeypatch):
                 assert body["error"]["message"] == "Internal server error"
             finally:
                 await actor.shutdown()
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_efficiency_counters_survive_session_finalization():
+    from uni_agent.gateway.config import GatewayActorConfig
+    from uni_agent.gateway.gateway import _GatewayActor
+
+    actor = _GatewayActor(GatewayActorConfig(tokenizer=FakeTokenizer()), SequencedBackend(["OK"]))
+    actor._server_base_url = "http://test"
+    await actor.create_session("metrics")
+    await actor._handle_openai_chat_completions("metrics", {"messages": [{"role": "user", "content": "hi"}]})
+    before = await actor.get_efficiency_metrics()
+    assert before["model/output_tokens"] == 2
+    assert before["model/requests_completed"] == 1
+    await actor.finalize_session("metrics")
+    after = await actor.get_efficiency_metrics()
+    assert after == before

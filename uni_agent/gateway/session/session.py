@@ -186,6 +186,61 @@ class GenerationOutcome:
     completion_tokens: int
 
 
+@dataclass
+class GenerationMetrics:
+    """Actor-lifetime backend request counters shared by all its sessions.
+
+    Request wall time includes backend queue/version waits, not only GPU compute.
+    Token counts include successful calls only; prompt tokens count repeated input
+    contexts and do not measure physical prefill work after prefix caching.
+    ``completed_elapsed_s`` pairs with ``completed`` (successful calls only), while
+    ``finished_elapsed_s`` covers every exited call, including failures and cancels.
+    """
+
+    started: int = 0
+    completed: int = 0
+    failed: int = 0
+    cancelled: int = 0
+    in_flight: int = 0
+    completed_elapsed_s: float = 0.0
+    finished_elapsed_s: float = 0.0
+    active_started_sum: float = 0.0
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+    def begin(self) -> float:
+        started_at = time.perf_counter()
+        self.started += 1
+        self.in_flight += 1
+        self.active_started_sum += started_at
+        return started_at
+
+    def end(self, started_at: float, *, succeeded: bool) -> None:
+        elapsed = time.perf_counter() - started_at
+        self.finished_elapsed_s += elapsed
+        if succeeded:
+            self.completed_elapsed_s += elapsed
+        self.in_flight -= 1
+        self.active_started_sum -= started_at
+        if self.in_flight == 0:
+            self.active_started_sum = 0.0
+
+    def snapshot(self) -> dict[str, int | float]:
+        return {
+            "model/requests_started": self.started,
+            "model/requests_completed": self.completed,
+            "model/requests_failed": self.failed,
+            "model/requests_cancelled": self.cancelled,
+            "model/requests_in_flight": self.in_flight,
+            "model/request_completed_elapsed_s": self.completed_elapsed_s,
+            "model/request_elapsed_s": (
+                self.finished_elapsed_s + time.perf_counter() * self.in_flight - self.active_started_sum
+            ),
+            "model/input_tokens": self.input_tokens,
+            "model/output_tokens": self.output_tokens,
+        }
+
+
 class GatewaySession:
     """Behavior-bearing state container for one gateway session.
 
@@ -206,6 +261,7 @@ class GatewaySession:
         enable_last_assistant_rollback: bool = True,
         coalesce_reserved_exact_requests: bool = True,
         metadata: dict[str, Any] | None = None,
+        generation_metrics: GenerationMetrics | None = None,
     ):
         """Create an active session bound to a handle and model codec."""
         if prompt_length is not None and prompt_length <= 0:
@@ -225,6 +281,7 @@ class GatewaySession:
         self._coalesce_reserved_exact_requests = coalesce_reserved_exact_requests
         self._metadata = dict(metadata or {})
         self._trace_identity = dict(self._metadata.get("_trace_identity") or {})
+        self._generation_metrics = generation_metrics if generation_metrics is not None else GenerationMetrics()
         self.active_chains: list[ChainState] = []
         self.materialized_chains: list[MaterializedChain] = []
         self.reserved_chain_ids: set[int] = set()
@@ -342,6 +399,9 @@ class GatewaySession:
             if encoded is None:
                 raise RuntimeError("generation input preparation did not produce a request")
 
+            metrics = self._generation_metrics
+            started_at = metrics.begin()
+            succeeded = False
             try:
                 output = await backend.generate(
                     request_id=self.handle.session_id,
@@ -351,10 +411,22 @@ class GatewaySession:
                     video_data=encoded.video_data,
                     mm_processor_kwargs=encoded.mm_processor_kwargs,
                 )
+            except asyncio.CancelledError:
+                metrics.cancelled += 1
+                raise
             except ValueError as e:
+                metrics.failed += 1
                 raise HTTPException(status_code=400, detail=str(e)) from e
             except Exception as e:
+                metrics.failed += 1
                 raise HTTPException(status_code=500, detail=f"{e.__class__.__name__}: {e}") from e
+            else:
+                succeeded = True
+                metrics.completed += 1
+                metrics.input_tokens += len(encoded.context_ids)
+                metrics.output_tokens += len(output.token_ids)
+            finally:
+                metrics.end(started_at, succeeded=succeeded)
 
             response_ids = list(output.token_ids)
             assistant_logprobs = None

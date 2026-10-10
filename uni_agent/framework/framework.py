@@ -8,6 +8,8 @@ import json
 import logging
 import os
 import random
+import threading
+import time
 from collections.abc import Awaitable, Callable
 from copy import deepcopy
 from dataclasses import dataclass, replace
@@ -22,6 +24,7 @@ from omegaconf import OmegaConf
 from tensordict import TensorDict
 from tensordict.tensorclass import NonTensorData, NonTensorStack
 
+from uni_agent.efficiency import collect_efficiency
 from uni_agent.gateway.session import SessionHandle, Trajectory
 from uni_agent.logging import LogContext, sample_logging
 from uni_agent.rl_insight.adapter import agent_loop_session
@@ -119,18 +122,31 @@ def _run_agent_runner_ray_task(
     sample_index: int,
     tools_kwargs: object | None,
     log_context: LogContext | None,
+    efficiency_sink=None,
 ) -> TaskResult | None:
     """Run only the user runner in Ray; parent owns session lifecycle outputs."""
     runner = _materialize_runner(runner_fqn, runner_kwargs)
+
+    async def invoke() -> TaskResult | None:
+        with collect_efficiency() as metrics:
+            try:
+                return await runner(
+                    raw_prompt=raw_prompt,
+                    session=session,
+                    sample_index=sample_index,
+                    **({"tools_kwargs": tools_kwargs} if tools_kwargs is not None else {}),
+                )
+            finally:
+                if efficiency_sink is not None:
+                    try:
+                        # The actor method is in its own concurrency group, so this
+                        # callback can run while generate_sequences holds a default slot.
+                        await efficiency_sink.record_efficiency_metrics.remote(metrics)
+                    except Exception:
+                        logger.exception("Failed to report runner efficiency metrics")
+
     with _log_scope(log_context):
-        return asyncio.run(
-            runner(
-                raw_prompt=raw_prompt,
-                session=session,
-                sample_index=sample_index,
-                **({"tools_kwargs": tools_kwargs} if tools_kwargs is not None else {}),
-            )
-        )
+        return asyncio.run(invoke())
 
 
 def _short_failure_reason(error: BaseException) -> str:
@@ -341,6 +357,16 @@ class GatewayAgentFramework(AgentFramework):
         trajectory_postprocessor_kwargs: dict[str, object] | None = None,
     ):
         self.gateway_manager = gateway_manager
+        self.efficiency_sink = None
+        with collect_efficiency() as efficiency_metrics:
+            self._efficiency_metrics = efficiency_metrics
+        self._efficiency_metrics["task_reports/count"] = 0.0
+        # Runner callbacks and snapshot RPCs run on the efficiency group's
+        # thread, while admission counters are updated on the default-group loop.
+        self._efficiency_lock = threading.Lock()
+        self._admission_wait_s = 0.0
+        self._admitted_sessions = 0
+        self._completed_sessions = 0
         self.runner_registry = runner_registry
         # Materialize inline runners at construction since they run in-process and may maintain state;
         # Ray-dispatched runners are materialized per-run since they run remotely.
@@ -503,6 +529,26 @@ class GatewayAgentFramework(AgentFramework):
         if "__do_sample__" in sample_fields and not bool(sample_fields["__do_sample__"]):
             sampling_params.update(temperature=0, top_p=1.0, top_k=-1)
         return sampling_params
+
+    def record_efficiency_metrics(self, metrics: dict[str, float]) -> None:
+        """Aggregate terminal runner reports, including graceful failures/cancellation.
+
+        Still-running and force-killed runners are not included in these totals.
+        Safe to call from the efficiency concurrency-group thread.
+        """
+        with self._efficiency_lock:
+            self._efficiency_metrics["task_reports/count"] += 1
+            for key, value in metrics.items():
+                self._efficiency_metrics[key] = self._efficiency_metrics.get(key, 0.0) + value
+
+    def get_efficiency_metrics(self) -> dict[str, float]:
+        with self._efficiency_lock:
+            metrics = dict(self._efficiency_metrics)
+            metrics["admission/wait_s"] = self._admission_wait_s
+            metrics["sessions/admitted"] = float(self._admitted_sessions)
+            metrics["sessions/completed"] = float(self._completed_sessions)
+            metrics["sessions/in_flight"] = float(self._admitted_sessions - self._completed_sessions)
+            return metrics
 
     async def generate_sequences(self, prompts: TensorDict) -> None:
         """Run rollout-manager generation and write outputs into TransferQueue."""
@@ -731,22 +777,36 @@ class GatewayAgentFramework(AgentFramework):
 
         runner_cap = runner_config.max_concurrent_sessions
         if runner_cap <= 0:
-            return await self._run_agent_episode(
-                sample_fields=sample_fields,
-                sample_index=sample_index,
-                session_index=session_index,
-                global_steps=global_steps,
-                runner_name=runner_name,
-                runner_config=runner_config,
-                sampling_params=sampling_params,
-            )
+            with self._efficiency_lock:
+                self._admitted_sessions += 1
+            try:
+                return await self._run_agent_episode(
+                    sample_fields=sample_fields,
+                    sample_index=sample_index,
+                    session_index=session_index,
+                    global_steps=global_steps,
+                    runner_name=runner_name,
+                    runner_config=runner_config,
+                    sampling_params=sampling_params,
+                )
+            finally:
+                with self._efficiency_lock:
+                    self._completed_sessions += 1
 
         runner_semaphore = self._runner_semaphores.get(runner_name)
         if runner_semaphore is None:
             runner_semaphore = asyncio.Semaphore(runner_cap)
             self._runner_semaphores[runner_name] = runner_semaphore
 
-        async with runner_semaphore:
+        wait_started = time.perf_counter()
+        try:
+            await runner_semaphore.acquire()
+        finally:
+            with self._efficiency_lock:
+                self._admission_wait_s += time.perf_counter() - wait_started
+        with self._efficiency_lock:
+            self._admitted_sessions += 1
+        try:
             return await self._run_agent_episode(
                 sample_fields=sample_fields,
                 sample_index=sample_index,
@@ -756,6 +816,10 @@ class GatewayAgentFramework(AgentFramework):
                 runner_config=runner_config,
                 sampling_params=sampling_params,
             )
+        finally:
+            with self._efficiency_lock:
+                self._completed_sessions += 1
+            runner_semaphore.release()
 
     async def _run_agent_episode(
         self,
@@ -821,6 +885,7 @@ class GatewayAgentFramework(AgentFramework):
                         sample_index=sample_index,
                         tools_kwargs=tools_kwargs,
                         log_context=task_log,
+                        efficiency_sink=self.efficiency_sink,
                     )
                     # Guard against runners that hang without raising (e.g. a
                     # remote sandbox that OOM-killed the kernel and never returns).
@@ -841,12 +906,16 @@ class GatewayAgentFramework(AgentFramework):
                         raise
                 else:
                     runner = self._inline_runners[runner_name]
-                    task_result = await runner(
-                        raw_prompt=raw_prompt,
-                        session=session,
-                        sample_index=sample_index,
-                        **({"tools_kwargs": tools_kwargs} if tools_kwargs is not None else {}),
-                    )
+                    with collect_efficiency() as efficiency_metrics:
+                        try:
+                            task_result = await runner(
+                                raw_prompt=raw_prompt,
+                                session=session,
+                                sample_index=sample_index,
+                                **({"tools_kwargs": tools_kwargs} if tools_kwargs is not None else {}),
+                            )
+                        finally:
+                            self.record_efficiency_metrics(efficiency_metrics)
                 if task_result is None:
                     task_result = TaskResult()
                 elif not isinstance(task_result, TaskResult):

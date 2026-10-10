@@ -119,3 +119,31 @@ async def test_run_marks_timeout_even_when_interrupt_reports_an_exit_code(
 
     assert result.timed_out is True
     assert result.exit_code == 130
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_shell_profile_distinguishes_wait_and_output_reads():
+    from uni_agent.efficiency import collect_efficiency
+
+    class Backend(RecordingBackend):
+        ready = False
+
+        async def exec(self, argv, **kwargs):
+            if argv[0] == "cat":
+                if argv[1].endswith(".rc"):
+                    return ExecResult(exit_code=0 if self.ready else 1, stdout="7" if self.ready else "", stderr="")
+                return ExecResult(exit_code=0, stdout="out" if argv[1].endswith(".out") else "err", stderr="")
+            return await super().exec(argv, **kwargs)
+
+        async def exec_shell(self, command, **kwargs):
+            self.ready = True
+            return ExecResult(exit_code=0, stdout="", stderr="")
+
+    with collect_efficiency() as metrics:
+        result = await TmuxShell(Backend()).run("exit 7")
+    assert (result.exit_code, result.stdout, result.stderr, result.timed_out) == (7, "out", "err", False)
+    for phase, count in (("write_command", 1), ("dispatch", 1), ("poll", 2), ("wait", 1), ("read_output", 2)):
+        assert metrics[f"shell/{phase}/count"] == count
+        assert metrics[f"shell/{phase}/total_s"] >= 0

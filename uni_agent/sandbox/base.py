@@ -18,6 +18,8 @@ from typing import Any, ClassVar, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from uni_agent.efficiency import measure_efficiency
+
 from .utils import (
     extract_dir_from_file,
     pack_dir_to_file,
@@ -429,29 +431,30 @@ class Sandbox(abc.ABC):
         ``CancelledError`` is a ``BaseException`` on Python 3.10+, and a cancelled
         enter must still ``stop()`` or the partial sandbox leaks.
         """
-        retry = max(1, retry)
-        last_exc: BaseException | None = None
-        for attempt in range(1, retry + 1):
-            try:
-                async with _startup_slot():
-                    await self._run_start()
-                return self
-            except Exception as exc:
-                last_exc = exc
-                await _stop_after_failed_start_shielded(self)
-            except BaseException:
-                # Not retried. async with skips __aexit__ when enter itself
-                # is cancelled, so stop() here is what releases a container
-                # start() already created. Shield it so a second cancel
-                # cannot abandon that teardown.
-                await _stop_after_failed_start_shielded(self)
-                raise
-            logger.warning("sandbox failed to start (attempt %d/%d): %r", attempt, retry, last_exc)
-            if attempt < retry:
-                await asyncio.sleep(2 * attempt)
-        assert last_exc is not None
-        logger.error("sandbox failed to start after %d attempts: %r", retry, last_exc)
-        raise last_exc
+        with measure_efficiency("sandbox_startup"):
+            retry = max(1, retry)
+            last_exc: BaseException | None = None
+            for attempt in range(1, retry + 1):
+                try:
+                    async with _startup_slot():
+                        await self._run_start()
+                    return self
+                except Exception as exc:
+                    last_exc = exc
+                    await _stop_after_failed_start_shielded(self)
+                except BaseException:
+                    # Not retried. async with skips __aexit__ when enter itself
+                    # is cancelled, so stop() here is what releases a container
+                    # start() already created. Shield it so a second cancel
+                    # cannot abandon that teardown.
+                    await _stop_after_failed_start_shielded(self)
+                    raise
+                logger.warning("sandbox failed to start (attempt %d/%d): %r", attempt, retry, last_exc)
+                if attempt < retry:
+                    await asyncio.sleep(2 * attempt)
+            assert last_exc is not None
+            logger.error("sandbox failed to start after %d attempts: %r", retry, last_exc)
+            raise last_exc
 
     async def __aexit__(self, *exc) -> None:
         await self.stop()
