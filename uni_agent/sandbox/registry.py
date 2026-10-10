@@ -3,16 +3,28 @@
 Providers live in their own module and self-register via
 :func:`register_sandbox`; :func:`build_sandbox` imports that module lazily on
 first use, so an uninstalled provider SDK never blocks importing this package.
+
+External overlays (private backends) can attach extra providers
+without adding them to :data:`SANDBOX_MODULES`. Set ``UNI_AGENT_SANDBOX_PLUGINS``
+to a comma-separated list of importable module names. Each module must call
+:func:`register_sandbox` at import time. Missing modules fail closed.
+Names in :data:`SANDBOX_MODULES` stay owned by those in-tree modules; a plugin
+that registers one fails closed instead of shadowing it.
 """
 
 from __future__ import annotations
 
+import os
+import sys
 from collections.abc import Callable
 from importlib import import_module
 
 from .base import Sandbox, SandboxConfig
 
 SANDBOX_REGISTRY: dict[str, type[Sandbox]] = {}
+
+#: Comma-separated importable modules that call :func:`register_sandbox`.
+SANDBOX_PLUGIN_MODULES_ENV = "UNI_AGENT_SANDBOX_PLUGINS"
 
 #: provider name -> module that defines (and registers) it, for lazy loading.
 SANDBOX_MODULES: dict[str, str] = {
@@ -28,6 +40,14 @@ def register_sandbox(name: str) -> Callable[[type[Sandbox]], type[Sandbox]]:
     """Class decorator: register a :class:`Sandbox` provider under ``name`` (and stamp ``cls.provider``)."""
 
     def decorator(cls: type[Sandbox]) -> type[Sandbox]:
+        reserved_module = SANDBOX_MODULES.get(name)
+        # Plugins are imported before the lazy in-tree module. The conflict check
+        # below cannot see the builtin class yet, so a reserved name would stick.
+        if reserved_module is not None and cls.__module__ != reserved_module:
+            raise ValueError(
+                f"Sandbox provider {name!r} is reserved for {reserved_module}; "
+                f"{cls.__module__}.{cls.__qualname__} cannot replace it"
+            )
         if name in SANDBOX_REGISTRY and SANDBOX_REGISTRY[name] is not cls:
             raise ValueError(f"Sandbox provider {name!r} already registered: {SANDBOX_REGISTRY[name]!r} vs {cls!r}")
         cls.provider = name
@@ -37,8 +57,34 @@ def register_sandbox(name: str) -> Callable[[type[Sandbox]], type[Sandbox]]:
     return decorator
 
 
+def _plugin_module_names() -> tuple[str, ...]:
+    raw = os.environ.get(SANDBOX_PLUGIN_MODULES_ENV, "")
+    return tuple(part.strip() for part in raw.split(",") if part.strip())
+
+
+def _load_plugin_modules() -> None:
+    """Import overlay modules so they can self-register. ``import_module`` is cached."""
+    for module_name in _plugin_module_names():
+        registered = set(SANDBOX_REGISTRY)
+        try:
+            import_module(module_name)
+        except BaseException as exc:
+            # Python drops a failed module from sys.modules, but classes it
+            # registered before failing stay here, so the next import would report
+            # "already registered" instead of this error. Modules that did import
+            # (e.g. an in-tree provider the plugin subclasses) keep their entries.
+            for name in SANDBOX_REGISTRY.keys() - registered:
+                if SANDBOX_REGISTRY[name].__module__ not in sys.modules:
+                    del SANDBOX_REGISTRY[name]
+            if not isinstance(exc, ImportError):
+                raise
+            raise ImportError(
+                f"Failed to import sandbox plugin module {module_name!r} from {SANDBOX_PLUGIN_MODULES_ENV}."
+            ) from exc
+
+
 def _load_sandbox_module(name: str) -> None:
-    """Import the module that registers provider ``name`` (no-op if unknown)."""
+    """Import the in-tree module that registers provider ``name`` (no-op if unknown)."""
     module_name = SANDBOX_MODULES.get(name)
     if module_name is None:
         return
@@ -53,8 +99,15 @@ def _load_sandbox_module(name: str) -> None:
 
 def get_sandbox_cls(name: str) -> type[Sandbox]:
     """Return a registered provider class by name, importing its module on first use."""
-    if name not in SANDBOX_REGISTRY:
+    # Always import reserved names, even if a plugin already claimed the key.
+    # The in-tree module then hits register_sandbox and fails closed on conflict.
+    if name in SANDBOX_MODULES or name not in SANDBOX_REGISTRY:
         _load_sandbox_module(name)
+    # Overlay names are not in SANDBOX_MODULES. Always re-import the plugin list
+    # for those lookups: an earlier module may already have registered the name
+    # before a later ImportError, and skipping the load would hide that failure.
+    if name not in SANDBOX_MODULES:
+        _load_plugin_modules()
     if name not in SANDBOX_REGISTRY:
         available = sorted(set(SANDBOX_REGISTRY) | set(SANDBOX_MODULES))
         raise ValueError(f"Unknown sandbox provider: {name!r}. Available: {available}")
