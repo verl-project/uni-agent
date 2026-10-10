@@ -233,7 +233,9 @@ class AgentFrameworkRolloutAdapter:
         if len(prompts) == 0:
             return []
         num_workers = len(self.framework_workers)
-        chunks = prompts.chunk(num_workers)
+        num_chunks = min(num_workers, len(prompts))
+        base, remainder = divmod(len(prompts), num_chunks)
+        chunks = prompts.split([base + (i < remainder) for i in range(num_chunks)])
         start = self._next_worker
         self._next_worker = (start + len(chunks)) % num_workers
         return [

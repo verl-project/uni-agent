@@ -47,12 +47,13 @@ def test_rollout_adapter_create_spreads_framework_workers(monkeypatch):
 
     monkeypatch.setattr(entry, "AgentFrameworkWorker", _WorkerClass)
     monkeypatch.setattr(entry, "build_gateway_manager", lambda **_: "gateway")
+    node_a, node_b = "a" * 56, "b" * 56
     monkeypatch.setattr(
         entry.ray,
         "nodes",
         lambda: [
-            {"NodeID": "node-a", "Alive": True, "Resources": {"CPU": 8}},
-            {"NodeID": "node-b", "Alive": True, "Resources": {"CPU": 8}},
+            {"NodeID": node_a, "Alive": True, "Resources": {"CPU": 8}},
+            {"NodeID": node_b, "Alive": True, "Resources": {"CPU": 8}},
         ],
     )
     config = OmegaConf.create({"actor_rollout_ref": {"rollout": {"agent": {"num_workers": 5}}}})
@@ -62,13 +63,7 @@ def test_rollout_adapter_create_spreads_framework_workers(monkeypatch):
     assert len(adapter.framework_workers) == 5
     assert adapter.framework_worker is adapter.framework_workers[0]
     assert [call["num_cpus"] for call in option_calls] == [0] * 5
-    assert [call["scheduling_strategy"].node_id for call in option_calls] == [
-        "node-a",
-        "node-b",
-        "node-a",
-        "node-b",
-        "node-a",
-    ]
+    assert [call["scheduling_strategy"].node_id for call in option_calls] == [node_a, node_b, node_a, node_b, node_a]
     assert [call["scheduling_strategy"].soft for call in option_calls] == [False] * 5
     assert [call["gateway_manager"] for call in remote_calls] == ["gateway"] * 5
 
@@ -90,6 +85,27 @@ def test_rollout_adapter_rotates_workers_across_small_refills(monkeypatch):
     assert adapter.generate_sequences_and_wait(_prompts(20, 21)) is None
     assert dispatched[-2:] == [(1, [20]), (2, [21])]
     assert adapter._dispatch(_prompts()) == []
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_rollout_adapter_splits_uneven_batches_across_all_workers():
+    dispatched = []
+    adapter = entry.AgentFrameworkRolloutAdapter()
+    adapter.framework_workers = [_recording_worker(index, dispatched) for index in range(8)]
+
+    adapter.generate_sequences(_prompts(*range(10)))
+
+    assert dispatched == [
+        (0, [0, 1]),
+        (1, [2, 3]),
+        (2, [4]),
+        (3, [5]),
+        (4, [6]),
+        (5, [7]),
+        (6, [8]),
+        (7, [9]),
+    ]
 
 
 def _runner_caps_config(**caps: int):
