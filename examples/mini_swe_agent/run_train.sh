@@ -358,6 +358,7 @@ MAIN_CMD=(
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity=full
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_num_layers=1
+    +actor_rollout_ref.actor.megatron.override_ddp_config.grad_reduce_in_fp32=False
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1
     actor_rollout_ref.ref.megatron.param_offload=${OFFLOAD}
     actor_rollout_ref.ref.megatron.tensor_model_parallel_size=${TRAIN_TP}

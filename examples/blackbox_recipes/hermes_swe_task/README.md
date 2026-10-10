@@ -14,7 +14,9 @@ bash examples/blackbox_recipes/hermes_swe_task/build_tool.sh --tag <your-tag>
 # Optional: add --registry <registry/namespace> to publish the built image.
 ```
 
-The image is a filesystem sidecar, mounted at `/opt/hermes`. Update
+The image is a filesystem sidecar, mounted at `/opt/hermes` through
+`sandbox.image_mounts` using the `image` and `mount_path` fields. Provider tunnel
+settings remain under `sandbox.sandbox_kwargs`. Update
 `task_config_hermes.yaml` with the image reference you built, preferably a digest,
 and a task image mapping accessible to your sandbox service. The included image
 reference records the original build; it is not a guarantee of registry access.

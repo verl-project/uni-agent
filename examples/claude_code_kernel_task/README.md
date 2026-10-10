@@ -75,6 +75,7 @@ python -m uni_agent.tasks.kernel_bench.preprocess \
   --train-source /data/drkernel \
   --validation-source /data/drkernel \
   --drkernel-validation-levels 1,2 \
+  --max-validation-rows 128 \
   --output-dir /data/triton-agent
 ```
 
@@ -128,14 +129,3 @@ Claude stdout/stderr logging contains only tails, not a full transcript. `artifa
 The task sets `CLAUDE_CODE_SKIP_PROMPT_HISTORY=0` to allow transcript persistence for best-prefix attribution. A valid snapshot hint is still required; unavailable hints fall back to finalized trajectories.
 
 Early-stop markers are terminal for a session: subsequent tool admissions are denied, and late verifier completions cannot clear them. This is cooperative admission control, not a hard kill of an in-flight tool or model request.
-
-## Validation
-
-Recipe tests use the registered `cpu` and `level0` markers:
-
-```bash
-python -m pytest -q -m "cpu and level0" tests/uni_agent/tasks/kernel_bench
-bash -n examples/claude_code_kernel_task/run_train_gpu.sh
-```
-
-Common deployment settings are environment variables in the launcher. Additional training settings can be passed as Hydra overrides after the script name; they are appended last. A running Ray cluster and a compatible installed verl/Megatron/vLLM environment are required.

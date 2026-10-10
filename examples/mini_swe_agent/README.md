@@ -7,6 +7,8 @@ tunnel when the sandbox is remote), and the reward is evaluated in the same sand
 The whole pipeline is wired into verl's black-box framework — no custom rollouter
 code required.
 
+This recipe establishes a reusable, standardized end-to-end training paradigm. It leverages the verl ecosystem as a unified training foundation and adapts to secure sandbox runtime environments, enabling the rapid deployment of standardized training pipelines through Uni-Agent. It adopts official standard datasets and evaluation images for data preprocessing, and employs dedicated Sidecar images to solidify agent runtime dependencies, achieving complete decoupling and isolation between training clusters and task execution environments. Distributed GRPO training tasks can be launched with a single command, with native full-process support for log persistence, checkpoint resumption, and visualized metric monitoring. The entire workflow is highly standardized, unified, and readily replicable at scale.
+
 ## How it works
 
 ```mermaid
@@ -39,22 +41,21 @@ Per sample, `uni_agent.framework.task_runner.run_task`:
 
 ### Sandbox provider
 
-This recipe runs on the **openyuanrong** sandbox — the only provider with
-reverse-tunnel support. The tunnel carries the sandbox → policy direction, so the
-sandbox cluster and the training cluster do **not** need to reach each other: only
-the training side must access the sandbox service (API + image pull), which is the
-typical setup for NPU clusters behind NAT.
+This experiment relies on the AKernel (openyuanrong) sandbox for code evaluation and reward computation. Before launching training, sandbox service deployment and permission setup must be completed first. Refer to the official deployment document for full cluster deployment and access enablement procedures:
+https://github.com/inclusionAI/AKernel/blob/main/deploy/README.md
+After deployment, verify these two prerequisites:
+- Valid service endpoint and access token obtained.
+- The sandbox cluster has pull access to public or private container registries, enabling retrieval of SWE dataset images and custom sidecar tool images. See [Prepare data](#3-prepare-data) and [Build the tool image](#2-build-the-tool-image) for details.
 
 ## Prerequisites
 
 | # | Requirement | Notes |
 |---|---|---|
-| 1 | **`verl` on `v0.9.1`** + `uni_agent` installed | from the repo root: `git -C verl fetch origin release/v0.9.1 && git -C verl checkout -q origin/release/v0.9.1`, then `pip install --no-deps -e ./verl && pip install -e .` |
-| 2 | **OpenYuanrong sandbox account** | set `OPENYUANRONG_SERVER_ADDRESS` and `OPENYUANRONG_TOKEN` (see [Configuration](#training-script-env-vars)) |
-| 3 | **Tool image built & reachable by the sandbox service** | see [Build the tool image](#1-build-the-tool-image); push to a registry the sandbox service can pull from |
-| 4 | **Preprocessed dataset** | see [Prepare data](#2-prepare-data) |
-| 5 | **A policy model** | any path/`hf://` ref accepted by the vLLM engine (`MODEL_PATH`) |
-| 6 | **Multi-node NPU/GPU cluster** | the script starts Ray with `NPU` resources by default; GPU users switch the `ray start` flags (see `run_train.sh`) |
+| 1 | **OpenYuanrong sandbox account** | [Deploy a sandbox cluster](#sandbox-provider), and set `OPENYUANRONG_SERVER_ADDRESS` and `OPENYUANRONG_TOKEN` (see [Configuration](#training-script-env-vars)) |
+| 2 | **Tool image built & reachable by the sandbox service** | see [Build the tool image](#2-build-the-tool-image); push to a registry the sandbox service can pull from |
+| 3 | **Preprocessed dataset** | see [Prepare data](#3-prepare-data) |
+| 4 | **A policy model** | any path/`hf://` ref accepted by the vLLM engine (`MODEL_PATH`) |
+| 5 | **Multi-node NPU/GPU cluster** | the script starts Ray with `NPU` resources by default; GPU users switch the `ray start` flags (see `run_train.sh`) |
 
 > This recipe is developed and validated against verl **`release/v0.9.1`**
 > (`separate_async` trainer mode + the black-box agent framework). Older verl
@@ -63,7 +64,31 @@ typical setup for NPU clusters behind NAT.
 
 ## Quick start
 
-### 1. Build the tool image
+### 1. verl × Uni-Agent Installation & Deployment
+
+It is recommended to select an open-source image from the verl ecosystem as the training foundation, refer to the [Ascend image documentation](https://github.com/verl-project/verl/blob/main/docs/ascend_tutorial/zh/get_start/dockerfile_build_guidance.rst). This way, you can leverage the built-in training and inference dependencies pre-adapted, eliminating the need for adaptation from scratch. After launching a container from the image, initialize the dependencies for this recipe using the commands below:
+
+```bash
+# Clone source code and enter working directory
+git clone https://github.com/verl-project/uni-agent.git
+cd uni-agent
+
+# Fetch and checkout the specified verl version
+git -C verl fetch origin release/v0.9.1
+git -C verl checkout -q origin/release/v0.9.1
+
+# Install dependencies
+pip install --no-deps -e ./verl
+pip install -e .
+
+# Install SWE-bench dependencies
+pip install swebench==4.1.0
+
+# Install sandbox dependencies
+pip install openyuanrong-sandbox==0.10.2rc9
+```
+
+### 2. Build the tool image
 
 The tool image is a self-contained Python 3.12 runtime
 ([python-build-standalone](https://github.com/astral-sh/python-build-standalone))
@@ -84,12 +109,12 @@ bash examples/mini_swe_agent/build_tool.sh \
     --registry swr.cn-east-3.myhuaweicloud.com/openyuanrong
 ```
 
-> The image URL is referenced from `task_config_mini_swe_agent.yaml`
-> (`sandbox.sandbox_kwargs.mounts[].image_url`), **not** from the training script.
+> The image is referenced from `task_config_mini_swe_agent.yaml`
+> (`sandbox.image_mounts[].image`), **not** from the training script.
 > If the sandbox service cannot pull it, change that URL (or push to a registry it
 > can reach) and keep the two in sync.
 
-### 2. Prepare data
+### 3. Prepare data
 
 Re-run the preprocessors so each parquet row carries the task payload consumed by
 `run_task` (`extra_info.tools_kwargs.task` with `{name, sandbox:{image: canonical}, prompt, metadata}`):
@@ -104,7 +129,7 @@ The recipe's Task Config maps it to the openyuanrong registry at run time via
 `sandbox.image_map` (edit the `to:` targets there to use a different registry);
 refs that are already full addresses (e.g. the tool image) pass through unchanged.
 
-### 3. Launch training
+### 4. Launch training
 
 ```bash
 OPENYUANRONG_SERVER_ADDRESS="<server-address>" \
@@ -124,7 +149,7 @@ by the unified bridge:
 agent_runners.task.runner_fqn = uni_agent.framework.task_runner.run_task
 ```
 
-### 4. Monitor
+### 5. Monitor
 
 - Per-session framework/task logs land under `AGENT_LOG_DIR` (default
   `/home/${USER}/uni_agent_logs`), one `step_<N>/<session-id>/` directory per session.
@@ -143,7 +168,7 @@ touching the training script:
 | Key | Default | Description |
 |-----|---------|-------------|
 | `sandbox.image_map` | `swebench/**` → `swr.cn-east-3.myhuaweicloud.com/openyuanrong/swebench/**` (and `swerebench/**`) | Prefixes canonical SWE image refs with the sandbox registry; keeps `swebench/` / `swerebench/` and the source tag |
-| `sandbox.sandbox_kwargs.mounts[].image_url` | `swr.cn-east-3.myhuaweicloud.com/openyuanrong/mini-swe-agent-tool:latest` | Sidecar tool image mounted at `/opt/mini-swe-agent` |
+| `sandbox.image_mounts[]` | `image: .../mini-swe-agent-tool:latest`, `mount_path: /opt/mini-swe-agent` | Provider-independent sidecar tool-image mount |
 | `sandbox.sandbox_kwargs.proxy_port` | `38197` | Sandbox-internal reverse-tunnel port — **single source of truth** |
 | `sandbox.sandbox_kwargs.cpu/memory/…` | provider defaults | Sandbox resource sizes (pass through to the openyuanrong SDK) |
 | `agent.step_limit` | `100` | mini-swe-agent max agent steps |
@@ -155,7 +180,7 @@ touching the training script:
 
 > `agent.tool_python` / `agent.run_agent_script` are **required**: they name paths
 > inside the prebuilt tool image and are tied to its Dockerfile layout. If you
-> build a custom tool image, set them (and the mount in `sandbox_kwargs.mounts`)
+> build a custom tool image, set them (and the mount in `sandbox.image_mounts`)
 > together.
 
 Runtime-managed (do **not** set in the YAML): `sandbox.sandbox_kwargs.upstream`
@@ -236,7 +261,7 @@ toward a zero reward.
 |---|---|
 | `OPENYUANRONG_SERVER_ADDRESS and OPENYUANRONG_TOKEN ... must be set` | Credentials missing; export both before `run_train.sh` |
 | Sandbox cannot pull the SWE image | The canonical ref is mapped by `sandbox.image_map` in the task YAML; edit the `to:` targets (or add a rule) so it points at the registry the sandbox service can reach |
-| Sandbox cannot pull the **tool** image | `mounts[].image_url` in the task YAML must be a full, pullable address — push it with `build_tool.sh --registry <registry>` |
+| Sandbox cannot pull the **tool** image | `image_mounts[].image` in the task YAML must be a full, pullable address — push it with `build_tool.sh --registry <registry>` |
 | Agent never reaches the policy / requests fail inside the sandbox | Reverse tunnel misconfigured: `proxy_port` must be set in `sandbox_kwargs` (single source of truth) and the provider must be `openyuanrong`; `run_task` injects `upstream` + rewrites `base_url` |
 | `ValueError: ... supported only on 'openyuanrong' ...` | `proxy_port` configured on a non-Yuanrong sandbox provider — switch the provider or drop `proxy_port` |
 | Sessions aborted at a round number | `SESSION_TIMEOUT_SECONDS` too low for your episode lengths (recipe default `3600`) — raise it when legitimate runs are being cut short |
