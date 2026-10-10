@@ -210,8 +210,7 @@ class AgentFrameworkRolloutAdapter:
             framework_workers.append(
                 AgentFrameworkWorker.options(
                     name=f"agent_framework_worker_{index}_{uuid4().hex[:8]}",
-                    num_cpus=0,
-                    scheduling_strategy=NodeAffinitySchedulingStrategy(node_id=node_id, soft=False),
+                    scheduling_strategy=NodeAffinitySchedulingStrategy(node_id=node_id, soft=True),
                 ).remote(
                     config=worker_config,
                     gateway_manager=gateway_manager,

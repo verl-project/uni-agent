@@ -62,9 +62,9 @@ def test_rollout_adapter_create_spreads_framework_workers(monkeypatch):
 
     assert len(adapter.framework_workers) == 5
     assert adapter.framework_worker is adapter.framework_workers[0]
-    assert [call["num_cpus"] for call in option_calls] == [0] * 5
     assert [call["scheduling_strategy"].node_id for call in option_calls] == [node_a, node_b, node_a, node_b, node_a]
-    assert [call["scheduling_strategy"].soft for call in option_calls] == [False] * 5
+    assert [call["scheduling_strategy"].soft for call in option_calls] == [True] * 5
+    assert all("num_cpus" not in call for call in option_calls)
     assert [call["gateway_manager"] for call in remote_calls] == ["gateway"] * 5
 
 
