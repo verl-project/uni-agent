@@ -11,12 +11,12 @@
     image_map:
       - from: "swebench/**"
         to: "swr.cn-east-3.myhuaweicloud.com/openyuanrong/swe-bench-verified/**:v2"
+    image_mounts:
+      - image: swr.cn-east-3.myhuaweicloud.com/openyuanrong/hermes-agent-tool:20260915
+        mount_path: /opt/hermes
     sandbox_kwargs:
       proxy_port: 38197
       tunnel_connect_timeout: 60
-      mounts:
-        - target: /opt/hermes
-          image_url: swr.cn-east-3.myhuaweicloud.com/openyuanrong/hermes-agent-tool:20260915
   agent:
     name: hermes
     max_iterations: 100
