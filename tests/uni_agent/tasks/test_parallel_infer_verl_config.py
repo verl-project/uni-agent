@@ -1,11 +1,96 @@
 from __future__ import annotations
 
-from argparse import Namespace
+import os
+from argparse import ArgumentParser, Namespace
 
+import hydra
 import pytest
+from omegaconf import OmegaConf, open_dict
+
+pytest.importorskip("ray")
 
 from examples.agent_aware_router.run_infer import init_config as init_router_config
+from examples.inference import parallel_infer_verl
 from examples.inference.parallel_infer_verl import init_config
+
+
+def _parse_inference_args(monkeypatch, *argv):
+    parse_args = ArgumentParser.parse_args
+    captured = None
+
+    class ParsedArgs(Exception):
+        pass
+
+    def capture(parser):
+        nonlocal captured
+        captured = parse_args(parser, ["--task-config", "/unused.yaml", *argv])
+        raise ParsedArgs
+
+    monkeypatch.setattr(ArgumentParser, "parse_args", capture)
+    with pytest.raises(ParsedArgs):
+        parallel_infer_verl.main()
+    return captured
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_shared_inference_preserves_defaults_and_accepts_recipe_overrides(monkeypatch):
+    monkeypatch.setenv("LIMIT", "7")
+    with monkeypatch.context() as context:
+        args = _parse_inference_args(context)
+    assert args.limit is None
+    assert args.concurrency == int(os.getenv("GLOBAL_CONCURRENCY", 128))
+    assert (args.n_gpus_per_node, args.tensor_parallel_size, args.gateway_count) == (8, 4, 4)
+
+    args = _parse_inference_args(
+        monkeypatch,
+        "--limit",
+        "1",
+        "--concurrency",
+        "1",
+        "--n-gpus-per-node",
+        "1",
+        "--tensor-parallel-size",
+        "1",
+        "--gateway-count",
+        "1",
+    )
+    assert (args.limit, args.concurrency, args.n_gpus_per_node, args.tensor_parallel_size, args.gateway_count) == (
+        1,
+        1,
+        1,
+        1,
+        1,
+    )
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize("configured", [None, False, True])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_language_model_only_is_opt_in_and_preserves_config(monkeypatch, configured, enabled):
+    args = _parse_inference_args(monkeypatch, *(["--language-model-only"] if enabled else []))
+    compose = hydra.compose
+
+    def compose_with_engine_setting(*args, **kwargs):
+        config = compose(*args, **kwargs)
+        engine = config.actor_rollout_ref.rollout.engine_kwargs.vllm
+        with open_dict(engine):
+            if configured is None:
+                engine.pop("language_model_only", None)
+            else:
+                engine.language_model_only = configured
+        return config
+
+    monkeypatch.setattr(hydra, "compose", compose_with_engine_setting)
+    config = init_config(args, served_model_name="policy")
+    engine = config.actor_rollout_ref.rollout.engine_kwargs.vllm
+    if enabled:
+        assert engine.language_model_only is True
+    elif configured is None:
+        assert "language_model_only" not in engine
+    else:
+        assert OmegaConf.select(engine, "language_model_only") is configured
 
 
 @pytest.mark.cpu
@@ -33,6 +118,7 @@ def test_inference_sampling_uses_run_options_and_preserves_length_configuration(
         concurrency=4,
         task_config="/not-loaded-until-task-preparation.yaml",
         log_dir="/tmp/test-inference",
+        language_model_only=False,
         num_workers=1,
         max_model_len=32768,
         max_num_seqs=16,
@@ -56,7 +142,7 @@ def test_inference_sampling_uses_run_options_and_preserves_length_configuration(
         assert sampling.top_p == 0.85
         assert sampling.top_k == 20
     assert rollout.val_kwargs.do_sample is True
-    expected_prompt_length = args.prompt_length if entrypoint is init_router_config else 4096
+    expected_prompt_length = args.prompt_length
     expected_response_length = args.response_length
     assert rollout.prompt_length == config.data.max_prompt_length == expected_prompt_length
     assert rollout.response_length == config.data.max_response_length == expected_response_length
@@ -69,3 +155,45 @@ def test_inference_sampling_uses_run_options_and_preserves_length_configuration(
         assert not task_runner.runner_kwargs
     else:
         assert task_runner.runner_kwargs.task_config_path == args.task_config
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_inference_language_model_only_wires_vllm_and_rejects_other_engines():
+    args = Namespace(
+        temperature=0.4,
+        top_p=0.85,
+        top_k=20,
+        allowed_request_sampling_param_keys=["temperature", "top_p", "top_k"],
+        n=1,
+        nnodes=1,
+        n_gpus_per_node=1,
+        model_path="/tmp/test-model",
+        engine="vllm",
+        tensor_parallel_size=1,
+        gpu_memory_utilization=0.8,
+        enable_rollout_routing_replay=False,
+        language_model_only=True,
+        tool_parser="qwen3_coder",
+        gateway_count=1,
+        concurrency=1,
+        task_config="/not-loaded-until-task-preparation.yaml",
+        log_dir="/tmp/test-inference",
+        num_workers=1,
+        max_model_len=32768,
+        max_num_seqs=16,
+        enable_mooncake=False,
+        kv_events=False,
+        router_config_path="uni_agent/agent_aware_router/configs/agent_aware_router.yaml",
+        simulated_runner_fqn=None,
+        load_threshold=0.5,
+        prompt_length=2048,
+        response_length=8192,
+    )
+
+    config = init_config(args, served_model_name="policy")
+    assert config.actor_rollout_ref.rollout.engine_kwargs.vllm.language_model_only is True
+
+    args.engine = "sglang"
+    with pytest.raises(ValueError, match="only with --engine vllm"):
+        init_config(args, served_model_name="policy")
