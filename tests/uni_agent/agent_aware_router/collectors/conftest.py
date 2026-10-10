@@ -126,12 +126,22 @@ def make_stored_event(
     return ["stored", [block_hash], parent, raw_ids, block_size, None, medium]
 
 
-def kv_payload(*events: list) -> bytes:
+def kv_payload(*events: list | dict) -> bytes:
     """Pack one or more events as a single msgpack payload.
 
-    Format: ``[timestamp, [[tag, fields...], ...]]``.
+    Format: ``[timestamp, [event, ...]]``; events may be arrays or mappings.
     """
-    return msgpack.packb([1234567890, [list(e) for e in events]])
+    return msgpack.packb([1234567890, list(events)])
+
+
+def mapping_event(event: list) -> dict:
+    """Convert a positional vLLM event to named fields for mapping tests."""
+    field_names = {
+        "BlockStored": ("block_hashes", "parent_block_hash", "token_ids", "block_size", "lora_id", "medium"),
+        "BlockRemoved": ("block_hashes", "medium", "group_idx"),
+        "AllBlocksCleared": (),
+    }
+    return {"type": event[0], **dict(zip(field_names[event[0]], event[1:], strict=False))}
 
 
 # ── Autouse: reset singleton stores between tests ─────────────────────────

@@ -47,7 +47,7 @@ class VLLMKVParser(Parser):
 
     # vLLM BlockStored/BlockRemoved ``medium`` → canonical layer.
     # Unknown / None (older vLLM) → GPU (see ``_medium_to_layer``).
-    _MEDIUM_TO_LAYER: dict[str, Layer] = {"GPU": Layer.GPU, "cpu": Layer.CPU}
+    _MEDIUM_TO_LAYER: dict[str, Layer] = {"GPU": Layer.GPU, "CPU": Layer.CPU}
 
     def __init__(self) -> None:
         self.remote_to_local_block_hash: dict[str, str] = {}
@@ -56,9 +56,11 @@ class VLLMKVParser(Parser):
     def parse(self, raw_data: bytes | str, node_id: str) -> KVCacheUpdate | None:
         """Parse msgpack payload and return structured update command.
 
-        Handles both single event (real-time) and multiple events (replay):
-          - Single: [timestamp, [[tag, fields...], ...]]
-          - Multiple: [[timestamp, [...]], [timestamp, [...]]]
+        Handles both single batches (real-time) and multiple batches (replay):
+          - Single: [timestamp, [event, ...], ...]
+          - Multiple: [[timestamp, [...], ...], [timestamp, [...], ...]]
+        Each event may be a legacy positional array or a mapping with named
+        fields and a ``type`` discriminator.
 
         Args:
             raw_data: ZMQ payload bytes (msgpack-encoded).
@@ -102,8 +104,9 @@ class VLLMKVParser(Parser):
 
     @classmethod
     def _medium_to_layer(cls, medium: str | None) -> Layer:
-        """Map a vLLM ``medium`` to a canonical layer; None/unknown → GPU."""
-        return cls._MEDIUM_TO_LAYER.get(medium, Layer.GPU)
+        """Map ``medium`` case-insensitively to a layer; None/unknown → GPU."""
+        key = medium.upper() if medium is not None else None
+        return cls._MEDIUM_TO_LAYER.get(key, Layer.GPU)
 
     # ── Event handlers ──────────────────────────────────────────────────
 
