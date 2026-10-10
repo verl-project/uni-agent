@@ -14,7 +14,7 @@ import logging
 import re
 import shlex
 import uuid
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 from pydantic import Field
@@ -48,6 +48,7 @@ def build_agent_command(
     conda_env_path: str | None = None,
     path: str | None = None,
     project_dir: str = "/testbed",
+    model_catalog_path: str | None = None,
 ) -> str:
     """Build the shell command that pipes a task into the Codex sidecar.
 
@@ -58,15 +59,12 @@ def build_agent_command(
     conda_env_vars = ""
     if conda_env_path:
         env_dir = PurePosixPath(conda_env_path)
-        conda_env_vars = (
-            f"CONDA_DEFAULT_ENV={shlex.quote(env_dir.name)} "
-            f"CONDA_PREFIX={shlex.quote(str(env_dir))} "
-        )
+        conda_env_vars = f"CONDA_DEFAULT_ENV={shlex.quote(env_dir.name)} CONDA_PREFIX={shlex.quote(str(env_dir))} "
     path_value = path
     if path_value is None and conda_env_path:
         env_dir = PurePosixPath(conda_env_path)
         path_value = f"{env_dir / 'bin'}:{env_dir.parent.parent / 'bin'}"
-    path_setup = f"PATH={shlex.quote(path_value)}:\"$PATH\" " if path_value else ""
+    path_setup = f'PATH={shlex.quote(path_value)}:"$PATH" ' if path_value else ""
     env = (
         f"{conda_env_vars}{path_setup}"
         f"CODEX_API_BASE={shlex.quote(gateway_url)} "
@@ -74,10 +72,10 @@ def build_agent_command(
         f"CODEX_API_KEY={shlex.quote(api_key)} "
         f"CODEX_PROJECT_DIR={shlex.quote(project_dir)}"
     )
-    return (
-        f"printf %s {shlex.quote(task_b64)} | base64 -d | "
-        f"env {env} bash {shlex.quote(tool_script)}"
-    )
+    catalog_args = ""
+    if model_catalog_path is not None:
+        catalog_args = " -c " + shlex.quote("model_catalog_json=" + json.dumps(model_catalog_path))
+    return f"printf %s {shlex.quote(task_b64)} | base64 -d | env {env} bash {shlex.quote(tool_script)}{catalog_args}"
 
 
 def parse_agent_result(stdout: str, exit_code: int) -> dict[str, Any]:
@@ -186,6 +184,10 @@ class CodexConfig(AgentConfig):
         default=None,
         description="Optional colon-separated PATH entries; unset derives the task Conda bin paths.",
     )
+    model_catalog_path: str | None = Field(
+        default=None,
+        description="Host-side Codex model catalog JSON; copied into the sandbox when set.",
+    )
     tool_script: str = Field(default="/opt/codex/bin/run_agent.sh", description="Sidecar entrypoint.")
 
 
@@ -216,6 +218,10 @@ class CodexAgent(Agent):
             api_key = uuid.uuid4().hex
         project_dir = workdir or "/testbed"
         task_b64 = base64.b64encode(user_prompt.encode()).decode()
+        catalog_path = None
+        if cfg.model_catalog_path is not None:
+            catalog_path = f"/tmp/codex-model-catalog-{uuid.uuid4().hex}.json"
+            await sandbox.write_file(catalog_path, Path(cfg.model_catalog_path).read_text(encoding="utf-8"))
         command = build_agent_command(
             task_b64=task_b64,
             tool_script=cfg.tool_script,
@@ -225,6 +231,7 @@ class CodexAgent(Agent):
             project_dir=project_dir,
             conda_env_path=cfg.conda_env_path,
             path=cfg.path,
+            model_catalog_path=catalog_path,
         )
 
         logger.info("codex: launch in %s", project_dir)

@@ -13,7 +13,7 @@ provided:
 
 ```bash
 bash examples/blackbox_recipes/codex_swe_task/build_tool.sh \
-  --tag 0.147.0-direct-stdin \
+  --tag 0.147.0-pr168-13e1f45-catalog \
   --version 0.147.0 \
   --registry registry.example/namespace
 ```
@@ -22,6 +22,10 @@ Record the resulting digest in
 `examples/blackbox_recipes/codex_swe_task/task_config_codex.yaml`. The task
 image owns `/testbed` and its Conda environment; `agent.conda_env_path` and
 `agent.path` describe that task image and do not assume a host installation.
+
+The task config mounts the sidecar with `sandbox.image_mounts`, using `image`
+for the image reference and `mount_path` for `/opt/codex`. Provider-specific
+settings such as `proxy_port` remain in `sandbox.sandbox_kwargs`.
 
 ## Run inference
 
@@ -61,6 +65,18 @@ task reward separately.
 The Codex adapter follows the mini-swe-agent input contract: it accepts an
 optional leading system message but passes only the single user task to the
 CLI. Put effective instructions in the user message.
+
+For a model name not included in Codex's catalog, set `agent.model_catalog_path`
+in the task YAML to a model catalog JSON file readable by the Ray worker. The
+adapter copies it into the sandbox and passes Codex's `model_catalog_json`
+configuration override. The catalog entry's `slug` must match the served model
+name, and its capabilities must match the model and Gateway. In particular,
+this Gateway requires `supports_parallel_tool_calls: true`; Codex's fallback
+metadata for unknown model names sends `parallel_tool_calls=false`.
+
+Build the catalog for the pinned Codex CLI version using the
+[official custom-model catalog guidance](https://learn.chatgpt.com/docs/enterprise/roll-out-a-gateway).
+Keep model instructions and metadata in that configuration file.
 
 ## Scope and tests
 

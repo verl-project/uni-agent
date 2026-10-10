@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import shlex
 
 import pytest
 
@@ -10,11 +11,16 @@ from uni_agent.agents.base import AgentResult, ModelConfig
 from uni_agent.agents.codex.agent import CodexAgent, CodexConfig, build_agent_command, parse_agent_result
 from uni_agent.sandbox.base import ExecResult
 
+
 class FakeSandbox:
     def __init__(self, stdout: str = "", exit_code: int = 0):
         self.stdout = stdout
         self.exit_code = exit_code
         self.calls: list[dict] = []
+        self.files: dict[str, str] = {}
+
+    async def write_file(self, path, content):
+        self.files[path] = content
 
     async def exec_shell(self, script, *, timeout=None, workdir=None, env=None):
         self.calls.append({"script": script, "timeout": timeout, "workdir": workdir, "env": env})
@@ -143,7 +149,10 @@ def test_codex_agent_runs_and_returns_agent_result():
     result = asyncio.run(
         agent.run(
             sandbox=sandbox,
-            messages=[{"role": "system", "content": "follow repository policy"}, {"role": "user", "content": "fix bug"}],
+            messages=[
+                {"role": "system", "content": "follow repository policy"},
+                {"role": "user", "content": "fix bug"},
+            ],
         )
     )
     assert isinstance(result, AgentResult)
@@ -155,3 +164,35 @@ def test_codex_agent_runs_and_returns_agent_result():
     assert 'PATH=/custom/conda/envs/testbed/bin:/custom/conda/bin:"$PATH"' in sandbox.calls[0]["script"]
     assert base64.b64encode(b"fix bug").decode() in sandbox.calls[0]["script"]
     assert base64.b64encode(b"follow repository policy").decode() not in sandbox.calls[0]["script"]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_build_agent_command_passes_catalog_as_a_quoted_cli_override():
+    path = "/tmp/model catalog's.json"
+    command = build_agent_command(
+        task_b64="",
+        tool_script="/opt/codex/bin/run_agent.sh",
+        gateway_url="http://gateway/v1",
+        model_name="policy",
+        api_key="EMPTY",
+        model_catalog_path=path,
+    )
+    assert shlex.split(command)[-2:] == ["-c", "model_catalog_json=" + json.dumps(path)]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_codex_agent_copies_optional_catalog_into_sandbox(tmp_path):
+    catalog = {"models": [{"slug": "policy", "supports_parallel_tool_calls": True}]}
+    source = tmp_path / "catalog.json"
+    source.write_text(json.dumps(catalog))
+    sandbox = FakeSandbox(stdout=json.dumps({"type": "turn.completed"}))
+    agent = make_agent(model_catalog_path=str(source))
+    result = asyncio.run(agent.run(sandbox=sandbox, messages=[{"role": "user", "content": "fix bug"}]))
+    assert result.finished is True
+    assert len(sandbox.files) == 1
+    path, content = next(iter(sandbox.files.items()))
+    assert path.startswith("/tmp/codex-model-catalog-") and path.endswith(".json")
+    assert json.loads(content) == catalog
+    assert "model_catalog_json=" + json.dumps(path) in sandbox.calls[0]["script"]

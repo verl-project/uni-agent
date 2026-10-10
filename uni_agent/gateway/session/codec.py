@@ -310,7 +310,18 @@ class MessageCodec:
                 self._tool_parser_cache[cache_key] = parser
 
         request = SimpleNamespace(tools=vllm_tools, tool_choice="auto", skip_special_tokens=True)
-        parsed = parser.extract_tool_calls(text, request)
+        engine = getattr(parser, "_parser_engine", None) if parser_name == "qwen3_coder" else None
+        if engine is not None and hasattr(engine, "_stream_arg_deltas"):
+            # Complete responses only consume final arguments. Computing streaming
+            # deltas repeatedly reparses growing Qwen3 XML parameter values.
+            stream_arg_deltas = engine._stream_arg_deltas
+            engine._stream_arg_deltas = False
+            try:
+                parsed = parser.extract_tool_calls(text, request)
+            finally:
+                engine._stream_arg_deltas = stream_arg_deltas
+        else:
+            parsed = parser.extract_tool_calls(text, request)
         if not parsed.tools_called:
             return text, []
         return parsed.content or "", [tool_call.function for tool_call in parsed.tool_calls]

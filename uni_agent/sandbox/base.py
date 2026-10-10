@@ -6,13 +6,14 @@ import base64
 import dataclasses
 import logging
 import os
+import re
 import shlex
 import tempfile
 import uuid
 import weakref
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, ClassVar, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -25,6 +26,8 @@ from .utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+_EXECUTABLE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
 
 
 def _to_str(data: str | bytes | None) -> str:
@@ -92,6 +95,40 @@ class ImageMap(BaseModel):
         return f"{name}:{tag}" if tag else name
 
 
+class ImageMount(BaseModel):
+    """A container image mounted as a directory inside a sandbox."""
+
+    image: str = Field(
+        min_length=1,
+        description="Container image whose root filesystem is mounted.",
+    )
+    mount_path: str = Field(
+        min_length=1,
+        description="Absolute non-root path where the image root filesystem is mounted.",
+    )
+
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("image")
+    @classmethod
+    def _validate_image(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("mounted image must be a non-empty string")
+        return value.strip()
+
+    @field_validator("mount_path")
+    @classmethod
+    def _validate_mount_path(cls, value: str) -> str:
+        path = PurePosixPath(value)
+        if not path.is_absolute():
+            raise ValueError("image mount_path must be absolute")
+        if path == PurePosixPath("/"):
+            raise ValueError("image mount_path must not be '/'")
+        if ".." in path.parts:
+            raise ValueError("image mount_path must not contain '..'")
+        return str(path)
+
+
 class SandboxConfig(BaseModel):
     """Which provider to run, plus its construction kwargs.
 
@@ -104,7 +141,7 @@ class SandboxConfig(BaseModel):
     )
     runtime_timeout: float = Field(
         default=3600.0,
-        description="Max sandbox runtime/lifetime (seconds) before it is killed; used by remote providers.",
+        description="Max sandbox runtime/lifetime in seconds.",
     )
     image: str | None = Field(
         default=None,
@@ -113,6 +150,14 @@ class SandboxConfig(BaseModel):
     image_map: list[ImageMap] = Field(
         default_factory=list,
         description="Optional glob from/to rules applied to image at construction. First match wins.",
+    )
+    image_mounts: list[ImageMount] = Field(
+        default_factory=list,
+        description="Container images mounted at provider-independent paths inside the sandbox.",
+    )
+    executable_paths: dict[str, str] = Field(
+        default_factory=dict,
+        description="Command names mapped to absolute executable paths exposed at /usr/bin.",
     )
     sandbox_kwargs: dict[str, Any] = Field(
         default_factory=dict,
@@ -131,12 +176,24 @@ class SandboxConfig(BaseModel):
         return value
 
     @model_validator(mode="after")
-    def _validate_provider_image(self) -> SandboxConfig:
-        if self.provider == "local" and self.image is not None:
-            raise ValueError(
-                "image must be None when provider='local'; use provider='docker' to run a container image locally"
-            )
+    def _validate_image_mount_paths(self) -> SandboxConfig:
+        paths = [mount.mount_path for mount in self.image_mounts]
+        if len(paths) != len(set(paths)):
+            raise ValueError("image_mounts must use unique mount_path values")
         return self
+
+    @field_validator("executable_paths")
+    @classmethod
+    def _validate_executable_paths(cls, value: dict[str, str]) -> dict[str, str]:
+        normalized: dict[str, str] = {}
+        for name, raw_path in value.items():
+            if not _EXECUTABLE_NAME_RE.fullmatch(name):
+                raise ValueError(f"executable name {name!r} must be a simple command name")
+            path = PurePosixPath(raw_path)
+            if not path.is_absolute() or path == PurePosixPath("/") or ".." in path.parts:
+                raise ValueError(f"executable path for {name!r} must be a safe absolute path")
+            normalized[name] = str(path)
+        return normalized
 
     @model_validator(mode="after")
     def _apply_image_map(self) -> SandboxConfig:
@@ -191,6 +248,7 @@ class SandboxBackend(Protocol):
 
 _DEFAULT_STARTUP_TIMEOUT = 600.0
 _DEFAULT_STARTUP_CONCURRENCY = 64
+_DEFAULT_STOP_TIMEOUT = 120.0
 # Per-process startup semaphores, created lazily per event loop so
 # each binds to the loop that uses it and is *shared* across concurrent start()s.
 _startup_semaphores: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
@@ -230,6 +288,47 @@ async def _startup_slot() -> AsyncIterator[None]:
         yield
 
 
+async def _stop_after_failed_start(sandbox: Sandbox) -> None:
+    """Best-effort ``stop()`` after a failed or cancelled ``start()``.
+
+    ``async with`` does not call ``__aexit__`` when ``__aenter__`` itself fails,
+    so this is the only teardown for a container ``start()`` already created.
+    Bounded by ``SANDBOX_STOP_TIMEOUT`` (``<=0`` disables): the caller keeps
+    waiting through cancellation, so a hung ``stop()`` would never let it exit.
+    """
+    timeout = _env_number("SANDBOX_STOP_TIMEOUT", _DEFAULT_STOP_TIMEOUT)
+    try:
+        await asyncio.wait_for(sandbox.stop(), timeout=timeout if timeout > 0 else None)
+    except asyncio.TimeoutError:
+        logger.warning("sandbox stop() exceeded SANDBOX_STOP_TIMEOUT=%gs during start() cleanup", timeout)
+    except Exception:
+        logger.warning("sandbox stop() failed during start() cleanup", exc_info=True)
+
+
+async def _stop_after_failed_start_shielded(sandbox: Sandbox) -> None:
+    """Finish ``stop()`` even when this task is cancelled again during teardown.
+
+    ``asyncio.shield`` keeps the cleanup task alive, but the outer await still
+    raises ``CancelledError``. Keep waiting until ``stop()`` finishes, then
+    propagate that cancellation.
+    """
+    stop_task = asyncio.create_task(_stop_after_failed_start(sandbox))
+    cancelled = False
+    while not stop_task.done():
+        try:
+            await asyncio.shield(stop_task)
+        except asyncio.CancelledError:
+            cancelled = True
+    if not cancelled:
+        await stop_task
+        return
+    try:
+        await stop_task
+    except asyncio.CancelledError:
+        pass
+    raise asyncio.CancelledError()
+
+
 class Sandbox(abc.ABC):
     """One provider = one class: owns lifecycle and is the data-plane backend.
 
@@ -253,8 +352,8 @@ class Sandbox(abc.ABC):
     def from_config(cls, config: SandboxConfig) -> Sandbox:
         """Build an instance from a :class:`SandboxConfig`.
 
-        Default: construct with no args; providers that take constructor kwargs
-        override this to map them off ``config``.
+        Default: construct with no args; providers that consume standard or
+        provider-specific config fields override this method.
         """
         return cls()
 
@@ -284,6 +383,35 @@ class Sandbox(abc.ABC):
         """
         raise NotImplementedError(f"{type(self).__name__} does not support native shells")
 
+    async def _setup_executable_paths(self, executable_paths: dict[str, str]) -> None:
+        """Force configured executables into ``/usr/bin`` after startup and mounts."""
+        for name, source in executable_paths.items():
+            target = f"/usr/bin/{name}"
+            current = await self.exec_shell(f"command -v {shlex.quote(name)}")
+            current_path = current.stdout.strip() if current.exit_code == 0 else ""
+            targets = [] if source == target else [target]
+            if current_path.startswith("/") and current_path not in {source, target}:
+                logger.warning(
+                    "overriding sandbox executable %r at %s with %s",
+                    name,
+                    current_path,
+                    source,
+                )
+                targets.append(current_path)
+            for link_path in targets:
+                linked = await self.exec(["ln", "-sfn", source, link_path])
+                if linked.exit_code != 0:
+                    detail = linked.stderr.strip() or linked.stdout.strip()
+                    raise RuntimeError(f"failed to link executable {name!r} to {link_path!r}: {detail}")
+            resolved = await self.exec_shell(f"command -v {shlex.quote(name)}")
+            actual = resolved.stdout.strip()
+            if resolved.exit_code != 0 or not actual:
+                detail = resolved.stderr.strip() or "command not found"
+                raise RuntimeError(f"failed to resolve configured executable {name!r}: {detail}")
+            same_file = await self.exec(["test", actual, "-ef", source])
+            if same_file.exit_code != 0:
+                raise RuntimeError(f"executable {name!r} resolves to {actual!r}, not configured source {source!r}")
+
     async def _run_start(self) -> None:
         """Run :meth:`start`, bounding it by the ``SANDBOX_STARTUP_TIMEOUT`` env cap (``<=0`` disables)."""
         timeout = _env_number("SANDBOX_STARTUP_TIMEOUT", _DEFAULT_STARTUP_TIMEOUT)
@@ -297,7 +425,9 @@ class Sandbox(abc.ABC):
 
         Each attempt holds one startup slot (``SANDBOX_STARTUP_CONCURRENCY``)
         and is bounded by ``SANDBOX_STARTUP_TIMEOUT``; the slot is released before the
-        retry backoff and the cleanup ``stop()``.
+        retry backoff and the cleanup ``stop()``. Cancellation is not retried:
+        ``CancelledError`` is a ``BaseException`` on Python 3.10+, and a cancelled
+        enter must still ``stop()`` or the partial sandbox leaks.
         """
         retry = max(1, retry)
         last_exc: BaseException | None = None
@@ -308,10 +438,14 @@ class Sandbox(abc.ABC):
                 return self
             except Exception as exc:
                 last_exc = exc
-                try:
-                    await self.stop()
-                except Exception:
-                    logger.warning("sandbox stop() failed during start() cleanup", exc_info=True)
+                await _stop_after_failed_start_shielded(self)
+            except BaseException:
+                # Not retried. async with skips __aexit__ when enter itself
+                # is cancelled, so stop() here is what releases a container
+                # start() already created. Shield it so a second cancel
+                # cannot abandon that teardown.
+                await _stop_after_failed_start_shielded(self)
+                raise
             logger.warning("sandbox failed to start (attempt %d/%d): %r", attempt, retry, last_exc)
             if attempt < retry:
                 await asyncio.sleep(2 * attempt)

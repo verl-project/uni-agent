@@ -41,6 +41,7 @@ class SWEBenchTask(Task):
             f"task config: {json.dumps(task_config_dump, indent=2)}"
         )
         async with self.build_sandbox() as sandbox:
+            agent_error = None
             if cfg.run_oracle_solution:
                 logger.info("applying gold patch to /testbed")
                 await sandbox.write_file("/tmp/gold_patch.patch", sample["patch"])
@@ -56,10 +57,13 @@ class SWEBenchTask(Task):
                     workdir="/testbed",
                 )
                 finished = agent_result.finished
+                agent_error = agent_result.info.get("error")
 
             from .reward import compute_reward
 
             result = await compute_reward(sample, sandbox, eval_timeout=cfg.eval_timeout)
+            if isinstance(agent_error, str) and agent_error.strip():
+                result = {**result, "agent_error": agent_error}
 
             logger.info(f"task done: resolved={result['resolved']}")
             return TaskResult(
