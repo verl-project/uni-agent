@@ -339,7 +339,10 @@ Important knobs include:
 - `agent_runners`: Runner import paths and arguments. With multiple entries, each
   registry key must match the sample's `agent_name`.
 - `dispatch_mode`: inline async execution or Ray tasks.
-- `max_concurrent_sessions`: per-Runner concurrency limit.
+- `max_concurrent_sessions`: per-Runner concurrency limit. The Framework semaphore holds a slot through
+  episode execution, scoring, and cleanup. The Ray worker RPC limit is the larger
+  of 1000 and the sum of positive Runner limits; zero or omitted limits leave that
+  Runner unbounded without making Ray RPC concurrency unlimited.
 - `log_dir`: runtime log root. Sessions with a global step write `framework.log`, `task.log`, and trajectory artifacts under `step_<global_step>/<log_id>/`; Sessions whose `global_steps` is `None` write directly under `<log_id>/`.
 - `rollout.n`: sessions per prompt.
 - `rollout.multi_turn.format`: model-specific Tool parser.
@@ -437,3 +440,29 @@ This context is independent of final reward-worker scores and training masks.
 For SWE-bench, the context includes `eval_exit_code`, per-test
 `eval_report.status_map`, and an `agent_error` when the agent reports one.
 These diagnostics do not change the task's resolution criteria.
+
+### Admission-only submission
+
+`AgentFrameworkRolloutAdapter` exposes three completion boundaries:
+
+| Method | Returns when |
+| --- | --- |
+| `generate_sequences(prompts)` | The full-generation RPC is submitted. |
+| `generate_sequences_and_wait(prompts)` | Generation and result delivery finish. |
+| `submit_sessions(prompts)` | Each session has acquired its Runner slot and been scheduled, or admission has failed. |
+
+`submit_sessions` does not wait for Gateway creation or episode completion.
+Framework retains the background tasks and writes their results to TransferQueue.
+Sessions acquire capacity incrementally; independent Runners have separate admission
+lanes, so one saturated Runner does not block another. Failures after admission are
+logged by Framework; the admission return value is not a rollout success receipt.
+
+Cancelling admission cleans up episodes and collectors already started by that
+submission, returns their slots, and settles their prompt status. Sessions waiting
+for capacity do not consume slots, and another batch's sessions remain unaffected.
+Previously persisted results are retained. This is local task cleanup, not
+process-crash recovery or a distributed task ledger.
+
+Custom Frameworks only need `generate_sequences` for ordinary generation. A caller
+using `submit_sessions` must choose a Framework that explicitly implements it;
+there is no fallback that waits for full generation.
