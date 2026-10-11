@@ -93,8 +93,7 @@ def build_swe_bench_pro(max_instances: int | None = None, *, scripts_dir: str | 
     print(f"Loaded {len(dataset)} raw instances", flush=True)
     if len(dataset) != EXPECTED_INSTANCES:
         raise RuntimeError(
-            f"Expected SWE-bench Pro {DATASET_CONFIG} to contain {EXPECTED_INSTANCES} instances, "
-            f"got {len(dataset)}"
+            f"Expected SWE-bench Pro {DATASET_CONFIG} to contain {EXPECTED_INSTANCES} instances, got {len(dataset)}"
         )
 
     if max_instances is not None and max_instances >= 0:
