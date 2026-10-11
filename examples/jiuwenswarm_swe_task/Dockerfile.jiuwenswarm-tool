@@ -1,0 +1,50 @@
+# Jiuwenswarm sidecar tool image.
+#
+# Contains a self-contained Python runtime at /opt/jiuwenswarm with
+# workswarm (jiuwenswarm) + all dependencies. When mounted into a sandbox
+# at /opt/jiuwenswarm, the agent can be invoked via:
+#
+#   bash /opt/jiuwenswarm/bin/run_agent.sh <task_config.json>
+#
+# Uses python-build-standalone for maximum portability across different
+# glibc versions (built against older glibc, forward-compatible).
+#
+# Build:
+#   docker build -f Dockerfile.jiuwenswarm-tool -t jiuwenswarm-tool:latest .
+#
+# The openjiuwen dependency is a git dep from gitcode.com, so the builder
+# stage needs git + network access.
+
+FROM debian:bookworm-slim AS builder
+
+ARG PBS_RELEASE="20260602"
+ARG PBS_PYTHON="3.12.13"
+ARG PIP_INDEX_URL=""
+ARG WORKSWARM_VERSION="0.2.6"
+
+# Install git + build deps for openjiuwen (git dependency from gitcode.com)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates wget git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Download and extract python-build-standalone (stripped, 32MB)
+RUN wget -q \
+    "https://github.com/astral-sh/python-build-standalone/releases/download/${PBS_RELEASE}/cpython-${PBS_PYTHON}%2B${PBS_RELEASE}-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz" \
+    -O /tmp/python.tar.gz \
+    && mkdir -p /opt/jiuwenswarm \
+    && tar -xzf /tmp/python.tar.gz -C /opt/jiuwenswarm --strip-components=1 \
+    && rm /tmp/python.tar.gz
+
+# Install workswarm (jiuwenswarm) + all dependencies (incl. openjiuwen from git)
+RUN /opt/jiuwenswarm/bin/pip install --no-cache-dir \
+    ${PIP_INDEX_URL:+-i ${PIP_INDEX_URL}} \
+    "workswarm==${WORKSWARM_VERSION}"
+
+# Copy the in-sandbox runner script
+COPY run_agent.sh /opt/jiuwenswarm/bin/run_agent.sh
+
+# Final scratch image: files are at the image root level so that when
+# akernel_sdk.Mount(target="/opt/jiuwenswarm") overlays this image,
+# the files appear at /opt/jiuwenswarm/bin/run_agent.sh etc.
+FROM scratch
+COPY --from=builder /opt/jiuwenswarm /
