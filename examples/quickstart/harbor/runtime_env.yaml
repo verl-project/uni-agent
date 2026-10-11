@@ -4,8 +4,7 @@ excludes:
 
 pip:
   packages:
-    - "harbor[modal]==0.16.1"
-    - "modal[api-proxy-support]==1.5.5"
+    - "harbor[modal]"
 
 env_vars:
   PYTHONPATH: "verl"
