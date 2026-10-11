@@ -4,11 +4,11 @@ excludes:
 
 pip:
   packages:
-    - "harbor"
+    - "harbor[modal]==0.16.1"
+    - "modal[api-proxy-support]==1.5.5"
 
 env_vars:
   PYTHONPATH: "verl"
-  PYTHONNOUSERSITE: "1"
-  TORCH_NCCL_AVOID_RECORD_STREAMS: "1"
-  CUDA_DEVICE_MAX_CONNECTIONS: "1"
-  VLLM_DISABLE_COMPILE_CACHE: "1"
+
+  MODAL_TOKEN_ID: "xxxxxx"
+  MODAL_TOKEN_SECRET: "xxxxxx"
