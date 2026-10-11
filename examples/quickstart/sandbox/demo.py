@@ -13,7 +13,7 @@ from uni_agent.logging import sample_logging
 from uni_agent.sandbox import Sandbox, SandboxConfig, build_sandbox
 from uni_agent.tools import Toolbox
 
-logger = logging.getLogger("demo")
+logger = logging.getLogger("uni_agent.demo")
 
 
 def banner(title: str) -> None:
