@@ -211,11 +211,9 @@ bash examples/quickstart/harbor/run_infer_terminus2.sh
 ```
 
 The smoke launchers default to Harbor Docker so the agent and Gateway stay on the
-same network. They pass `hosted_vllm/<model>` as the default
-`--served-model-name`; Harbor receives that user-provided value unchanged.
-Override `SERVED_MODEL_NAME` to select another provider-qualified name. Override
-`TASK_CONFIG` and provide `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET` to use Modal
-after making the Gateway reachable from that environment.
+same network. Their data, model, hardware, and concurrency settings are intentionally
+inlined like the other quickstart launchers; edit those flags directly before a larger
+run. Harbor receives the configured `--served-model-name` unchanged.
 
 ## Results and Rewards
 

@@ -1,0 +1,14 @@
+working_dir: ./
+excludes:
+  - "/.git/"
+
+pip:
+  packages:
+    - "harbor"
+
+env_vars:
+  PYTHONPATH: "verl"
+  PYTHONNOUSERSITE: "1"
+  TORCH_NCCL_AVOID_RECORD_STREAMS: "1"
+  CUDA_DEVICE_MAX_CONNECTIONS: "1"
+  VLLM_DISABLE_COMPILE_CACHE: "1"
