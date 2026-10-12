@@ -70,15 +70,10 @@ index 1b7c8c76..a0559ecb 100644
 
          rollout_worker_actor_cls = ray.remote(CheckpointEngineWorker)
 diff --git a/verl/workers/rollout/sglang_rollout/async_sglang_server.py b/verl/workers/rollout/sglang_rollout/async_sglang_server.py
-index 70cd649b..4032f245 100644
+index 70cd649b..cc159781 100644
 --- a/verl/workers/rollout/sglang_rollout/async_sglang_server.py
 +++ b/verl/workers/rollout/sglang_rollout/async_sglang_server.py
-@@ -18,29 +18,14 @@ import json
- import logging
- import os
- import secrets
-+import sys
- from pathlib import Path
+@@ -22,25 +22,9 @@ from pathlib import Path
  from typing import Any, Optional
 
  import ray
@@ -104,7 +99,7 @@ index 70cd649b..4032f245 100644
 
  from verl.plugin.platform import get_platform
  from verl.utils.config import omega_conf_to_dataclass
-@@ -55,7 +40,6 @@ from verl.utils.profiler import (
+@@ -55,7 +39,6 @@ from verl.utils.profiler import (
  from verl.utils.tracking import RLInsightLogger
  from verl.workers.config import HFModelConfig, RolloutConfig
  from verl.workers.rollout.replica import RolloutMode, RolloutReplica, TokenOutput
@@ -112,7 +107,7 @@ index 70cd649b..4032f245 100644
  from verl.workers.rollout.sglang_rollout.utils import (
      SGLANG_LORA_NAME,
      lora_rank_of,
-@@ -67,6 +51,52 @@ from verl.workers.rollout.utils import get_max_position_embeddings, run_uvicorn
+@@ -67,6 +50,67 @@ from verl.workers.rollout.utils import get_max_position_embeddings, run_uvicorn
  logger = logging.getLogger(__file__)
  logger.setLevel(logging.INFO)
 
@@ -131,6 +126,21 @@ index 70cd649b..4032f245 100644
 +    except (AttributeError, ImportError, TypeError):
 +        annotations = getattr(server_args_type, "__annotations__", {})
 +        return field_name in annotations
++
++
++def _add_tokenizer_stop_token_ids(sampling_params: dict, tokenizer: Any) -> None:
++    """Supply EOS ids when the server runs without its tokenizer process."""
++    if sampling_params.get("ignore_eos", False):
++        return
++    eos_ids = getattr(tokenizer, "eos_token_id", None)
++    stop_ids = set(sampling_params.get("stop_token_ids") or ())
++    if isinstance(eos_ids, list | tuple | set):
++        stop_ids.update(eos_ids)
++    elif eos_ids is not None:
++        stop_ids.add(eos_ids)
++    stop_ids.update(getattr(tokenizer, "additional_stop_token_ids", None) or ())
++    if stop_ids:
++        sampling_params["stop_token_ids"] = sorted(stop_ids)
 +
 +
 +def _load_sglang_runtime() -> None:
@@ -165,7 +175,7 @@ index 70cd649b..4032f245 100644
  visible_devices_keyword = get_visible_devices_keyword()
 
 
-@@ -149,11 +179,20 @@ class SGLangHttpServer:
+@@ -149,11 +193,12 @@ class SGLangHttpServer:
          disaggregation_role: str = "null",
          disaggregation_bootstrap_port: Optional[int] = None,
      ):
@@ -176,18 +186,10 @@ index 70cd649b..4032f245 100644
              f"{nnodes=}, {cuda_visible_devices=}, role={disaggregation_role}"
          )
 -        os.environ[visible_devices_keyword] = cuda_visible_devices
-+        logger.info(
-+            "sglang runtime identity: pid=%s python=%s sglang_version=%s sglang_module=%s "
-+            "torch_version=%s torch_module=%s ray_version=%s ray_module=%s "
-+            "replica_rank=%s node_rank=%s CUDA_VISIBLE_DEVICES=%s",
-+            os.getpid(), sys.executable, sglang.__version__, sglang.__file__,
-+            torch.__version__, torch.__file__, ray.__version__, ray.__file__,
-+            replica_rank, node_rank, cuda_visible_devices,
-+        )
 
          assert disaggregation_role in ("null", "prefill", "decode"), (
              f"disaggregation_role must be 'null'|'prefill'|'decode', got {disaggregation_role!r}"
-@@ -179,6 +218,7 @@ class SGLangHttpServer:
+@@ -179,6 +224,7 @@ class SGLangHttpServer:
          self.node_rank = node_rank
          self.nnodes = nnodes
          self.base_gpu_id = base_gpu_id
@@ -195,30 +197,7 @@ index 70cd649b..4032f245 100644
          # model weights version, set by ServerAdapter when update weights.
          self.global_steps = None
 
-@@ -237,6 +277,22 @@ class SGLangHttpServer:
-         assert self._server_port is not None, "http server is not launched, port is None"
-         return self._server_address, self._server_port
-
-+    def get_runtime_identity(self) -> dict[str, Any]:
-+        """Return package and device identity from this SGLang server actor."""
-+        return {
-+            "pid": os.getpid(),
-+            "python_executable": sys.executable,
-+            "sglang_version": sglang.__version__,
-+            "sglang_module_file": sglang.__file__,
-+            "torch_version": torch.__version__,
-+            "torch_module_file": torch.__file__,
-+            "ray_version": ray.__version__,
-+            "ray_module_file": ray.__file__,
-+            "replica_rank": self.replica_rank,
-+            "node_rank": self.node_rank,
-+            "cuda_visible_devices": os.environ.get(visible_devices_keyword),
-+        }
-+
-     async def set_pd_peer(self, decode_peers: list, bootstrap_host: str):
-         assert isinstance(decode_peers, list) and decode_peers
-         self._pd_decode_peers = list(decode_peers)
-@@ -372,7 +428,7 @@ class SGLangHttpServer:
+@@ -372,7 +418,7 @@ class SGLangHttpServer:
              args["enable_metrics"] = True
 
          # enable_weights_cpu_backup is supported in sglang>=0.5.3
@@ -227,108 +206,24 @@ index 70cd649b..4032f245 100644
              # HYBRID mode also needs CPU weight backup so that:
              #   1. sleep() can release GPU weights to free memory for the training engine.
              #   2. naive update_weights() can call resume(tags=["weights"]) to reload weights
-@@ -554,6 +610,7 @@ class SGLangHttpServer:
-         bootstrap_port: Optional[int] = None,
-         bootstrap_room: Optional[int] = None,
-     ) -> TokenOutput:
-+        logger.info("sglang request dispatch: request_id=%s prompt_tokens=%s", request_id, len(prompt_ids))
-         # PD top-level dispatch: prefill mints a bootstrap_room and fans out
-         # paired local-prefill + remote-decode calls; decode returns the tokens
-         # (prefill only materialises KV and pushes via NIXL). Random peer
-@@ -593,6 +650,64 @@ class SGLangHttpServer:
+@@ -593,6 +639,16 @@ class SGLangHttpServer:
                  f"({self.config.max_model_len})."
              )
 
-+        # Some checkpoints omit EOS metadata from config.json even though the
-+        # tokenizer declares the actual turn terminator.  Pass those ids at
-+        # request level as well as through SGLang's model config so stop
-+        # handling remains correct for isolated language-model-only actors.
-+        tokenizer = getattr(self.tokenizer_manager, "tokenizer", None)
-+        tokenizer_source = "manager"
-+        if tokenizer is None:
-+            # SGLang's tokenizer manager can omit the tokenizer object in an
-+            # isolated actor even though the scheduler owns one. Load the same
-+            # local tokenizer once in this actor so request-level stop controls
-+            # are still explicit and auditable.
++        if self.config.skip_tokenizer_init and not sampling_params.get("ignore_eos", False):
 +            if self._request_stop_tokenizer is None:
-+                try:
-+                    import importlib
++                from sglang.srt.utils.hf_transformers import get_tokenizer
 +
-+                    tokenizer_module = importlib.import_module("sglang.srt.utils.hf_transformers")
-+                    self._request_stop_tokenizer = tokenizer_module.get_tokenizer(self.model_config.local_path)
-+                except Exception as exc:  # pragma: no cover - runtime fallback
-+                    logger.warning("unable to load request stop tokenizer: %s", exc)
-+            tokenizer = self._request_stop_tokenizer
-+            tokenizer_source = "actor-local"
-+        tokenizer_eos = getattr(tokenizer, "eos_token_id", None)
-+        if tokenizer is not None and tokenizer_eos is not None:
-+            stop_token_ids = set(sampling_params.get("stop_token_ids") or ())
-+            if isinstance(tokenizer_eos, (list, tuple, set)):
-+                stop_token_ids.update(tokenizer_eos)
-+            else:
-+                stop_token_ids.add(tokenizer_eos)
-+            stop_token_ids.update(getattr(tokenizer, "additional_stop_token_ids", None) or ())
-+            sampling_params["stop_token_ids"] = stop_token_ids
-+            # ``skip_tokenizer_init=True`` is used by the language-model-only
-+            # actor.  In that mode the scheduler cannot evaluate string stop
-+            # sequences, even though this actor has loaded a tokenizer for
-+            # deriving EOS ids.  Passing ``stop=<|im_end|>`` here makes
-+            # SGLang raise ``ValueError`` before generation and the gateway
-+            # exposes it as the client's ``BadRequestError``.  Token-id stops
-+            # remain supported without a scheduler tokenizer.
-+            tokenizer_eos_text = getattr(tokenizer, "eos_token", None)
-+            if tokenizer_source == "manager" and isinstance(tokenizer_eos_text, str) and tokenizer_eos_text:
-+                existing_stop = sampling_params.get("stop")
-+                if existing_stop is None:
-+                    stop_sequences: list[str] = []
-+                elif isinstance(existing_stop, str):
-+                    stop_sequences = [existing_stop]
-+                else:
-+                    stop_sequences = list(existing_stop)
-+                if tokenizer_eos_text not in stop_sequences:
-+                    stop_sequences.append(tokenizer_eos_text)
-+                sampling_params["stop"] = stop_sequences[0] if len(stop_sequences) == 1 else stop_sequences
-+            if os.environ.get("UNI_AGENT_SGLANG_RESPONSE_DIAGNOSTICS") == "1":
-+                logger.warning(
-+                    "sglang request stop controls: request_id=%s source=%s stop_token_ids=%s stop=%s",
-+                    request_id,
-+                    tokenizer_source,
-+                    sorted(stop_token_ids),
-+                    sampling_params.get("stop"),
++                self._request_stop_tokenizer = get_tokenizer(
++                    self.model_config.local_path,
++                    trust_remote_code=self.model_config.trust_remote_code,
 +                )
++            _add_tokenizer_stop_token_ids(sampling_params, self._request_stop_tokenizer)
 +
          if "max_new_tokens" in sampling_params:
              max_new_tokens = sampling_params.pop("max_new_tokens")
          elif "max_tokens" in sampling_params:
-@@ -658,6 +773,27 @@ class SGLangHttpServer:
-         meta_info = output.get("meta_info", {})
-         finish_reason = meta_info.get("finish_reason")
-         finish_reason = finish_reason["type"] if finish_reason else None
-+        if os.environ.get("UNI_AGENT_SGLANG_RESPONSE_DIAGNOSTICS") == "1":
-+            diagnostic_ids = list(output.get("output_ids", []))
-+            diagnostic_tail = ""
-+            try:
-+                tokenizer = getattr(self.tokenizer_manager, "tokenizer", None) or self._request_stop_tokenizer
-+                if tokenizer is not None and diagnostic_ids:
-+                    diagnostic_tail = tokenizer.decode(
-+                        diagnostic_ids[-256:], skip_special_tokens=False
-+                    )[-512:]
-+            except Exception as exc:  # pragma: no cover - diagnostic-only best effort
-+                diagnostic_tail = f"<decode-error:{type(exc).__name__}>"
-+            logger.warning(
-+                "sglang response diagnostic: request_id=%s output_tokens=%s finish_reason=%s "
-+                "first_ids=%s last_ids=%s tail=%r",
-+                request_id,
-+                len(diagnostic_ids),
-+                finish_reason,
-+                diagnostic_ids[:8],
-+                diagnostic_ids[-8:],
-+                diagnostic_tail,
-+            )
-         if return_logprob:
-             token_ids = list(output.get("output_ids", []))
-             output_token_logprobs = meta_info.get("output_token_logprobs") or []
-@@ -841,17 +977,48 @@ class SGLangReplica(RolloutReplica):
+@@ -841,17 +897,25 @@ class SGLangReplica(RolloutReplica):
                  name = f"sglang_server_teacher_{self.replica_rank}_{node_rank}{self.name_suffix}"
              else:
                  name = f"sglang_server_{self.replica_rank}_{node_rank}{self.name_suffix}"
@@ -345,29 +240,6 @@ index 70cd649b..4032f245 100644
 +            if sglang_python and sglang_pythonpath:
 +                server_runtime_env["py_executable"] = sglang_python
 +                server_runtime_env["env_vars"]["PYTHONPATH"] = sglang_pythonpath
-+            sglang_ld_library_path = os.environ.get("UNI_AGENT_SGLANG_LD_LIBRARY_PATH")
-+            if sglang_ld_library_path:
-+                server_runtime_env["env_vars"]["LD_LIBRARY_PATH"] = sglang_ld_library_path
-+            sglang_cuda_home = os.environ.get("UNI_AGENT_SGLANG_CUDA_HOME")
-+            sglang_path = os.environ.get("UNI_AGENT_SGLANG_PATH")
-+            if sglang_cuda_home:
-+                server_runtime_env["env_vars"]["CUDA_HOME"] = sglang_cuda_home
-+                server_runtime_env["env_vars"]["CUDA_PATH"] = sglang_cuda_home
-+            sglang_cpath = os.environ.get("UNI_AGENT_SGLANG_CPATH")
-+            if sglang_cpath:
-+                server_runtime_env["env_vars"]["CPATH"] = sglang_cpath
-+                server_runtime_env["env_vars"]["CPLUS_INCLUDE_PATH"] = sglang_cpath
-+            for source_key, target_key in (
-+                ("UNI_AGENT_SGLANG_CUDAHOSTCXX", "CUDAHOSTCXX"),
-+                ("UNI_AGENT_SGLANG_CC", "CC"),
-+                ("UNI_AGENT_SGLANG_CXX", "CXX"),
-+            ):
-+                compiler = os.environ.get(source_key)
-+                if compiler:
-+                    server_runtime_env["env_vars"][target_key] = compiler
-+            if sglang_path:
-+                server_runtime_env["env_vars"]["PATH"] = sglang_path
-+
              server = self.server_class.options(
                  scheduling_strategy=ray.util.scheduling_strategies.NodeAffinitySchedulingStrategy(
                      node_id=node_id,

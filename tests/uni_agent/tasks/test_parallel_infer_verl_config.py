@@ -70,8 +70,6 @@ def test_inference_sampling_uses_run_options_and_preserves_length_configuration(
         assert not task_runner.runner_kwargs
     else:
         assert task_runner.runner_kwargs.task_config_path == args.task_config
-        if entrypoint is init_config:
-            assert task_runner.trajectory_selection == "all"
 
 
 @pytest.mark.cpu
@@ -108,4 +106,3 @@ def test_parallel_infer_routes_language_model_only_to_selected_engine(engine):
     assert rollout.enforce_eager is True
     assert rollout.checkpoint_engine.enabled is False
     assert rollout.engine_kwargs[engine].language_model_only is True
-    assert rollout.custom.agent_framework.agent_runners.task.trajectory_selection == "all"

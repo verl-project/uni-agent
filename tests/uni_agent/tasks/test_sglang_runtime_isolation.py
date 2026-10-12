@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -12,30 +13,75 @@ import pytest
 
 @pytest.mark.cpu
 @pytest.mark.level0
-def test_mini_swe_launcher_uses_validated_driver_python_for_ray_job():
+@pytest.mark.parametrize("engine", ["vllm", "sglang"])
+def test_mini_swe_launcher_preserves_defaults_and_forwards_selected_runtime(tmp_path, monkeypatch, engine):
+    if sys.platform == "win32":
+        pytest.skip("the Ray inference launcher targets POSIX hosts")
     repo_root = Path(__file__).resolve().parents[3]
-    launcher = (repo_root / "examples/mini_swe_agent/run_infer_mini_swe_agent.sh").read_text(encoding="utf-8")
-
-    expected = '-- "${PYTHON_BIN}" "${REPO_ROOT}/examples/inference/parallel_infer_verl.py"'
-    assert expected in launcher
-    assert '\n    -- python "${REPO_ROOT}/examples/inference/parallel_infer_verl.py"' not in launcher
+    ray_stub = tmp_path / "ray"
+    ray_stub.write_text(f"#!{sys.executable}\nimport json,sys\nprint(json.dumps(sys.argv[1:]))\n", encoding="utf-8")
+    ray_stub.chmod(0o700)
+    monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
+    for name in (
+        "CUDA_VISIBLE_DEVICES",
+        "TENSOR_PARALLEL_SIZE",
+        "N_GPUS_PER_NODE",
+        "LANGUAGE_MODEL_ONLY",
+        "ENFORCE_EAGER",
+        "GATEWAY_COUNT",
+    ):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("OPENYUANRONG_SERVER_ADDRESS", "https://sandbox.example")
+    monkeypatch.setenv("OPENYUANRONG_TOKEN", "synthetic-test-token")
+    monkeypatch.setenv("PYTHON_BIN", sys.executable)
+    monkeypatch.setenv("ENGINE", engine)
+    monkeypatch.setenv("UNI_AGENT_SGLANG_PYTHON", "/selected/runtime/python")
+    monkeypatch.setenv("UNI_AGENT_SGLANG_PYTHONPATH", "/selected/runtime/packages")
+    if engine == "sglang":
+        monkeypatch.setenv("LANGUAGE_MODEL_ONLY", "true")
+    result = subprocess.run(
+        ["bash", "examples/mini_swe_agent/run_infer_mini_swe_agent.sh"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    argv = json.loads(result.stdout)
+    runtime = json.loads(argv[argv.index("--runtime-env-json") + 1])["env_vars"]
+    assert argv[argv.index("--engine") + 1] == engine
+    assert argv[argv.index("--tensor-parallel-size") + 1] == "2"
+    assert argv[argv.index("--n-gpus-per-node") + 1] == "2"
+    assert argv[argv.index("--gateway-count") + 1] == "4"
+    assert runtime["CUDA_VISIBLE_DEVICES"] == "0,1"
+    assert ("--language-model-only" in argv) is (engine == "sglang")
+    assert "--enforce-eager" not in argv
+    assert ("UNI_AGENT_SGLANG_PYTHON" in runtime) is (engine == "sglang")
+    if engine == "sglang":
+        assert runtime["UNI_AGENT_SGLANG_PYTHONPATH"] == "/selected/runtime/packages"
 
 
 @pytest.mark.cpu
 @pytest.mark.level0
-def test_mini_swe_launcher_forwards_sglang_cuda_library_path_only_to_actor_runtime():
-    repo_root = Path(__file__).resolve().parents[3]
-    launcher = (repo_root / "examples/mini_swe_agent/run_infer_mini_swe_agent.sh").read_text(encoding="utf-8")
+@pytest.mark.parametrize("eos", [248046, [248046, 248047], (248046, 248047)])
+def test_sglang_tokenizer_stops_preserve_explicit_controls_without_adding_string_stop(eos):
+    from verl.workers.rollout.sglang_rollout.async_sglang_server import _add_tokenizer_stop_token_ids
 
-    assert "SGLANG_ACTOR_LD_LIBRARY_PATH" in launcher
-    assert 'env["UNI_AGENT_SGLANG_LD_LIBRARY_PATH"]' in launcher
-    assert 'LD_LIBRARY_PATH="${SGLANG_ACTOR_LD_LIBRARY_PATH}"' in launcher
-    assert "examples/mini_swe_agent/sglang_actor_runtime" in launcher
-    assert 'env["UNI_AGENT_SGLANG_CUDA_HOME"]' in launcher
-    assert 'env["UNI_AGENT_SGLANG_CUDA_INCLUDE_PATH"]' in launcher
-    assert 'env["UNI_AGENT_SGLANG_CPATH"]' in launcher
-    assert 'env["UNI_AGENT_SGLANG_PATH"]' in launcher
-    assert "SGLANG_CUDA_HOME=\"${REPO_ROOT}/.tmp/sglang-cuda13\"" in launcher
+    params = {"stop_token_ids": [17], "stop": ["user-supplied-stop"]}
+    tokenizer = SimpleNamespace(eos_token_id=eos, additional_stop_token_ids=[18])
+    _add_tokenizer_stop_token_ids(params, tokenizer)
+    expected = {17, 18, 248046} | ({248047} if not isinstance(eos, int) else set())
+    assert set(params["stop_token_ids"]) == expected
+    assert params["stop"] == ["user-supplied-stop"]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_sglang_tokenizer_stops_respect_ignore_eos():
+    from verl.workers.rollout.sglang_rollout.async_sglang_server import _add_tokenizer_stop_token_ids
+
+    params = {"ignore_eos": True, "stop_token_ids": [17]}
+    _add_tokenizer_stop_token_ids(params, SimpleNamespace(eos_token_id=248046))
+    assert params == {"ignore_eos": True, "stop_token_ids": [17]}
 
 
 @pytest.mark.cpu
