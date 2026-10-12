@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shlex
 from types import SimpleNamespace
 
 import pytest
@@ -45,9 +46,9 @@ class FakeSandbox:
         )
 
 
-def run_agent(mode, messages=None):
+def run_agent(mode, messages=None, **config_overrides):
     sandbox = FakeSandbox(mode)
-    cfg = OpenClawConfig(model=ModelConfig(base_url="http://endpoint/v1", model_name="policy"))
+    cfg = OpenClawConfig(model=ModelConfig(base_url="http://endpoint/v1", model_name="policy"), **config_overrides)
     if messages is None:
         messages = [{"role": "user", "content": "solve 中文 ' $(false)"}]
     result = asyncio.run(
@@ -77,16 +78,50 @@ def test_success():
 
 @pytest.mark.cpu
 @pytest.mark.level0
-def test_optional_system_message_is_ignored():
-    result, sandbox = run_agent(
-        "success",
-        messages=[
-            {"role": "system", "content": "follow repository policy"},
-            {"role": "user", "content": "solve 中文 ' $(false)"},
-        ],
-    )
+@pytest.mark.parametrize(
+    "messages",
+    [
+        [],
+        [{"role": "system", "content": "instructions"}],
+        [{"role": "assistant", "content": "answer"}],
+        [{"role": "system", "content": "instructions"}, {"role": "user", "content": "task"}],
+        [{"role": "user", "content": "first"}, {"role": "user", "content": "second"}],
+        [{"role": "user", "content": ""}],
+        [{"role": "user", "content": " \n\t"}],
+        [{"role": "user", "content": None}],
+        [{"role": "user", "content": [{"type": "text", "text": "task"}]}],
+    ],
+)
+def test_invalid_messages_fail_before_sandbox_operations(messages):
+    sandbox = FakeSandbox()
+    cfg = OpenClawConfig(model=ModelConfig(base_url="http://endpoint/v1", model_name="policy"))
+    with pytest.raises(ValueError, match="openclaw requires"):
+        asyncio.run(OpenClawAgent(cfg).run(sandbox=sandbox, messages=messages))
+    assert not sandbox.shells and not sandbox.commands and not sandbox.files
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize("config_overrides, expected_timeout", [({}, 1700), ({"cli_timeout_seconds": 23}, 23)])
+def test_cli_budget_and_outer_grace(config_overrides, expected_timeout):
+    result, sandbox = run_agent("success", **config_overrides)
     assert result.finished
-    assert all("follow repository policy" not in content for content in sandbox.files.values())
+    argv, options = sandbox.commands[0]
+    command = shlex.split(argv[-1])
+    assert command[:2] == ["exec", "openclaw"]
+    assert command[command.index("--timeout") + 1] == str(expected_timeout)
+    assert options["timeout"] == expected_timeout + 100
+    config = json.loads(next(value for path, value in sandbox.files.items() if path.endswith("openclaw.json")))
+    assert config["agents"]["defaults"]["timeoutSeconds"] == expected_timeout
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_large_user_text_is_forwarded_without_a_byte_cap():
+    prompt = "任务" * 700_000
+    result, sandbox = run_agent("success", messages=[{"role": "user", "content": prompt}])
+    assert result.finished
+    assert next(value for path, value in sandbox.files.items() if path.endswith("task.txt")) == prompt
 
 
 @pytest.mark.cpu

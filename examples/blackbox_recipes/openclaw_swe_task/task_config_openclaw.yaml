@@ -14,6 +14,9 @@
     image_mounts:
       - image: swr.cn-east-3.myhuaweicloud.com/openyuanrong/openclaw-tool@sha256:90cef4641f82a955692385c48cb4db01a3bd73fc6f68f37962a58717ce547c13
         mount_path: /opt/openclaw
+    executable_paths:
+      openclaw: /opt/openclaw/bin/openclaw
+      node: /opt/openclaw/bin/node
     sandbox_kwargs:
       proxy_port: 38197
   agent:

@@ -23,9 +23,17 @@ The sidecar is mounted at `/opt/openclaw` through `sandbox.image_mounts`
 `task_config_openclaw.yaml`; the task image still owns `/testbed` and its own
 Python environment.
 
-Like mini-swe-agent, `agent.conda_env_path` binds the task image's existing
-Conda environment. The adapter sets `CONDA_PREFIX`, `CONDA_DEFAULT_ENV`, and
-the launch PATH, and derives OpenClaw's native `tools.exec.pathPrepend` because
+`sandbox.executable_paths` exposes `openclaw` and its bundled `node` runtime
+after mounting the sidecar. The adapter invokes `openclaw` by name; executable
+locations belong to the task YAML rather than an agent `tool_command` option.
+
+Like mini-swe-agent and the jiuwenswarm design in
+[PR #210](https://github.com/verl-project/uni-agent/pull/210), the optional
+`agent.conda_env_path` selects an existing environment inside the task image,
+not the GPU host's Conda environment. It defaults to `None`; the SWE-bench YAML
+selects `/opt/miniconda3/envs/testbed`. The adapter sets `CONDA_PREFIX`,
+`CONDA_DEFAULT_ENV`, and the launch PATH, and derives OpenClaw's native
+`tools.exec.pathPrepend` because
 its exec tool rebuilds PATH. Leave this option unset for images without Conda.
 The pinned CLI filters `CONDA_*` from exec subprocesses; the derived PATH
 selects the task environment's executables and Python packages.
@@ -56,13 +64,23 @@ session without selecting or discarding other trajectories. A result of reward 0
 is valid ordinary inference. OpenClaw's native
 `meta.aborted` and fallback fields remain part of agent completion handling.
 
-The agent follows the mini-swe-agent input contract: from at most two initial
-messages, it passes the user task to the CLI and ignores an optional system
-message. The recipe's prompt template therefore emits a single user message.
+The agent requires exactly one user message with non-empty text. System messages,
+multiple messages, and empty or non-text content are rejected. The recipe's
+prompt template emits this single user message, whose text is passed unchanged.
 The completion instructions are recipe prompt guidance and can be edited in the
 YAML; the adapter does not append instructions to the user task.
 Credentials and diagnostics are redacted before they are returned to the
 framework.
+
+`agent.cli_timeout_seconds` is the only agent execution timeout, defaulting to
+1700 seconds. The outer sandbox command gets an additional 100 seconds, so its
+default remains 1800 seconds. `sandbox.runtime_timeout` is a separate sandbox
+lifetime that also covers setup and scoring; the example keeps it at 7200 seconds.
+Remove previous `agent.run_timeout` overrides and configure the desired CLI
+budget through `agent.cli_timeout_seconds`. Move previous `agent.tool_command`
+paths to `sandbox.executable_paths` and remove `agent.max_prompt_bytes` overrides.
+The adapter does not impose a prompt byte limit; framework token budgets still
+govern model requests and trajectories.
 
 ## Scope and tests
 

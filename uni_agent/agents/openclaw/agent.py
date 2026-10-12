@@ -27,6 +27,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _MAX_DIAGNOSTIC_CHARS = 4000
+_CLI_TIMEOUT_GRACE_SECONDS = 100
 
 
 def _shell_quote_path(path: str) -> str:
@@ -143,12 +144,12 @@ def build_openclaw_config(
 
 
 def _extract_user_prompt(messages: list[dict[str, Any]]) -> str:
-    """Extract the user task using the mini-swe-agent message contract."""
-    if len(messages) > 2:
-        raise ValueError(f"openclaw accepts at most 2 messages (system?, user), got {len(messages)}")
-    prompt = next((message["content"] for message in messages if message.get("role") == "user"), None)
-    if not prompt:
-        raise ValueError("openclaw requires a 'user' message (the problem statement)")
+    """Require the single text message passed to OpenClaw's message file."""
+    if len(messages) != 1 or messages[0].get("role") != "user":
+        raise ValueError("openclaw requires exactly one 'user' message")
+    prompt = messages[0].get("content")
+    if not isinstance(prompt, str) or not prompt.strip():
+        raise ValueError("openclaw requires non-empty user text")
     return prompt
 
 
@@ -177,18 +178,15 @@ class OpenClawConfig(AgentConfig):
     """Black-box launch parameters bound to the OpenClaw tool-image layout."""
 
     name: str = "openclaw"
-    run_timeout: float = Field(default=1800.0, gt=0, description="Hard wall-clock cap for the OpenClaw CLI.")
     cli_timeout_seconds: int = Field(
-        default=1700, gt=0, description="OpenClaw --timeout deadline; must be below run_timeout."
+        default=1700, gt=0, description="OpenClaw deadline in seconds; the outer process gets 100 extra seconds."
     )
     agent_id: str = Field(default="main", min_length=1)
-    tool_command: str = Field(default="/opt/openclaw/bin/openclaw")
     state_root: str = Field(default="/tmp/uni-agent-openclaw")
-    max_prompt_bytes: int = Field(default=4 * 1024 * 1024, ge=1)
     conda_env_path: str | None = Field(
         default=None,
-        description="Task-image conda environment bound around the launch and exec tools; "
-        "unset for images without conda.",
+        description="Task-image path of the conda environment used by tool subprocesses "
+        "(e.g. /opt/miniconda3/envs/testbed); leave unset for images without conda.",
     )
 
 
@@ -203,11 +201,7 @@ class OpenClawAgent(Agent):
         model = cfg.model
         if not model.base_url or not model.model_name:
             raise ValueError("openclaw requires config.model.base_url and config.model.model_name")
-        if cfg.cli_timeout_seconds >= cfg.run_timeout:
-            raise ValueError("openclaw cli_timeout_seconds must be lower than run_timeout")
         prompt = _extract_user_prompt(messages)
-        if len(prompt.encode("utf-8")) > cfg.max_prompt_bytes:
-            raise ValueError(f"openclaw prompt exceeds max_prompt_bytes={cfg.max_prompt_bytes}")
 
         workspace = workdir or "/testbed"
         episode_id = uuid.uuid4().hex
@@ -236,7 +230,7 @@ class OpenClawAgent(Agent):
             await sandbox.write_file(config_path, json.dumps(config, separators=(",", ":")))
             await sandbox.write_file(prompt_path, prompt)
             argv = [
-                cfg.tool_command,
+                "openclaw",
                 "agent",
                 "--local",
                 "--agent",
@@ -257,18 +251,18 @@ class OpenClawAgent(Agent):
                 "OPENCLAW_STATE_DIR": state_dir,
                 "OPENCLAW_NO_RESPAWN": "1",
             }
-            tool_dir = str(PurePosixPath(cfg.tool_command).parent)
-            path_prefix = [tool_dir]
+            launch_script = f"exec {shlex.join(argv)}"
             if cfg.conda_env_path:
                 env_dir = PurePosixPath(cfg.conda_env_path)
                 env.update(CONDA_DEFAULT_ENV=env_dir.name, CONDA_PREFIX=str(env_dir))
-                path_prefix.extend([str(env_dir / "bin"), str(env_dir.parent.parent / "bin")])
-            launch_path = ":".join(_shell_quote_path(path) for path in path_prefix)
-            launch_script = f'export PATH={launch_path}:"${{PATH:-}}"; exec {shlex.join(argv)}'
+                launch_path = ":".join(
+                    _shell_quote_path(str(path)) for path in (env_dir / "bin", env_dir.parent.parent / "bin")
+                )
+                launch_script = f'export PATH={launch_path}:"${{PATH:-}}"; {launch_script}'
             proc = await sandbox.exec(
                 ["bash", "-c", launch_script],
                 env=env,
-                timeout=cfg.run_timeout,
+                timeout=cfg.cli_timeout_seconds + _CLI_TIMEOUT_GRACE_SECONDS,
                 workdir=workspace,
             )
             if proc.exit_code == -1:
