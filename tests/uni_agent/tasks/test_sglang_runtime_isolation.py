@@ -6,7 +6,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -82,6 +82,51 @@ def test_sglang_tokenizer_stops_respect_ignore_eos():
     params = {"ignore_eos": True, "stop_token_ids": [17]}
     _add_tokenizer_stop_token_ids(params, SimpleNamespace(eos_token_id=248046))
     assert params == {"ignore_eos": True, "stop_token_ids": [17]}
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_sglang_eos_reuses_configured_tokenizer():
+    from verl.workers.rollout.sglang_rollout.async_sglang_server import _get_request_stop_tokenizer
+
+    tokenizer = object()
+    assert _get_request_stop_tokenizer(SimpleNamespace(tokenizer=tokenizer)) is tokenizer
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize(
+    "local_tokenizer_path,tokenizer_path,expected_path",
+    [
+        ("/materialized/tokenizer", "/configured/tokenizer", "/materialized/tokenizer"),
+        (None, "/configured/tokenizer", "/configured/tokenizer"),
+        (None, None, "/weights"),
+    ],
+)
+def test_sglang_eos_fallback_preserves_separate_tokenizer_path(
+    monkeypatch, local_tokenizer_path, tokenizer_path, expected_path
+):
+    from verl.workers.rollout.sglang_rollout.async_sglang_server import _get_request_stop_tokenizer
+
+    calls = []
+    tokenizer = object()
+    module = ModuleType("sglang.srt.utils.hf_transformers")
+
+    def load(path, **kwargs):
+        calls.append((path, kwargs))
+        return tokenizer
+
+    module.get_tokenizer = load
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    config = SimpleNamespace(
+        tokenizer=None,
+        local_tokenizer_path=local_tokenizer_path,
+        tokenizer_path=tokenizer_path,
+        local_path="/weights",
+        trust_remote_code=True,
+    )
+    assert _get_request_stop_tokenizer(config) is tokenizer
+    assert calls == [(expected_path, {"trust_remote_code": True})]
 
 
 @pytest.mark.cpu
