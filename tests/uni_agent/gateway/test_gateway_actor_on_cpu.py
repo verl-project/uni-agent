@@ -632,7 +632,7 @@ async def test_gateway_actor_forwards_image_data_on_initial_multimodal_request(r
     """On the first turn of a multimodal session, ``image_data`` extracted
     from the request is forwarded to the backend and recorded in the
     resulting ``Trajectory.multi_modal_data``."""
-    from uni_agent.gateway.adapters.openai import openai_to_internal
+    from uni_agent.gateway.adapters.openai_chat import openai_to_internal
     from uni_agent.gateway.config import GatewayActorConfig
     from uni_agent.gateway.gateway import GatewayActor
 

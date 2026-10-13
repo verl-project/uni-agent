@@ -21,13 +21,13 @@ from uni_agent.gateway.adapters.anthropic import (
     anthropic_stream_response,
     anthropic_to_internal,
 )
-from uni_agent.gateway.adapters.openai import (
+from uni_agent.gateway.adapters.openai_chat import (
     openai_build_response,
     openai_error_body,
     openai_stream_response,
     openai_to_internal,
 )
-from uni_agent.gateway.adapters.responses import (
+from uni_agent.gateway.adapters.openai_response import (
     responses_build_response,
     responses_error_body,
     responses_stream_response,

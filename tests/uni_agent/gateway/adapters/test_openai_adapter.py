@@ -10,7 +10,7 @@ ALLOWED_SAMPLING_KEYS = frozenset({"temperature", "top_p", "top_k", "max_tokens"
 def test_openai_build_response_shape():
     """A completed internal outcome serializes to the basic OpenAI chat
     completion envelope with ids, model, choices, and token usage."""
-    from uni_agent.gateway.adapters.openai import openai_build_response
+    from uni_agent.gateway.adapters.openai_chat import openai_build_response
     from uni_agent.gateway.session.session import GenerationOutcome
 
     outcome = GenerationOutcome(
@@ -32,7 +32,7 @@ def test_openai_build_response_shape():
 @pytest.mark.cpu
 @pytest.mark.level0
 def test_openai_build_response_serializes_internal_dict_tool_arguments():
-    from uni_agent.gateway.adapters.openai import openai_build_response
+    from uni_agent.gateway.adapters.openai_chat import openai_build_response
     from uni_agent.gateway.session.session import GenerationOutcome
 
     assistant_msg = {
@@ -66,7 +66,7 @@ def test_openai_build_response_serializes_internal_dict_tool_arguments():
 async def test_openai_stream_response_emits_compatible_sse_chunks():
     """A completed internal outcome is synthesized into OpenAI-compatible SSE
     chunks for role, reasoning, content, tool calls, final usage, and DONE."""
-    from uni_agent.gateway.adapters.openai import openai_stream_response
+    from uni_agent.gateway.adapters.openai_chat import openai_stream_response
     from uni_agent.gateway.session.session import GenerationOutcome
 
     resp = openai_stream_response(
@@ -120,7 +120,7 @@ def test_openai_to_internal_normalizes_messages_sampling_and_tools():
     """OpenAI wire requests lower to the internal shape: sampling params use the
     gateway allowlist, JSON-object tool arguments are parsed, non-object and
     malformed arguments stay strings, and tool_choice=none clears tool schemas."""
-    from uni_agent.gateway.adapters.openai import openai_to_internal
+    from uni_agent.gateway.adapters.openai_chat import openai_to_internal
 
     payload = {
         "messages": [

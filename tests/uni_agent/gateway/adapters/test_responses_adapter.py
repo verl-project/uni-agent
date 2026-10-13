@@ -10,6 +10,7 @@ import pytest
 pytestmark = [pytest.mark.cpu, pytest.mark.level0]
 
 ALLOWED_SAMPLING_KEYS = frozenset({"temperature", "top_p", "top_k", "max_tokens", "stop"})
+_MISSING_ROLE = object()
 
 
 def _request(**overrides):
@@ -42,7 +43,7 @@ def _outcome(*, content: str = "", tool_calls=None, finish_reason: str = "tool_c
 
 
 def test_custom_exec_round_trips_raw_input_and_tool_output():
-    from uni_agent.gateway.adapters.responses import responses_build_response, responses_to_internal
+    from uni_agent.gateway.adapters.openai_response import responses_build_response, responses_to_internal
 
     javascript = 'const r = await tools.exec_command({"cmd":"git status --short"});\ntext(r.output);'
     payload = _request(
@@ -102,7 +103,7 @@ def test_custom_exec_round_trips_raw_input_and_tool_output():
 
 
 def test_responses_preserves_images_and_namespaces_for_lowering():
-    from uni_agent.gateway.adapters.responses import responses_to_internal
+    from uni_agent.gateway.adapters.openai_response import responses_to_internal
 
     payload = _request(
         input=[
@@ -135,9 +136,100 @@ def test_responses_preserves_images_and_namespaces_for_lowering():
     assert internal["tools"][0]["function"]["name"] == "repo__lookup"
 
 
+@pytest.mark.parametrize(
+    "source,expected_url",
+    [
+        ({"image_url": "https://example.test/image.png"}, "https://example.test/image.png"),
+        ({"image_url": {"url": "https://example.test/image.png"}}, "https://example.test/image.png"),
+        ({"url": "https://example.test/image.png"}, "https://example.test/image.png"),
+        ({"image_url": "data:image/png;base64,AAAA"}, "data:image/png;base64,AAAA"),
+        ({"data": "AAAA"}, "data:image/png;base64,AAAA"),
+        ({"data": "AAAA", "mime_type": "image/jpeg"}, "data:image/jpeg;base64,AAAA"),
+        ({"image_data": "AAAA", "media_type": "image/webp"}, "data:image/webp;base64,AAAA"),
+        ({"data": "data:image/png;base64,AAAA"}, "data:image/png;base64,AAAA"),
+    ],
+)
+def test_responses_normalizes_supported_image_sources(source, expected_url):
+    from uni_agent.gateway.adapters.openai_response import responses_to_internal
+
+    internal = responses_to_internal(
+        _request(
+            input=[
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "inspect"}, {"type": "input_image", **source}],
+                }
+            ]
+        ),
+        base_sampling_params={},
+        allowed_sampling_keys=ALLOWED_SAMPLING_KEYS,
+    )
+    assert internal["messages"][1]["content"] == [
+        {"type": "text", "text": "inspect"},
+        {"type": "image_url", "image_url": {"url": expected_url}},
+    ]
+
+
+@pytest.mark.parametrize(
+    "source,field",
+    [
+        ({"file_id": "file-secret-id"}, "file_id"),
+        ({}, "none"),
+        ({"image_url": ""}, "image_url"),
+        ({"image_url": {}}, "image_url"),
+        ({"url": 1}, "url"),
+        ({"data": []}, "data"),
+        ({"image_data": {}}, "image_data"),
+    ],
+)
+def test_responses_rejects_images_without_supported_sources(source, field):
+    from uni_agent.gateway.adapters.openai_response import responses_to_internal
+    from uni_agent.gateway.adapters.types import MalformedRequestError
+
+    with pytest.raises(MalformedRequestError, match=r"input\[0\].content\[1\]") as error:
+        responses_to_internal(
+            _request(
+                input=[
+                    {
+                        "type": "message",
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": "inspect"}, {"type": "input_image", **source}],
+                    }
+                ]
+            ),
+            base_sampling_params={},
+            allowed_sampling_keys=ALLOWED_SAMPLING_KEYS,
+        )
+    assert field in str(error.value)
+    assert "file-secret-id" not in str(error.value)
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("source", [{"file_id": "file-secret-id"}, {}])
+@pytest.mark.asyncio
+async def test_responses_image_source_errors_precede_generation(stream, source):
+    from fastapi import HTTPException
+
+    from uni_agent.gateway.gateway import _GatewayActor
+
+    generate = AsyncMock(return_value=_outcome(content="done", finish_reason="stop"))
+    actor = object.__new__(_GatewayActor)
+    actor._sessions = {"s1": SimpleNamespace(sampling_params={}, run_generation=generate)}
+    actor._allowed_request_sampling_param_keys = ALLOWED_SAMPLING_KEYS
+    actor._backend = object()
+    with pytest.raises(HTTPException) as error:
+        await actor._handle_openai_responses(
+            "s1", _request(stream=stream, input=[{"role": "user", "content": [{"type": "input_image", **source}]}])
+        )
+    assert error.value.status_code == 400
+    assert "input[0].content[0]" in error.value.detail
+    generate.assert_not_called()
+
+
 @pytest.mark.parametrize("field,value", [("background", True), ("store", True), ("previous_response_id", "resp_x")])
 def test_responses_rejects_unsupported_stateful_features(field, value):
-    from uni_agent.gateway.adapters.responses import responses_to_internal
+    from uni_agent.gateway.adapters.openai_response import responses_to_internal
     from uni_agent.gateway.adapters.types import MalformedRequestError
 
     with pytest.raises(MalformedRequestError):
@@ -149,7 +241,7 @@ def test_responses_rejects_unsupported_stateful_features(field, value):
 
 
 def test_responses_length_status_and_error_envelope():
-    from uni_agent.gateway.adapters.responses import responses_build_response, responses_error_body
+    from uni_agent.gateway.adapters.openai_response import responses_build_response, responses_error_body
 
     body = responses_build_response(
         _outcome(content="", tool_calls=[], finish_reason="length"),
@@ -161,17 +253,6 @@ def test_responses_length_status_and_error_envelope():
     assert responses_error_body(400, "bad", param="input")["error"]["type"] == "invalid_request_error"
 
 
-def test_responses_tool_choice_none_disables_tools():
-    from uni_agent.gateway.adapters.responses import responses_to_internal
-
-    internal = responses_to_internal(
-        _request(tool_choice="none"),
-        base_sampling_params={},
-        allowed_sampling_keys=ALLOWED_SAMPLING_KEYS,
-    )
-    assert internal["tools"] is None
-
-
 @pytest.mark.parametrize(
     "overrides",
     [
@@ -179,7 +260,7 @@ def test_responses_tool_choice_none_disables_tools():
     ],
 )
 def test_responses_rejects_unsupported_capability_flags(overrides):
-    from uni_agent.gateway.adapters.responses import responses_to_internal
+    from uni_agent.gateway.adapters.openai_response import responses_to_internal
     from uni_agent.gateway.adapters.types import MalformedRequestError
 
     with pytest.raises(MalformedRequestError):
@@ -191,7 +272,7 @@ def test_responses_rejects_unsupported_capability_flags(overrides):
 
 
 def test_responses_rejects_parallel_tool_calls_false_at_request_entry():
-    from uni_agent.gateway.adapters.responses import responses_to_internal
+    from uni_agent.gateway.adapters.openai_response import responses_to_internal
     from uni_agent.gateway.adapters.types import MalformedRequestError
 
     with pytest.raises(MalformedRequestError, match="parallel_tool_calls=false is not supported"):
@@ -204,14 +285,14 @@ def test_responses_rejects_parallel_tool_calls_false_at_request_entry():
 
 @pytest.mark.parametrize("parallel", [True, "omitted"])
 def test_responses_accepts_parallel_tool_calls_true_or_default(parallel):
-    from uni_agent.gateway.adapters.responses import responses_to_internal
+    from uni_agent.gateway.adapters.openai_response import responses_to_internal
 
     payload = _request(**({"parallel_tool_calls": parallel} if parallel != "omitted" else {}))
     assert responses_to_internal(payload, base_sampling_params={}, allowed_sampling_keys=ALLOWED_SAMPLING_KEYS)["tools"]
 
 
 def test_responses_rejects_unknown_tool_type_instead_of_dropping_it():
-    from uni_agent.gateway.adapters.responses import responses_to_internal
+    from uni_agent.gateway.adapters.openai_response import responses_to_internal
     from uni_agent.gateway.adapters.types import MalformedRequestError
 
     with pytest.raises(MalformedRequestError):
@@ -223,7 +304,7 @@ def test_responses_rejects_unknown_tool_type_instead_of_dropping_it():
 
 
 def test_responses_preserves_known_hosted_tool_as_parser_declaration():
-    from uni_agent.gateway.adapters.responses import responses_to_internal
+    from uni_agent.gateway.adapters.openai_response import responses_to_internal
 
     internal = responses_to_internal(
         _request(tools=[{"type": "web_search", "description": "Search the web"}]),
@@ -243,7 +324,7 @@ def test_responses_preserves_known_hosted_tool_as_parser_declaration():
 
 
 def test_responses_rejects_unknown_input_item_instead_of_degrading_it():
-    from uni_agent.gateway.adapters.responses import responses_to_internal
+    from uni_agent.gateway.adapters.openai_response import responses_to_internal
     from uni_agent.gateway.adapters.types import MalformedRequestError
 
     with pytest.raises(MalformedRequestError):
@@ -255,7 +336,7 @@ def test_responses_rejects_unknown_input_item_instead_of_degrading_it():
 
 
 def test_responses_rejects_unknown_content_block_instead_of_dropping_it():
-    from uni_agent.gateway.adapters.responses import responses_to_internal
+    from uni_agent.gateway.adapters.openai_response import responses_to_internal
     from uni_agent.gateway.adapters.types import MalformedRequestError
 
     with pytest.raises(MalformedRequestError):
@@ -276,7 +357,7 @@ def test_responses_rejects_unknown_content_block_instead_of_dropping_it():
 
 @pytest.mark.asyncio
 async def test_responses_stream_emits_heartbeats_and_custom_events():
-    from uni_agent.gateway.adapters.responses import responses_stream_response
+    from uni_agent.gateway.adapters.openai_response import responses_stream_response
 
     async def generate():
         await asyncio.sleep(0.03)
@@ -309,7 +390,7 @@ async def test_responses_stream_emits_heartbeats_and_custom_events():
 
 @pytest.mark.parametrize("choice", ["auto", "AUTO", "none", "NoNe"])
 def test_responses_tool_choice_strings_are_normalized(choice):
-    from uni_agent.gateway.adapters.responses import responses_build_response, responses_to_internal
+    from uni_agent.gateway.adapters.openai_response import responses_build_response, responses_to_internal
 
     payload = _request(tool_choice=choice)
     internal = responses_to_internal(payload, base_sampling_params={}, allowed_sampling_keys=ALLOWED_SAMPLING_KEYS)
@@ -333,7 +414,7 @@ def test_responses_tool_choice_strings_are_normalized(choice):
     ],
 )
 def test_responses_rejects_unsupported_tool_choice_shapes(choice):
-    from uni_agent.gateway.adapters.responses import responses_to_internal
+    from uni_agent.gateway.adapters.openai_response import responses_to_internal
     from uni_agent.gateway.adapters.types import MalformedRequestError
 
     with pytest.raises(MalformedRequestError, match="tool_choice"):
@@ -352,7 +433,7 @@ def test_responses_rejects_unsupported_tool_choice_shapes(choice):
     ],
 )
 def test_responses_rejects_chat_token_limit_field(overrides):
-    from uni_agent.gateway.adapters.responses import responses_to_internal
+    from uni_agent.gateway.adapters.openai_response import responses_to_internal
     from uni_agent.gateway.adapters.types import MalformedRequestError
 
     with pytest.raises(MalformedRequestError, match="use max_output_tokens"):
@@ -363,7 +444,7 @@ def test_responses_rejects_chat_token_limit_field(overrides):
 
 @pytest.mark.parametrize("limit,expected", [(128, 128), (None, 2048)])
 def test_responses_maps_only_canonical_output_token_limit(limit, expected):
-    from uni_agent.gateway.adapters.responses import responses_to_internal
+    from uni_agent.gateway.adapters.openai_response import responses_to_internal
 
     internal = responses_to_internal(
         _request(max_output_tokens=limit),
@@ -377,7 +458,7 @@ def test_responses_maps_only_canonical_output_token_limit(limit, expected):
     "role,expected", [("system", "system"), ("developer", "system"), ("user", "user"), ("assistant", "assistant")]
 )
 def test_responses_accepts_standard_message_roles(role, expected):
-    from uni_agent.gateway.adapters.responses import responses_to_internal
+    from uni_agent.gateway.adapters.openai_response import responses_to_internal
 
     internal = responses_to_internal(
         _request(instructions=None, input=[{"type": "message", "role": role, "content": "body"}]),
@@ -387,26 +468,19 @@ def test_responses_accepts_standard_message_roles(role, expected):
     assert any(message["role"] == expected and message["content"] == "body" for message in internal["messages"])
 
 
-@pytest.mark.parametrize("role", ["moderator", "tool", "USER", "", None, {}, []])
+@pytest.mark.parametrize(
+    "role", ["moderator", "tool", "USER", "", None, {}, [], pytest.param(_MISSING_ROLE, id="missing")]
+)
 def test_responses_rejects_unknown_or_invalid_message_roles(role):
-    from uni_agent.gateway.adapters.responses import responses_to_internal
+    from uni_agent.gateway.adapters.openai_response import responses_to_internal
     from uni_agent.gateway.adapters.types import MalformedRequestError
 
+    message = {"type": "message", "content": "body", "tool_call_id": "call-1"}
+    if role is not _MISSING_ROLE:
+        message["role"] = role
     with pytest.raises(MalformedRequestError, match=r"input\[0\].role"):
         responses_to_internal(
-            _request(input=[{"type": "message", "role": role, "content": "body", "tool_call_id": "call-1"}]),
-            base_sampling_params={},
-            allowed_sampling_keys=ALLOWED_SAMPLING_KEYS,
-        )
-
-
-def test_responses_requires_explicit_message_role():
-    from uni_agent.gateway.adapters.responses import responses_to_internal
-    from uni_agent.gateway.adapters.types import MalformedRequestError
-
-    with pytest.raises(MalformedRequestError, match=r"input\[0\].role"):
-        responses_to_internal(
-            _request(input=[{"type": "message", "content": "body"}]),
+            _request(input=[message]),
             base_sampling_params={},
             allowed_sampling_keys=ALLOWED_SAMPLING_KEYS,
         )

@@ -21,7 +21,7 @@ from fastapi.responses import StreamingResponse
 from uni_agent.gateway.session.session import GenerationOutcome
 from uni_agent.gateway.session.types import InternalGenerationRequest
 
-from .openai import openai_to_internal
+from .openai_chat import openai_to_internal
 from .types import MalformedRequestError
 
 logger = logging.getLogger("gateway")
@@ -177,7 +177,11 @@ def _content_to_chat_content(content: Any, *, param: str) -> Any:
                 parts.append({"type": "image_url", "image_url": {"url": image_url}})
                 has_image = True
                 continue
-            logger.warning("Responses input_image has no usable URL at %s", block_param)
+            source_fields = ", ".join(sorted(set(block) - {"type", "detail"})) or "none"
+            raise MalformedRequestError(
+                f"Unsupported Responses input_image source at {block_param} "
+                f"(provided fields: {source_fields}); use image_url, url, data, or image_data"
+            )
         text = _content_to_text(block, param=block_param)
         if text:
             parts.append({"type": "text", "text": text})

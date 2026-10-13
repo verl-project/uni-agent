@@ -82,6 +82,9 @@ def _normalize_messages_for_continuous_tokens(
     history owned by the framework is never mutated.
     """
 
+    # TODO: Remove this workaround once our pinned verl revision includes the upstream fix
+    # and Qwen3.5 system-only initialization and continuation are verified to preserve
+    # system ordering and the immutable Continuous Token prefix without this wrapper.
     normalized = []
     for message in messages:
         copied = dict(message)
@@ -282,17 +285,12 @@ class MessageCodec:
             raise ValueError(
                 "Continuous Token context merging does not currently support incremental image or video data"
             )
-        force_system_anchor = (
-            any(message.get("role") == "system" for message in previous_messages)
-            and not any(message.get("role") == "user" for message in previous_messages)
+        force_system_anchor = any(message.get("role") == "system" for message in previous_messages) and not any(
+            message.get("role") == "user" for message in previous_messages
         )
         merge_result = self._continuous_token_builder.merge_context_tokens(
-            _normalize_messages_for_continuous_tokens(
-                previous_messages, force_system_anchor=force_system_anchor
-            ),
-            _normalize_messages_for_continuous_tokens(
-                updated_messages, force_system_anchor=force_system_anchor
-            ),
+            _normalize_messages_for_continuous_tokens(previous_messages, force_system_anchor=force_system_anchor),
+            _normalize_messages_for_continuous_tokens(updated_messages, force_system_anchor=force_system_anchor),
             runtime_token_ids,
             tools=tools,
         )
@@ -444,12 +442,6 @@ class MessageCodec:
         for tool_call in tool_calls:
             normalized_tool_call = dict(tool_call)
             normalized_tool_call.pop("id", None)
-            normalized_tool_call["type"] = "function"
-            function = normalized_tool_call.get("function")
-            if isinstance(function, dict) and "arguments" in function:
-                normalized_function = dict(function)
-                normalized_function["arguments"] = normalize_tool_arguments(function["arguments"])
-                normalized_tool_call["function"] = normalized_function
             normalized_tool_calls.append(normalized_tool_call)
         normalized["tool_calls"] = normalized_tool_calls
         return normalized
