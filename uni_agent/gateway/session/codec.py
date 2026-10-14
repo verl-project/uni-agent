@@ -311,25 +311,11 @@ class MessageCodec:
 
         request = SimpleNamespace(tools=vllm_tools, tool_choice="auto", skip_special_tokens=True)
 
-        # vLLM's ParserEngine-based parsers (qwen3, minimax_m2, seed_oss, etc.)
-        # can produce streaming argument deltas via an arg_converter. In streaming
-        # scenarios, the converter runs on every chunk to extract a safe JSON prefix,
-        # allowing clients to display partial tool arguments before the response
-        # completes. However, in complete-response scenarios like Gateway's rollout,
-        # this incremental conversion creates O(n²) overhead: each chunk triggers a
-        # full reparse of the accumulated argument string.
-        #
-        # Temporarily disable delta computation for complete responses by setting
-        # _stream_arg_deltas=False on the parser engine. This skips the repeated
-        # arg_converter calls while still producing correct final tool calls.
-        #
-        # The optimization applies only when:
-        # - The parser uses vLLM 0.23+ ParserEngine (_parser_engine attribute exists)
-        # - The engine has an arg_converter (indicates delta computation is possible)
-        # - The engine has the _stream_arg_deltas flag (vLLM 0.29+)
-        #
-        # Parsers without these attributes (legacy implementations, older vLLM versions)
-        # fall back to the standard extract_tool_calls path.
+        # Complete responses do not need streaming argument deltas. Repeated partial
+        # conversions can become quadratic for long tool arguments; disabling them
+        # preserves final conversion. Detect engine capabilities rather than parser
+        # names so aliases and other compatible parsers benefit, while older parsers
+        # keep the standard path. Restore the flag below for cached parser reuse.
         engine = getattr(parser, "_parser_engine", None)
         should_disable_deltas = (
             engine is not None
