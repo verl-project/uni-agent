@@ -310,16 +310,41 @@ class MessageCodec:
                 self._tool_parser_cache[cache_key] = parser
 
         request = SimpleNamespace(tools=vllm_tools, tool_choice="auto", skip_special_tokens=True)
-        engine = getattr(parser, "_parser_engine", None) if parser_name == "qwen3_coder" else None
-        if engine is not None and hasattr(engine, "_stream_arg_deltas"):
-            # Complete responses only consume final arguments. Computing streaming
-            # deltas repeatedly reparses growing Qwen3 XML parameter values.
-            stream_arg_deltas = engine._stream_arg_deltas
+
+        # vLLM's ParserEngine-based parsers (qwen3, minimax_m2, seed_oss, etc.)
+        # can produce streaming argument deltas via an arg_converter. In streaming
+        # scenarios, the converter runs on every chunk to extract a safe JSON prefix,
+        # allowing clients to display partial tool arguments before the response
+        # completes. However, in complete-response scenarios like Gateway's rollout,
+        # this incremental conversion creates O(n²) overhead: each chunk triggers a
+        # full reparse of the accumulated argument string.
+        #
+        # Temporarily disable delta computation for complete responses by setting
+        # _stream_arg_deltas=False on the parser engine. This skips the repeated
+        # arg_converter calls while still producing correct final tool calls.
+        #
+        # The optimization applies only when:
+        # - The parser uses vLLM 0.23+ ParserEngine (_parser_engine attribute exists)
+        # - The engine has an arg_converter (indicates delta computation is possible)
+        # - The engine has the _stream_arg_deltas flag (vLLM 0.29+)
+        #
+        # Parsers without these attributes (legacy implementations, older vLLM versions)
+        # fall back to the standard extract_tool_calls path.
+        engine = getattr(parser, "_parser_engine", None)
+        should_disable_deltas = (
+            engine is not None
+            and hasattr(engine, "_arg_converter")
+            and getattr(engine, "_arg_converter", None) is not None
+            and hasattr(engine, "_stream_arg_deltas")
+        )
+
+        if should_disable_deltas:
+            saved_stream_arg_deltas = engine._stream_arg_deltas
             engine._stream_arg_deltas = False
             try:
                 parsed = parser.extract_tool_calls(text, request)
             finally:
-                engine._stream_arg_deltas = stream_arg_deltas
+                engine._stream_arg_deltas = saved_stream_arg_deltas
         else:
             parsed = parser.extract_tool_calls(text, request)
         if not parsed.tools_called:
