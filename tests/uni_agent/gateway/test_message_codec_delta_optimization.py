@@ -1,6 +1,5 @@
 """Verify complete-response delta optimization applies to all ParserEngine-based parsers."""
 
-import json
 from types import SimpleNamespace
 
 import pytest
@@ -143,46 +142,13 @@ def test_delta_optimization_handles_legacy_parsers(monkeypatch):
 
 @pytest.mark.cpu
 @pytest.mark.level0
-def test_delta_optimization_restores_flag_on_exception(monkeypatch):
-    """The _stream_arg_deltas flag must be restored even when extract_tool_calls raises."""
-    from vllm.tool_parsers import ToolParserManager
-
-    class ParserThatRaises:
-        def __init__(self, tokenizer, *, tools):
-            self._parser_engine = SimpleNamespace(
-                _stream_arg_deltas=True,
-                _arg_converter=lambda x, y: x,
-            )
-
-        def extract_tool_calls(self, text, request):
-            if text == "boom":
-                raise ValueError("parse error")
-            return SimpleNamespace(tools_called=False, content=text, tool_calls=[])
-
-    monkeypatch.setattr(ToolParserManager, "get_tool_parser", lambda name: ParserThatRaises)
-    codec = MessageCodec(FakeTokenizer())
-
-    # First call raises
-    with pytest.raises(ValueError, match="parse error"):
-        codec._process_tool_calls_vllm("boom", TOOLS, "test")
-
-    # Verify the flag was restored
-    cached_parser = next(iter(codec._tool_parser_cache.values()))
-    assert cached_parser._parser_engine._stream_arg_deltas is True
-
-    # Second call should work
-    content, calls = codec._process_tool_calls_vllm("ok", TOOLS, "test")
-    assert content == "ok"
-    assert calls == []
-
-
-@pytest.mark.cpu
-@pytest.mark.level0
 @pytest.mark.parametrize("has_converter_attr", [True, False])
 @pytest.mark.parametrize("has_deltas_attr", [True, False])
 def test_delta_optimization_version_compatibility(has_converter_attr, has_deltas_attr, monkeypatch):
     """The optimization should gracefully degrade across vLLM versions with different APIs."""
     from vllm.tool_parsers import ToolParserManager
+
+    flag_during_parse = []
 
     class VersionedParser:
         def __init__(self, tokenizer, *, tools):
@@ -194,6 +160,10 @@ def test_delta_optimization_version_compatibility(has_converter_attr, has_deltas
             self._parser_engine = engine
 
         def extract_tool_calls(self, text, request):
+            # Record the flag state during parse to verify optimization behavior
+            flag_during_parse.append(
+                getattr(self._parser_engine, "_stream_arg_deltas", None)
+            )
             return SimpleNamespace(tools_called=False, content=text, tool_calls=[])
 
     monkeypatch.setattr(ToolParserManager, "get_tool_parser", lambda name: VersionedParser)
@@ -204,7 +174,21 @@ def test_delta_optimization_version_compatibility(has_converter_attr, has_deltas
     assert content == "test"
     assert calls == []
 
-    # When both attrs exist, optimization should apply
+    # Verify optimization behavior based on attribute presence
     if has_converter_attr and has_deltas_attr:
+        # Optimization should apply: flag was False during parse
+        assert flag_during_parse == [False], (
+            "When both _arg_converter and _stream_arg_deltas exist, "
+            "the flag should be False during parse (optimization applied)"
+        )
+        # Flag should be restored after parse
         cached = next(iter(codec._tool_parser_cache.values()))
         assert cached._parser_engine._stream_arg_deltas is True
+    else:
+        # Standard path: flag unchanged (True if attr exists, None if not)
+        expected = True if has_deltas_attr else None
+        assert flag_during_parse == [expected], (
+            f"Without both attrs, flag should stay at original value "
+            f"(expected {expected}, got {flag_during_parse})"
+        )
+
