@@ -355,37 +355,198 @@ def test_responses_rejects_unknown_content_block_instead_of_dropping_it():
         )
 
 
-@pytest.mark.asyncio
-async def test_responses_stream_emits_heartbeats_and_custom_events():
+@pytest.fixture(params=["text", "function", "custom", "reasoning_length", "reasoning_only_length"])
+def stream_case(request):
+    kind = request.param
+    payload = _request()
+    outcome = _outcome(
+        content="done" if kind in {"text", "reasoning_length"} else "",
+        finish_reason="length" if kind.startswith("reasoning") else "stop",
+    )
+    if kind in {"function", "custom"}:
+        outcome.assistant_msg["tool_calls"] = [
+            {"id": "call-1", "type": "function", "function": {"name": "exec", "arguments": {"input": "pwd"}}}
+        ]
+        if kind == "function":
+            payload["tools"] = [{"type": "function", "name": "exec", "parameters": {"type": "object"}}]
+    if kind.startswith("reasoning"):
+        outcome.assistant_msg["reasoning_content"] = "plan"
+    return outcome, payload
+
+
+async def _stream_bytes(outcome, payload):
     from uni_agent.gateway.adapters.openai_response import responses_stream_response
 
-    async def generate():
-        await asyncio.sleep(0.03)
-        return _outcome(
-            tool_calls=[
-                {
-                    "id": "call-1",
-                    "type": "function",
-                    "function": {"name": "exec", "arguments": {"input": "pwd"}},
-                }
-            ]
-        )
+    response = responses_stream_response(outcome, payload=payload, model="policy")
+    return b"".join([chunk async for chunk in response.body_iterator])
 
-    response = responses_stream_response(
-        generate,
-        payload=_request(),
-        model="policy",
-        heartbeat_interval_s=0.005,
+
+@pytest.mark.asyncio
+async def test_responses_stream_preserves_identity_and_content_parts(stream_case, monkeypatch):
+    from uni_agent.gateway.adapters import openai_response
+
+    timestamps = iter(range(1700000000, 1700000010))
+    monkeypatch.setattr(openai_response, "time", SimpleNamespace(time=lambda: next(timestamps)))
+    outcome, payload = stream_case
+    raw = await _stream_bytes(outcome, payload)
+    data = [json.loads(line.removeprefix("data: ")) for line in raw.decode().splitlines() if line.startswith("data: ")]
+    types = [event["type"] for event in data]
+    assert types[:2] == ["response.created", "response.in_progress"]
+    assert types.count("response.in_progress") == 1
+    assert [event["sequence_number"] for event in data] == list(range(len(data)))
+    final = data[-1]["response"]
+    assert types[-1] == ("response.incomplete" if outcome.finish_reason == "length" else "response.completed")
+    responses = [event["response"] for event in data if "response" in event]
+    assert {response["id"] for response in responses} == {final["id"]}
+    assert {response["created_at"] for response in responses} == {final["created_at"]}
+    done_items = [event["item"] for event in data if event["type"] == "response.output_item.done"]
+    assert done_items == final["output"]
+    for event in data:
+        if "item_id" in event:
+            assert event["item_id"] == final["output"][event["output_index"]]["id"]
+        if event["type"] == "response.output_item.added":
+            assert event["item"]["id"] == final["output"][event["output_index"]]["id"]
+    if outcome.assistant_msg["content"]:
+        assert types.index("response.content_part.added") < types.index("response.output_text.delta")
+        assert types.index("response.output_text.done") < types.index("response.content_part.done")
+        part_done = next(event for event in data if event["type"] == "response.content_part.done")
+        assert part_done["part"] == final["output"][part_done["output_index"]]["content"][0]
+
+
+@pytest.mark.asyncio
+async def test_responses_stream_is_consumed_by_openai_sdk(stream_case):
+    openai = pytest.importorskip("openai", minversion="2.6.1")
+    import httpx
+
+    outcome, payload = stream_case
+    raw = await _stream_bytes(outcome, payload)
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(200, headers={"content-type": "text/event-stream"}, content=raw)
     )
-    text = (b"".join([chunk async for chunk in response.body_iterator])).decode()
-    events = [line.removeprefix("event: ") for line in text.splitlines() if line.startswith("event: ")]
-    data = [json.loads(line.removeprefix("data: ")) for line in text.splitlines() if line.startswith("data: ")]
+    with openai.OpenAI(api_key="test-key", http_client=httpx.Client(transport=transport)) as client:
+        with client.responses.stream(model="policy", input="hello") as stream:
+            events = list(stream)
+            terminal = events[-1].response
+            assert terminal.status == ("incomplete" if outcome.finish_reason == "length" else "completed")
+            if terminal.status == "completed":
+                assert stream.get_final_response().id == terminal.id
+            assert terminal.output_text == outcome.assistant_msg["content"]
+            for event in events:
+                if event.type == "response.output_item.done":
+                    assert event.item.id == terminal.output[event.output_index].id
 
-    assert events[:2] == ["response.created", "response.in_progress"]
-    assert events.count("response.in_progress") >= 2
-    assert "response.custom_tool_call_input.delta" in events
-    assert events[-1] == "response.completed"
-    assert [item["sequence_number"] for item in data] == list(range(len(data)))
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.asyncio
+async def test_responses_handler_waits_for_generation_before_returning(stream):
+    from uni_agent.gateway.gateway import _GatewayActor
+
+    started, release = asyncio.Event(), asyncio.Event()
+
+    async def generate(*args):
+        started.set()
+        await release.wait()
+        return _outcome(content="done", finish_reason="stop")
+
+    actor = object.__new__(_GatewayActor)
+    generate_mock = AsyncMock(side_effect=generate)
+    actor._sessions = {"s1": SimpleNamespace(sampling_params={}, run_generation=generate_mock)}
+    actor._allowed_request_sampling_param_keys = ALLOWED_SAMPLING_KEYS
+    actor._backend = object()
+    task = asyncio.create_task(actor._handle_openai_responses("s1", _request(stream=stream)))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=1)
+        assert not task.done()
+    finally:
+        release.set()
+        await task
+    generate_mock.assert_awaited_once()
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.asyncio
+async def test_responses_generation_errors_precede_stream_headers(stream):
+    from uni_agent.gateway.gateway import _GatewayActor
+
+    actor = object.__new__(_GatewayActor)
+    generate = AsyncMock(side_effect=RuntimeError("backend unavailable"))
+    actor._sessions = {"s1": SimpleNamespace(sampling_params={}, run_generation=generate)}
+    actor._allowed_request_sampling_param_keys = ALLOWED_SAMPLING_KEYS
+    actor._backend = object()
+    with pytest.raises(RuntimeError, match="backend unavailable"):
+        await actor._handle_openai_responses("s1", _request(stream=stream))
+    generate.assert_awaited_once()
+
+
+def test_responses_input_accumulates_assistant_fragments_in_order():
+    from uni_agent.gateway.adapters.openai_response import responses_to_internal
+
+    internal = responses_to_internal(
+        _request(
+            input=[
+                {"role": "user", "content": "q"},
+                {"role": "assistant", "content": "a"},
+                {"type": "reasoning", "summary": [{"type": "summary_text", "text": "plan"}]},
+                {"type": "function_call", "call_id": "call-1", "name": "first", "arguments": "{}"},
+                {"type": "custom_tool_call", "call_id": "call-2", "name": "exec", "input": "pwd"},
+                {"role": "assistant", "content": "b"},
+            ]
+        ),
+        base_sampling_params={},
+        allowed_sampling_keys=ALLOWED_SAMPLING_KEYS,
+    )
+    assistant = internal["messages"][-1]
+    assert assistant["content"] == "ab"
+    assert assistant["reasoning_content"] == "plan"
+    assert [call["id"] for call in assistant["tool_calls"]] == ["call-1", "call-2"]
+
+
+@pytest.mark.parametrize(
+    "boundary",
+    [
+        {"type": "custom_tool_call_output", "call_id": "call-1", "output": "ok"},
+        {"type": "compaction"},
+        {"role": "system", "content": "policy"},
+    ],
+)
+def test_responses_keeps_assistant_groups_across_input_boundaries(boundary):
+    from uni_agent.gateway.adapters.openai_response import responses_to_internal
+
+    internal = responses_to_internal(
+        _request(input=[{"role": "assistant", "content": "a"}, boundary, {"role": "assistant", "content": "b"}]),
+        base_sampling_params={},
+        allowed_sampling_keys=ALLOWED_SAMPLING_KEYS,
+    )
+    assert [m["content"] for m in internal["messages"] if m["role"] == "assistant"] == ["a", "b"]
+
+
+def test_responses_system_normalization_preserves_mixed_image_content():
+    from copy import deepcopy
+
+    from uni_agent.gateway.adapters.openai_response import responses_to_internal
+
+    payload = _request(
+        instructions="policy",
+        input=[
+            {"role": "system", "content": ""},
+            {"role": "developer", "content": [{"type": "input_image", "image_url": "data:image/png;base64,AAAA"}]},
+            {"role": "system", "content": "last"},
+            {"role": "user", "content": "q"},
+        ],
+    )
+    original = deepcopy(payload)
+    internal = responses_to_internal(payload, base_sampling_params={}, allowed_sampling_keys=ALLOWED_SAMPLING_KEYS)
+    assert payload == original
+    assert internal["messages"][0] == {
+        "role": "system",
+        "content": [
+            {"type": "text", "text": "policy"},
+            {"type": "text", "text": "\n"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+            {"type": "text", "text": "\n"},
+            {"type": "text", "text": "last"},
+        ],
+    }
 
 
 @pytest.mark.parametrize("choice", ["auto", "AUTO", "none", "NoNe"])

@@ -8,11 +8,10 @@ state.
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import time
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator
 from typing import Any
 from uuid import uuid4
 
@@ -66,56 +65,18 @@ def _merge_content(previous: Any, current: Any) -> Any:
     return [*as_parts(previous), {"type": "text", "text": "\n"}, *as_parts(current)]
 
 
-def coalesce_consecutive_assistant_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Merge Responses reasoning/function items into one assistant message.
-
-    The Responses protocol may represent one assistant turn as separate
-    ``reasoning`` and ``function_call`` items. The internal Chat Completions
-    shape needs one assistant message carrying ``reasoning_content`` and
-    ``tool_calls`` so session prefix matching and incremental encoding see the
-    same history on every continuation.
-    """
-    result: list[dict[str, Any]] = []
-    for message in messages:
-        if not result or result[-1].get("role") != "assistant" or message.get("role") != "assistant":
-            copied = dict(message)
-            if isinstance(message.get("tool_calls"), list):
-                copied["tool_calls"] = list(message["tool_calls"])
-            result.append(copied)
-            continue
-
-        previous = result[-1]
-        previous["content"] = _merge_content(previous.get("content", ""), message.get("content", ""))
-
-        current_reasoning = message.get("reasoning_content") or ""
-        if current_reasoning:
-            previous_reasoning = previous.get("reasoning_content") or ""
-            previous["reasoning_content"] = (
-                f"{previous_reasoning}\n{current_reasoning}" if previous_reasoning else current_reasoning
-            )
-
-        current_tool_calls = message.get("tool_calls") or []
-        if current_tool_calls:
-            previous["tool_calls"] = [*previous.get("tool_calls", []), *current_tool_calls]
-
-        if "name" not in previous and "name" in message:
-            previous["name"] = message["name"]
-    return result
-
-
 def canonicalize_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Normalize system/developer placement and Responses assistant fragments."""
-    coalesced = coalesce_consecutive_assistant_messages(messages)
-    system_messages = [message for message in coalesced if message.get("role") == "system"]
+    """Move system messages to the front and merge their content in order."""
+    system_messages = [message for message in messages if message.get("role") == "system"]
     if not system_messages:
-        return coalesced
+        return messages
 
     first_system = dict(system_messages[0])
     for message in system_messages[1:]:
         first_system["content"] = _merge_content(first_system.get("content", ""), message.get("content", ""))
-    if len(system_messages) == 1 and coalesced and coalesced[0].get("role") == "system":
-        return coalesced
-    return [first_system] + [message for message in coalesced if message.get("role") != "system"]
+    if len(system_messages) == 1 and messages and messages[0].get("role") == "system":
+        return messages
+    return [first_system] + [message for message in messages if message.get("role") != "system"]
 
 
 def responses_error_body(status_code: int, message: str, *, param: str | None = None) -> dict[str, Any]:
@@ -722,23 +683,14 @@ def _event_to_sse(event: dict[str, Any]) -> bytes:
     return f"event: {event['type']}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n".encode()
 
 
-async def _as_generation(value: GenerationOutcome | Callable[[], Awaitable[GenerationOutcome]]) -> GenerationOutcome:
-    if callable(value):
-        return await value()
-    return value
-
-
 def responses_stream_response(
-    run_generation: GenerationOutcome | Callable[[], Awaitable[GenerationOutcome]],
+    outcome: GenerationOutcome,
     *,
     payload: dict[str, Any] | None = None,
     model: str,
-    heartbeat_interval_s: float = 15.0,
 ) -> StreamingResponse:
-    """Serve a Responses SSE stream without blocking the client during generation."""
-    payload = dict(payload or {})
-    response_id = f"resp_{uuid4().hex}"
-    created_at = int(time.time())
+    """Serialize a completed generation outcome as Responses SSE events."""
+    response = responses_build_response(outcome, payload=payload, model=model)
 
     async def _gen() -> AsyncIterator[bytes]:
         sequence_number = 0
@@ -749,129 +701,123 @@ def responses_stream_response(
             sequence_number += 1
             return result
 
-        in_progress = _response_base(
-            payload,
-            response_id=response_id,
-            model=model,
-            created_at=created_at,
-            status="in_progress",
-            output=[],
-            usage=None,
-        )
+        in_progress = {
+            **response,
+            "status": "in_progress",
+            "output": [],
+            "output_text": "",
+            "usage": None,
+            "incomplete_details": None,
+        }
         yield _event_to_sse(event("response.created", response=in_progress))
         yield _event_to_sse(event("response.in_progress", response=in_progress))
-        task = asyncio.create_task(_as_generation(run_generation))
-        try:
-            while not task.done():
-                done, _ = await asyncio.wait({task}, timeout=heartbeat_interval_s)
-                if not done:
-                    yield _event_to_sse(event("response.in_progress", response=in_progress))
-            outcome = task.result()
-            output = _output_items(outcome, payload)
-            for output_index, item in enumerate(output):
-                item_type = item["type"]
-                if item_type == "reasoning":
-                    in_flight = {**item, "status": "in_progress", "summary": []}
-                elif item_type == "message":
-                    in_flight = {**item, "status": "in_progress", "content": []}
-                elif item_type == "custom_tool_call":
-                    in_flight = {**item, "status": "in_progress", "input": ""}
-                else:
-                    in_flight = {**item, "status": "in_progress", "arguments": ""}
-                yield _event_to_sse(event("response.output_item.added", output_index=output_index, item=in_flight))
-                if item_type == "reasoning":
-                    text = item["summary"][0]["text"]
-                    yield _event_to_sse(
-                        event(
-                            "response.reasoning_summary_text.delta",
-                            item_id=item["id"],
-                            output_index=output_index,
-                            summary_index=0,
-                            delta=text,
-                        )
+        for output_index, item in enumerate(response["output"]):
+            item_type = item["type"]
+            if item_type == "reasoning":
+                in_flight = {**item, "status": "in_progress", "summary": []}
+            elif item_type == "message":
+                in_flight = {**item, "status": "in_progress", "content": []}
+            elif item_type == "custom_tool_call":
+                in_flight = {**item, "status": "in_progress", "input": ""}
+            else:
+                in_flight = {**item, "status": "in_progress", "arguments": ""}
+            yield _event_to_sse(event("response.output_item.added", output_index=output_index, item=in_flight))
+            if item_type == "reasoning":
+                text = item["summary"][0]["text"]
+                yield _event_to_sse(
+                    event(
+                        "response.reasoning_summary_text.delta",
+                        item_id=item["id"],
+                        output_index=output_index,
+                        summary_index=0,
+                        delta=text,
                     )
-                    yield _event_to_sse(
-                        event(
-                            "response.reasoning_summary_text.done",
-                            item_id=item["id"],
-                            output_index=output_index,
-                            summary_index=0,
-                            text=text,
-                        )
+                )
+                yield _event_to_sse(
+                    event(
+                        "response.reasoning_summary_text.done",
+                        item_id=item["id"],
+                        output_index=output_index,
+                        summary_index=0,
+                        text=text,
                     )
-                elif item_type == "message":
-                    text = item["content"][0]["text"]
-                    yield _event_to_sse(
-                        event(
-                            "response.output_text.delta",
-                            item_id=item["id"],
-                            output_index=output_index,
-                            content_index=0,
-                            delta=text,
-                        )
+                )
+            elif item_type == "message":
+                part = item["content"][0]
+                text = part["text"]
+                yield _event_to_sse(
+                    event(
+                        "response.content_part.added",
+                        item_id=item["id"],
+                        output_index=output_index,
+                        content_index=0,
+                        part={**part, "text": ""},
                     )
-                    yield _event_to_sse(
-                        event(
-                            "response.output_text.done",
-                            item_id=item["id"],
-                            output_index=output_index,
-                            content_index=0,
-                            text=text,
-                        )
+                )
+                yield _event_to_sse(
+                    event(
+                        "response.output_text.delta",
+                        item_id=item["id"],
+                        output_index=output_index,
+                        content_index=0,
+                        delta=text,
+                        logprobs=part["logprobs"],
                     )
-                elif item_type == "custom_tool_call":
-                    yield _event_to_sse(
-                        event(
-                            "response.custom_tool_call_input.delta",
-                            item_id=item["id"],
-                            output_index=output_index,
-                            delta=item["input"],
-                        )
+                )
+                yield _event_to_sse(
+                    event(
+                        "response.output_text.done",
+                        item_id=item["id"],
+                        output_index=output_index,
+                        content_index=0,
+                        text=text,
+                        logprobs=part["logprobs"],
                     )
-                    yield _event_to_sse(
-                        event(
-                            "response.custom_tool_call_input.done",
-                            item_id=item["id"],
-                            output_index=output_index,
-                            input=item["input"],
-                        )
+                )
+                yield _event_to_sse(
+                    event(
+                        "response.content_part.done",
+                        item_id=item["id"],
+                        output_index=output_index,
+                        content_index=0,
+                        part=part,
                     )
-                else:
-                    yield _event_to_sse(
-                        event(
-                            "response.function_call_arguments.delta",
-                            item_id=item["id"],
-                            output_index=output_index,
-                            delta=item["arguments"],
-                        )
+                )
+            elif item_type == "custom_tool_call":
+                yield _event_to_sse(
+                    event(
+                        "response.custom_tool_call_input.delta",
+                        item_id=item["id"],
+                        output_index=output_index,
+                        delta=item["input"],
                     )
-                    yield _event_to_sse(
-                        event(
-                            "response.function_call_arguments.done",
-                            item_id=item["id"],
-                            output_index=output_index,
-                            arguments=item["arguments"],
-                        )
+                )
+                yield _event_to_sse(
+                    event(
+                        "response.custom_tool_call_input.done",
+                        item_id=item["id"],
+                        output_index=output_index,
+                        input=item["input"],
                     )
-                yield _event_to_sse(event("response.output_item.done", output_index=output_index, item=item))
-            completed = responses_build_response(outcome, payload=payload, model=model, response_id=response_id)
-            yield _event_to_sse(event(f"response.{completed['status']}", response=completed))
-        except asyncio.CancelledError:
-            task.cancel()
-            raise
-        except Exception as exc:
-            logger.exception("Responses generation failed")
-            failed = _response_base(
-                payload,
-                response_id=response_id,
-                model=model,
-                created_at=created_at,
-                status="failed",
-                output=[],
-                usage=None,
-            )
-            failed["error"] = {"code": "internal_error", "message": str(exc)}
-            yield _event_to_sse(event("response.failed", response=failed))
-            yield _event_to_sse(event("error", code="internal_error", message=str(exc), param=None))
+                )
+            else:
+                yield _event_to_sse(
+                    event(
+                        "response.function_call_arguments.delta",
+                        item_id=item["id"],
+                        output_index=output_index,
+                        delta=item["arguments"],
+                    )
+                )
+                yield _event_to_sse(
+                    event(
+                        "response.function_call_arguments.done",
+                        item_id=item["id"],
+                        output_index=output_index,
+                        arguments=item["arguments"],
+                    )
+                )
+            yield _event_to_sse(event("response.output_item.done", output_index=output_index, item=item))
+        yield _event_to_sse(event(f"response.{response['status']}", response=response))
 
     return StreamingResponse(_gen(), media_type="text/event-stream", headers=_RESPONSES_HEADERS)

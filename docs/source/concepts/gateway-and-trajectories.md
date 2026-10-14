@@ -52,6 +52,12 @@ Sessions are held in Gateway memory until they are finalized or aborted.
 
 ## Responses Capability Boundaries
 
+Responses streaming uses the same completed-outcome flow as Chat Completions:
+the handler waits for generation to finish, then emits the SSE item and content
+events followed by a terminal response. Generation errors use the HTTP error
+path before stream headers are sent. The SSE response is a serialization of the
+completed outcome; it does not deliver tokens as the model generates them.
+
 The Responses adapter validates requests before starting generation, including
 streaming requests. Unsupported capabilities return HTTP 400.
 

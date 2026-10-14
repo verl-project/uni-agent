@@ -226,15 +226,11 @@ class _GatewayActor:
         except MalformedRequestError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-        model = str(payload.get("model") or "unknown")
-        if payload.get("stream") is True:
-            return responses_stream_response(
-                lambda: session.run_generation(internal, self._backend),
-                payload=payload,
-                model=model,
-            )
         outcome = await session.run_generation(internal, self._backend)
+        model = str(payload.get("model") or "unknown")
         try:
+            if payload.get("stream") is True:
+                return responses_stream_response(outcome, payload=payload, model=model)
             response = responses_build_response(outcome, payload=payload, model=model)
         except MalformedRequestError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
