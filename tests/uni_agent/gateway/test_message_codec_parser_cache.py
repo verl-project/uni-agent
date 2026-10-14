@@ -1,3 +1,4 @@
+import json
 import sys
 import types
 from types import SimpleNamespace
@@ -235,17 +236,137 @@ async def test_verl_parser_cache_ignores_tool_schema(monkeypatch):
 @pytest.mark.cpu
 @pytest.mark.level0
 @pytest.mark.asyncio
-async def test_sglang_qwen3_parser_uses_driver_safe_verl_grammar(monkeypatch):
+@pytest.mark.parametrize("parser_name", ["qwen3_coder", "qwen3_xml"])
+async def test_sglang_qwen3_parser_uses_verl_without_sglang(monkeypatch, parser_name):
     from uni_agent.gateway.session.codec import MessageCodec
 
     lookups = []
     _install_fake_verl(monkeypatch, lookups)
+    monkeypatch.setitem(sys.modules, "sglang", None)
     codec = MessageCodec(
         FakeTokenizer(),
-        tool_parser_name="qwen3_coder",
+        tool_parser_name=parser_name,
         rollout_backend="sglang",
     )
 
     await codec.decode_response([ord("x")], tools=TOOLS)
 
     assert lookups == ["qwen3_coder"]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_sglang_other_parser_keeps_its_runtime(monkeypatch):
+    from uni_agent.gateway.session.codec import MessageCodec
+
+    constructions = []
+    _install_fake_sglang(monkeypatch, constructions)
+    codec = MessageCodec(FakeTokenizer(), tool_parser_name="hermes", rollout_backend="sglang")
+
+    message, finish_reason = await codec.decode_response([ord("x")], tools=TOOLS)
+
+    assert message == {"role": "assistant", "content": "x"}
+    assert finish_reason == "stop"
+    assert [name for _, name in constructions] == ["hermes"]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_sglang_other_parser_reports_missing_gateway_runtime(monkeypatch):
+    from uni_agent.gateway.session.codec import MessageCodec
+
+    monkeypatch.setitem(sys.modules, "sglang", None)
+    codec = MessageCodec(FakeTokenizer(), tool_parser_name="hermes", rollout_backend="sglang")
+
+    with pytest.raises(RuntimeError, match="requires SGLang in the gateway environment") as error:
+        await codec.decode_response([ord("x")], tools=TOOLS)
+
+    assert "qwen3_coder (alias qwen3_xml)" in str(error.value)
+    assert isinstance(error.value.__cause__, ModuleNotFoundError)
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("text", "expected_calls"),
+    [
+        ("No tool is needed.", []),
+        (
+            "Searching.\n<tool_call><function=search><parameter=query>cache hit</parameter></function></tool_call>",
+            [("search", {"query": "cache hit"})],
+        ),
+        (
+            "<tool_call><function=search>"
+            "<parameter=query>first\nsecond</parameter>"
+            "<parameter=count>2</parameter><parameter=ratio>1.5</parameter>"
+            '<parameter=enabled>true</parameter><parameter=metadata>{"key": 1}</parameter>'
+            '<parameter=items>["a", 2]</parameter><parameter=missing>null</parameter>'
+            "</function></tool_call>",
+            [
+                (
+                    "search",
+                    {
+                        "query": "first\nsecond",
+                        "count": 2,
+                        "ratio": 1.5,
+                        "enabled": True,
+                        "metadata": {"key": 1},
+                        "items": ["a", 2],
+                        "missing": None,
+                    },
+                )
+            ],
+        ),
+        (
+            "<tool_call><function=search><parameter=query>one</parameter></function></tool_call>"
+            "<tool_call><function=search><parameter=query>two</parameter></function></tool_call>",
+            [("search", {"query": "one"}), ("search", {"query": "two"})],
+        ),
+    ],
+    ids=["plain-text", "single-call", "typed-arguments", "multiple-calls"],
+)
+async def test_real_qwen3_parsers_agree_on_common_calls(text, expected_calls):
+    # The tokenizer is a fixed, reversible token fixture; both parsers are real.
+    # These fixtures do not claim parity for malformed output or all schemas.
+    pytest.importorskip("sglang", reason="real parser comparison requires the optional SGLang runtime")
+    from sglang.srt.entrypoints.openai.protocol import Tool
+    from sglang.srt.function_call.function_call_parser import FunctionCallParser
+
+    from uni_agent.gateway.session.codec import MessageCodec
+    from verl.experimental.agent_loop.tool_parser import ToolParser
+    from verl.tools.schemas import OpenAIFunctionToolSchema
+
+    properties = {
+        "query": {"type": "string"},
+        "count": {"type": "integer"},
+        "ratio": {"type": "number"},
+        "enabled": {"type": "boolean"},
+        "metadata": {"type": "object"},
+        "items": {"type": "array"},
+        "missing": {"type": "string"},
+    }
+    tools = [
+        {**TOOLS[0], "function": {**TOOLS[0]["function"], "parameters": {"type": "object", "properties": properties}}}
+    ]
+    tokenizer = FakeTokenizer()
+    response_ids = tokenizer.encode(text)
+    verl_parser = ToolParser.get_tool_parser("qwen3_coder", tokenizer)
+    verl_content, verl_calls = await verl_parser.extract_tool_calls(
+        response_ids, [OpenAIFunctionToolSchema.model_validate(tool) for tool in tools]
+    )
+    sglang_parser = FunctionCallParser([Tool.model_validate(tool) for tool in tools], "qwen3_coder")
+    sglang_content, sglang_calls = sglang_parser.parse_non_stream(
+        tokenizer.decode(response_ids, skip_special_tokens=False)
+    )
+
+    assert [(call.name, json.loads(call.arguments)) for call in verl_calls] == expected_calls
+    assert [(call.name, json.loads(call.parameters)) for call in sglang_calls] == expected_calls
+    assert verl_content == sglang_content
+    for parser_name in ("qwen3_coder", "qwen3_xml"):
+        codec = MessageCodec(tokenizer, tool_parser_name=parser_name, rollout_backend="sglang")
+        content, calls = await codec._extract_tool_calls(response_ids, tools, parser_name)
+        assert content == verl_content
+        assert [(call.name, json.loads(call.arguments)) for call in calls] == expected_calls

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from argparse import Namespace
 
 import pytest
@@ -75,7 +76,8 @@ def test_inference_sampling_uses_run_options_and_preserves_length_configuration(
 @pytest.mark.cpu
 @pytest.mark.level0
 @pytest.mark.parametrize("engine", ["vllm", "sglang"])
-def test_parallel_infer_routes_language_model_only_to_selected_engine(engine):
+@pytest.mark.parametrize("language_model_only", [False, True])
+def test_parallel_infer_routes_language_model_only_to_sglang_native_config(engine, language_model_only):
     args = Namespace(
         temperature=0.4,
         top_p=0.85,
@@ -86,7 +88,7 @@ def test_parallel_infer_routes_language_model_only_to_selected_engine(engine):
         n_gpus_per_node=8,
         model_path="/model",
         engine=engine,
-        language_model_only=True,
+        language_model_only=language_model_only,
         enforce_eager=True,
         tensor_parallel_size=8,
         gpu_memory_utilization=0.9,
@@ -104,5 +106,9 @@ def test_parallel_infer_routes_language_model_only_to_selected_engine(engine):
 
     assert rollout.name == engine
     assert rollout.enforce_eager is True
-    assert rollout.checkpoint_engine.enabled is False
-    assert rollout.engine_kwargs[engine].language_model_only is True
+    assert "enabled" not in rollout.checkpoint_engine
+    assert "language_model_only" not in rollout.engine_kwargs[engine]
+    if engine == "sglang" and language_model_only:
+        assert json.loads(rollout.engine_kwargs.sglang.json_model_override_args) == {"language_model_only": True}
+    else:
+        assert "json_model_override_args" not in rollout.engine_kwargs[engine]

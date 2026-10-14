@@ -71,6 +71,7 @@ class _GatewayActor:
             vision_info_extractor_kwargs=config.vision_info_extractor_kwargs,
             tool_parser_name=config.tool_parser_name,
             rollout_backend=config.rollout_backend,
+            skip_tokenizer_init=config.skip_tokenizer_init,
             enable_tool_parser_cache=config.enable_tool_parser_cache,
             hf_model_type=config.hf_model_type,
             apply_chat_template_kwargs=config.apply_chat_template_kwargs,

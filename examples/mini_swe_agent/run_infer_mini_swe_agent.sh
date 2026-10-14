@@ -53,9 +53,6 @@ for option in LANGUAGE_MODEL_ONLY ENFORCE_EAGER; do
         *) echo "${option} must be 0, 1, false, or true" >&2; exit 2 ;;
     esac
 done
-export ENGINE
-
-# Only explicit actor-runtime overrides are passed to the SGLang server.
 RUNTIME_ENV_JSON="$("${PYTHON_BIN}" - <<'PY'
 import json
 import os
@@ -66,10 +63,6 @@ names = (
 )
 env_vars = {name: os.environ[name] for name in names}
 env_vars["PYTHONPATH"] = "verl"
-if os.environ["ENGINE"] == "sglang":
-    for name in ("UNI_AGENT_SGLANG_PYTHON", "UNI_AGENT_SGLANG_PYTHONPATH"):
-        if os.environ.get(name):
-            env_vars[name] = os.environ[name]
 print(json.dumps({"env_vars": env_vars, "excludes": ["/.git/"]}))
 PY
 )"

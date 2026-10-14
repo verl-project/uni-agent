@@ -4,9 +4,7 @@ import json
 import os
 import subprocess
 import sys
-from dataclasses import dataclass
 from pathlib import Path
-from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -14,7 +12,7 @@ import pytest
 @pytest.mark.cpu
 @pytest.mark.level0
 @pytest.mark.parametrize("engine", ["vllm", "sglang"])
-def test_mini_swe_launcher_preserves_defaults_and_forwards_selected_runtime(tmp_path, monkeypatch, engine):
+def test_mini_swe_launcher_preserves_defaults_without_forwarding_local_runtime(tmp_path, monkeypatch, engine):
     if sys.platform == "win32":
         pytest.skip("the Ray inference launcher targets POSIX hosts")
     repo_root = Path(__file__).resolve().parents[3]
@@ -55,83 +53,13 @@ def test_mini_swe_launcher_preserves_defaults_and_forwards_selected_runtime(tmp_
     assert runtime["CUDA_VISIBLE_DEVICES"] == "0,1"
     assert ("--language-model-only" in argv) is (engine == "sglang")
     assert "--enforce-eager" not in argv
-    assert ("UNI_AGENT_SGLANG_PYTHON" in runtime) is (engine == "sglang")
-    if engine == "sglang":
-        assert runtime["UNI_AGENT_SGLANG_PYTHONPATH"] == "/selected/runtime/packages"
+    assert "UNI_AGENT_SGLANG_PYTHON" not in runtime
+    assert "UNI_AGENT_SGLANG_PYTHONPATH" not in runtime
 
 
 @pytest.mark.cpu
 @pytest.mark.level0
-@pytest.mark.parametrize("eos", [248046, [248046, 248047], (248046, 248047)])
-def test_sglang_tokenizer_stops_preserve_explicit_controls_without_adding_string_stop(eos):
-    from verl.workers.rollout.sglang_rollout.async_sglang_server import _add_tokenizer_stop_token_ids
-
-    params = {"stop_token_ids": [17], "stop": ["user-supplied-stop"]}
-    tokenizer = SimpleNamespace(eos_token_id=eos, additional_stop_token_ids=[18])
-    _add_tokenizer_stop_token_ids(params, tokenizer)
-    expected = {17, 18, 248046} | ({248047} if not isinstance(eos, int) else set())
-    assert set(params["stop_token_ids"]) == expected
-    assert params["stop"] == ["user-supplied-stop"]
-
-
-@pytest.mark.cpu
-@pytest.mark.level0
-def test_sglang_tokenizer_stops_respect_ignore_eos():
-    from verl.workers.rollout.sglang_rollout.async_sglang_server import _add_tokenizer_stop_token_ids
-
-    params = {"ignore_eos": True, "stop_token_ids": [17]}
-    _add_tokenizer_stop_token_ids(params, SimpleNamespace(eos_token_id=248046))
-    assert params == {"ignore_eos": True, "stop_token_ids": [17]}
-
-
-@pytest.mark.cpu
-@pytest.mark.level0
-def test_sglang_eos_reuses_configured_tokenizer():
-    from verl.workers.rollout.sglang_rollout.async_sglang_server import _get_request_stop_tokenizer
-
-    tokenizer = object()
-    assert _get_request_stop_tokenizer(SimpleNamespace(tokenizer=tokenizer)) is tokenizer
-
-
-@pytest.mark.cpu
-@pytest.mark.level0
-@pytest.mark.parametrize(
-    "local_tokenizer_path,tokenizer_path,expected_path",
-    [
-        ("/materialized/tokenizer", "/configured/tokenizer", "/materialized/tokenizer"),
-        (None, "/configured/tokenizer", "/configured/tokenizer"),
-        (None, None, "/weights"),
-    ],
-)
-def test_sglang_eos_fallback_preserves_separate_tokenizer_path(
-    monkeypatch, local_tokenizer_path, tokenizer_path, expected_path
-):
-    from verl.workers.rollout.sglang_rollout.async_sglang_server import _get_request_stop_tokenizer
-
-    calls = []
-    tokenizer = object()
-    module = ModuleType("sglang.srt.utils.hf_transformers")
-
-    def load(path, **kwargs):
-        calls.append((path, kwargs))
-        return tokenizer
-
-    module.get_tokenizer = load
-    monkeypatch.setitem(sys.modules, module.__name__, module)
-    config = SimpleNamespace(
-        tokenizer=None,
-        local_tokenizer_path=local_tokenizer_path,
-        tokenizer_path=tokenizer_path,
-        local_path="/weights",
-        trust_remote_code=True,
-    )
-    assert _get_request_stop_tokenizer(config) is tokenizer
-    assert calls == [(expected_path, {"trust_remote_code": True})]
-
-
-@pytest.mark.cpu
-@pytest.mark.level0
-def test_sglang_replica_module_import_does_not_require_sglang_package():
+def test_sglang_inference_driver_import_does_not_require_sglang_package():
     repo_root = Path(__file__).resolve().parents[3]
     child = """
 import importlib.abc
@@ -144,8 +72,8 @@ class BlockSGLang(importlib.abc.MetaPathFinder):
         return None
 
 sys.meta_path.insert(0, BlockSGLang())
-from verl.workers.rollout.sglang_rollout.async_sglang_server import SGLangReplica
-assert SGLangReplica.__name__ == "SGLangReplica"
+from uni_agent.inference.sglang import SGLangInferenceReplica
+assert SGLangInferenceReplica.__name__ == "SGLangInferenceReplica"
 assert not any(name == "sglang" or name.startswith("sglang.") for name in sys.modules)
 """
     env = os.environ.copy()
@@ -155,23 +83,13 @@ assert not any(name == "sglang" or name.startswith("sglang.") for name in sys.mo
 
 @pytest.mark.cpu
 @pytest.mark.level0
-@pytest.mark.parametrize(
-    ("checkpoint_workers_enabled", "expected_worker_class"),
-    [(False, "_StandalonePlacementWorker"), (True, "CheckpointEngineWorker")],
-)
-def test_rollout_worker_selection_preserves_training_default_and_supports_inference_opt_out(
-    checkpoint_workers_enabled, expected_worker_class, monkeypatch
-):
+def test_vllm_standalone_preserves_upstream_checkpoint_worker(monkeypatch):
+    from verl.checkpoint_engine.base import CheckpointEngineWorker
     from verl.workers.rollout import replica as replica_module
+    from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMReplica
 
-    class ConcreteReplica(replica_module.RolloutReplica):
-        async def launch_servers(self):
-            return None
-
-    replica = object.__new__(ConcreteReplica)
-    replica.config = SimpleNamespace(
-        checkpoint_engine=SimpleNamespace(enabled=checkpoint_workers_enabled),
-    )
+    replica = object.__new__(vLLMReplica)
+    replica.config = object()
     replica.model_config = object()
     replica.replica_rank = 0
     replica.rollout_mode = replica_module.RolloutMode.STANDALONE
@@ -179,23 +97,4 @@ def test_rollout_worker_selection_preserves_training_default_and_supports_infere
 
     worker_spec = replica.get_ray_class_with_init_args()
 
-    assert worker_spec.cls.__name__ == expected_worker_class
-
-
-@pytest.mark.cpu
-@pytest.mark.level0
-def test_sglang_server_args_field_detection_supports_dataclass_and_msgspec_records():
-    from verl.workers.rollout.sglang_rollout.async_sglang_server import _server_args_has_field
-
-    @dataclass
-    class DataclassArgs:
-        enable_weights_cpu_backup: bool = False
-
-    assert _server_args_has_field(DataclassArgs, "enable_weights_cpu_backup")
-
-    msgspec = pytest.importorskip("msgspec")
-
-    class MsgspecArgs(msgspec.Struct):
-        enable_weights_cpu_backup: bool = False
-
-    assert _server_args_has_field(MsgspecArgs, "enable_weights_cpu_backup")
+    assert worker_spec.cls is CheckpointEngineWorker

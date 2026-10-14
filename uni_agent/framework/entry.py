@@ -55,6 +55,7 @@ def build_gateway_manager(*, config, llm_client) -> GatewayManager:
         processor=model_config.processor,
         tool_parser_name=rollout_config.multi_turn.format,
         rollout_backend=rollout_config.name,
+        skip_tokenizer_init=rollout_config.skip_tokenizer_init,
         enable_tool_parser_cache=af_cfg.get("enable_tool_parser_cache", True),
         hf_model_type=getattr(model_config.hf_config, "model_type", None),
         apply_chat_template_kwargs=dict(apply_chat_template_kwargs),

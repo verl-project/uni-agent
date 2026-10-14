@@ -49,9 +49,9 @@ except ImportError:  # fall back to verl's shim (mock raises a clear error if TQ
     from verl.utils.transferqueue_utils import tq
 
 from uni_agent.framework.entry import AgentFrameworkRolloutAdapter
+from uni_agent.inference.server import InferenceServerManager as LLMServerManager
 from uni_agent.tasks import TaskConfigResolver
 from verl.utils import tensordict_utils as tu
-from verl.workers.rollout.llm_server import LLMServerManager
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 logger = logging.getLogger(__name__)
@@ -113,7 +113,6 @@ def init_config(args: argparse.Namespace, *, served_model_name: str):
     rollout.enforce_eager = bool(getattr(args, "enforce_eager", False))
     # Standalone inference has no trainer to broadcast weights.
     rollout.load_format = "auto"
-    rollout.checkpoint_engine.enabled = False
     rollout.prompt_length = DEFAULT_PROMPT_LENGTH
     rollout.response_length = response_length
     rollout.max_model_len = rollout.prompt_length + rollout.response_length
@@ -132,11 +131,12 @@ def init_config(args: argparse.Namespace, *, served_model_name: str):
             force_add=True,
         )
 
-    if getattr(args, "language_model_only", False):
+    if args.engine == "sglang" and getattr(args, "language_model_only", False):
+        # Qwen3.5/Qwen3-VL consume this native HF-config option in SGLang.
         OmegaConf.update(
             config,
-            f"actor_rollout_ref.rollout.engine_kwargs.{args.engine}.language_model_only",
-            True,
+            "actor_rollout_ref.rollout.engine_kwargs.sglang.json_model_override_args",
+            json.dumps({"language_model_only": True}),
             force_add=True,
         )
 
@@ -368,7 +368,7 @@ def main() -> None:
     parser.add_argument(
         "--language-model-only",
         action="store_true",
-        help="Load only the language model when the selected engine supports text-only serving.",
+        help="Enable SGLang HF-config text-only mode for Qwen3.5/Qwen3-VL; ignored by vLLM.",
     )
     parser.add_argument(
         "--enforce-eager",

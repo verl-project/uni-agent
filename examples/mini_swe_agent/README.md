@@ -239,24 +239,32 @@ rewritten through the reverse tunnel when `proxy_port` is set).
 
 The inference launcher selects the existing verl rollout backend with
 `ENGINE=vllm` (the default) or `ENGINE=sglang`. Its two-GPU defaults are
-unchanged. `LANGUAGE_MODEL_ONLY=1` and `ENFORCE_EAGER=1` explicitly enable the
-corresponding optional engine settings; both are disabled by default.
+unchanged. `LANGUAGE_MODEL_ONLY=1` selects SGLang text-only serving for
+Qwen3.5/Qwen3-VL through the native model-config override; the vLLM path ignores
+this flag. `ENFORCE_EAGER=1` disables graph capture for either backend. Both
+options are disabled by default.
 
-The pinned verl release/v0.9.1 adapter supports lazy SGLang imports, optional
-actor runtime isolation, and fixed-weight standalone inference without
-checkpoint workers. Apply it from the repository root:
+Use the unmodified community sources for verl release/v0.9.1
+(`1876b06d0a3e4e71e06230be10af14492ca8a75b`) and SGLang release/v0.5.20
+(`94602c9c2b7cbdb8efd5c52802dac6a1c180089e`). Neither dependency needs a patch.
 
-```bash
-git -C verl apply --check ../patches/verl/sglang-runtime-audit.patch
-git -C verl apply ../patches/verl/sglang-runtime-audit.patch
-```
+Uni-Agent selects its standalone SGLang replica through verl's recipe extension
+point. Server actors create the native SGLang Engine and reuse verl's generation,
+logprob and lifecycle methods. SGLang imports stay inside the server actor;
+vLLM continues through verl's default replica. Default checkpoint workers are
+retained. The SGLang integration supports base-model TP/DP inference; it rejects
+training workers, PD, pipeline parallelism, LoRA, quantization and MTP rollout.
 
-For Qwen3.5 text-only serving on SGLang release/v0.5.20, apply
-`patches/sglang/qwen3_5_language_model_only.patch` to that release's source and
-install the patched source in the selected SGLang runtime. The patch adds the
-Qwen3.5 architecture to the language-only allow-list. The verl adapter supplies
-token-id EOS stops when tokenizer initialization is skipped, while respecting
-`ignore_eos`; it does not add string stops in that mode.
+For Qwen3.5, the launcher sets
+`json_model_override_args='{"language_model_only": true}'`, which selects the
+upstream model's language-only implementation. The Uni-Agent gateway supplies
+tokenizer EOS IDs when the SGLang backend skips tokenizer initialization. It
+respects per-request `ignore_eos` and explicit stops, without injecting string
+stop sequences or reloading the tokenizer.
+
+The SGLang runtime must satisfy SGLang 0.5.20's dependencies, including its
+Torch version. The `verl[sglang]` extra pins SGLang 0.5.12 and is not the version
+combination used by this integration.
 
 For example, with the existing Ray cluster and sandbox settings configured:
 
@@ -271,13 +279,21 @@ LOG_DIR=artifacts/example/logs RESULT_PATH=artifacts/example/result.json \
 bash examples/mini_swe_agent/run_infer_mini_swe_agent.sh
 ```
 
-SGLang can also use a separate interpreter by setting both
-`UNI_AGENT_SGLANG_PYTHON` and `UNI_AGENT_SGLANG_PYTHONPATH`. These optional
-overrides apply only to its server actor; the driver and gateway retain their
-normal runtime. A compatible shared environment needs neither override.
 The launcher does not install dependencies or alter compiler/library paths.
-The example exercises non-streaming mini-swe-agent generation and leaves the
-existing task, sandbox, result and trajectory contracts unchanged.
+Use an environment compatible with the selected backend and verl. The gateway
+uses verl's non-streaming parser for `qwen3_coder` and its `qwen3_xml` alias.
+Tests compare complete tool calls against SGLang's parser; malformed calls and
+schema edge cases can differ, so full parser equivalence is not claimed.
+Other SGLang parser names require SGLang in the gateway environment.
+This example targets text-only, non-streaming mini-swe-agent generation.
+Validation on Qwen3.5-9B used one fixed SWE-bench instance, mini-swe-agent 2.2.8,
+TP=8, text-only mode and eager execution. Unmodified SGLang 0.5.20 and
+vLLM 0.24.0 each completed the task with reward 1.0 and one complete trajectory.
+The runs used the public inference entrypoint with external host runtime and audit
+configuration. Public launcher defaults are covered by CPU regression tests.
+This validates the stated workload, not a performance ranking or every runtime
+installation. The added gateway option is keyword-only to preserve existing
+positional callers; its keyword configuration is unchanged from the GPU runs.
 
 ### How the time budgets relate
 
