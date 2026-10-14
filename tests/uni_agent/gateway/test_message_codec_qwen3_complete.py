@@ -21,10 +21,16 @@ def test_cached_parser_restores_streaming_policy_after_failure(monkeypatch, init
 
     class Parser:
         def __init__(self, tokenizer, *, tools):
-            self._parser_engine = SimpleNamespace(_stream_arg_deltas=initial_flag)
+            # Mock a parser with arg_converter (like qwen3) vs without (like "other")
+            converter = (lambda x, y: x) if parser_name == "qwen3_coder" else None
+            self._parser_engine = SimpleNamespace(
+                _stream_arg_deltas=initial_flag,
+                _arg_converter=converter,
+            )
             instances.append(self)
 
         def extract_tool_calls(self, text, request):
+            # Optimization applies when _arg_converter is not None
             expected = False if parser_name == "qwen3_coder" else initial_flag
             assert self._parser_engine._stream_arg_deltas is expected
             if text == "failure":
