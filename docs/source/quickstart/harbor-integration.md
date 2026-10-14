@@ -8,7 +8,7 @@ This guide demonstrates three evaluation workflows, each with a dedicated task c
 | --- | --- | --- | --- |
 | SWE-bench Verified | Oracle | — | — |
 | Terminal-Bench 2.1 | Terminus-2 | GLM-5.2-733B-A40B | External API Service |
-| SWE-bench Pro | OpenHands | Qwen3.6-35B-A3B | Uni-Agent Gateway |
+| SWE-bench Verified | Terminus-2 | Qwen3.6-35B-A3B | Uni-Agent Gateway |
 
 ## Install Harbor
 
@@ -31,7 +31,7 @@ Select a dataset from [Harbor Hub](https://hub.harborframework.com/), or index a
     ```bash
     python -m uni_agent.tasks.harbor.preprocess \
         --dataset-ref swe-bench/swe-bench-verified \
-        --local-save-dir ~/data/uni_agent
+        --local-save-dir /mnt/shared/data/uni_agent
     ```
 
 === "Terminal-Bench 2.1"
@@ -39,7 +39,7 @@ Select a dataset from [Harbor Hub](https://hub.harborframework.com/), or index a
     ```bash
     python -m uni_agent.tasks.harbor.preprocess \
         --dataset-ref terminal-bench/terminal-bench-2-1 \
-        --local-save-dir ~/data/uni_agent
+        --local-save-dir /mnt/shared/data/uni_agent
     ```
 
 === "SWE-bench Pro"
@@ -47,7 +47,7 @@ Select a dataset from [Harbor Hub](https://hub.harborframework.com/), or index a
     ```bash
     python -m uni_agent.tasks.harbor.preprocess \
         --dataset-ref scale-ai/swe-bench-pro \
-        --local-save-dir ~/data/uni_agent
+        --local-save-dir /mnt/shared/data/uni_agent
     ```
 
 === "Custom dataset"
@@ -55,10 +55,13 @@ Select a dataset from [Harbor Hub](https://hub.harborframework.com/), or index a
     ```bash
     python -m uni_agent.tasks.harbor.preprocess \
         --task-root /path/to/your/harbor/tasks \
-        --local-save-dir ~/data/uni_agent
+        --local-save-dir /mnt/shared/data/uni_agent
     ```
 
-Each command writes a parquet file under `~/data/uni_agent`. Harbor Hub tasks are stored under `~/data/uni_agent/harbor`.
+Each command writes a parquet file under `/mnt/shared/data/uni_agent`. Harbor Hub tasks are stored under `/mnt/shared/data/uni_agent/harbor`.
+
+!!! note "Shared storage for multi-node Ray"
+    Harbor tasks run across Ray worker nodes and read their task assets directly from storage. For multi-node jobs, shared storage is recommended because each row in the Parquet index references an absolute `task_path` in the exported task tree.
 
 Use `--max-instances N` to limit preprocessing to the first N tasks.
 
@@ -78,7 +81,7 @@ The evaluation commands below use these task configurations:
       timeout_multiplier: 1.0
     ```
 
-=== "GLM-5.2 + Terminus-2"
+=== "GLM-5.2 + Terminus-2 (Model API)"
 
     `examples/quickstart/harbor/task_config_glm52.yaml`
 
@@ -105,14 +108,28 @@ The evaluation commands below use these task configurations:
       override_memory_mb: 8192
     ```
 
-=== "Qwen3.6 + OpenHands"
+=== "Qwen3.6 + Terminus-2 (Hosted Engine)"
 
-    `examples/quickstart/harbor/task_config_openhands.yaml`
+    `examples/quickstart/harbor/task_config_terminus2_rollout.yaml`
 
     ```yaml
     - name: harbor
       agent:
-        name: openhands
+        name: terminus-2
+        timeout_sec: 14400
+        kwargs:
+          parser_name: json
+          max_turns: 200
+          enable_summarize: true
+          proactive_summarization_threshold: 8192
+          record_terminal_session: true
+          model_info:
+            max_input_tokens: 114688
+            max_output_tokens: 16384
+            input_cost_per_token: 0.0
+            output_cost_per_token: 0.0
+          llm_call_kwargs:
+            max_tokens: 16384
       harbor_env: modal
       timeout_multiplier: 1.0
     ```
@@ -140,7 +157,7 @@ Use Harbor's `oracle` agent to validate the task environment and verifier with t
 NUM_WORKERS=8 \
 GLOBAL_CONCURRENCY=128 \
 python examples/inference/parallel_infer_api.py \
-    --data-path ~/data/uni_agent/harbor_swe-bench_swe-bench-verified.parquet \
+    --data-path /mnt/shared/data/uni_agent/harbor_swe-bench_swe-bench-verified.parquet \
     --task-config examples/quickstart/harbor/task_config_oracle.yaml \
     --base-url http://unused.invalid/v1 \
     --log-dir /path/to/log_dir
@@ -158,7 +175,7 @@ API_KEY="replace-with-api-key" \
 MODEL="openai/glm-5-2-260617" \
 NUM_WORKERS=8 \
 python examples/inference/parallel_infer_api.py \
-    --data-path ~/data/uni_agent/harbor_terminal-bench_terminal-bench-2-1.parquet \
+    --data-path /mnt/shared/data/uni_agent/harbor_terminal-bench_terminal-bench-2-1.parquet \
     --task-config examples/quickstart/harbor/task_config_glm52.yaml \
     --log-dir /path/to/log_dir
 ```
@@ -170,32 +187,54 @@ The endpoint must be reachable from the Harbor agent process.
 
 ### Gateway Rollout
 
-!!! note "Not yet validated"
-    This Harbor + Gateway workflow has not yet been validated end to end.
-
-The following example evaluates `Qwen3.6-35B-A3B` on SWE-bench Pro with OpenHands through the Uni-Agent Gateway:
+The following example evaluates `Qwen3.6-35B-A3B` on SWE-bench Verified with Terminus-2 through the Uni-Agent Gateway:
 
 ```bash
 ray job submit --no-wait \
-    --runtime-env examples/quickstart/inference/runtime_env.yaml \
+    --runtime-env examples/quickstart/harbor/runtime_env.yaml \
     --working-dir . \
     -- python3 examples/inference/parallel_infer_verl.py \
-    --data-path ~/data/uni_agent/harbor_scale-ai_swe-bench-pro.parquet \
+    --data-path /mnt/shared/data/uni_agent/harbor_swe-bench_swe-bench-verified.parquet \
     --model-path Qwen/Qwen3.6-35B-A3B \
-    --task-config examples/quickstart/harbor/task_config_openhands.yaml \
+    --served-model-name hosted_vllm/Qwen3.6-35B-A3B \
+    --task-config examples/quickstart/harbor/task_config_terminus2_rollout.yaml \
     --engine vllm \
     --tool-parser qwen3_coder \
     --tensor-parallel-size 4 \
     --nnodes 8 \
     --n-gpus-per-node 4 \
     --log-dir /mnt/shared/uni_agent_logs \
-    --concurrency 512
+    --concurrency 512 \
+    --response-length 131072
 ```
 
-!!! note "Dataset availability"
-    Ensure that `--data-path` points to a readable Parquet file at the same path on every Ray worker. Use a shared filesystem path or replicate the dataset to each worker.
+!!! note "Model prefix"
+    Keep the `hosted_vllm/` prefix in `--served-model-name`; Harbor uses it to select LiteLLM's hosted-vLLM provider for the Gateway endpoint.
 
-The runner launches the model engine, injects a session-scoped Gateway endpoint, and captures token-level trajectories. OpenHands must be able to reach the Gateway from its Harbor environment.
+!!! note "Gateway reachability by harness"
+    Terminus-2 sends model requests from Ray workers, while sandbox-installed harnesses such as Claude Code and Codex send them from the Harbor environment. Ensure the corresponding request origin can reach the Gateway.
+
+!!! success "Result"
+    Terminus-2 with `Qwen3.6-35B-A3B` achieved a **69.8** score on SWE-bench Verified.
+
+The dedicated launchers expect Harbor-formatted datasets and task trees on the
+shared filesystem:
+
+```bash
+python -m uni_agent.tasks.harbor.preprocess \
+    --dataset-ref swe-bench/swe-bench-verified \
+    --local-save-dir /mnt/shared/data/uni_agent
+
+python -m uni_agent.tasks.harbor.preprocess \
+    --dataset-ref terminal-bench/terminal-bench-2-1 \
+    --local-save-dir /mnt/shared/data/uni_agent
+
+bash examples/quickstart/harbor/run_infer_terminus2.sh
+```
+
+The launcher's data, model, hardware, and concurrency settings are intentionally
+inlined like the other quickstart launchers. Harbor receives the configured
+`--served-model-name` unchanged.
 
 ## Results and Rewards
 

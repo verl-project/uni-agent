@@ -29,6 +29,9 @@
       - --disable-slash-commands
     extra_env:
       CLAUDE_CODE_MAX_OUTPUT_TOKENS: "8192"
+      CLAUDE_CODE_MAX_RETRIES: "2"
+      BASH_MAX_TIMEOUT_MS: "3600000"
+      BASH_DEFAULT_TIMEOUT_MS: "3600000"
       CLAUDE_CODE_SKIP_PROMPT_HISTORY: "0"
   workspace_dir: /workspace
   template_dir: /opt/triton-agent-template

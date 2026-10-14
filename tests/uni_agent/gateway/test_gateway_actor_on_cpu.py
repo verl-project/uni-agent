@@ -137,7 +137,8 @@ async def test_gateway_actor_forwards_last_assistant_rollback_to_session():
 @pytest.mark.cpu
 @pytest.mark.level0
 @pytest.mark.asyncio
-async def test_gateway_actor_max_tokens_clamped_to_remaining_trajectory_capacity():
+@pytest.mark.parametrize("limit_name", ["max_tokens", "max_completion_tokens"])
+async def test_gateway_actor_max_tokens_clamped_to_remaining_trajectory_capacity(limit_name):
     """Clamp ``max_tokens`` to total capacity minus the selected chain context."""
     from uni_agent.gateway.config import GatewayActorConfig
     from uni_agent.gateway.gateway import _GatewayActor
@@ -166,7 +167,7 @@ async def test_gateway_actor_max_tokens_clamped_to_remaining_trajectory_capacity
             "s1",
             {
                 "messages": [*first_messages, {"role": "assistant", "content": "A" * 60}],
-                "max_tokens": 5000,
+                limit_name: 5000,
             },
         )
 

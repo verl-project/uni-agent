@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import types
 from copy import deepcopy
@@ -1073,6 +1074,42 @@ async def test_framework_and_runner_logs_share_one_session_directory(tmp_path, f
 @pytest.mark.cpu
 @pytest.mark.level0
 @pytest.mark.asyncio
+async def test_framework_logs_and_persists_trajectory_observability(tmp_path, fake_tq):
+    runtime = _FakeGatewayManager(
+        {
+            "session-sample-0-rollout-0": [
+                _trajectory(extra_fields={"num_coalesced_requests": 2}),
+                _trajectory(extra_fields={"rollback_count": 1, "rollback_dropped_trainable_tokens_total": 3}),
+            ]
+        }
+    )
+    framework = await _build_framework_with_agent_runners(
+        agent_runners={"runner": _inline_runner_config(logging_runner)},
+        gateway_manager=runtime,
+        log_dir=str(tmp_path),
+    )
+
+    await framework.generate_sequences(_build_prompts(count=1, global_steps=12))
+
+    session_dir = next((tmp_path / "step_12").iterdir())
+    task_log = (session_dir / "task.log").read_text()
+    trajectory_lines = [line for line in task_log.splitlines() if "turns=" in line]
+    assert "coalesced_waiters=2 rollback_count=0" in trajectory_lines[0]
+    assert "coalesced_waiters=0 rollback_count=1 rollback_dropped_trainable_tokens=3" in trajectory_lines[1]
+    trajectory_summary = json.loads((session_dir / "trajectory.json").read_text())
+    assert trajectory_summary["trajectories"][0]["num_coalesced_requests"] == 2
+    assert trajectory_summary["trajectories"][1]["rollback_count"] == 1
+    assert trajectory_summary["trajectories"][1]["rollback_dropped_trainable_tokens_total"] == 3
+    fields = fake_tq.batch_puts[0]["fields"]
+    assert fields["extra_fields"][0]["num_coalesced_requests"] == 2
+    assert "rollback_count" not in fields["extra_fields"][0]
+    assert fields["extra_fields"][1]["rollback_count"] == 1
+    assert "num_coalesced_requests" not in fields["extra_fields"][1]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
 async def test_validation_logs_omit_global_step_directory(tmp_path, fake_tq):
     runtime = _FakeGatewayManager({"session-sample-0-rollout-0": [_trajectory()]})
     framework = await _build_framework_with_agent_runners(
@@ -1459,7 +1496,12 @@ async def test_tq_nests_acc_under_reward_extra_info(fake_tq):
     fields = fake_tq.batch_puts[0]["fields"]
     assert "reward_extra_info" not in fields.keys()
     extra_fields = tu.get(fields, "extra_fields")
-    assert extra_fields == [{"reward_extra_info": {"acc": 1.0}}]
+    assert extra_fields == [
+        {
+            "reward_extra_info": {"acc": 1.0},
+            "runner_reward_info": {"reward": 0.5, "metrics": {"acc": 1.0}, "reward_context": {}},
+        }
+    ]
 
 
 @pytest.mark.cpu
@@ -2014,3 +2056,73 @@ async def test_ray_task_termination_cancels_runner_and_aborts_session(monkeypatc
     # so no force-kill escalation happened.
     assert [call["force"] for call in cancel_calls] == [False]
     assert runtime.aborted_sessions, "terminated session must be aborted"
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+@pytest.mark.parametrize("validate,mask_unfinished", [(False, True), (True, False)])
+async def test_runner_reward_context_survives_tq_without_changing_training_fields(fake_tq, validate, mask_unfinished):
+    context = {
+        "eval_completed": False,
+        "eval_exit_code": 1,
+        "eval_execution_time": 2.5,
+        "eval_report": {
+            "found_eval_status": True,
+            "status_map": {"test_fix": "FAILED", "test_existing": "PASSED"},
+            "resolved": False,
+        },
+        "agent_error": "RuntimeError: agent upload failed",
+    }
+
+    async def scored_runner(**kwargs):
+        return TaskResult(reward=0.75, accuracy=0.5, finished=False, extra_info=context)
+
+    gateway_extra = {"runner_reward_info": {"reward_context": {"eval_completed": True}}, "gateway_field": 17}
+    trajectories = [
+        _trajectory(response_ids=[30, 31, 32], response_mask=[1, 0, 1], extra_fields=gateway_extra),
+        _trajectory(response_ids=[40, 41], response_mask=[1, 1], extra_fields=gateway_extra),
+    ]
+    runtime = _FakeGatewayManager({"session-sample-0-rollout-0": trajectories})
+    framework = await _build_framework_with_agent_runners(
+        agent_runners={"runner": _inline_runner_config(scored_runner)},
+        gateway_manager=runtime,
+        mask_unfinished_episode=mask_unfinished,
+    )
+
+    await framework.generate_sequences(_build_prompts(count=1, global_steps=7, validate=validate))
+
+    assert len(fake_tq.batch_puts) == 1
+    batch = fake_tq.batch_puts[0]
+    assert batch["partition_id"] == ("val" if validate else "train")
+    assert batch["keys"] == ["uid-0_0_0", "uid-0_0_1"]
+    assert [tag["uid"] for tag in batch["tags"]] == ["uid-0", "uid-0"]
+    assert tu.get(batch["fields"], "session_id") == [0, 0]
+    for index, trajectory in enumerate(trajectories):
+        fields = batch["fields"]
+        assert fields["rm_scores"][index].tolist() == [0.0] * (len(trajectory.response_ids) - 1) + [0.75]
+        expected_mask = [0] * len(trajectory.response_ids) if mask_unfinished else trajectory.response_mask
+        assert fields["response_mask"][index].tolist() == expected_mask
+        assert fields["loss_mask"][index].tolist() == expected_mask
+    for extra in tu.get(batch["fields"], "extra_fields"):
+        assert extra["runner_reward_info"] == {
+            "reward": 0.75,
+            "metrics": {"acc": 0.5},
+            "reward_context": context,
+        }
+        assert extra["reward_extra_info"] == {"acc": 0.5}
+        assert extra["gateway_field"] == 17
+    assert gateway_extra["runner_reward_info"] == {"reward_context": {"eval_completed": True}}
+    assert fake_tq.puts == [
+        {
+            "key": "uid-0",
+            "partition_id": "val" if validate else "train",
+            "tag": {"status": "running"},
+        },
+        {
+            "key": "uid-0",
+            "partition_id": "val" if validate else "train",
+            "tag": {"status": "finished"},
+        },
+    ]
+    assert "runner_reward_info" not in framework._trajectory_meta(trajectories[0])

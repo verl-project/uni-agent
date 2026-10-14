@@ -14,7 +14,7 @@ import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .base import ExecResult, Sandbox, _to_str
+from .base import ExecResult, ImageMount, Sandbox, _to_str
 from .registry import register_sandbox
 
 if TYPE_CHECKING:
@@ -127,6 +127,8 @@ class OpenyuanrongSandbox(Sandbox):
         cwd: str | None = None,
         name: str | None = None,
         mounts: list[Any] | None = None,
+        image_mounts: list[ImageMount] | None = None,
+        executable_paths: dict[str, str] | None = None,
         upstream: str | None = None,
         proxy_port: int | None = None,
         port_forwardings: list[int] | None = None,
@@ -148,6 +150,8 @@ class OpenyuanrongSandbox(Sandbox):
         self.cwd = cwd
         self.name = name
         self.mounts = mounts or []
+        self.image_mounts = list(image_mounts or [])
+        self.executable_paths = dict(executable_paths or {})
         self.upstream = upstream
         self.proxy_port = proxy_port
         self.port_forwardings = port_forwardings or []
@@ -156,7 +160,13 @@ class OpenyuanrongSandbox(Sandbox):
 
     @classmethod
     def from_config(cls, config: SandboxConfig) -> OpenyuanrongSandbox:
-        return cls(image=config.image, runtime_timeout=config.runtime_timeout, **config.sandbox_kwargs)
+        return cls(
+            image=config.image,
+            runtime_timeout=config.runtime_timeout,
+            image_mounts=config.image_mounts,
+            executable_paths=config.executable_paths,
+            **config.sandbox_kwargs,
+        )
 
     # ----- public: control plane -----
     async def start(self) -> None:
@@ -171,8 +181,10 @@ class OpenyuanrongSandbox(Sandbox):
             "mem_limit": self.mem_limit,
             "idle_timeout": self.idle_timeout,
         }
-        if self.mounts:
-            sb_kwargs["mounts"] = [self._coerce_mount(m, sdk) for m in self.mounts]
+        mounts = [self._coerce_mount(m, sdk) for m in self.mounts]
+        mounts.extend(sdk.Mount(target=mount.mount_path, image_url=mount.image) for mount in self.image_mounts)
+        if mounts:
+            sb_kwargs["mounts"] = mounts
         if self.env:
             sb_kwargs["env"] = self.env
         if self.cwd:
@@ -191,6 +203,7 @@ class OpenyuanrongSandbox(Sandbox):
         if "connection" not in sb_kwargs:
             sb_kwargs["connection"] = _connection_config(sdk)
         self._sandbox = await asyncio.to_thread(lambda: sdk.Sandbox(**sb_kwargs))
+        await self._setup_executable_paths(self.executable_paths)
 
     async def stop(self) -> None:
         """Kill the sandbox if still running."""
