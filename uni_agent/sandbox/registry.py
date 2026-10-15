@@ -18,6 +18,7 @@ SANDBOX_REGISTRY: dict[str, type[Sandbox]] = {}
 SANDBOX_MODULES: dict[str, str] = {
     "local": "uni_agent.sandbox.local",
     "docker": "uni_agent.sandbox.docker",
+    "e2b": "uni_agent.sandbox.e2b",
     "modal": "uni_agent.sandbox.modal",
     "vefaas": "uni_agent.sandbox.vefaas",
     "openyuanrong": "uni_agent.sandbox.openyuanrong",

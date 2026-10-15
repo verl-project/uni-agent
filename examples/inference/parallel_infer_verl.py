@@ -135,10 +135,7 @@ def init_config(args: argparse.Namespace, *, served_model_name: str):
         if args.engine != "vllm":
             raise ValueError("--language-model-only is supported only with --engine vllm")
         OmegaConf.update(
-            config,
-            "actor_rollout_ref.rollout.engine_kwargs.vllm.language_model_only",
-            True,
-            force_add=True,
+            config, "actor_rollout_ref.rollout.engine_kwargs.vllm.language_model_only", True, force_add=True
         )
     if getattr(args, "disable_thinking", False):
         OmegaConf.update(config, "data.apply_chat_template_kwargs.enable_thinking", False, force_add=True)
@@ -375,16 +372,6 @@ def main() -> None:
         help="Inference engine backend.",
     )
     parser.add_argument(
-        "--language-model-only",
-        action="store_true",
-        help="Load only the language-model component (required for text-only Qwen3.5 vLLM runs).",
-    )
-    parser.add_argument(
-        "--disable-thinking",
-        action="store_true",
-        help="Disable thinking in the model chat template.",
-    )
-    parser.add_argument(
         "--enable-rollout-routing-replay",
         action="store_true",
         help="Enable R3 routed-expert capture in the rollout engine for routing-replay diagnostics.",
@@ -399,6 +386,16 @@ def main() -> None:
         "--kv-cache-dtype",
         default="auto",
         help="vLLM KV-cache dtype, for example 'auto' or 'fp8'.",
+    )
+    parser.add_argument(
+        "--language-model-only",
+        action="store_true",
+        help="Load only the language-model component (required for text-only Qwen3.5 vLLM runs).",
+    )
+    parser.add_argument(
+        "--disable-thinking",
+        action="store_true",
+        help="Disable thinking in the model chat template.",
     )
     parser.add_argument(
         "--gateway-count",

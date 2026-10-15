@@ -1,0 +1,62 @@
+name: tests-cpu
+
+on:
+  pull_request:
+    branches: [ "main" ]
+    types: [ opened, synchronize, reopened ]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  # ============ Job: test in cpu ============
+  test-cpu:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    # tested in certain python version
+    strategy:
+      matrix:
+        python-version: [ "3.12" ]
+
+    steps:
+      # 1. git clone code
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      # 2. set up python
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: 'pip'
+
+      # 3. install dependencies
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-test.txt
+          
+          git clone --branch v4.1.0 https://github.com/princeton-nlp/SWE-bench.git
+          cd SWE-bench
+          pip install -e .
+
+      # 4. Test with pytest
+      - name: Test with pytest
+        run: |
+          pip install pytest pytest-cov pytest-custom_exit_code
+          export PYTHONPATH="${PYTHONPATH}:${GITHUB_WORKSPACE}"
+          pytest tests/uni_agent/ -m="cpu and level0" --suppress-no-test-exit-code --cov=./uni_agent/ --cov-report=xml --cov-report=term
+
+      - name: Upload CPU coverage
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          file: ./coverage.xml
+          flags: cpu-tests

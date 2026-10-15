@@ -25,7 +25,8 @@ ray job submit --no-wait \
     --allowed-request-sampling-param-keys temperature top_p top_k \
     --tool-parser qwen3_coder \
     --tensor-parallel-size 4 \
-    --nnodes 8 \
+    --nnodes 4 \
+    --response-length 131072 \
     --n-gpus-per-node 8 \
     --log-dir /mnt/shared/uni_agent_logs \
     --concurrency 512

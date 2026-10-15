@@ -1,0 +1,13 @@
+working_dir: ./
+excludes:
+  - "/.git/"
+
+pip:
+  packages:
+    - "harbor[modal]"
+
+env_vars:
+  PYTHONPATH: "verl"
+
+  MODAL_TOKEN_ID: "xxxxxx"
+  MODAL_TOKEN_SECRET: "xxxxxx"

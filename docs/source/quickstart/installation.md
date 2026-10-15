@@ -55,6 +55,12 @@ Install the client package for the sandbox backend you plan to use, for example:
     pip install modal
     ```
 
+=== "E2B"
+
+    ```bash
+    pip install e2b
+    ```
+
 === "veFaaS"
 
     ```bash

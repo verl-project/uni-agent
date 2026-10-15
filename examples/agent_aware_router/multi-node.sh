@@ -181,17 +181,6 @@ setup_ray_cluster() {
     log "  cluster up: ${nconn}/${NNODES} nodes alive"
 }
 
-# Copy the router dashboard (uni_agent/agent_aware_router/insight/) into
-# rl-insight's installed package before start. Idempotent every run — heals
-# pip reinstalls and picks up json updates.
-ensure_router_dashboard() {
-    local dash_dir
-    dash_dir="$(python -c 'import pathlib, rl_insight; print(pathlib.Path(rl_insight.__file__).parent / "config/services/grafana/dashboards")' 2>/dev/null)" || return 0
-    [ -d "$dash_dir" ] || return 0
-    mkdir -p "$dash_dir"
-    cp -v "$REPO_ROOT"/uni_agent/agent_aware_router/insight/*.json "$dash_dir"/ || true
-}
-
 # =====================================================================
 # Step 2: rl-insight server — started once, up for the whole matrix
 # =====================================================================
@@ -199,9 +188,12 @@ step2_rl_insight() {
     log "=== Step 2: rl-insight server on head (${HEAD_IP}:${RL_INSIGHT_PORT}), up for the whole matrix ==="
     export VERL_RL_INSIGHT_ENABLE=1
     export RL_INSIGHT_SERVER_URL="http://${HEAD_IP}:${RL_INSIGHT_PORT}"
-    ensure_router_dashboard
     rl-insight server stop
-    rl-insight server start --detach 2>/dev/null || true   # already-running is fine
+    # Mount the router dashboard via --extra-dashboard-dir (rl-insight #183);
+    # requires an rl-insight build with the flag, start fails loudly otherwise.
+    rl-insight server start \
+        --extra-dashboard-dir "${REPO_ROOT}/uni_agent/agent_aware_router/insight" \
+        --detach
     trap 'rl-insight server stop 2>/dev/null || true' EXIT
     log "rl-insight up; workers scrape via RL_INSIGHT_SERVER_URL=${RL_INSIGHT_SERVER_URL}"
 }

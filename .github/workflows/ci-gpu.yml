@@ -1,0 +1,92 @@
+name: tests-gpu
+
+on:
+  pull_request:
+    branches: [ "main" ]
+    types: [ opened, synchronize, reopened ]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+env:
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:vllm018.dev1"
+  DYNAMIC_RUNNER_ENDPOINT: "https://sh6mtrbg8demerkmc1uhk.apigateway-cn-beijing.volceapi.com/runner/create/runner"
+
+jobs:
+  # ============ Job: test in gpu ============
+  setup:
+    runs-on: ubuntu-latest
+    outputs:
+      runner-label: ${{ steps.create-runner.outputs.runner-label }}
+      mlp-task-id: ${{ steps.create-runner.outputs.mlp-task-id }}
+    steps:
+      - id: create-runner
+        uses: volcengine/vemlp-github-runner@v1
+        with:
+          mode: "create"
+          faas-url: "${{ env.DYNAMIC_RUNNER_ENDPOINT }}"
+          mlp-image: "${{ env.IMAGE }}"
+
+  test-gpu:
+    needs: setup
+    runs-on: [ "${{ needs.setup.outputs.runner-label || 'L20x8' }}" ]
+    timeout-minutes: 60
+
+    # tested in certain python version
+    strategy:
+      matrix:
+        python-version: [ "3.12" ]
+
+    steps:
+      # 1. git clone code
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      # 2. set up python
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: 'pip'
+
+      # 3. install dependencies
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-test.txt -i https://pypi.org/simple
+
+          git clone --branch v4.1.0 https://github.com/princeton-nlp/SWE-bench.git
+          cd SWE-bench
+          pip install -e .
+
+      # 4. Test with pytest
+      - name: Test with pytest
+        run: |
+          pip install pytest pytest-cov pytest-custom_exit_code
+          export PYTHONPATH="${PYTHONPATH}:${GITHUB_WORKSPACE}"
+          pytest tests/uni_agent/ -m="gpu and level0" --suppress-no-test-exit-code --cov=./uni_agent/ --cov-report=xml --cov-report=term
+
+      - name: Upload GPU coverage
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          file: ./coverage.xml
+          flags: gpu-tests
+
+  cleanup:
+    runs-on: ubuntu-latest
+    needs: [ setup, test-gpu ]
+    if: always()
+    steps:
+      - id: destroy-runner
+        uses: volcengine/vemlp-github-runner@v1
+        with:
+          mode: "destroy"
+          faas-url: "${{ env.DYNAMIC_RUNNER_ENDPOINT }}"
+          mlp-task-id: "${{ needs.setup.outputs.mlp-task-id }}"
