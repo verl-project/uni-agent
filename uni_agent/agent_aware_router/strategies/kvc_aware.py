@@ -253,7 +253,16 @@ class KVCacheAwareStrategy:
             block_size = store.get_block_size() or 16
             inflight_blocks = store.get_metric(replica.replica_id, MetricKey.INFLIGHT_BLOCKS) or 0
             avail = cap - inflight_blocks * block_size
-            return avail < thresh
+            if avail >= thresh:
+                return False
+            for node_id in store.get_metric_node_ids():
+                if cap - (store.get_metric(node_id, MetricKey.INFLIGHT_BLOCKS) or 0) * block_size >= thresh:
+                    return True
+            logger.info(
+                f"is-overload replica={replica.replica_id} avail={avail:.0f} under water, "
+                f"no replica passes the gate → keep sticky"
+            )
+            return False
         raise ValueError(
             f"There is no {self.overload_mode}, please set overload_mode in ['None', 'kv_cache_usage_perc', 'kv_load']"
         )
@@ -398,7 +407,7 @@ class KVCacheAwareStrategy:
     def _soft_pick(self, values: list[float], *, maximize: bool, tolerance: float) -> int:
         """Pick an index from the ``tolerance × |best|`` band around the best value."""
         best = max(values) if maximize else min(values)
-        gap = tolerance * abs(best)
+        gap = tolerance * (max(values) - min(values))
         candidates = [i for i, v in enumerate(values) if (best - v if maximize else v - best) <= gap]
         picked = self._rng.choice(candidates)  # non-empty: best itself is always in the band
         if len(candidates) > 1:

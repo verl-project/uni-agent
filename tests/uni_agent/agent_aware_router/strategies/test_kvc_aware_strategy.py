@@ -40,7 +40,7 @@ from uni_agent.agent_aware_router.strategies.kvc_aware import (
     StrategyError,
 )
 from uni_agent.agent_aware_router.strategies.routing import RoutingStrategy
-from uni_agent.agent_aware_router.types import Layer, MetricKey, SlowCut
+from uni_agent.agent_aware_router.types import Layer, MetricKey, OverloadMode, SlowCut
 
 # --------------------------------------------------------------------------- #
 # Helpers
@@ -574,7 +574,6 @@ class TestFromConfigDebugEnv:
     def test_pure_sticky_baseline(self, monkeypatch):
         """slow_cut=least-inflight + overload_mode=None → sticky never falls back."""
         from uni_agent.agent_aware_router.config.strategy import KVCAwareStrategyConfig
-        from uni_agent.agent_aware_router.types import OverloadMode
 
         monkeypatch.setattr(
             "uni_agent.agent_aware_router.debug.os.environ",
@@ -982,8 +981,8 @@ class TestCapacityTokenAware:
     def test_soft_pick_randomizes_within_tolerance_band(self):
         """tie_tolerance soft-pick: near-equal remaining values share the win.
 
-        rep_b remaining=797 vs rep_c 781 — gap 16 ≤ 0.05·797 ≈ 39.9 → same band;
-        repeated calls return both, neither is pinned.
+        Spread band = 0.05×(797−173) ≈ 31: rep_c (gap 16) is in, rep_d (gap 624)
+        and filtered rep_a are out; repeated calls return both winners.
         """
         strat = self._cap_strat(do_shortcut=False, tie_tolerance=0.05)
         provider = FakeRouteDataProvider(
@@ -991,10 +990,14 @@ class TestCapacityTokenAware:
                 "rep_a": {"num_gpu_blocks": 100, "inflight_blocks": 99},
                 "rep_b": {"num_gpu_blocks": 100, "inflight_blocks": 50},
                 "rep_c": {"num_gpu_blocks": 100, "inflight_blocks": 51},
+                # Distant third keeps the pool's spread wide enough that rep_c still
+                # lands inside tol×spread — with only b/c the spread is 16 and the
+                # band would shrink to 0.8 (strict argmax).
+                "rep_d": {"num_gpu_blocks": 100, "inflight_blocks": 89},
             }
         )
         winners = {
-            strat.score(PROMPT_IDS, provider, _replicas("rep_a", "rep_b", "rep_c"), request_id="r1").index(
+            strat.score(PROMPT_IDS, provider, _replicas("rep_a", "rep_b", "rep_c", "rep_d"), request_id="r1").index(
                 STICKY_TOP_SCORE
             )
             for _ in range(200)
@@ -1004,7 +1007,7 @@ class TestCapacityTokenAware:
     def test_soft_pick_strict_outside_tolerance_band(self):
         """Soft-pick only randomizes inside the band — a clear win stays deterministic.
 
-        rep_b remaining=1597 vs rep_c 781: gap 816 > 0.05·1597 ≈ 79.9 → strict argmax every call.
+        rep_b remaining=1597 vs rep_c 781: band = 0.05×(1597−781) = 40.8 ≪ 816 → strict argmax every call.
         """
         strat = self._cap_strat(do_shortcut=False, tie_tolerance=0.05)
         provider = FakeRouteDataProvider(
@@ -1022,15 +1025,18 @@ class TestCapacityTokenAware:
         }
         assert winners == {1}
 
-    def test_soft_pick_negative_best_band_is_symmetric(self):
-        """Gap form on a negative best (no-eligible pool) stays in-band.
+    def test_soft_pick_negative_pool_uses_spread_band(self):
+        """Negative pool: band = tolerance × (max − min), so a negative best can't blow it up.
 
-        [-16, -24] → best=-16, gap=8: tol=0.5 → band 8 (tie), tol=0.05 → band 0.8 (strict);
-        the multiplicative form would give an empty set here.
+        [-5800, -6016, -6300], tol=0.05 → band 25: strict argmax on index 0 (the |best|
+        form would open a 290-wide band and randomize 0 vs 1). All-equal values keep
+        every index (band 0, diffs 0) — the candidate set can never be empty.
         """
-        loose = self._cap_strat(tie_tolerance=0.5)
-        picked = {loose._soft_pick([-16.0, -24.0], maximize=True, tolerance=loose.tie_tolerance) for _ in range(200)}
-        assert picked == {0, 1}
-        strict = self._cap_strat(tie_tolerance=0.05)
-        picked = {strict._soft_pick([-16.0, -24.0], maximize=True, tolerance=strict.tie_tolerance) for _ in range(50)}
+        strat = self._cap_strat(tie_tolerance=0.05)
+        picked = {
+            strat._soft_pick([-5800.0, -6016.0, -6300.0], maximize=True, tolerance=strat.tie_tolerance)
+            for _ in range(50)
+        }
         assert picked == {0}
+        picked = {strat._soft_pick([-5.0, -5.0], maximize=True, tolerance=strat.tie_tolerance) for _ in range(50)}
+        assert picked == {0, 1}
