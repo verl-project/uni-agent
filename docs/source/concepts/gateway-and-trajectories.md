@@ -437,3 +437,26 @@ This context is independent of final reward-worker scores and training masks.
 For SWE-bench, the context includes `eval_exit_code`, per-test
 `eval_report.status_map`, and an `agent_error` when the agent reports one.
 These diagnostics do not change the task's resolution criteria.
+
+### Rollout efficiency observations
+
+`await adapter.get_efficiency_metrics()` returns cumulative Framework and Gateway
+observations. Counters live for their owning actor's lifetime, not a single batch;
+Gateway finalization does not reset model counters. A missing Gateway actor fails
+the snapshot rather than returning an incomplete total. Framework snapshots have
+a dedicated actor concurrency group and remain available while generation calls
+occupy all default-group slots.
+
+| Metric family | Meaning |
+| --- | --- |
+| `model/requests_*` | Started, completed, failed, cancelled, and currently in-flight backend calls. |
+| `model/input_tokens`, `model/output_tokens` | Tokens in successful calls only. Inputs count repeated context; these are not physical prefill tokens after caching. |
+| `model/request_completed_elapsed_s` | Cumulative duration of successful calls. |
+| `model/request_elapsed_s` | Duration of all exited calls plus the current age of in-flight calls. |
+| `model/snapshot_unix_s` | Snapshot time for differences within the same run. |
+| `admission/wait_s` | Runner capacity wait time for exited wait attempts, including cancelled waiters; still-waiting attempts are excluded until they exit. |
+| `sessions/*` | Admitted/exited/in-flight session counts. `completed` includes failed or cancelled admitted sessions; cancelled capacity waiters are not admitted. |
+
+Backend time includes queue and version waits. Concurrent durations overlap;
+`model/request_elapsed_s` differences divided by wall time describe average
+in-flight work, not GPU utilization.

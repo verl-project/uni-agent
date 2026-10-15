@@ -93,12 +93,15 @@ def build_agent_framework(
     )
 
 
-@ray.remote
+@ray.remote(concurrency_groups={"efficiency": 1})
 class AgentFrameworkWorker:
     """Ray actor host: initializes TQ in this process and owns one AgentFramework.
 
     Construction is synchronous (no async setup round-trip); the gateway manager
     is created driver-side and injected so its actors are not owned by this worker.
+
+    Efficiency snapshots run in a separate group so they remain available when
+    generation calls occupy every default-group slot.
     """
 
     def __init__(self, *, config, gateway_manager, reward_loop_worker_handles=None) -> None:
@@ -109,6 +112,11 @@ class AgentFrameworkWorker:
             gateway_manager=gateway_manager,
             reward_loop_worker_handles=reward_loop_worker_handles,
         )
+
+    @ray.method(concurrency_group="efficiency")
+    async def get_efficiency_metrics(self):
+        get_metrics = getattr(self.framework, "get_efficiency_metrics", None)
+        return {} if get_metrics is None else get_metrics()
 
     async def generate_sequences(self, prompts) -> None:
         await self.framework.generate_sequences(prompts)
@@ -163,6 +171,14 @@ class AgentFrameworkRolloutAdapter:
 
         self.framework_worker.generate_sequences.remote(prompts)
         return None
+
+    async def get_efficiency_metrics(self) -> dict[str, float]:
+        """Read cumulative rollout observations without waiting for generation."""
+        if self.framework_worker is None:
+            raise RuntimeError("framework must be initialized before get_efficiency_metrics")
+        framework_metrics = await self.framework_worker.get_efficiency_metrics.remote()
+        model_metrics = await self.gateway_manager.get_efficiency_metrics()
+        return {**framework_metrics, **model_metrics}
 
     def generate_sequences_and_wait(self, prompts) -> None:
         """Blocking variant of :meth:`generate_sequences` for standalone (non-trainer) runs.

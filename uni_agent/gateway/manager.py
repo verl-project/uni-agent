@@ -8,6 +8,7 @@ forward to the right actor through Ray remote methods.
 from __future__ import annotations
 
 import asyncio
+import time
 
 import ray
 
@@ -105,6 +106,17 @@ class GatewayManager:
         await gateway.abort_session.remote(session_id=session_id)
         self._session_to_gateway_index.pop(session_id, None)
         self.active_sessions_per_gateway[gateway_index] -= 1
+
+    async def get_efficiency_metrics(self) -> dict[str, int | float]:
+        """Sum all gateway actors; fail the snapshot if any actor is unavailable."""
+        snapshots = await asyncio.gather(*(gateway.get_efficiency_metrics.remote() for gateway in self.gateways))
+        metrics: dict[str, int | float] = {}
+        for snapshot in snapshots:
+            for key, value in snapshot.items():
+                metrics[key] = metrics.get(key, 0) + value
+        metrics["model/snapshot_unix_s"] = time.time()
+        metrics["model/gateway_count"] = len(snapshots)
+        return metrics
 
     async def shutdown(self) -> None:
         """Stop owned gateway actors and clear routing state."""
