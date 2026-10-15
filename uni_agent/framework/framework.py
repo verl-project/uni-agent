@@ -12,6 +12,7 @@ from collections.abc import Awaitable, Callable
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from functools import partial
+from numbers import Integral
 from pathlib import Path
 from uuid import uuid4
 
@@ -800,6 +801,11 @@ class GatewayAgentFramework(AgentFramework):
                 session_id,
                 metadata={"_trace_identity": trace_identity},
                 sampling_params=dict(sampling_params),
+                weight_version=(
+                    int(global_steps)
+                    if isinstance(global_steps, Integral) and not isinstance(global_steps, bool) and global_steps >= 0
+                    else None
+                ),
             )
             logger.info(
                 "session %s start: runner=%s sample_index=%s session_index=%s global_steps=%s",
@@ -869,7 +875,10 @@ class GatewayAgentFramework(AgentFramework):
                 raise
             except Exception:
                 logger.exception("session %s failed (runner=%s); aborting session", session_id, runner_name)
-                await self.gateway_manager.abort_session(session_id)
+                try:
+                    await self.gateway_manager.abort_session(session_id)
+                except Exception:
+                    logger.exception("session %s: Gateway abort failed after runner failure", session_id)
                 session_trace.finish(
                     runner_name=runner_name,
                     status="failure",

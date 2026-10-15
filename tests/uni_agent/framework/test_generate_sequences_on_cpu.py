@@ -1229,6 +1229,24 @@ async def test_framework_binds_sampling_defaults_to_gateway_sessions(
     )
 
     assert [kwargs["sampling_params"] for kwargs in runtime.created_session_kwargs] == [expected_sampling_params]
+    assert [kwargs.get("weight_version") for kwargs in runtime.created_session_kwargs] == [7]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "step,expected", [(7, 7), (np.int64(7), 7), (None, None), (True, None), (-1, None), (7.5, None)]
+)
+async def test_framework_normalizes_optional_route_version(fake_tq, step, expected):
+    runtime = _FakeGatewayManager({"session-sample-0-rollout-0": [_trajectory()]})
+    framework = await _build_framework_with_agent_runners(
+        agent_runners={"runner": _inline_runner_config(_async_noop_runner)}, gateway_manager=runtime
+    )
+    await framework.generate_sequences(_build_prompts(count=1, global_steps=step, validate=True))
+    assert runtime.created_session_kwargs[0]["weight_version"] == expected
+    if expected is not None:
+        assert type(runtime.created_session_kwargs[0]["weight_version"]) is int
 
 
 @pytest.mark.cpu
@@ -2126,3 +2144,35 @@ async def test_runner_reward_context_survives_tq_without_changing_training_field
         },
     ]
     assert "runner_reward_info" not in framework._trajectory_meta(trajectories[0])
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_runner_error_survives_gateway_abort_failure():
+    async def failing_runner(**kwargs):
+        raise ValueError("runner exploded")
+
+    class _GatewayManager(_FakeGatewayManager):
+        async def abort_session(self, session_id: str) -> None:
+            await super().abort_session(session_id)
+            raise RuntimeError("abort failed")
+
+    runtime = _GatewayManager({"session-sample-0-rollout-0": [_trajectory()]})
+    framework = await _build_framework_with_agent_runners(
+        agent_runners={"runner": _inline_runner_config(failing_runner)},
+        gateway_manager=runtime,
+    )
+
+    # The abort failure is logged; the runner error is what callers see.
+    with pytest.raises(ValueError, match="runner exploded"):
+        await framework._run_agent_episode(
+            sample_fields={"raw_prompt": [], "uid": "uid-0"},
+            sample_index=0,
+            session_index=0,
+            global_steps=7,
+            runner_name="runner",
+            runner_config=framework.runner_registry["runner"],
+            sampling_params={},
+        )
+    assert len(runtime.aborted_sessions) == 1

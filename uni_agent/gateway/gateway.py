@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from typing import Any
+from uuid import uuid4
 
 import ray
 from fastapi import FastAPI, HTTPException, Request
@@ -29,12 +30,14 @@ from uni_agent.gateway.adapters.openai import (
 )
 from uni_agent.gateway.adapters.types import AnthropicRequest, MalformedRequestError, OpenAIChatCompletionRequest
 from uni_agent.gateway.config import GatewayActorConfig
+from uni_agent.gateway.manager import _settle_call
 from uni_agent.gateway.session import (
     GatewaySession,
     MessageCodec,
     SessionHandle,
     Trajectory,
 )
+from uni_agent.gateway.session.session import SessionPhase
 from verl.utils.net_utils import is_valid_ipv6_address
 from verl.workers.rollout.utils import run_uvicorn
 
@@ -254,6 +257,8 @@ class _GatewayActor:
         session_id: str,
         metadata: dict[str, Any] | None = None,
         sampling_params: dict[str, Any] | None = None,
+        weight_version: int | None = None,
+        creation_id: str | None = None,
     ) -> SessionHandle:
         """Create an actor-owned session and return its provider-compatible handle."""
         self._require_started()
@@ -264,7 +269,7 @@ class _GatewayActor:
             session_id=session_id,
             base_url=f"{self._server_base_url}/sessions/{session_id}/v1",
         )
-        self._sessions[session_id] = GatewaySession(
+        session = GatewaySession(
             handle=handle,
             codec=self._codec,
             prompt_length=self._prompt_length,
@@ -274,22 +279,75 @@ class _GatewayActor:
             coalesce_reserved_exact_requests=self._coalesce_reserved_exact_requests,
             metadata=metadata,
         )
+        session._creation_id = creation_id if creation_id is not None else uuid4().hex
+        self._sessions[session_id] = session
+        try:
+            bind_route = getattr(self._backend, "bind_route", None)
+            if bind_route is not None:
+                await bind_route(session_id=session_id, weight_version=weight_version)
+            if self._sessions.get(session_id) is not session or session.phase != SessionPhase.ACTIVE:
+                raise RuntimeError(f"Session {session_id} closed during route binding")
+        except BaseException:
+            if self._sessions.get(session_id) is session:
+                cleanup, _ = await _settle_call(self.abort_session(session_id, creation_id=session._creation_id))
+                try:
+                    cleanup.result()
+                except (Exception, asyncio.CancelledError):
+                    logger.exception("session %s: cleanup failed after route bind failure", session_id)
+            raise
         return handle
 
-    async def finalize_session(self, session_id: str) -> list[Trajectory]:
-        """Finalize a session, remove it from the actor, and return its trajectories."""
+    async def finalize_session(
+        self, session_id: str, creation_id: str | None = None, *, close: bool = True
+    ) -> list[Trajectory]:
+        """Return trajectories before backend route cleanup starts."""
         session = self._get_session(session_id)
+        if creation_id is not None and session._creation_id != creation_id:
+            raise KeyError(f"Session {session_id} belongs to a different creation")
         trajectories = await session.finalize()
-        self._sessions.pop(session_id, None)
+        if close:
+            await self.close_session(session_id, creation_id=session._creation_id)
         return trajectories
 
-    async def abort_session(self, session_id: str) -> None:
-        """Abort a session and remove it from the actor if it still exists."""
+    async def close_session(self, session_id: str, creation_id: str | None = None) -> None:
+        """Release the backend route, retaining the session if cleanup fails."""
         session = self._sessions.get(session_id)
-        if session is None:
-            return  # Already finalized or aborted — treat as idempotent.
-        await session.abort()
-        self._sessions.pop(session_id, None)
+        if session is None or (creation_id is not None and session._creation_id != creation_id):
+            return
+        async with session.request_lock:
+            if self._sessions.get(session_id) is not session:
+                return
+            if session.phase == SessionPhase.ACTIVE:
+                raise RuntimeError(f"Session {session_id} must be finalized or aborted before close")
+            release_route = getattr(self._backend, "release_route", None)
+            cancellation = None
+            if release_route is not None:
+                release, cancellation = await _settle_call(release_route(session_id=session_id))
+                release.result()
+            if self._sessions.get(session_id) is session:
+                del self._sessions[session_id]
+            if cancellation is not None:
+                raise cancellation
+
+    async def abort_session(self, session_id: str, creation_id: str | None = None) -> None:
+        """Abort generation admission, then close the same session's backend route."""
+        session = self._sessions.get(session_id)
+        if session is None or (creation_id is not None and session._creation_id != creation_id):
+            return
+        cancellation = None
+        if session.phase != SessionPhase.FINALIZED:
+            abort, cancellation = await _settle_call(session.abort())
+            try:
+                abort.result()
+            except asyncio.CancelledError as exc:
+                cancellation = cancellation or exc
+            except RuntimeError:
+                if session.phase != SessionPhase.FINALIZED:
+                    raise
+        close, close_cancellation = await _settle_call(self.close_session(session_id, creation_id=session._creation_id))
+        close.result()
+        if cancellation is not None or close_cancellation is not None:
+            raise cancellation or close_cancellation
 
     async def get_session_state(self, session_id: str) -> dict[str, Any]:
         """Return a snapshot of a live session's state."""
