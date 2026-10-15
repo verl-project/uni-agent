@@ -8,7 +8,7 @@ only its rollout name is forwarded here to select a matching tool parser.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -22,6 +22,8 @@ class GatewayActorConfig:
         tool_parser_name: Optional tool parser name for decoding tool calls.
         rollout_backend: Inference backend name used to select the matching
             SGLang or vLLM parser. Other backends use verl's parser registry.
+        skip_tokenizer_init: Whether the backend omits its tokenizer; SGLang
+            then needs the gateway tokenizer's stop token IDs on each request.
         enable_tool_parser_cache: Whether to reuse parser instances within an
             actor-scoped codec. Disable for parsers that require request-scoped
             instances; enabled by default for the parser-construction speedup.
@@ -50,6 +52,7 @@ class GatewayActorConfig:
     processor: Any | None = None
     tool_parser_name: str | None = None
     rollout_backend: str | None = None
+    skip_tokenizer_init: bool = field(default=False, kw_only=True)
     enable_tool_parser_cache: bool = True
     hf_model_type: str | None = None
     apply_chat_template_kwargs: dict[str, Any] | None = None

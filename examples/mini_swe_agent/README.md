@@ -66,7 +66,7 @@ After deployment, verify these two prerequisites:
 
 ### 1. verl × Uni-Agent Installation & Deployment
 
-It is recommended to select an open-source image from the verl ecosystem as the training foundation, e.g.: quay.io/ascend/verl:latest-vllm-910b-ubuntu-for-uniagent. This way, you can leverage the built-in training and inference dependencies pre-adapted, eliminating the need for adaptation from scratch. After launching a container from the image, initialize the dependencies for this recipe using the commands below:
+It is recommended to select an open-source image from the verl ecosystem as the training foundation, refer to the [Ascend image documentation](https://github.com/verl-project/verl/blob/main/docs/ascend_tutorial/zh/get_start/dockerfile_build_guidance.rst). This way, you can leverage the built-in training and inference dependencies pre-adapted, eliminating the need for adaptation from scratch. After launching a container from the image, initialize the dependencies for this recipe using the commands below:
 
 ```bash
 # Clone source code and enter working directory
@@ -234,6 +234,66 @@ rewritten through the reverse tunnel when `proxy_port` is set).
 | `TRAIN_MAX_SAMPLES` / `VAL_MAX_SAMPLES` | `-1` | Cap samples per split (`-1` = all) |
 | `VAL_BEFORE_TRAIN` | `true` | Run validation before the first step |
 | `CKPTS_DIR` | `checkpoints/${PROJECT_NAME}/${EXPERIMENT_NAME}` | Checkpoint root |
+
+## Single-task inference
+
+The inference launcher selects the existing verl rollout backend with
+`ENGINE=vllm` (the default) or `ENGINE=sglang`. Its two-GPU defaults are
+unchanged. `LANGUAGE_MODEL_ONLY=1` selects SGLang text-only serving for
+Qwen3.5/Qwen3-VL through the native model-config override; the vLLM path ignores
+this flag. `ENFORCE_EAGER=1` disables graph capture for either backend. Both
+options are disabled by default.
+
+Use the unmodified community sources for verl release/v0.9.1
+(`1876b06d0a3e4e71e06230be10af14492ca8a75b`) and SGLang release/v0.5.20
+(`94602c9c2b7cbdb8efd5c52802dac6a1c180089e`). Neither dependency needs a patch.
+
+Uni-Agent selects its standalone SGLang replica through verl's recipe extension
+point. Server actors create the native SGLang Engine and reuse verl's generation,
+logprob and lifecycle methods. SGLang imports stay inside the server actor;
+vLLM continues through verl's default replica. Default checkpoint workers are
+retained. The SGLang integration supports base-model TP/DP inference; it rejects
+training workers, PD, pipeline parallelism, LoRA, quantization and MTP rollout.
+
+For Qwen3.5, the launcher sets
+`json_model_override_args='{"language_model_only": true}'`, which selects the
+upstream model's language-only implementation. The Uni-Agent gateway supplies
+tokenizer EOS IDs when the SGLang backend skips tokenizer initialization. It
+respects per-request `ignore_eos` and explicit stops, without injecting string
+stop sequences or reloading the tokenizer.
+
+The SGLang runtime must satisfy SGLang 0.5.20's dependencies, including its
+Torch version. The `verl[sglang]` extra pins SGLang 0.5.12 and is not the version
+combination used by this integration.
+
+For example, with the existing Ray cluster and sandbox settings configured:
+
+```bash
+DATA_PATH=/path/to/one-row-swe-bench.parquet \
+MODEL_PATH=/path/to/Qwen3.5-9B \
+ENGINE=sglang LANGUAGE_MODEL_ONLY=1 \
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+TENSOR_PARALLEL_SIZE=8 N_GPUS_PER_NODE=8 \
+LIMIT=1 N=1 CONCURRENCY=1 GATEWAY_COUNT=1 \
+LOG_DIR=artifacts/example/logs RESULT_PATH=artifacts/example/result.json \
+bash examples/mini_swe_agent/run_infer_mini_swe_agent.sh
+```
+
+The launcher does not install dependencies or alter compiler/library paths.
+Use an environment compatible with the selected backend and verl. The gateway
+uses verl's non-streaming parser for `qwen3_coder` and its `qwen3_xml` alias.
+Tests compare complete tool calls against SGLang's parser; malformed calls and
+schema edge cases can differ, so full parser equivalence is not claimed.
+Other SGLang parser names require SGLang in the gateway environment.
+This example targets text-only, non-streaming mini-swe-agent generation.
+Validation on Qwen3.5-9B used one fixed SWE-bench instance, mini-swe-agent 2.2.8,
+TP=8, text-only mode and eager execution. Unmodified SGLang 0.5.20 and
+vLLM 0.24.0 each completed the task with reward 1.0 and one complete trajectory.
+The runs used the public inference entrypoint with external host runtime and audit
+configuration. Public launcher defaults are covered by CPU regression tests.
+This validates the stated workload, not a performance ranking or every runtime
+installation. The added gateway option is keyword-only to preserve existing
+positional callers; its keyword configuration is unchanged from the GPU runs.
 
 ### How the time budgets relate
 

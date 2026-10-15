@@ -507,7 +507,7 @@ class GatewaySession:
     ) -> EncodedData:
         messages = request["messages"]
         tools = request["tools"]
-        sampling_params = dict(request["sampling_params"])
+        sampling_params = self._codec.prepare_sampling_params(request["sampling_params"])
         mm_processor_kwargs = self._codec.mm_processor_kwargs or {}
         incoming_message_prefix_hashes = self._extend_message_prefix_hashes([], messages)
         selection = self._select_chain(

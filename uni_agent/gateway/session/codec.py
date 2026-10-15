@@ -31,6 +31,7 @@ _FINISH_REASON_MAP = {
     "abort": "stop",
 }
 
+# Both names explicitly select verl's non-streaming Qwen3 parser in the gateway.
 _SGLANG_TOOL_PARSER_ALIASES = {
     "qwen3_xml": "qwen3_coder",
 }
@@ -89,6 +90,7 @@ class MessageCodec:
         vision_info_extractor_kwargs: dict[str, Any] | None = None,
         tool_parser_name: str | None = None,
         rollout_backend: str | None = None,
+        skip_tokenizer_init: bool = False,
         enable_tool_parser_cache: bool = True,
         hf_model_type: str | None = None,
         apply_chat_template_kwargs: dict[str, Any] | None = None,
@@ -122,6 +124,7 @@ class MessageCodec:
             )
         self._tool_parser_name = tool_parser_name
         self._rollout_backend = rollout_backend
+        self._skip_tokenizer_init = skip_tokenizer_init
         self._enable_tool_parser_cache = enable_tool_parser_cache
         # Backend parser construction performs expensive setup, so reuse parsers
         # within this actor-scoped codec. SGLang/vLLM bind tool schemas at
@@ -132,6 +135,21 @@ class MessageCodec:
         # optimization for parser implementations that require request-scoped
         # instances.
         self._tool_parser_cache: dict[tuple[str, ...], Any] = {}
+
+    def prepare_sampling_params(self, sampling_params: dict[str, Any]) -> dict[str, Any]:
+        """Supply tokenizer stops for SGLang's token-only input contract."""
+        params = dict(sampling_params)
+        if self._rollout_backend != "sglang" or not self._skip_tokenizer_init or params.get("ignore_eos", False):
+            return params
+        eos = getattr(self._tokenizer, "eos_token_id", None)
+        eos_ids = [eos] if isinstance(eos, int) else list(eos or [])
+        stop_ids = set(params.get("stop_token_ids") or [])
+        stop_ids.update(eos_ids)
+        stop_ids.update(getattr(self._tokenizer, "additional_stop_token_ids", None) or [])
+        if stop_ids:
+            params["stop_token_ids"] = sorted(stop_ids)
+        # Explicit string stops retain their native backend validation semantics.
+        return params
 
     @property
     def mm_processor_kwargs(self) -> dict[str, Any]:
@@ -348,11 +366,23 @@ class MessageCodec:
         try:
             if parser_backend == "sglang":
                 sglang_name = _SGLANG_TOOL_PARSER_ALIASES.get(parser_name, parser_name)
+                if sglang_name == "qwen3_coder":
+                    # Use verl's non-streaming Qwen3 parser without requiring
+                    # SGLang in the gateway. Other parser names still use SGLang;
+                    # malformed output and schema edge cases follow verl's parser.
+                    return await self._process_tool_calls_verl(response_ids, tools, sglang_name)
                 return self._process_tool_calls_sglang(text, tools, sglang_name)
             if parser_backend == "vllm":
                 vllm_name = _VLLM_TOOL_PARSER_ALIASES.get(parser_name, parser_name)
                 return self._process_tool_calls_vllm(text, tools, vllm_name)
             return await self._process_tool_calls_verl(response_ids, tools, parser_name)
+        except ModuleNotFoundError as exc:
+            if parser_backend == "sglang" and (exc.name == "sglang" or (exc.name or "").startswith("sglang.")):
+                raise RuntimeError(
+                    f"SGLang tool parser {parser_name!r} requires SGLang in the gateway environment. "
+                    "Only qwen3_coder (alias qwen3_xml) uses verl without that dependency."
+                ) from exc
+            raise RuntimeError(f"{parser_backend} tool parser {parser_name!r} failed") from exc
         except Exception as exc:
             raise RuntimeError(f"{parser_backend} tool parser {parser_name!r} failed") from exc
 

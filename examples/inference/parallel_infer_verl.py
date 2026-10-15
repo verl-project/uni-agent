@@ -49,9 +49,9 @@ except ImportError:  # fall back to verl's shim (mock raises a clear error if TQ
     from verl.utils.transferqueue_utils import tq
 
 from uni_agent.framework.entry import AgentFrameworkRolloutAdapter
+from uni_agent.inference.server import InferenceServerManager as LLMServerManager
 from uni_agent.tasks import TaskConfigResolver
 from verl.utils import tensordict_utils as tu
-from verl.workers.rollout.llm_server import LLMServerManager
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 logger = logging.getLogger(__name__)
@@ -110,6 +110,7 @@ def init_config(args: argparse.Namespace, *, served_model_name: str):
     config.actor_rollout_ref.model.path = os.path.expanduser(args.model_path)
     rollout.name = args.engine
     rollout.mode = "async"
+    rollout.enforce_eager = bool(getattr(args, "enforce_eager", False))
     # Standalone inference has no trainer to broadcast weights.
     rollout.load_format = "auto"
     rollout.prompt_length = DEFAULT_PROMPT_LENGTH
@@ -127,6 +128,15 @@ def init_config(args: argparse.Namespace, *, served_model_name: str):
             config,
             "actor_rollout_ref.rollout.engine_kwargs.vllm.kv_cache_dtype",
             getattr(args, "kv_cache_dtype", "auto"),
+            force_add=True,
+        )
+
+    if args.engine == "sglang" and getattr(args, "language_model_only", False):
+        # Qwen3.5/Qwen3-VL consume this native HF-config option in SGLang.
+        OmegaConf.update(
+            config,
+            "actor_rollout_ref.rollout.engine_kwargs.sglang.json_model_override_args",
+            json.dumps({"language_model_only": True}),
             force_add=True,
         )
 
@@ -354,6 +364,16 @@ def main() -> None:
         default="vllm",
         choices=["vllm", "sglang"],
         help="Inference engine backend.",
+    )
+    parser.add_argument(
+        "--language-model-only",
+        action="store_true",
+        help="Enable SGLang HF-config text-only mode for Qwen3.5/Qwen3-VL; ignored by vLLM.",
+    )
+    parser.add_argument(
+        "--enforce-eager",
+        action="store_true",
+        help="Disable CUDA graph capture in the selected engine.",
     )
     parser.add_argument(
         "--enable-rollout-routing-replay",
