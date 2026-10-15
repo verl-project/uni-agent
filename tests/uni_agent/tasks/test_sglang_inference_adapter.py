@@ -82,6 +82,34 @@ def test_native_server_args_keep_config_and_separate_tokenizer(nnodes, host, exp
 
 @pytest.mark.cpu
 @pytest.mark.level0
+@pytest.mark.parametrize("device", ["cuda", "npu"])
+def test_native_server_args_use_platform_defaults(monkeypatch, device):
+    from uni_agent.inference import sglang as adapter
+
+    monkeypatch.setattr(adapter, "get_platform", lambda: SimpleNamespace(device_name=device))
+    args = _engine_args(_backend())
+    assert args["enable_memory_saver"] is (device != "npu")
+    assert args.get("device") == ("npu" if device == "npu" else None)
+    assert args.get("attention_backend") == ("ascend" if device == "npu" else None)
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_native_server_args_preserve_explicit_platform_overrides(monkeypatch):
+    from uni_agent.inference import sglang as adapter
+
+    monkeypatch.setattr(adapter, "get_platform", lambda: SimpleNamespace(device_name="npu"))
+    backend = _backend()
+    overrides = {"device": "cuda", "attention_backend": "flashinfer", "enable_memory_saver": True}
+    backend.config.engine_kwargs["sglang"].update(overrides)
+    original = copy.deepcopy(backend.config.engine_kwargs)
+    args = _engine_args(backend)
+    assert {name: args[name] for name in overrides} == overrides
+    assert backend.config.engine_kwargs == original
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 @pytest.mark.parametrize("exception", [None, RuntimeError("backend failure"), asyncio.CancelledError()])
 async def test_generation_delegates_tokens_metadata_errors_and_cancellation(exception):

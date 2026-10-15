@@ -73,6 +73,8 @@ def _engine_args(server):
         "skip_server_warmup": True,
         "enable_return_routed_experts": config.enable_rollout_routing_replay,
     }
+    if get_platform().device_name == "npu":
+        args.update(device="npu", attention_backend="ascend", enable_memory_saver=False)
     if server.nnodes > 1:
         host = server._master_address
         host = f"[{host}]" if is_valid_ipv6_address(host) else host
