@@ -810,3 +810,106 @@ async def test_responses_capability_errors_precede_generation(stream, overrides)
         await actor._handle_openai_responses("s1", _request(stream=stream, **overrides))
     assert error.value.status_code == 400
     generate.assert_not_called()
+
+
+@pytest.mark.parametrize("item_type", ["function_call_output", "custom_tool_call_output"])
+def test_tool_output_images_remain_chat_content_parts(item_type):
+    from copy import deepcopy
+
+    from uni_agent.gateway.adapters.openai_response import responses_to_internal
+
+    output = [
+        {"type": "input_text", "text": "Screenshot:"},
+        {"type": "input_image", "image_url": "data:image/png;base64,AAAA"},
+        {"type": "input_text", "text": "Second image:"},
+        {"type": "input_image", "data": "BBBB", "mime_type": "image/png"},
+    ]
+    payload = _request(
+        input=[{"role": "user", "content": "inspect"}, {"type": item_type, "call_id": "call-image", "output": output}]
+    )
+    original = deepcopy(payload)
+    request = responses_to_internal(payload, base_sampling_params={}, allowed_sampling_keys=ALLOWED_SAMPLING_KEYS)
+    assert request["messages"][-1] == {
+        "role": "tool",
+        "tool_call_id": "call-image",
+        "content": [
+            {"type": "text", "text": "Screenshot:"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+            {"type": "text", "text": "Second image:"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,BBBB"}},
+        ],
+    }
+    assert payload == original
+
+
+@pytest.mark.parametrize(
+    "output,expected",
+    [
+        ("unchanged", "unchanged"),
+        ('{"type":"input_image","image_url":"literal text"}', '{"type":"input_image","image_url":"literal text"}'),
+        ([{"type": "input_text", "text": "one"}, {"type": "input_text", "text": "two"}], "onetwo"),
+        ([], ""),
+        ({"count": 1}, '{"count": 1}'),
+    ],
+)
+def test_tool_output_text_and_json_results_keep_their_text_semantics(output, expected):
+    from uni_agent.gateway.adapters.openai_response import responses_to_internal
+
+    request = responses_to_internal(
+        _request(input=[{"type": "function_call_output", "call_id": "call-1", "output": output}]),
+        base_sampling_params={},
+        allowed_sampling_keys=ALLOWED_SAMPLING_KEYS,
+    )
+    assert request["messages"][0 if request["messages"][0]["role"] == "tool" else 1]["content"] == expected
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize(
+    "output",
+    [
+        [{"type": "input_image", "file_id": "file-unsupported"}],
+        [{"type": "input_image"}],
+        [{"type": "input_file", "file_data": "base64", "text": "must not hide the file"}],
+        [{"type": "unknown", "text": "must not hide unsupported content"}],
+        ["not a content object"],
+        [{"type": []}],
+        [{"type": {}}],
+        {"type": []},
+        {"type": {}},
+        {"type": "input_image", "image_url": "https://example.test/image.png"},
+        {"type": "computer_screenshot", "image_url": "https://example.test/image.png"},
+    ],
+)
+def test_unsupported_tool_output_media_is_rejected_before_generation(output, stream):
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+
+    from uni_agent.gateway.gateway import _GatewayActor
+
+    async def run():
+        session = SimpleNamespace(
+            sampling_params={},
+            run_generation=AsyncMock(return_value=_outcome(content="done", finish_reason="stop")),
+        )
+        gateway = _GatewayActor.__new__(_GatewayActor)
+        gateway._sessions = {"s1": session}
+        gateway._allowed_request_sampling_param_keys = ALLOWED_SAMPLING_KEYS
+        gateway._backend = object()
+        gateway._app = FastAPI()
+        gateway._register_routes()
+        async with AsyncClient(transport=ASGITransport(app=gateway._app), base_url="http://test") as client:
+            response = await client.post(
+                "/sessions/s1/v1/responses",
+                json=_request(
+                    stream=stream,
+                    input=[
+                        {"role": "user", "content": "inspect"},
+                        {"type": "function_call_output", "call_id": "call-1", "output": output},
+                    ],
+                ),
+            )
+        assert response.status_code == 400
+        assert "input[1].output" in response.json()["error"]["message"]
+        session.run_generation.assert_not_awaited()
+
+    asyncio.run(run())

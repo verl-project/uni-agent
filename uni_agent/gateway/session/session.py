@@ -14,7 +14,7 @@ from typing import Any
 from fastapi import HTTPException
 
 from uni_agent.gateway.session.codec import MessageCodec
-from uni_agent.gateway.session.types import InternalGenerationRequest, SessionHandle, Trajectory
+from uni_agent.gateway.session.types import InternalGenerationRequest, SessionHandle, Trajectory, UnsupportedMediaError
 from uni_agent.rl_insight.adapter import start_generation_span
 
 _EMPTY_PREFIX_HASH = hashlib.sha256(b"uni-agent-prefix-v1\0empty").hexdigest()
@@ -608,8 +608,6 @@ class GatewaySession:
                 incremental_messages = messages[len(selected_chain.message_history) :]
                 previous_messages = selected_chain.message_history
 
-            new_image_data = None
-            new_video_data = None
             updated_messages = previous_messages + incremental_messages
             merged_token_ids = None
             merged_response_mask = None
@@ -620,6 +618,13 @@ class GatewaySession:
             )
             if incremental_messages and not capacity_exhausted:
                 new_image_data, new_video_data = await self._codec.extract_multi_modal_data(incremental_messages)
+                if new_video_data:
+                    raise UnsupportedMediaError(
+                        "Continuous Token context merging does not currently support incremental video data"
+                    )
+                # verl binds resolved images against every image block in the full
+                # updated history, including images already stored on this chain.
+                merged_image_data = [*(image_data or []), *(new_image_data or [])] or None
                 runtime_token_ids = buffer.prompt_ids + buffer.response_ids
                 merged_token_ids, merged_response_mask, merged_response_logprobs = self._codec.merge_context_tokens(
                     previous_messages,
@@ -628,8 +633,7 @@ class GatewaySession:
                     buffer.response_mask,
                     buffer.response_logprobs if sampling_params.get("logprobs", False) else None,
                     tools=tools,
-                    image_data=new_image_data,
-                    video_data=new_video_data,
+                    image_data=merged_image_data,
                 )
                 capacity_exhausted = (
                     self._trajectory_capacity is not None and len(merged_token_ids) >= self._trajectory_capacity
@@ -643,14 +647,7 @@ class GatewaySession:
                 buffer.response_mask = list(merged_response_mask)
                 buffer.response_logprobs = list(merged_response_logprobs or [])
                 self._assert_response_logprob_alignment(buffer)
-                if new_image_data:
-                    if image_data is None:
-                        image_data = []
-                    image_data.extend(new_image_data)
-                if new_video_data:
-                    if video_data is None:
-                        video_data = []
-                    video_data.extend(new_video_data)
+                image_data = merged_image_data
 
         context_ids = buffer.prompt_ids + buffer.response_ids
         if capacity_exhausted:

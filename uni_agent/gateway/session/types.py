@@ -10,6 +10,10 @@ if TYPE_CHECKING:
     import torch
 
 
+class UnsupportedMediaError(ValueError):
+    """A request requires media capabilities unavailable in the current session."""
+
+
 class InternalGenerationRequest(TypedDict):
     """Lowered request consumed by GatewaySession.run_generation.
 

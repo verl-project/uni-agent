@@ -41,6 +41,7 @@ from uni_agent.gateway.session import (
     SessionHandle,
     Trajectory,
 )
+from uni_agent.gateway.session.types import UnsupportedMediaError
 from verl.utils.net_utils import is_valid_ipv6_address
 from verl.workers.rollout.utils import run_uvicorn
 
@@ -118,6 +119,13 @@ class _GatewayActor:
             return JSONResponse(
                 status_code=exc.status_code,
                 content=_error_body_for_path(request.url.path, exc.status_code, message),
+            )
+
+        @self._app.exception_handler(UnsupportedMediaError)
+        async def _unsupported_media_handler(request: Request, exc: UnsupportedMediaError):
+            return JSONResponse(
+                status_code=400,
+                content=_error_body_for_path(request.url.path, 400, str(exc)),
             )
 
         @self._app.exception_handler(Exception)

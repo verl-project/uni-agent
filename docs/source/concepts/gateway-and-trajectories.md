@@ -76,6 +76,16 @@ streaming requests. Unsupported capabilities return HTTP 400.
   or non-string roles are rejected. Tool results use `function_call_output` or
   `custom_tool_call_output` items with a `call_id`, rather than a `tool` message.
 
+
+- Function/custom tool outputs preserve strings and arrays of `input_text` and
+  `input_image` blocks. Supported image URLs or inline data use the same content
+  normalization as user images; unsupported sources, files and content types
+  return HTTP 400 rather than becoming JSON text.
+- Image-enabled models can receive additional images in later tool or user
+  messages. The shared session retains the complete image history for continuous
+  token merging. Models without a multimodal processor reject image content with
+  HTTP 400. Adding videos after generation has begun remains unsupported.
+
 See the [Responses API reference](https://developers.openai.com/api/reference/python/resources/responses/methods/create)
 and [message-to-item migration guide](https://developers.openai.com/api/docs/guides/migrate-to-responses)
 for the public wire format. These Gateway capability limits are narrower than

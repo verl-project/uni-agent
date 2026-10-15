@@ -149,6 +149,29 @@ def _content_to_chat_content(content: Any, *, param: str) -> Any:
     return parts if has_image else _content_to_text(content, param=param)
 
 
+def _tool_output_to_chat_content(output: Any, *, param: str) -> Any:
+    """Preserve supported tool content parts instead of JSON-encoding image data."""
+    if isinstance(output, list):
+        for index, block in enumerate(output):
+            block_type = block.get("type") if isinstance(block, dict) else None
+            if not isinstance(block_type, str):
+                raise MalformedRequestError(f"Responses tool output type must be a string at {param}[{index}].type")
+            if block_type not in {"input_text", "input_image"}:
+                raise MalformedRequestError(
+                    f"Unsupported Responses tool output block {block_type!r} at {param}[{index}]"
+                )
+        return _content_to_chat_content(output, param=param)
+    if isinstance(output, dict) and "type" in output:
+        output_type = output["type"]
+        if not isinstance(output_type, str):
+            raise MalformedRequestError(f"Responses tool output type must be a string at {param}.type")
+        if output_type in {"input_image", "input_file", "image_url", "computer_screenshot"}:
+            raise MalformedRequestError(
+                f"Unsupported Responses tool output object at {param}; use a text/image content array"
+            )
+    return output if isinstance(output, str) else json.dumps(output, ensure_ascii=False)
+
+
 def _json_arguments(value: Any) -> str:
     if isinstance(value, str):
         return value
@@ -422,9 +445,7 @@ def _messages_from_input(payload: dict[str, Any]) -> list[dict[str, Any]]:
             call_id = item.get("call_id") or item.get("id")
             if not call_id:
                 raise MalformedRequestError(f"{item_type} requires a call_id")
-            output = item.get("output", "")
-            if not isinstance(output, str):
-                output = json.dumps(output, ensure_ascii=False)
+            output = _tool_output_to_chat_content(item.get("output", ""), param=f"{param}.output")
             messages.append({"role": "tool", "tool_call_id": str(call_id), "content": output})
             continue
         if item_type in {"web_search_call", "computer_call", "tool_search_call"}:

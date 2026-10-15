@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from typing import Any
 from uuid import uuid4
 
+from uni_agent.gateway.session.types import UnsupportedMediaError
 from uni_agent.gateway.utils import normalize_tool_arguments
 from verl.utils.tokenizer import normalize_token_ids
 from verl.utils.tokenizer.chat_template import apply_chat_template as _apply_chat_template
@@ -196,8 +197,21 @@ class MessageCodec:
         # default path needs nothing beyond ``messages`` and patch size.
         from qwen_vl_utils import process_vision_info
 
+        # qwen_vl_utils expects image_url itself to be a URL; the canonical
+        # Chat shape nests it under {"url": ...}. Keep history and hashes intact.
+        vision_messages = []
+        for message in messages:
+            content = message.get("content")
+            if isinstance(content, list):
+                parts = []
+                for part in content:
+                    if isinstance(part, dict) and isinstance(part.get("image_url"), dict):
+                        part = {**part, "image_url": part["image_url"].get("url")}
+                    parts.append(part)
+                message = {**message, "content": parts}
+            vision_messages.append(message)
         return process_vision_info(
-            messages,
+            vision_messages,
             image_patch_size=image_patch_size,
             return_video_metadata=True,
         )
@@ -207,9 +221,6 @@ class MessageCodec:
         messages: list[dict[str, Any]],
     ) -> tuple[list[Any] | None, list[Any] | None]:
         """Extract image and video inputs when a processor-backed request needs them."""
-        if self._processor is None:
-            return None, None
-
         has_multi_modal_blocks = False
         for message in messages:
             content = message.get("content")
@@ -224,6 +235,8 @@ class MessageCodec:
 
         if not has_multi_modal_blocks:
             return None, None
+        if not self._continuous_token_builder.supports_multimodal():
+            raise UnsupportedMediaError("image or video content requires a multimodal processor")
 
         return await self._vision_info_extractor(
             messages,
@@ -280,11 +293,16 @@ class MessageCodec:
         image_data: list[Any] | None = None,
         video_data: list[Any] | None = None,
     ) -> tuple[list[int], list[int], list[float] | None]:
-        """Merge appended context and align response metadata."""
-        if image_data or video_data:
-            raise ValueError(
-                "Continuous Token context merging does not currently support incremental image or video data"
+        """Merge appended context using resolved images for the full updated history."""
+        if video_data:
+            raise UnsupportedMediaError(
+                "Continuous Token context merging does not currently support incremental video data"
             )
+        media_kwargs = {}
+        if image_data:
+            if not self._continuous_token_builder.supports_multimodal():
+                raise UnsupportedMediaError("image content requires a multimodal processor")
+            media_kwargs["images"] = image_data
         force_system_anchor = any(message.get("role") == "system" for message in previous_messages) and not any(
             message.get("role") == "user" for message in previous_messages
         )
@@ -293,6 +311,7 @@ class MessageCodec:
             _normalize_messages_for_continuous_tokens(updated_messages, force_system_anchor=force_system_anchor),
             runtime_token_ids,
             tools=tools,
+            **media_kwargs,
         )
         response_mask, response_logprobs = self._continuous_token_builder.align_response_metadata(
             merge_result,
@@ -348,16 +367,27 @@ class MessageCodec:
                 self._tool_parser_cache[cache_key] = parser
 
         request = SimpleNamespace(tools=vllm_tools, tool_choice="auto", skip_special_tokens=True)
-        engine = getattr(parser, "_parser_engine", None) if parser_name == "qwen3_coder" else None
-        if engine is not None and hasattr(engine, "_stream_arg_deltas"):
-            # Complete responses only consume final arguments. Computing streaming
-            # deltas repeatedly reparses growing Qwen3 XML parameter values.
-            stream_arg_deltas = engine._stream_arg_deltas
+
+        # Complete responses do not need streaming argument deltas. Repeated partial
+        # conversions can become quadratic for long tool arguments; disabling them
+        # preserves final conversion. Detect engine capabilities rather than parser
+        # names so aliases and other compatible parsers benefit, while older parsers
+        # keep the standard path. Restore the flag below for cached parser reuse.
+        engine = getattr(parser, "_parser_engine", None)
+        should_disable_deltas = (
+            engine is not None
+            and hasattr(engine, "_arg_converter")
+            and getattr(engine, "_arg_converter", None) is not None
+            and hasattr(engine, "_stream_arg_deltas")
+        )
+
+        if should_disable_deltas:
+            saved_stream_arg_deltas = engine._stream_arg_deltas
             engine._stream_arg_deltas = False
             try:
                 parsed = parser.extract_tool_calls(text, request)
             finally:
-                engine._stream_arg_deltas = stream_arg_deltas
+                engine._stream_arg_deltas = saved_stream_arg_deltas
         else:
             parsed = parser.extract_tool_calls(text, request)
         if not parsed.tools_called:
