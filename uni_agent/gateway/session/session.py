@@ -608,6 +608,7 @@ class GatewaySession:
                 incremental_messages = messages[len(selected_chain.message_history) :]
                 previous_messages = selected_chain.message_history
 
+            appended_images = None
             updated_messages = previous_messages + incremental_messages
             merged_token_ids = None
             merged_response_mask = None
@@ -617,15 +618,19 @@ class GatewaySession:
                 self._trajectory_capacity is not None and current_trajectory_length >= self._trajectory_capacity
             )
             if incremental_messages and not capacity_exhausted:
-                new_image_data, new_video_data = await self._codec.extract_multi_modal_data(incremental_messages)
-                if new_video_data:
+                self._codec.validate_incremental_media(incremental_messages)
+                appended_images, appended_videos = await self._codec.extract_multi_modal_data(incremental_messages)
+                if appended_videos:
                     raise UnsupportedMediaError(
                         "Continuous Token context merging does not currently support incremental video data"
                     )
-                # verl binds resolved images against every image block in the full
-                # updated history, including images already stored on this chain.
-                merged_image_data = [*(image_data or []), *(new_image_data or [])] or None
                 runtime_token_ids = buffer.prompt_ids + buffer.response_ids
+                # The merge view covers the whole updated conversation, so the
+                # images handed to Continuous Token combine resolved history
+                # with newly extracted images.
+                updated_images = None
+                if image_data is not None or appended_images is not None:
+                    updated_images = [*(image_data or []), *(appended_images or [])]
                 merged_token_ids, merged_response_mask, merged_response_logprobs = self._codec.merge_context_tokens(
                     previous_messages,
                     updated_messages,
@@ -633,7 +638,7 @@ class GatewaySession:
                     buffer.response_mask,
                     buffer.response_logprobs if sampling_params.get("logprobs", False) else None,
                     tools=tools,
-                    image_data=merged_image_data,
+                    image_data=updated_images,
                 )
                 capacity_exhausted = (
                     self._trajectory_capacity is not None and len(merged_token_ids) >= self._trajectory_capacity
@@ -647,7 +652,10 @@ class GatewaySession:
                 buffer.response_mask = list(merged_response_mask)
                 buffer.response_logprobs = list(merged_response_logprobs or [])
                 self._assert_response_logprob_alignment(buffer)
-                image_data = merged_image_data
+                if appended_images:
+                    if image_data is None:
+                        image_data = []
+                    image_data.extend(appended_images)
 
         context_ids = buffer.prompt_ids + buffer.response_ids
         if capacity_exhausted:

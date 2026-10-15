@@ -86,6 +86,13 @@ streaming requests. Unsupported capabilities return HTTP 400.
   token merging. Models without a multimodal processor reject image content with
   HTTP 400. Adding videos after generation has begun remains unsupported.
 
+
+- Remote `compaction` / `compaction_summary` items contain opaque state that this
+  Gateway cannot interpret and return HTTP 400. Notification-only
+  `context_compaction` items are skipped; ordinary user-text compaction summaries
+  remain supported. Images encountered in text-only fields return HTTP 400
+  instead of an image-omitted placeholder.
+
 See the [Responses API reference](https://developers.openai.com/api/reference/python/resources/responses/methods/create)
 and [message-to-item migration guide](https://developers.openai.com/api/docs/guides/migrate-to-responses)
 for the public wire format. These Gateway capability limits are narrower than

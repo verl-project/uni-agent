@@ -99,16 +99,16 @@ def _content_to_text(content: Any, *, param: str) -> str:
     if isinstance(content, list):
         return "".join(_content_to_text(item, param=param) for item in content)
     if isinstance(content, dict):
+        block_type = content.get("type")
+        if block_type == "input_image":
+            raise MalformedRequestError(f"Cannot convert Responses input_image to text at {param}")
         if "output" in content:
             return _content_to_text(content["output"], param=param)
-        block_type = content.get("type")
         if block_type in _TEXT_BLOCK_TYPES or block_type is None:
             return _content_to_text(content.get("text", content.get("content", "")), param=param)
         if block_type == "encrypted_content":
             value = content.get("encrypted_content", "")
             return value if isinstance(value, str) else str(value)
-        if block_type == "input_image":
-            return "[Image omitted]"
         salvaged = content.get("text", content.get("content", content.get("refusal")))
         if salvaged is not None:
             return _content_to_text(salvaged, param=param)
@@ -219,6 +219,13 @@ def _declared_name(tool: Any) -> str | None:
     return str(name) if name else None
 
 
+def _merge_tool_kinds(kinds: dict[str, str], incoming: dict[str, str]) -> None:
+    for name, kind in incoming.items():
+        if name in kinds and kinds[name] != kind:
+            raise MalformedRequestError(f"Conflicting Responses tool kinds for {name!r}")
+    kinds.update(incoming)
+
+
 def _merge_tool_names(names: dict[str, tuple[str | None, str]], incoming: dict[str, tuple[str | None, str]]) -> None:
     for qualified_name, original_name in incoming.items():
         if qualified_name in names and names[qualified_name] != original_name:
@@ -260,8 +267,8 @@ def _flatten_tool(
                 nested, namespace=next_namespace, drop_deferred=drop_deferred
             )
             converted.extend(child)
-            kinds.update(child_kinds)
             _merge_tool_names(namespaced, child_names)
+            _merge_tool_kinds(kinds, child_kinds)
         return converted, kinds, namespaced
 
     if tool_type in _IGNORED_TOOL_TYPES:
@@ -348,8 +355,8 @@ def _convert_tools(
             raise MalformedRequestError("Each tool must be an object")
         child, child_kinds, child_names = _flatten_tool(tool, drop_deferred=drop_deferred)
         converted.extend(child)
-        kinds.update(child_kinds)
         _merge_tool_names(namespaced, child_names)
+        _merge_tool_kinds(kinds, child_kinds)
     return converted, kinds, namespaced
 
 
@@ -460,10 +467,7 @@ def _messages_from_input(payload: dict[str, Any]) -> list[dict[str, Any]]:
             )
             continue
         if item_type in {"compaction", "compaction_summary"}:
-            _flush_assistant_pending(messages, pending)
-            pending = None
-            messages.append({"role": "user", "content": ""})
-            continue
+            raise MalformedRequestError(f"Unsupported Responses input item type {item_type!r} at {param}")
         raise MalformedRequestError(f"Unsupported Responses input item type {item_type!r} at {param}")
     _flush_assistant_pending(messages, pending)
     if not any(message.get("role") in {"system", "user"} for message in messages):

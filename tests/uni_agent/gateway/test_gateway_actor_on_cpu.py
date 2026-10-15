@@ -18,6 +18,7 @@ from tests.uni_agent.support import (
     InspectingBackend,
     InspectingSequencedBackend,
     QueuedBackend,
+    QwenVLTokenizer,
     RecordingConcurrentBackend,
     RejectRequestEnvelopeBackend,
     SequencedBackend,
@@ -876,10 +877,11 @@ async def test_gateway_actor_continues_with_tool_returned_image(monkeypatch, end
     tool_call_text = '<tool_call>\n{"name": "search", "arguments": {"query": "crop"}}\n</tool_call>'
     actor = _GatewayActor(
         GatewayActorConfig(
-            tokenizer=FakeTokenizer(),
+            tokenizer=QwenVLTokenizer(),
             processor=FakeProcessor(),
             tool_parser_name="hermes",
             vision_info_extractor=fake_vision_info_extractor,
+            hf_model_type="qwen2_5_vl",
         ),
         InspectingSequencedBackend([tool_call_text, "__inspect__"]),
     )

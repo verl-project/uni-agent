@@ -18,6 +18,7 @@ from uni_agent.gateway.utils import normalize_tool_arguments
 from verl.utils.tokenizer import normalize_token_ids
 from verl.utils.tokenizer.chat_template import apply_chat_template as _apply_chat_template
 from verl.utils.tokenizer.chat_template import initialize_turn_separator
+from verl.utils.tokenizer.continuous_token import VLContinuousTokenMixin
 from verl.utils.tokenizer.continuous_token_wiring import create_continuous_token_builder
 
 # Map backend stop_reason values into the gateway's internal finish_reason vocabulary.
@@ -41,6 +42,38 @@ _VLLM_TOOL_PARSER_ALIASES = {
     "qwen25": "qwen3_xml",
     "qwen3": "qwen3_xml",
 }
+
+
+def _normalize_url_value(value: Any, *, field: str) -> str:
+    """Normalize a URL field to a non-empty string."""
+    if isinstance(value, dict):
+        if "url" not in value:
+            raise ValueError(f"{field} must contain a url field")
+        value = value["url"]
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{field}.url must be a non-empty string")
+    return value
+
+
+def _normalize_messages_for_qwen_vision_info(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Normalize OpenAI URL fields only on the view passed to Qwen extraction."""
+    normalized_messages = []
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, list):
+            normalized_messages.append(message)
+            continue
+        normalized_content = []
+        for block in content:
+            if isinstance(block, dict) and ("image_url" in block or "video_url" in block):
+                block = dict(block)
+                if "image_url" in block:
+                    block["image_url"] = _normalize_url_value(block["image_url"], field="image_url")
+                if "video_url" in block:
+                    block["video"] = _normalize_url_value(block.pop("video_url"), field="video_url")
+            normalized_content.append(block)
+        normalized_messages.append({**message, "content": normalized_content})
+    return normalized_messages
 
 
 def _canonical_tools_hash(tools: list[dict[str, Any]]) -> str:
@@ -131,9 +164,6 @@ class MessageCodec:
         mm_processor_kwargs: dict[str, Any] | None = None,
     ):
         self._tokenizer = tokenizer
-        self._processor = processor
-        self._vision_info_extractor = vision_info_extractor or self._default_vision_info_extractor
-        self._vision_info_extractor_kwargs = dict(vision_info_extractor_kwargs or {})
         self._apply_chat_template_kwargs = dict(apply_chat_template_kwargs or {})
         self._mm_processor_kwargs = dict(mm_processor_kwargs or {})
         self._continuous_token_builder = create_continuous_token_builder(
@@ -143,7 +173,10 @@ class MessageCodec:
             mm_processor_kwargs=self._mm_processor_kwargs,
             processor=processor,
         )
-        processing_class = self._processor if self._processor is not None else tokenizer
+        self._processor = processor
+        self._vision_info_extractor = vision_info_extractor or self._default_vision_info_extractor
+        self._vision_info_extractor_kwargs = dict(vision_info_extractor_kwargs or {})
+        processing_class = processor if processor is not None else tokenizer
         if hasattr(processing_class, "chat_template") and processing_class.chat_template is None:
             self._generation_prompt = []
             self._turn_separator = []
@@ -191,58 +224,39 @@ class MessageCodec:
         image_patch_size: int,
         **_extra: Any,
     ) -> tuple[list[Any] | None, list[Any] | None]:
-        # Lazy import so callers without multi-modal needs do not load
-        # qwen_vl_utils. ``_extra`` absorbs ``vision_info_extractor_kwargs`` that
-        # ``extract_multi_modal_data`` forwards for custom extractors; the
-        # default path needs nothing beyond ``messages`` and patch size.
+        """Resolve Qwen media using a temporary URL-normalized message view."""
+        # Keep image dependencies out of text-only requests.
         from qwen_vl_utils import process_vision_info
 
-        # qwen_vl_utils expects image_url itself to be a URL; the canonical
-        # Chat shape nests it under {"url": ...}. Keep history and hashes intact.
-        vision_messages = []
-        for message in messages:
-            content = message.get("content")
-            if isinstance(content, list):
-                parts = []
-                for part in content:
-                    if isinstance(part, dict) and isinstance(part.get("image_url"), dict):
-                        part = {**part, "image_url": part["image_url"].get("url")}
-                    parts.append(part)
-                message = {**message, "content": parts}
-            vision_messages.append(message)
         return process_vision_info(
-            vision_messages,
+            _normalize_messages_for_qwen_vision_info(messages),
             image_patch_size=image_patch_size,
             return_video_metadata=True,
         )
 
     async def extract_multi_modal_data(
-        self,
-        messages: list[dict[str, Any]],
+        self, messages: list[dict[str, Any]]
     ) -> tuple[list[Any] | None, list[Any] | None]:
-        """Extract image and video inputs when a processor-backed request needs them."""
-        has_multi_modal_blocks = False
-        for message in messages:
-            content = message.get("content")
-            if not isinstance(content, list):
-                continue
-            for part in content:
-                if isinstance(part, dict) and part.get("type") in {"image", "image_url", "video", "video_url"}:
-                    has_multi_modal_blocks = True
-                    break
-            if has_multi_modal_blocks:
-                break
+        """Return (images, videos) in message/block order, one object per block.
 
-        if not has_multi_modal_blocks:
+        Custom extractors accept image_patch_size; explicit kwargs override the
+        processor value. Videos may include metadata as (video, metadata) tuples.
+        """
+        has_media = any(
+            isinstance(block, dict) and block.get("type") in {"image", "image_url", "video", "video_url"}
+            for message in messages
+            if isinstance(message.get("content"), list)
+            for block in message["content"]
+        )
+        if not has_media:
             return None, None
         if not self._continuous_token_builder.supports_multimodal():
             raise UnsupportedMediaError("image or video content requires a multimodal processor")
 
-        return await self._vision_info_extractor(
-            messages,
-            image_patch_size=self._processor.image_processor.patch_size,
-            **self._vision_info_extractor_kwargs,
-        )
+        extractor_kwargs = dict(self._vision_info_extractor_kwargs)
+        if "image_patch_size" not in extractor_kwargs:
+            extractor_kwargs["image_patch_size"] = self._processor.image_processor.patch_size
+        return await self._vision_info_extractor(messages, **extractor_kwargs)
 
     def build_initial_tokens(
         self,
@@ -281,6 +295,27 @@ class MessageCodec:
         )
         return merge_result.token_ids, response_mask, response_logprobs
 
+    def validate_incremental_media(self, messages: list[dict[str, Any]]) -> None:
+        """Reject appended media unsupported by the Gateway or selected builder."""
+        for message in messages:
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                media_type = block.get("type")
+                if media_type in {"video", "video_url", "audio", "audio_url", "input_audio", "output_audio"}:
+                    raise UnsupportedMediaError(
+                        "Gateway Continuous Token does not support incremental video or audio data"
+                    )
+                if media_type in {"image", "image_url"} and not isinstance(
+                    self._continuous_token_builder, VLContinuousTokenMixin
+                ):
+                    raise UnsupportedMediaError(
+                        "Gateway incremental image inputs require a VL Continuous Token builder"
+                    )
+
     def merge_context_tokens(
         self,
         previous_messages: list[dict[str, Any]],
@@ -293,26 +328,42 @@ class MessageCodec:
         image_data: list[Any] | None = None,
         video_data: list[Any] | None = None,
     ) -> tuple[list[int], list[int], list[float] | None]:
-        """Merge appended context using resolved images for the full updated history."""
+        """Merge prepared context and align response metadata.
+
+        image_data covers all updated_messages, including history, in block order.
+        Shared VL builders treat None as [] to disable raw-reference fallback.
+        The session validates appended media first; non-empty video_data is unsupported.
+        """
         if video_data:
             raise UnsupportedMediaError(
                 "Continuous Token context merging does not currently support incremental video data"
             )
-        media_kwargs = {}
-        if image_data:
-            if not self._continuous_token_builder.supports_multimodal():
-                raise UnsupportedMediaError("image content requires a multimodal processor")
-            media_kwargs["images"] = image_data
         force_system_anchor = any(message.get("role") == "system" for message in previous_messages) and not any(
             message.get("role") == "user" for message in previous_messages
         )
-        merge_result = self._continuous_token_builder.merge_context_tokens(
-            _normalize_messages_for_continuous_tokens(previous_messages, force_system_anchor=force_system_anchor),
-            _normalize_messages_for_continuous_tokens(updated_messages, force_system_anchor=force_system_anchor),
-            runtime_token_ids,
-            tools=tools,
-            **media_kwargs,
+        previous_messages = _normalize_messages_for_continuous_tokens(
+            previous_messages, force_system_anchor=force_system_anchor
         )
+        updated_messages = _normalize_messages_for_continuous_tokens(
+            updated_messages, force_system_anchor=force_system_anchor
+        )
+        builder = self._continuous_token_builder
+        if isinstance(builder, VLContinuousTokenMixin):
+            merge_result = builder.merge_context_tokens(
+                previous_messages,
+                updated_messages,
+                runtime_token_ids,
+                tools=tools,
+                images=image_data if image_data is not None else [],
+            )
+        else:
+            # Preserve legacy merges: historical images are not appended media.
+            merge_result = builder.merge_context_tokens(
+                previous_messages,
+                updated_messages,
+                runtime_token_ids,
+                tools=tools,
+            )
         response_mask, response_logprobs = self._continuous_token_builder.align_response_metadata(
             merge_result,
             response_mask,

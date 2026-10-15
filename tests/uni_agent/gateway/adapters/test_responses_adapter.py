@@ -643,7 +643,7 @@ def test_responses_input_accumulates_assistant_fragments_in_order():
     "boundary",
     [
         {"type": "custom_tool_call_output", "call_id": "call-1", "output": "ok"},
-        {"type": "compaction"},
+        {"role": "user", "content": "compacted context"},
         {"role": "system", "content": "policy"},
     ],
 )
@@ -913,3 +913,139 @@ def test_unsupported_tool_output_media_is_rejected_before_generation(output, str
         session.run_generation.assert_not_awaited()
 
     asyncio.run(run())
+
+
+async def _assert_responses_request_fails_before_generation(payload):
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+
+    from uni_agent.gateway.gateway import _GatewayActor
+
+    generate = AsyncMock(return_value=_outcome(content="done", finish_reason="stop"))
+    actor = object.__new__(_GatewayActor)
+    actor._sessions = {"s1": SimpleNamespace(sampling_params={}, run_generation=generate)}
+    actor._allowed_request_sampling_param_keys = ALLOWED_SAMPLING_KEYS
+    actor._backend = object()
+    actor._app = FastAPI()
+    actor._register_routes()
+    async with AsyncClient(transport=ASGITransport(app=actor._app), base_url="http://test") as client:
+        response = await client.post("/sessions/s1/v1/responses", json=payload)
+    assert response.status_code == 400
+    assert response.headers["content-type"].startswith("application/json")
+    error = response.json()["error"]
+    assert error["type"] == "invalid_request_error"
+    generate.assert_not_called()
+    return error["message"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("item_type", ["compaction", "compaction_summary"])
+@pytest.mark.parametrize("encrypted", [False, True])
+async def test_remote_compaction_items_are_rejected_before_generation(stream, item_type, encrypted):
+    item = {"type": item_type}
+    if encrypted:
+        item["encrypted_content"] = "opaque-content-must-not-be-echoed"
+    message = await _assert_responses_request_fails_before_generation(
+        _request(stream=stream, input=[{"role": "user", "content": "q"}, item])
+    )
+    assert item_type in message and "input[1]" in message
+    assert "opaque-content-must-not-be-echoed" not in message
+
+
+@pytest.mark.parametrize("notice", ["context_compaction", "compaction_trigger"])
+def test_compaction_notifications_do_not_split_assistant_fragments(notice):
+    from uni_agent.gateway.adapters.openai_response import responses_to_internal
+
+    request = responses_to_internal(
+        _request(
+            input=[
+                {"role": "user", "content": "q"},
+                {"role": "assistant", "content": "a"},
+                {"type": notice},
+                {"role": "assistant", "content": "b"},
+            ]
+        ),
+        base_sampling_params={},
+        allowed_sampling_keys=ALLOWED_SAMPLING_KEYS,
+    )
+    assert [m["content"] for m in request["messages"] if m["role"] == "assistant"] == ["ab"]
+
+
+def test_text_compaction_summary_remains_an_ordinary_user_message():
+    from uni_agent.gateway.adapters.openai_response import responses_to_internal
+
+    summary = "Compacted context:\nKeep this previous progress and tool evidence."
+    request = responses_to_internal(
+        _request(input=[{"role": "user", "content": summary}]),
+        base_sampling_params={},
+        allowed_sampling_keys=ALLOWED_SAMPLING_KEYS,
+    )
+    assert request["messages"][-1] == {"role": "user", "content": summary}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("with_source", [False, True])
+@pytest.mark.parametrize(
+    "location", ["summary", "reasoning_content", "summary_text", "output", "text", "tool_text", "image_with_output"]
+)
+async def test_images_in_text_only_fields_are_rejected_without_omission(stream, with_source, location):
+    image = {"type": "input_image"}
+    if with_source:
+        image["image_url"] = "data:image/png;base64,AAAA"
+    if location == "summary":
+        item = {"type": "reasoning", "summary": [image]}
+    elif location == "reasoning_content":
+        item = {"type": "reasoning", "content": [image]}
+    elif location == "summary_text":
+        item = {"type": "reasoning", "summary": [{"type": "summary_text", "text": [image]}]}
+    elif location == "output":
+        item = {"role": "user", "content": [{"output": [image]}]}
+    elif location == "text":
+        item = {"role": "user", "content": [{"type": "input_text", "text": [image]}]}
+    elif location == "tool_text":
+        item = {
+            "type": "function_call_output",
+            "call_id": "call-1",
+            "output": [{"type": "input_text", "text": [image]}],
+        }
+    else:
+        item = {"type": "reasoning", "summary": {**image, "output": "must-not-bypass-image-validation"}}
+    message = await _assert_responses_request_fails_before_generation(
+        _request(stream=stream, input=[{"role": "user", "content": "q"}, item])
+    )
+    assert "input_image" in message and "input[1]" in message
+    assert "[Image omitted]" not in message
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("deferred", [False, True])
+@pytest.mark.parametrize("placement", ["flat", "namespace", "separate_namespaces"])
+async def test_conflicting_tool_kinds_are_rejected_before_generation(stream, reverse, deferred, placement):
+    tools = [{"type": "function", "name": "same", "parameters": {"type": "object"}}, {"type": "custom", "name": "same"}]
+    if deferred:
+        tools[0]["defer_loading"] = True
+    if reverse:
+        tools.reverse()
+    if placement == "namespace":
+        tools = [{"type": "namespace", "name": "group", "tools": tools}]
+    elif placement == "separate_namespaces":
+        tools = [{"type": "namespace", "name": "group", "tools": [tool]} for tool in tools]
+    message = await _assert_responses_request_fails_before_generation(_request(stream=stream, tools=tools))
+    assert "tool kind" in message and "same" in message
+
+
+@pytest.mark.parametrize("kind", ["function", "custom"])
+def test_duplicate_tool_declarations_of_the_same_kind_keep_existing_behavior(kind):
+    from uni_agent.gateway.adapters.openai_response import responses_to_internal
+
+    declaration = {"type": kind, "name": "same"}
+    request = responses_to_internal(
+        _request(tools=[declaration, dict(declaration)]),
+        base_sampling_params={},
+        allowed_sampling_keys=ALLOWED_SAMPLING_KEYS,
+    )
+    assert [tool["function"]["name"] for tool in request["tools"]] == ["same", "same"]
