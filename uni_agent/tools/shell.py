@@ -23,7 +23,9 @@ from typing import Any, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from uni_agent.efficiency import measure_efficiency
 from uni_agent.sandbox import Sandbox, SandboxBackend
+
 from .base import Tool, ToolError, ToolResult, register_tool
 
 logger = logging.getLogger(__name__)
@@ -197,7 +199,8 @@ class TmuxShell:
         return f"uniagent-{self.session_id}-{cid}"
 
     async def _read_text(self, path: str) -> str:
-        res = await self.backend.exec(["cat", path])
+        with measure_efficiency("shell/read_output"):
+            res = await self.backend.exec(["cat", path])
         return res.stdout if res.exit_code == 0 else ""
 
     # ----- lifecycle -----
@@ -250,19 +253,22 @@ class TmuxShell:
         command_path = f"{self._dir}/cmd_{cid}.input"
         # Keep arbitrary-size command text out of tmux's command argv: tmux
         # rejects an oversized `send-keys` argument before it reaches the pane.
-        await self.backend.write_file(command_path, command)
+        with measure_efficiency("shell/write_command"):
+            await self.backend.write_file(command_path, command)
         line = _capture_wrapper(command_path, out, err, rc, signal=self._chan(cid), sock=self._sock)
         # Type the short wrapper then press Enter.
-        res = await self.backend.exec(
-            self._tmux("send-keys", "-t", self.session_id, "--", line, "Enter")
-        )
+        with measure_efficiency("shell/dispatch"):
+            res = await self.backend.exec(
+                self._tmux("send-keys", "-t", self.session_id, "--", line, "Enter")
+            )
         if res.exit_code != 0:
             raise RuntimeError(f"failed to inject command: {res.stderr.strip()}")
         return cid
 
     async def poll(self, command_id: int) -> int | None:
         _, _, rc = self._paths(command_id)
-        res = await self.backend.exec(["cat", rc])
+        with measure_efficiency("shell/poll"):
+            res = await self.backend.exec(["cat", rc])
         if res.exit_code != 0:
             return None  # exit-code file not written yet -> still running
         text = res.stdout.strip()
@@ -289,10 +295,12 @@ class TmuxShell:
             # return the instant it signals. poll() stays the source of truth, so a
             # lost signal costs one bounded slice, not a hang.
             slice_s = max(0.1, min(2.0, timeout - elapsed))
-            await self.backend.exec_shell(
-                f"timeout {slice_s} tmux -S {shlex.quote(self._sock)} wait {shlex.quote(chan)} 2>/dev/null || true",
-                timeout=slice_s + 10,
-            )
+            # Includes intentional command waiting; not RPC overhead alone.
+            with measure_efficiency("shell/wait"):
+                await self.backend.exec_shell(
+                    f"timeout {slice_s} tmux -S {shlex.quote(self._sock)} wait {shlex.quote(chan)} 2>/dev/null || true",
+                    timeout=slice_s + 10,
+                )
 
         end = time.monotonic()
         return CommandResult(
@@ -452,7 +460,8 @@ class ShellTool(Tool):
 
         command_timeout = timeout if timeout is not None else self.config.command_timeout
         shell = await self._ensure_shell()
-        result = await shell.run(command, timeout=command_timeout)
+        with measure_efficiency("shell/run"):
+            result = await shell.run(command, timeout=command_timeout)
         if result.timed_out:
             return ToolResult(
                 text=_format_timeout(command_timeout, result.stdout, result.stderr),

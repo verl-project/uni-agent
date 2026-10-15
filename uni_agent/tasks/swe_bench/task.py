@@ -7,6 +7,8 @@ import logging
 
 from pydantic import Field
 
+from uni_agent.efficiency import measure_efficiency
+
 from ..base import Task, TaskConfig, TaskResult
 from ..registry import register_task
 
@@ -61,7 +63,8 @@ class SWEBenchTask(Task):
 
             from .reward import compute_reward
 
-            result = await compute_reward(sample, sandbox, eval_timeout=cfg.eval_timeout)
+            with measure_efficiency("reward"):
+                result = await compute_reward(sample, sandbox, eval_timeout=cfg.eval_timeout)
             if isinstance(agent_error, str) and agent_error.strip():
                 result = {**result, "agent_error": agent_error}
 

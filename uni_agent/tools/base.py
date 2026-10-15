@@ -22,6 +22,8 @@ from typing import TYPE_CHECKING, Any, ClassVar, Literal
 from jsonschema.validators import validator_for
 from pydantic import BaseModel, ValidationError
 
+from uni_agent.efficiency import measure_efficiency, record_efficiency
+
 if TYPE_CHECKING:
     from uni_agent.sandbox import SandboxBackend
 
@@ -354,24 +356,28 @@ class Toolbox:
         self, name: str, args: dict[str, Any] | str | None = None, *, timeout: float | None = None
     ) -> ToolResult:
         """Dispatch one tool call, returning the :class:`ToolResult` for the model."""
-        try:
-            tool = self._tools.get(name)
-            if tool is None:
-                raise ToolCallFormatError(
-                    f"Invalid action: function {name!r} is not defined in the tools list.\n"
-                    f"Allowed functions should be one of: {self.names()}."
-                )
-            parsed_args = self._parse_arguments(name, args)
-            validated_args = self._validate_arguments(tool, parsed_args)
-            result = await tool.run(validated_args, timeout=timeout)
-        except ToolCallFormatError as exc:
-            return ToolResult(text=str(exc), status="format_error")
-        except ToolError as exc:
-            return ToolResult(text=f"Error: {exc}", status="error")
-        except Exception:
-            logger.exception("tool %r raised an unexpected error", name)
-            raise
-        return result if isinstance(result, ToolResult) else ToolResult(text=str(result))
+        with measure_efficiency("tool"):
+            try:
+                tool = self._tools.get(name)
+                if tool is None:
+                    raise ToolCallFormatError(
+                        f"Invalid action: function {name!r} is not defined in the tools list.\n"
+                        f"Allowed functions should be one of: {self.names()}."
+                    )
+                parsed_args = self._parse_arguments(name, args)
+                validated_args = self._validate_arguments(tool, parsed_args)
+                result = await tool.run(validated_args, timeout=timeout)
+            except ToolCallFormatError as exc:
+                result = ToolResult(text=str(exc), status="format_error")
+            except ToolError as exc:
+                result = ToolResult(text=f"Error: {exc}", status="error")
+            except Exception:
+                logger.exception("tool %r raised an unexpected error", name)
+                raise
+            result = result if isinstance(result, ToolResult) else ToolResult(text=str(result))
+            if result.status != "ok":
+                record_efficiency(f"tool/result_{result.status}_count")
+            return result
 
     @staticmethod
     def _parse_arguments(name: str, raw_arguments: dict[str, Any] | str | None) -> dict[str, Any]:

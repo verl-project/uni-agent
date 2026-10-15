@@ -35,6 +35,7 @@ from uni_agent.gateway.session import (
     SessionHandle,
     Trajectory,
 )
+from uni_agent.gateway.session.session import GenerationMetrics
 from verl.utils.net_utils import is_valid_ipv6_address
 from verl.workers.rollout.utils import run_uvicorn
 
@@ -80,6 +81,7 @@ class _GatewayActor:
             config.allowed_request_sampling_param_keys or ()
         )
         self._warned_discarded_request_sampling_param_keys: set[str] = set()
+        self._generation_metrics = GenerationMetrics()
         self._prompt_length = config.prompt_length
         self._response_length = config.response_length
         self._enable_last_assistant_rollback = config.enable_last_assistant_rollback
@@ -273,6 +275,7 @@ class _GatewayActor:
             enable_last_assistant_rollback=self._enable_last_assistant_rollback,
             coalesce_reserved_exact_requests=self._coalesce_reserved_exact_requests,
             metadata=metadata,
+            generation_metrics=self._generation_metrics,
         )
         return handle
 
@@ -290,6 +293,10 @@ class _GatewayActor:
             return  # Already finalized or aborted — treat as idempotent.
         await session.abort()
         self._sessions.pop(session_id, None)
+
+    async def get_efficiency_metrics(self) -> dict[str, int | float]:
+        """Return cumulative backend counters, including currently waiting calls."""
+        return self._generation_metrics.snapshot()
 
     async def get_session_state(self, session_id: str) -> dict[str, Any]:
         """Return a snapshot of a live session's state."""
