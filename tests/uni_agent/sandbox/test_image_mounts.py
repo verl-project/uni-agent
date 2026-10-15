@@ -68,6 +68,7 @@ def test_local_provider_rejects_container_image():
     [
         ("local", None),
         ("vefaas", "python:3.12"),
+        ("e2b", "python:3.12"),
     ],
 )
 def test_registry_rejects_image_mounts_for_unsupported_provider(provider, image):

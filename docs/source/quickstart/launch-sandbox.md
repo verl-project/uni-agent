@@ -156,6 +156,63 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
     Modal builds each configured image and mounts it into the running
     Sandbox with `Sandbox.mount_image`. Note that Modal SDK 1.3.4 or newer is required when using `image_mounts`.
 
+=== "E2B"
+
+    **Remote cloud service.** [E2B](https://e2b.dev/) starts Firecracker-based
+    sandboxes from pre-built templates.
+
+    Install the SDK and configure its API key:
+
+    ```bash
+    pip install "e2b>=2.26,<3"
+    export E2B_API_KEY="<e2b-api-key>"
+    ```
+
+    To use a template already provided by the service, pass its name or ID:
+
+    ```python
+    from uni_agent.sandbox import SandboxConfig
+
+    config = SandboxConfig(
+        provider="e2b",
+        runtime_timeout=3600,
+        sandbox_kwargs={
+            "template": "my-ready-template",
+            "allow_internet_access": True,
+        },
+    )
+    ```
+
+    Alternatively, pass an open-source image. The provider checks its
+    deterministic template name and builds the template when missing:
+
+    ```yaml
+    sandbox:
+      provider: e2b
+      image: python:3.12
+      sandbox_kwargs:
+        cpu_count: 4
+        memory_mb: 8192
+    ```
+
+    CPU and memory are part of the generated template name. Changing either
+    value builds and uses a separate template.
+
+    Commands and file operations run as `root` by default. Set
+    `sandbox_kwargs.user: null` to use the template's default user instead.
+
+    E2B does not provide OCI image mounts. Build a composite E2B template
+    when the task needs a separate runtime image; configuring `image_mounts`
+    is rejected explicitly. `executable_paths` remains available for binaries
+    already present in the selected image or template.
+
+    !!! warning "Gateway reachability"
+        Host-side agents such as ReAct only use E2B for tools. Agents launched
+        inside the sandbox, such as Claude Code, must be able to reach their
+        model endpoint from E2B. Use a routable HTTPS Gateway address and an
+        egress allowlist; a private worker address or `127.0.0.1` is not
+        reachable from the E2B cloud.
+
 === "OpenYuanrong"
 
     **Remote or self-hosted service.** [OpenYuanrong](https://docs.openyuanrong.org/zh-cn/latest/index.html) provides elastic sandbox management for distributed agent workloads.
@@ -332,6 +389,13 @@ After configuring a supported backend above, run the complete connectivity and p
 
     ```bash
     DEBUG_MODE=1 SANDBOX_PROVIDER=modal python examples/quickstart/sandbox/demo.py
+    ```
+
+=== "E2B"
+
+    ```bash
+    DEBUG_MODE=1 SANDBOX_PROVIDER=e2b IMAGE=python:3.12 \
+      python examples/quickstart/sandbox/demo.py
     ```
 
 === "OpenYuanrong"

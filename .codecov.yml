@@ -1,0 +1,24 @@
+# Codecov configuration:
+# - CPU/GPU coverage reports are uploaded with separate flags
+# - Codecov auto-merges them per commit/PR and reports back via status checks
+coverage:
+  status:
+    project:
+      default:
+        target: auto
+        threshold: 1%
+    patch:
+      default:
+        target: auto
+        threshold: 1%
+
+flags:
+  cpu-tests:
+    carryforward: true
+  gpu-tests:
+    carryforward: true
+
+comment:
+  layout: "reach, diff, flags, files"
+  behavior: default
+  require_changes: false

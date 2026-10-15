@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -94,3 +96,77 @@ def test_unsupported_providers_reject_executable_path_overrides(provider, image)
 
     with pytest.raises(NotImplementedError, match="does not support executable path overrides"):
         build_sandbox(config)
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_e2b_receives_executable_path_overrides_from_config():
+    config = SandboxConfig(
+        provider="e2b",
+        image="python:3.12",
+        executable_paths={"claude": "/opt/claude-code/bin/claude"},
+    )
+
+    sandbox = build_sandbox(config)
+
+    assert sandbox.executable_paths == {"claude": "/opt/claude-code/bin/claude"}
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_e2b_defaults_to_root_user():
+    from uni_agent.sandbox.e2b import E2BSandbox
+
+    assert E2BSandbox(template="ready-template").user == "root"
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_e2b_sets_up_executable_paths_as_root_by_default(monkeypatch):
+    from uni_agent.sandbox.e2b import E2BSandbox
+
+    calls = []
+
+    class _CommandExitException(Exception):
+        pass
+
+    class _Handle:
+        def __init__(self, result):
+            self.result = result
+
+        async def wait(self):
+            return self.result
+
+    class _Commands:
+        async def run(self, command, **kwargs):
+            calls.append((command, kwargs["user"]))
+            stdout = "/usr/bin/claude\n" if "command -v claude" in command else ""
+            return _Handle(SimpleNamespace(exit_code=0, stdout=stdout, stderr=""))
+
+    class _AsyncSandbox:
+        @classmethod
+        async def create(cls, **kwargs):
+            return SimpleNamespace(sandbox_id="sb-1", commands=_Commands())
+
+    monkeypatch.setitem(
+        sys.modules,
+        "e2b",
+        SimpleNamespace(
+            AsyncSandbox=_AsyncSandbox,
+            CommandExitException=_CommandExitException,
+        ),
+    )
+    sandbox = E2BSandbox(
+        template="ready-template",
+        executable_paths={"claude": "/opt/claude-code/bin/claude"},
+    )
+
+    asyncio.run(sandbox.start())
+
+    assert calls == [
+        ("exec bash -c 'command -v claude'", "root"),
+        ("exec ln -sfn /opt/claude-code/bin/claude /usr/bin/claude", "root"),
+        ("exec bash -c 'command -v claude'", "root"),
+        ("exec test /usr/bin/claude -ef /opt/claude-code/bin/claude", "root"),
+    ]
+    assert sandbox.user == "root"

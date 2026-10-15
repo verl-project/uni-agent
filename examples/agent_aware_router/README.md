@@ -15,7 +15,7 @@ For setup and concepts, see the documentation:
 - `multi-node.sh`: the same matrix on a multi-node Ray cluster.
 - `run_infer.sh` / `run_infer.py`: one-shot inference driver the matrix calls per run (`--help` for the full flag set).
 - `task_config_mini_swe_agent.yaml`: task/agent config used by the matrix (mini-swe-agent in an openyuanrong sandbox).
-- `uni_agent/agent_aware_router/insight/`: the Grafana dashboard json (kvc-router metrics); the drivers inject it into rl-insight at startup.
+- `uni_agent/agent_aware_router/insight/`: the Grafana dashboard json (kvc-router metrics); the drivers mount it into rl-insight at startup.
 
 ## Environment
 
@@ -45,7 +45,7 @@ export OPENYUANRONG_TUNNEL_SSL_VERIFY="0"   # optional, defaults to 0
 
 ## Grafana dashboard
 
-The kvc-router metrics dashboard (`verl_agentic_rollout.json`) ships in `uni_agent/agent_aware_router/insight/`. Both drivers copy it into rl-insight's installed package before `rl-insight server start` (idempotent — heals pip reinstalls).
+The kvc-router metrics dashboard (`verl_agentic_rollout.json`) ships in `uni_agent/agent_aware_router/insight/`. Both drivers pass that directory to `rl-insight server start --extra-dashboard-dir` ([rl-insight #183](https://github.com/verl-project/rl-insight/pull/183)), so the installed rl-insight package stays untouched and json updates apply on every restart. This requires an rl-insight build with the flag; older builds fail at startup.
 
 ## Single-node usage
 

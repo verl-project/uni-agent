@@ -1,4 +1,4 @@
-"""Preprocess SWE-bench Pro into Uni-Agent's native task format."""
+"""Preprocess SWE-bench Pro v1 into Uni-Agent's native task format."""
 
 from __future__ import annotations
 
@@ -11,7 +11,12 @@ from typing import Any
 from datasets import DownloadManager, load_dataset
 
 DATA_SOURCE = "ScaleAI/SWE-bench_Pro"
-RUN_SCRIPTS_ARCHIVE = "https://github.com/scaleapi/SWE-bench_Pro-os/archive/refs/heads/main.tar.gz"
+DATASET_CONFIG = "v1"
+EXPECTED_INSTANCES = 731
+# The upstream repository has no v1 tag. Pin the final commit that changed the
+# legacy v1 run_scripts so preprocessing cannot drift with the main branch.
+RUN_SCRIPTS_COMMIT = "a19d238c0eff0d8585da673760cf46d8c20d3520"
+RUN_SCRIPTS_ARCHIVE = f"https://github.com/scaleapi/SWE-bench_Pro-os/archive/{RUN_SCRIPTS_COMMIT}.tar.gz"
 
 
 def _parse_string_list(value: object, field_name: str) -> list[str]:
@@ -39,7 +44,7 @@ def _resolve_run_scripts_dir(scripts_dir: str | None) -> Path:
 
 
 def build_swe_bench_pro(max_instances: int | None = None, *, scripts_dir: str | None = None):
-    """Load and convert the public SWE-bench Pro test split."""
+    """Load and convert the public SWE-bench Pro v1 test split."""
     run_scripts_dir = _resolve_run_scripts_dir(scripts_dir)
 
     def process(example: dict[str, Any]) -> dict[str, Any]:
@@ -83,9 +88,13 @@ def build_swe_bench_pro(max_instances: int | None = None, *, scripts_dir: str | 
             "extra_info": {"tools_kwargs": {"task": task_config}},
         }
 
-    print(f"Loading {DATA_SOURCE} from Hugging Face...", flush=True)
-    dataset = load_dataset(DATA_SOURCE, split="test")
+    print(f"Loading {DATA_SOURCE} (config={DATASET_CONFIG}) from Hugging Face...", flush=True)
+    dataset = load_dataset(DATA_SOURCE, DATASET_CONFIG, split="test")
     print(f"Loaded {len(dataset)} raw instances", flush=True)
+    if len(dataset) != EXPECTED_INSTANCES:
+        raise RuntimeError(
+            f"Expected SWE-bench Pro {DATASET_CONFIG} to contain {EXPECTED_INSTANCES} instances, got {len(dataset)}"
+        )
 
     if max_instances is not None and max_instances >= 0:
         dataset = dataset.select(range(min(max_instances, len(dataset))))
@@ -110,6 +119,6 @@ if __name__ == "__main__":
     os.makedirs(save_dir, exist_ok=True)
 
     dataset = build_swe_bench_pro(max_instances=args.max_instances, scripts_dir=args.scripts_dir)
-    output_path = os.path.join(save_dir, "swe_bench_pro.parquet")
+    output_path = os.path.join(save_dir, "swe_bench_pro_v1.parquet")
     dataset.to_parquet(output_path)
     print(f"Wrote {len(dataset)} instances to {output_path}", flush=True)

@@ -47,19 +47,13 @@ export SANDBOX_NAME_PREFIX="${SANDBOX_NAME_PREFIX:-mini-swe-}"
 export VERL_RL_INSIGHT_ENABLE="${VERL_RL_INSIGHT_ENABLE:-1}"
 export RL_INSIGHT_SERVER_URL="${RL_INSIGHT_SERVER_URL:-http://127.0.0.1:18080}"
 
-# Copy the router dashboard (uni_agent/agent_aware_router/insight/) into
-# rl-insight's installed package before start. Idempotent every run — heals
-# pip reinstalls and picks up json updates.
-ensure_router_dashboard() {
-    local dash_dir
-    dash_dir="$(python -c 'import pathlib, rl_insight; print(pathlib.Path(rl_insight.__file__).parent / "config/services/grafana/dashboards")' 2>/dev/null)" || return 0
-    [ -d "$dash_dir" ] || return 0
-    mkdir -p "$dash_dir"
-    cp -v "$REPO_ROOT"/uni_agent/agent_aware_router/insight/*.json "$dash_dir"/ || true
-}
-ensure_router_dashboard
-
-rl-insight server start --detach 2>/dev/null || true
+# Mount the router dashboard (uni_agent/agent_aware_router/insight/) via
+# --extra-dashboard-dir (rl-insight #183): the installed rl-insight package
+# stays untouched and json updates apply on every restart. Requires an
+# rl-insight build with the flag; start fails loudly otherwise.
+rl-insight server start \
+    --extra-dashboard-dir "${REPO_ROOT}/uni_agent/agent_aware_router/insight" \
+    --detach
 trap 'rl-insight server stop 2>/dev/null || true' EXIT
 
 TARGET="inference summary"

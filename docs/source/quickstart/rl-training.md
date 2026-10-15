@@ -6,6 +6,7 @@ This guide demonstrates:
 
 1. Train `Qwen3-Coder-30B-A3B-Instruct` with the white-box `ReAct Agent`.
 2. Train `Qwen3-Coder-30B-A3B-Instruct` with the black-box `Claude Code` Agent.
+3. Train `Qwen3.5-4B` with the white-box `ReAct Agent` using colocated asynchronous rollout.
 
 ## Prerequisites
 
@@ -13,7 +14,7 @@ We recommend completing the preceding Quickstart guides before starting training
 
 ## Prepare the Data
 
-Both examples train on SWE-reBench and validate on SWE-Bench Verified. The preprocessors convert each dataset row into the Task Config format consumed by Uni-Agent.
+All examples train on SWE-reBench and validate on SWE-Bench Verified. The preprocessors convert each dataset row into the Task Config format consumed by Uni-Agent.
 
 ### Training Dataset
 
@@ -324,3 +325,50 @@ Outputs are written under:
 The following dashboard summarizes reward, SWE-Bench Verified performance, rollout behavior, throughput, timing, and policy-drift metrics for this run:
 
 ![Claude Code Qwen3-Coder-30B-A3B-Instruct training metrics](../assets/results_claude_code_qwen3_coder_30b.svg){ width="1200" }
+
+## Case 3: Qwen3.5-4B ReAct Agent RL
+
+### Launch Training
+
+This recipe trains `Qwen3.5-4B` with the ReAct Task Config on 64 H100 GPUs. Actor training and asynchronous vLLM rollout share all GPUs in `colocate_async` mode:
+
+```bash
+DATA_DIR=/path/to/data \
+RUNTIME_DIR=/path/to/runtime \
+NNODES=8 \
+NGPUS_PER_NODE=8 \
+CONCURRENCY=1024 \
+GATEWAY_COUNT=32 \
+TRAIN_PROMPT_BSZ=64 \
+N_RESP_PER_PROMPT=8 \
+PPO_MINI_BATCH_SIZE=16 \
+MAX_PROMPT_LENGTH=8192 \
+MAX_RESPONSE_LENGTH=131072 \
+CP=4 \
+TASK_CONFIG=examples/quickstart/training/task_config_react.yaml \
+EXP_NAME=react_qwen3p5_4b_grpo \
+bash examples/quickstart/training/train_qwen3p5_dense.sh
+```
+
+The default configuration uses GRPO, a `1e-6` learning rate with 10 warmup steps, 512 trajectories per training step, and two-token MTP speculative decoding. The ReAct Task Config allows up to 200 Agent steps. Checkpoints are saved every 10 training steps; set `TEST_FREQ` when online validation is desired.
+
+The expected data and runtime layouts are the same as Case 1, except that the default model directory is:
+
+```text
+<DATA_DIR>/models/Qwen3.5-4B/
+```
+
+### Monitor the Run
+
+Checkpoints and per-session Agent logs are written under:
+
+```text
+<RUNTIME_DIR>/ckpts/Uni-Agent-Qwen3.5-4B-megatron-64g/<EXP_NAME>/
+<RUNTIME_DIR>/logs/Uni-Agent-Qwen3.5-4B-megatron-64g/<EXP_NAME>/
+```
+
+### Results
+
+Over the first 50 training steps, the SWE-Bench Verified resolved rate increases from **52.9%** to **59.8%**, a gain of **6.9 percentage points**. Evaluation uses the initial model and checkpoints at 10-step intervals; the training panels show logged scalars over the same 50-step window.
+
+![Qwen3.5-4B ReAct training metrics through step 50](../assets/results_qwen3p5_4b.svg){ width="1200" }
