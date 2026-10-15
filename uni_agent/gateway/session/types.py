@@ -10,12 +10,18 @@ if TYPE_CHECKING:
     import torch
 
 
-class InternalGenerationRequest(TypedDict):
+class _AgentRequestMetadata(TypedDict, total=False):
+    # Provider semantics that can be lost during template-facing lowering.
+    received_tool_result: bool
+
+
+class InternalGenerationRequest(_AgentRequestMetadata):
     """Lowered request consumed by GatewaySession.run_generation.
 
     Provider adapters lower OpenAI / Anthropic wire requests into this
     template-facing canonical before the session sees them. It is not a
-    provider-neutral block model.
+    provider-neutral block model. Optional received_tool_result preserves
+    the current provider turn's meaning across multimodal lowering.
     """
 
     messages: list[dict[str, Any]]

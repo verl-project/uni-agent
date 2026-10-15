@@ -11,7 +11,10 @@ from tests.uni_agent.support import (
     SequencedBackend,
     fake_vision_info_extractor,
 )
+from uni_agent.gateway.adapters.anthropic import anthropic_to_internal
 from uni_agent.gateway.adapters.openai import openai_to_internal
+from uni_agent.gateway.agent_hint import AgentRuntimeHint
+from uni_agent.gateway.kv_offload.hints import compute_dynamic_priority
 from uni_agent.gateway.session import GatewaySession, MessageCodec, SessionHandle
 from verl.workers.rollout.replica import TokenOutput
 
@@ -106,6 +109,141 @@ async def _run(session: GatewaySession, backend: SequencedBackend, messages: lis
         allowed_sampling_keys=ALLOWED_SAMPLING_KEYS,
     )
     return await session.run_generation(request, backend)
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_gateway_session_injects_runtime_kv_hint_for_vllm():
+    backend = SequencedBackend(["OK"])
+    backend.supports_agent_runtime_hint = True
+    session = _session(
+        "trajectory-7",
+        sampling_params={"extra_args": {"caller": "preserved"}},
+    )
+    await _run(
+        session,
+        backend,
+        [{"role": "user", "content": "use a tool if needed"}],
+        tools=[{"type": "function", "function": {"name": "search", "parameters": {}}}],
+    )
+
+    params = backend.calls[-1]["sampling_params"]
+    assert params["extra_args"]["caller"] == "preserved"
+    hint = params["extra_args"]["kv_transfer_params"]["agent_hint"]
+    assert hint["schema_version"] == 2
+    assert hint["trajectory_id"] == "trajectory-7"
+    assert "kv_priority" not in hint and "lease_until" not in hint
+    assert hint["tools_available"] is True
+    assert hint["has_active_chain"] is False
+    assert hint["received_tool_result"] is False
+    assert hint["context_tokens"] == len(backend.calls[-1]["prompt_ids"])
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_gateway_session_hint_describes_tool_result_continuation():
+    backend = SequencedBackend(["A", "B"])
+    backend.supports_agent_runtime_hint = True
+    session = _session(
+        "dynamic-trajectory",
+        prompt_length=10_000,
+        response_length=10_000,
+    )
+    tools = [{"type": "function", "function": {"name": "search", "parameters": {}}}]
+    user = {"role": "user", "content": "search"}
+
+    await _run(session, backend, [user], tools=tools)
+    first_hint = backend.calls[-1]["sampling_params"]["extra_args"]["kv_transfer_params"]["agent_hint"]
+    await _run(
+        session,
+        backend,
+        [
+            user,
+            {"role": "assistant", "content": "A"},
+            {"role": "tool", "tool_call_id": "call-1", "content": "result"},
+        ],
+        tools=tools,
+    )
+    second_hint = backend.calls[-1]["sampling_params"]["extra_args"]["kv_transfer_params"]["agent_hint"]
+
+    assert first_hint["received_tool_result"] is False
+    assert first_hint["has_active_chain"] is False
+    assert second_hint["received_tool_result"] is True
+    assert second_hint["has_active_chain"] is True
+    assert second_hint["remaining_capacity"] == 20_000 - second_hint["context_tokens"]
+    assert "kv_priority" not in second_hint and "lease_until" not in second_hint
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+@pytest.mark.parametrize("image_only", [False, True])
+@pytest.mark.parametrize("with_following_text", [False, True])
+async def test_anthropic_image_tool_result_hint_preserves_provider_semantics(image_only, with_following_text):
+    session = _session("image-tool-result", processor=FakeProcessor(), vision_info_extractor=fake_vision_info_extractor)
+    backend = SequencedBackend(["A", "B"])
+    backend.supports_agent_runtime_hint = True
+    content = [] if image_only else [{"type": "text", "text": "screenshot captured"}]
+    content.append({"type": "image", "source": {"type": "url", "url": "https://example.com/tool.png"}})
+    user_content = [{"type": "tool_result", "tool_use_id": "call-1", "content": content}]
+    if with_following_text:
+        user_content.append({"type": "text", "text": "describe this result"})
+    messages = [
+        {"role": "user", "content": "take a screenshot"},
+        {
+            "role": "assistant",
+            "content": [{"type": "tool_use", "id": "call-1", "name": "screenshot", "input": {}}],
+        },
+        {"role": "user", "content": user_content},
+    ]
+    request = anthropic_to_internal(
+        {"messages": messages},
+        base_sampling_params=session.sampling_params,
+        allowed_sampling_keys=ALLOWED_SAMPLING_KEYS,
+    )
+    assert request["messages"][-1]["role"] == "user"
+    await session.run_generation(request, backend)
+    runtime = AgentRuntimeHint.from_dict(
+        backend.calls[-1]["sampling_params"]["extra_args"]["kv_transfer_params"]["agent_hint"]
+    )
+    assert runtime is not None and runtime.received_tool_result is True
+    decision = compute_dynamic_priority(runtime)
+    assert decision.continuation_score == 55
+    assert decision.priority >= 50  # Do not reject this tool result at threshold 50.
+    assert backend.calls[-1]["image_data"] == ["https://example.com/tool.png"]
+
+    # A later ordinary user image is not a new tool result, despite the history.
+    messages.extend(
+        [
+            {"role": "assistant", "content": "A"},
+            {
+                "role": "user",
+                "content": [{"type": "image", "source": {"type": "url", "url": "https://example.com/user.png"}}],
+            },
+        ]
+    )
+    request = anthropic_to_internal(
+        {"messages": messages},
+        base_sampling_params=session.sampling_params,
+        allowed_sampling_keys=ALLOWED_SAMPLING_KEYS,
+    )
+    await session.run_generation(request, backend)
+    hint = backend.calls[-1]["sampling_params"]["extra_args"]["kv_transfer_params"]["agent_hint"]
+    assert hint["received_tool_result"] is False
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+@pytest.mark.parametrize("capability", [False, None, 1])
+async def test_gateway_session_does_not_inject_hint_without_backend_capability(capability):
+    backend = SequencedBackend(["OK"])
+    backend.supports_agent_runtime_hint = capability
+    session = _session("no-runtime-hint")
+    await _run(session, backend, [{"role": "user", "content": "hello"}])
+    assert "extra_args" not in backend.calls[-1]["sampling_params"]
 
 
 class _LogprobBackend:

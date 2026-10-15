@@ -39,6 +39,10 @@ def build_gateway_manager(*, config, llm_client) -> GatewayManager:
 
     apply_chat_template_kwargs = data_cfg.get("apply_chat_template_kwargs", {})
     mm_processor_kwargs = data_cfg.get("mm_processor_kwargs", {})
+
+    if af_cfg.get("kv_cache_offload") is not None:
+        raise ValueError("Configure KV offload in the vLLM connector's agent_hint_config, not agent_framework")
+
     allowed_sampling_keys = af_cfg.get("allowed_request_sampling_param_keys")
     if allowed_sampling_keys is not None:
         if not isinstance(allowed_sampling_keys, list | tuple) and not OmegaConf.is_list(allowed_sampling_keys):

@@ -529,7 +529,17 @@ def anthropic_to_internal(
 
     # Message/system lowering handles Anthropic-specific compatibility downgrades
     # before the session sees the OpenAI-like template-facing canonical.
-    messages = _messages_to_internal(_fold_mid_list_system_into_user(payload.get("messages")))
+    provider_messages = _fold_mid_list_system_into_user(payload.get("messages"))
+    messages = _messages_to_internal(provider_messages)
+    # Images inside tool results become template-facing user messages. Preserve
+    # the current provider turn's meaning before those roles lose provenance.
+    last_message = provider_messages[-1]
+    content = last_message.get("content", "")
+    received_tool_result = (
+        last_message["role"] == "user"
+        and isinstance(content, list)
+        and any(block.get("type") == "tool_result" for block in content)
+    )
     system_text = _system_to_text(payload.get("system"))
     if system_text:
         messages.insert(0, {"role": "system", "content": system_text})
@@ -549,4 +559,5 @@ def anthropic_to_internal(
         "messages": messages,
         "tools": tools,
         "sampling_params": sampling_params,
+        "received_tool_result": received_tool_result,
     }

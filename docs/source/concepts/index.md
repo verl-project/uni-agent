@@ -105,3 +105,4 @@ The overview is top-down, but customization is easier in dependency order:
 3. [Agent](agent.md) — implement a white-box loop or integrate a black-box harness.
 4. [Task and Reward](task-and-reward.md) — compose the lower layers into a scored workload.
 5. [Gateway and Trajectories](gateway-and-trajectories.md) — understand the training rollout path.
+6. [Agent-Aware KV Cache Offload](agent-aware-kv-offload.md) — configure Gateway hints and vLLM CPU cache policy.
