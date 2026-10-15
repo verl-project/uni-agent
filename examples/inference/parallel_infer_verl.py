@@ -391,16 +391,6 @@ def main() -> None:
         help="Inference engine backend.",
     )
     parser.add_argument(
-        "--language-model-only",
-        action="store_true",
-        help="Load only the language-model component (required for text-only Qwen3.5 vLLM runs).",
-    )
-    parser.add_argument(
-        "--disable-thinking",
-        action="store_true",
-        help="Disable thinking in the model chat template.",
-    )
-    parser.add_argument(
         "--enable-rollout-routing-replay",
         action="store_true",
         help="Enable R3 routed-expert capture in the rollout engine for routing-replay diagnostics.",
