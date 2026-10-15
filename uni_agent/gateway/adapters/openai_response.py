@@ -196,12 +196,19 @@ def _declared_name(tool: Any) -> str | None:
     return str(name) if name else None
 
 
+def _merge_tool_names(names: dict[str, tuple[str | None, str]], incoming: dict[str, tuple[str | None, str]]) -> None:
+    for qualified_name, original_name in incoming.items():
+        if qualified_name in names and names[qualified_name] != original_name:
+            raise MalformedRequestError(f"Ambiguous Responses tool name {qualified_name!r}")
+    names.update(incoming)
+
+
 def _flatten_tool(
     tool: dict[str, Any],
     *,
     namespace: str | None = None,
     drop_deferred: bool = False,
-) -> tuple[list[dict[str, Any]], dict[str, str], set[str]]:
+) -> tuple[list[dict[str, Any]], dict[str, str], dict[str, tuple[str | None, str]]]:
     """Build the parser-facing function view and remember original tool kinds."""
     tool_type = tool.get("type")
     if tool_type == "namespace":
@@ -209,7 +216,7 @@ def _flatten_tool(
         nested_tools = tool.get("tools")
         if nested_tools is None:
             logger.warning("Skipping empty Responses namespace tool group %r", name)
-            return [], {}, set()
+            return [], {}, {}
         if not isinstance(name, str) or not name.strip():
             raise MalformedRequestError("Namespace tools require a non-empty name")
         if not isinstance(nested_tools, list):
@@ -222,7 +229,7 @@ def _flatten_tool(
         )
         converted: list[dict[str, Any]] = []
         kinds: dict[str, str] = {}
-        namespaced: set[str] = set()
+        namespaced: dict[str, tuple[str | None, str]] = {}
         for nested in nested_tools:
             if not isinstance(nested, dict):
                 raise MalformedRequestError("Each namespace tool must be an object")
@@ -231,7 +238,7 @@ def _flatten_tool(
             )
             converted.extend(child)
             kinds.update(child_kinds)
-            namespaced.update(child_names)
+            _merge_tool_names(namespaced, child_names)
         return converted, kinds, namespaced
 
     if tool_type in _IGNORED_TOOL_TYPES:
@@ -253,12 +260,9 @@ def _flatten_tool(
                 "parameters": parameters,
             },
         }
-        return [declaration], {qualified_name: str(tool_type)}, {qualified_name} if namespace else set()
+        return [declaration], {qualified_name: str(tool_type)}, {qualified_name: (namespace, name)}
     if tool_type not in {"function", "custom"}:
         raise MalformedRequestError(f"Unsupported Responses tool type {tool_type!r}")
-    if drop_deferred and tool.get("defer_loading"):
-        return [], {}, set()
-
     source = tool.get("function") if isinstance(tool.get("function"), dict) else tool
     name = source.get("name")
     if not isinstance(name, str) or not name:
@@ -277,7 +281,8 @@ def _flatten_tool(
             "parameters": parameters,
         },
     }
-    return [declaration], {qualified_name: str(tool_type)}, {qualified_name} if namespace else set()
+    declarations = [] if drop_deferred and tool.get("defer_loading") else [declaration]
+    return declarations, {qualified_name: str(tool_type)}, {qualified_name: (namespace, name)}
 
 
 def _merge_tool_channels(top: list[Any], additional: list[Any]) -> list[Any]:
@@ -305,21 +310,23 @@ def _collect_tool_defs(payload: dict[str, Any]) -> list[Any]:
     return _merge_tool_channels(list(top), additional)
 
 
-def _convert_tools(tools: Any, *, drop_deferred: bool = False) -> tuple[list[dict[str, Any]], dict[str, str], set[str]]:
+def _convert_tools(
+    tools: Any, *, drop_deferred: bool = False
+) -> tuple[list[dict[str, Any]], dict[str, str], dict[str, tuple[str | None, str]]]:
     if tools is None:
-        return [], {}, set()
+        return [], {}, {}
     if not isinstance(tools, list):
         raise MalformedRequestError("tools must be a list")
     converted: list[dict[str, Any]] = []
     kinds: dict[str, str] = {}
-    namespaced: set[str] = set()
+    namespaced: dict[str, tuple[str | None, str]] = {}
     for tool in tools:
         if not isinstance(tool, dict):
             raise MalformedRequestError("Each tool must be an object")
         child, child_kinds, child_names = _flatten_tool(tool, drop_deferred=drop_deferred)
         converted.extend(child)
         kinds.update(child_kinds)
-        namespaced.update(child_names)
+        _merge_tool_names(namespaced, child_names)
     return converted, kinds, namespaced
 
 
@@ -512,17 +519,13 @@ def responses_to_internal(
     )
 
 
-def _tool_metadata(payload: dict[str, Any]) -> tuple[dict[str, str], set[str]]:
+def _tool_metadata(payload: dict[str, Any]) -> tuple[dict[str, str], dict[str, tuple[str | None, str]]]:
     _, kinds, namespaced = _convert_tools(_collect_tool_defs(payload))
     return kinds, namespaced
 
 
-def _split_namespaced_name(name: str, namespaced_names: set[str]) -> tuple[str | None, str]:
-    if name in namespaced_names:
-        namespace, _, bare_name = name.partition(_NAMESPACE_SEPARATOR)
-        if namespace and bare_name:
-            return namespace, bare_name
-    return None, name
+def _split_namespaced_name(name: str, namespaced_names: dict[str, tuple[str | None, str]]) -> tuple[str | None, str]:
+    return namespaced_names.get(name, (None, name))
 
 
 def _custom_input(arguments: Any) -> str:

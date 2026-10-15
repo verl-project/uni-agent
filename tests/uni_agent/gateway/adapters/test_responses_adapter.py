@@ -136,6 +136,144 @@ def test_responses_preserves_images_and_namespaces_for_lowering():
     assert internal["tools"][0]["function"]["name"] == "repo__lookup"
 
 
+def _namespace_tool(tool, namespaces):
+    for namespace in reversed(namespaces):
+        tool = {"type": "namespace", "name": namespace, "tools": [tool]}
+    return tool
+
+
+@pytest.mark.parametrize("kind", ["function", "custom"])
+@pytest.mark.parametrize(
+    "namespaces,name,expected_namespace,qualified_name",
+    [
+        ([], "look__up", None, "look__up"),
+        (["repo"], "lookup", "repo", "repo__lookup"),
+        (["repo"], "look__up", "repo", "repo__look__up"),
+        (["outer__inner"], "lookup", "outer__inner", "outer__inner__lookup"),
+        (["outer", "inner"], "lookup", "outer__inner", "outer__inner__lookup"),
+        (["outer", "functions", "inner"], "look__up", "outer__inner", "outer__inner__look__up"),
+    ],
+)
+def test_responses_preserves_declared_namespace_and_tool_name(
+    kind, namespaces, name, expected_namespace, qualified_name
+):
+    from uni_agent.gateway.adapters.openai_response import responses_build_response, responses_to_internal
+
+    payload = _request(tools=[_namespace_tool({"type": kind, "name": name}, namespaces)])
+    internal = responses_to_internal(payload, base_sampling_params={}, allowed_sampling_keys=ALLOWED_SAMPLING_KEYS)
+    assert internal["tools"][0]["function"]["name"] == qualified_name
+
+    body = responses_build_response(
+        _outcome(
+            tool_calls=[
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": qualified_name, "arguments": {"input": "pwd"}},
+                }
+            ]
+        ),
+        payload=payload,
+        model="policy",
+    )
+    call = body["output"][0]
+    assert call["type"] == ("custom_tool_call" if kind == "custom" else "function_call")
+    assert call["name"] == name
+    assert call.get("namespace") == expected_namespace
+    replay = responses_to_internal(
+        _request(tools=payload["tools"], input=[{"role": "user", "content": "inspect"}, call]),
+        base_sampling_params={},
+        allowed_sampling_keys=ALLOWED_SAMPLING_KEYS,
+    )
+    assert replay["messages"][-1]["tool_calls"][0]["function"]["name"] == qualified_name
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("kind", ["function", "custom"])
+@pytest.mark.parametrize("namespaces", [[], ["repo"]])
+@pytest.mark.asyncio
+async def test_responses_deferred_tool_name_errors_precede_generation(stream, kind, namespaces):
+    from fastapi import HTTPException
+
+    from uni_agent.gateway.gateway import _GatewayActor
+
+    generate = AsyncMock(return_value=_outcome(content="done", finish_reason="stop"))
+    actor = object.__new__(_GatewayActor)
+    actor._sessions = {"s1": SimpleNamespace(sampling_params={}, run_generation=generate)}
+    actor._allowed_request_sampling_param_keys = ALLOWED_SAMPLING_KEYS
+    actor._backend = object()
+    tool = _namespace_tool({"type": kind, "defer_loading": True}, namespaces)
+    with pytest.raises(HTTPException) as error:
+        await actor._handle_openai_responses("s1", _request(stream=stream, tools=[tool]))
+    assert error.value.status_code == 400
+    assert "require a non-empty name" in error.value.detail
+    generate.assert_not_called()
+
+
+@pytest.mark.parametrize("kind", ["function", "custom"])
+@pytest.mark.parametrize("namespaces", [[], ["repo"]])
+def test_responses_valid_deferred_tools_keep_output_metadata(kind, namespaces):
+    from uni_agent.gateway.adapters.openai_response import responses_build_response, responses_to_internal
+
+    tool = _namespace_tool({"type": kind, "name": "lookup", "defer_loading": True}, namespaces)
+    payload = _request(tools=[tool])
+    internal = responses_to_internal(payload, base_sampling_params={}, allowed_sampling_keys=ALLOWED_SAMPLING_KEYS)
+    assert internal["tools"] is None
+    qualified_name = "repo__lookup" if namespaces else "lookup"
+    body = responses_build_response(
+        _outcome(
+            tool_calls=[
+                {
+                    "id": "call-1",
+                    "type": "function",
+                    "function": {"name": qualified_name, "arguments": {"input": "pwd"}},
+                }
+            ]
+        ),
+        payload=payload,
+        model="policy",
+    )
+    call = body["output"][0]
+    assert call["type"] == ("custom_tool_call" if kind == "custom" else "function_call")
+    assert call["name"] == "lookup"
+    assert call.get("namespace") == ("repo" if namespaces else None)
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize(
+    "left_namespaces,right_namespaces,right_name,left_deferred,right_deferred",
+    [
+        (["a__b"], ["a"], "b__c", False, False),
+        (["a", "b"], ["a"], "b__c", False, False),
+        (["a__b"], [], "a__b__c", False, False),
+        (["a__b"], ["a"], "b__c", True, False),
+        (["a__b"], ["a"], "b__c", False, True),
+    ],
+)
+@pytest.mark.asyncio
+async def test_responses_ambiguous_flat_tool_names_precede_generation(
+    stream, left_namespaces, right_namespaces, right_name, left_deferred, right_deferred
+):
+    from fastapi import HTTPException
+
+    from uni_agent.gateway.gateway import _GatewayActor
+
+    tools = [
+        _namespace_tool({"type": "function", "name": "c", "defer_loading": left_deferred}, left_namespaces),
+        _namespace_tool({"type": "custom", "name": right_name, "defer_loading": right_deferred}, right_namespaces),
+    ]
+    generate = AsyncMock(return_value=_outcome(content="done", finish_reason="stop"))
+    actor = object.__new__(_GatewayActor)
+    actor._sessions = {"s1": SimpleNamespace(sampling_params={}, run_generation=generate)}
+    actor._allowed_request_sampling_param_keys = ALLOWED_SAMPLING_KEYS
+    actor._backend = object()
+    with pytest.raises(HTTPException) as error:
+        await actor._handle_openai_responses("s1", _request(stream=stream, tools=tools))
+    assert error.value.status_code == 400
+    assert "Ambiguous Responses tool name" in error.value.detail
+    generate.assert_not_called()
+
+
 @pytest.mark.parametrize(
     "source,expected_url",
     [
