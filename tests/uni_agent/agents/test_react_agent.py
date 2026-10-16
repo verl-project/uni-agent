@@ -296,3 +296,69 @@ async def test_per_turn_cap_truncation_ends_the_episode():
 
     assert model.sampling_params["max_tokens"] == 8
     assert reason == "token_limit"
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_tool_images_follow_tool_messages_as_one_user_message():
+    agent = _agent()
+    cfg: ReActConfig = agent.config  # type: ignore[assignment]
+    calls = [
+        {"id": f"call-{i}", "type": "function", "function": {"name": "screenshot", "arguments": "{}"}} for i in range(2)
+    ]
+    model = _StepModel(tool_calls=calls, finish_reason="tool_calls")
+    shot = "data:image/png;base64,AAAA"
+    transcript: list[dict] = []
+
+    reason = await agent.step(
+        cfg, model, _StepToolbox(ToolResult(text="shot", images=(shot,))), transcript, _step_info()
+    )
+
+    assert reason == "completed"
+    assert [m["role"] for m in transcript] == ["assistant", "tool", "tool", "user"]
+    assert all(isinstance(m["content"], str) for m in transcript[1:3])
+    parts = transcript[3]["content"]
+    assert [p["type"] for p in parts] == ["text", "image_url", "image_url"]
+    assert parts[1]["image_url"]["url"] == shot
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_text_only_tool_results_add_no_user_message():
+    agent = _agent()
+    cfg: ReActConfig = agent.config  # type: ignore[assignment]
+    model = _StepModel(
+        tool_calls=[{"id": "c", "type": "function", "function": {"name": "shell", "arguments": "{}"}}],
+        finish_reason="tool_calls",
+    )
+    transcript: list[dict] = []
+
+    await agent.step(cfg, model, _StepToolbox(), transcript, _step_info())
+
+    assert [m["role"] for m in transcript] == ["assistant", "tool"]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_tool_images_survive_timeout_budget_exit():
+    agent = _agent()
+    cfg: ReActConfig = agent.config  # type: ignore[assignment]
+    calls = [
+        {"id": f"call-{i}", "type": "function", "function": {"name": "screenshot", "arguments": "{}"}} for i in range(3)
+    ]
+    model = _StepModel(tool_calls=calls, finish_reason="tool_calls")
+    shot = "data:image/png;base64,AAAA"
+    info = _step_info()
+    info["timeouts"] = cfg.timeout_budget  # the next timeout exceeds the budget
+    transcript: list[dict] = []
+
+    reason = await agent.step(
+        cfg, model, _StepToolbox(ToolResult(text="slow", status="timeout", images=(shot,))), transcript, info
+    )
+
+    assert reason == "timeout_limit"
+    assert [m["role"] for m in transcript] == ["assistant", "tool", "tool", "tool", "user"]
+    assert transcript[-1]["content"][1]["image_url"]["url"] == shot

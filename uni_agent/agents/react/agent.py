@@ -156,12 +156,14 @@ class ReActAgent(Agent):
 
         # step 2: dispatch the tool calls
         saw_finish = False
+        pending_images: list[str] = []
         for idx, tool_call in enumerate(tool_calls):
             fn = tool_call.get("function", {})
             name = fn.get("name", "")
             logger.info(f"🎬 ACTION ({name}):\n{fn.get('arguments')}")
             tool_result = await toolbox.call(name, fn.get("arguments"), timeout=cfg.action_timeout)
             observation = tool_result.to_observation()
+            pending_images.extend(tool_result.images)
             info["num_tool_calls"] += 1
             if tool_result.status == "timeout":  # a tool hit its own timeout (e.g. shell command_timeout)
                 info["timeouts"] += 1
@@ -194,9 +196,30 @@ class ReActAgent(Agent):
                             "content": "Skipped: timeout budget exhausted.",
                         }
                     )
+                _append_image_message(transcript, pending_images)
                 return "timeout_limit"
             if name in _FINISH_TOOLS and tool_result.status == "ok":
                 saw_finish = True
+        _append_image_message(transcript, pending_images)
         if saw_finish:
             logger.info("💬 FINISHED: policy called a finish tool.")
         return "finished" if saw_finish else "completed"
+
+
+def _append_image_message(transcript: list[dict[str, Any]], images: list[str]) -> None:
+    """Add tool-returned images as one user message after the turn's tool messages.
+
+    `tool` messages cannot hold image parts, and tool replies must stay contiguous
+    after the assistant message, so the images follow the last of them.
+    """
+    if not images:
+        return
+    transcript.append(
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "Images returned by the tool calls above:"},
+                *({"type": "image_url", "image_url": {"url": url}} for url in images),
+            ],
+        }
+    )

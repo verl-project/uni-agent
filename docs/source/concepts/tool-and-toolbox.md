@@ -26,6 +26,8 @@ ok | format_error | error | timeout
 
 `ToolResult.to_observation()` converts the result into the next-turn observation and clips oversized output.
 
+A result can also carry `images`, a tuple of `data:image/...;base64,...` URLs such as a screenshot. `ToolResult.to_content()` renders the observation text plus one `image_url` part per image. Text clipping applies to the text only; images are never clipped. The built-in ReAct Agent sends images to the model as a single `user` message after the turn's `tool` messages, because OpenAI `tool` messages cannot hold image parts.
+
 ## Build a Toolbox
 
 Tool specs are configuration dictionaries. The `name` selects a registry entry; remaining fields are validated by that Tool's `config_model`.
@@ -129,6 +131,37 @@ class ReadTextTool(Tool):
 ```
 
 Make sure the module is imported before `get_tool()` is called. Built-in tools are imported for registration from `uni_agent.tools.__init__`.
+
+## GUI Tools
+
+The `gui_*` tools drive an X11 desktop inside the Sandbox. Each runs `xdotool` (input) or ImageMagick `import` (screenshot) through `sandbox.exec` with `DISPLAY` set, so the Sandbox image needs an X server and those two binaries. [`examples/gui`](https://github.com/verl-project/uni-agent/tree/main/examples/gui) has a minimal image.
+
+| Registry key | Model-facing name | Arguments |
+| --- | --- | --- |
+| `gui_screenshot` | `screenshot` | none |
+| `gui_click` | `click` | `x`, `y`, `button` (`left`/`middle`/`right`), `double` |
+| `gui_type` | `type_text` | `text` |
+| `gui_key` | `press_key` | `keys` (xdotool syntax, for example `ctrl+a Return`) |
+| `gui_scroll` | `scroll` | `x`, `y`, `direction` (`up`/`down`), `amount` |
+
+Every action returns a fresh screenshot in `ToolResult.images`. Shared settings go on each Tool spec:
+
+```yaml
+tools:
+  - name: gui_screenshot
+    display: ":0"
+  - name: gui_click
+    display: ":0"
+    coordinate_space: relative_1000
+    screenshot_after_action: true
+    settle_seconds: 0.5
+```
+
+- `display`: X display the desktop runs on. When the tools are used by the `gui` Task, the Task display is copied into any `gui_*` spec that omits it, and a conflicting value is rejected.
+- `coordinate_space`: `pixel` (default) or `relative_1000`. Models that ground on a normalized grid, such as the Qwen-VL family, emit coordinates from 0 to 1000 over the screenshot; `relative_1000` converts them to screen pixels and says so in the Tool description. The screenshot itself is never rescaled.
+- `screenshot_after_action` and `settle_seconds`: whether to attach a screenshot after each action, and how long to wait for the UI to redraw first.
+
+A command that exceeds its timeout returns `status="timeout"`, so the ReAct timeout budget applies. Other command failures return `status="error"` with the command's stderr.
 
 ## Implementation Rules
 
