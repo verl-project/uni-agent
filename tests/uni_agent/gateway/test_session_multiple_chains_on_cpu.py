@@ -11,7 +11,7 @@ from tests.uni_agent.support import (
     SequencedBackend,
     fake_vision_info_extractor,
 )
-from uni_agent.gateway.adapters.openai import openai_to_internal
+from uni_agent.gateway.adapters.openai_chat import openai_to_internal
 from uni_agent.gateway.session import GatewaySession, MessageCodec, SessionHandle
 from verl.workers.rollout.replica import TokenOutput
 
@@ -1608,58 +1608,34 @@ async def test_multiple_chains_video_media_stays_chain_local():
 
 @pytest.mark.cpu
 @pytest.mark.level0
-@pytest.mark.parametrize(
-    ("media_kind", "message_factory", "extractor", "sent_url", "unsent_url", "backend_field", "trajectory_key"),
-    [
-        (
-            "image",
-            _image_message,
-            fake_vision_info_extractor,
-            "image://sent-a.png",
-            "image://unsent-b.png",
-            "image_data",
-            "images",
-        ),
-        (
-            "video",
-            _video_message,
-            _codec_compatible_video_extractor,
-            "video://sent-a.mp4",
-            "video://unsent-b.mp4",
-            "video_data",
-            "videos",
-        ),
-    ],
-)
 @pytest.mark.asyncio
-async def test_multiple_chains_rejects_incremental_media_without_mutating_stored_media(
-    media_kind, message_factory, extractor, sent_url, unsent_url, backend_field, trajectory_key
-):
-    """Reject unsupported CT media without mutating the selected chain."""
-    first_messages = [message_factory(sent_url, "describe first")]
+async def test_multiple_chains_rejects_incremental_video_without_mutating_stored_media():
+    """Reject incremental video while preserving the selected chain media."""
+    sent_url = "video://sent-a.mp4"
+    first_messages = [_video_message(sent_url, "describe first")]
     continuation_messages = [
         *first_messages,
         {"role": "assistant", "content": "FIRST"},
-        message_factory(unsent_url, "new incremental media"),
+        _video_message("video://unsent-b.mp4", "new incremental media"),
     ]
-    expected_sent = [sent_url] if media_kind == "image" else [(sent_url, {"url": sent_url})]
+    expected_sent = [(sent_url, {"url": sent_url})]
     session = _session(
-        f"incremental-media-{media_kind}",
+        "incremental-media-video",
         processor=FakeProcessor(),
-        vision_info_extractor=extractor,
+        vision_info_extractor=_codec_compatible_video_extractor,
     )
     backend = SequencedBackend(["FIRST", "SHOULD_NOT_RUN"])
 
     await _run(session, backend, first_messages)
-    with pytest.raises(ValueError, match="does not currently support incremental image or video data"):
+    with pytest.raises(ValueError, match="incremental video"):
         await _run(session, backend, continuation_messages)
     trajectories = await session.finalize()
 
     assert len(backend.calls) == 1
     assert backend.steps == ["SHOULD_NOT_RUN"]
-    assert backend.calls[0][backend_field] == expected_sent
+    assert backend.calls[0]["video_data"] == expected_sent
     assert len(trajectories) == 1
-    assert trajectories[0].multi_modal_data == {trajectory_key: expected_sent}
+    assert trajectories[0].multi_modal_data == {"videos": expected_sent}
     assert trajectories[0].extra_fields == {}
 
 
@@ -2194,3 +2170,120 @@ async def test_weight_versions_absent_when_backend_omits_them():
     [trajectory] = await session.finalize()
 
     assert trajectory.extra_fields == {}
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize("initial_image", [False, True])
+@pytest.mark.asyncio
+async def test_multiple_chains_accumulates_incremental_tool_images(initial_image):
+    """Keep resolved images and trainable-token metadata across repeated tool turns."""
+    extracted = []
+
+    async def extractor(messages, image_patch_size, config=None):
+        images, videos = await fake_vision_info_extractor(messages, image_patch_size, config)
+        extracted.append(images)
+        return images, videos
+
+    session = _session(
+        "incremental-images",
+        processor=FakeProcessor(),
+        vision_info_extractor=extractor,
+        sampling_params={"logprobs": True},
+    )
+    backend = SequencedBackend(["FIRST", "SECOND", "THIRD", "FOURTH"])
+    messages = [_image_message("image://a.png", "start") if initial_image else {"role": "user", "content": "start"}]
+    expected_images = ["image://a.png"] if initial_image else []
+    await _run(session, backend, messages)
+    for answer, url in [("FIRST", "image://b.png"), ("SECOND", "image://c.png"), ("THIRD", None)]:
+        previous_buffer = session.active_chains[0].buffer
+        saved_mask = list(previous_buffer.response_mask)
+        saved_logprobs = list(previous_buffer.response_logprobs)
+        context = _image_message(url, "crop") if url else {"role": "user", "content": "follow up"}
+        if url:
+            context.update(role="tool", tool_call_id="crop")
+            expected_images.append(url)
+        messages = [*messages, {"role": "assistant", "content": answer}, context]
+        await _run(session, backend, messages)
+        assert backend.calls[-1]["image_data"] == expected_images
+        buffer = session.active_chains[0].buffer
+        assert buffer.response_mask[: len(saved_mask)] == saved_mask
+        assert buffer.response_logprobs[: len(saved_logprobs)] == saved_logprobs
+
+    trajectories = await session.finalize()
+    assert len(trajectories) == 1
+    trajectory = trajectories[0]
+    assert trajectory.multi_modal_data == {"images": expected_images}
+    assert len(trajectory.response_ids) == len(trajectory.response_mask) == len(trajectory.response_logprobs)
+    assert sum(trajectory.response_mask) == len("FIRSTSECONDTHIRDFOURTH")
+    assert extracted == ([["image://a.png"]] if initial_image else []) + [["image://b.png"], ["image://c.png"]]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_incremental_image_rollback_failure_does_not_change_stored_media():
+    session = _session(
+        "image-rollback",
+        processor=FakeProcessor(),
+        vision_info_extractor=fake_vision_info_extractor,
+        enable_last_assistant_rollback=True,
+        sampling_params={"logprobs": True},
+    )
+    backend = SequencedBackend(["FIRST", "SECOND", RuntimeError("failed crop"), "FIXED"])
+    first = [_image_message("image://a.png", "start")]
+    second = [*first, {"role": "assistant", "content": "FIRST"}, _image_message("image://b.png", "second")]
+    await _run(session, backend, first)
+    await _run(session, backend, second)
+    rewrite = [*second, {"role": "assistant", "content": "REPLACED"}, _image_message("image://unsent.png", "crop")]
+    with pytest.raises(HTTPException, match="failed crop"):
+        await _run(session, backend, rewrite)
+    assert session.active_chains[0].image_data == ["image://a.png", "image://b.png"]
+    rewrite[-1] = _image_message("image://c.png", "crop")
+    await _run(session, backend, rewrite)
+    assert backend.calls[-1]["image_data"] == ["image://a.png", "image://b.png", "image://c.png"]
+    trajectories = await session.finalize()
+    assert len(trajectories) == 1
+    assert trajectories[0].multi_modal_data == {"images": ["image://a.png", "image://b.png", "image://c.png"]}
+    assert trajectories[0].extra_fields["rollback_count"] == 1
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_incremental_images_remain_isolated_between_chains():
+    session = _session("image-fork", processor=FakeProcessor(), vision_info_extractor=fake_vision_info_extractor)
+    backend = SequencedBackend(["MAIN1", "MAIN2", "SUB", "MAIN3"])
+    main = [HELPFUL_SYS, _image_message("image://a.png", "main")]
+    await _run(session, backend, main)
+    main = [*main, {"role": "assistant", "content": "MAIN1"}, _image_message("image://b.png", "crop")]
+    await _run(session, backend, main)
+    await _run(session, backend, [SUBAGENT_SYS, _image_message("image://sub.png", "subagent")])
+    main = [*main, {"role": "assistant", "content": "MAIN2"}, _image_message("image://c.png", "crop")]
+    await _run(session, backend, main)
+    assert [call["image_data"] for call in backend.calls] == [
+        ["image://a.png"],
+        ["image://a.png", "image://b.png"],
+        ["image://sub.png"],
+        ["image://a.png", "image://b.png", "image://c.png"],
+    ]
+    trajectories = await session.finalize()
+    assert [trajectory.multi_modal_data for trajectory in trajectories] == [
+        {"images": ["image://sub.png"]},
+        {"images": ["image://a.png", "image://b.png", "image://c.png"]},
+    ]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize("role", ["user", "tool"])
+@pytest.mark.asyncio
+async def test_image_requires_multimodal_processor_before_backend(role):
+    session = _session("text-only-images")
+    backend = SequencedBackend(["SHOULD_NOT_RUN"])
+    message = _image_message("image://unsupported.png", "image")
+    message["role"] = role
+    with pytest.raises(ValueError, match="multimodal processor"):
+        await _run(session, backend, [{"role": "user", "content": "start"}, message])
+    assert backend.calls == []
+    assert await session.finalize() == []

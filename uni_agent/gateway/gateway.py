@@ -21,11 +21,17 @@ from uni_agent.gateway.adapters.anthropic import (
     anthropic_stream_response,
     anthropic_to_internal,
 )
-from uni_agent.gateway.adapters.openai import (
+from uni_agent.gateway.adapters.openai_chat import (
     openai_build_response,
     openai_error_body,
     openai_stream_response,
     openai_to_internal,
+)
+from uni_agent.gateway.adapters.openai_response import (
+    responses_build_response,
+    responses_error_body,
+    responses_stream_response,
+    responses_to_internal,
 )
 from uni_agent.gateway.adapters.types import AnthropicRequest, MalformedRequestError, OpenAIChatCompletionRequest
 from uni_agent.gateway.config import GatewayActorConfig
@@ -35,6 +41,7 @@ from uni_agent.gateway.session import (
     SessionHandle,
     Trajectory,
 )
+from uni_agent.gateway.session.types import UnsupportedMediaError
 from verl.utils.net_utils import is_valid_ipv6_address
 from verl.workers.rollout.utils import run_uvicorn
 
@@ -97,6 +104,8 @@ class _GatewayActor:
         def _error_body_for_path(path: str, status_code: int, message: str) -> dict[str, Any]:
             if path.endswith("/v1/messages"):
                 return anthropic_error_body(status_code, message)
+            if path.endswith("/v1/responses"):
+                return responses_error_body(status_code, message)
             return openai_error_body(status_code, message)
 
         @self._app.exception_handler(HTTPException)
@@ -110,6 +119,13 @@ class _GatewayActor:
             return JSONResponse(
                 status_code=exc.status_code,
                 content=_error_body_for_path(request.url.path, exc.status_code, message),
+            )
+
+        @self._app.exception_handler(UnsupportedMediaError)
+        async def _unsupported_media_handler(request: Request, exc: UnsupportedMediaError):
+            return JSONResponse(
+                status_code=400,
+                content=_error_body_for_path(request.url.path, 400, str(exc)),
             )
 
         @self._app.exception_handler(Exception)
@@ -131,6 +147,14 @@ class _GatewayActor:
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
             return await self._handle_openai_chat_completions(session_id=session_id, payload=payload)
+
+        @self._app.post("/sessions/{session_id}/v1/responses")
+        async def _openai_responses(session_id: str, request: Request):
+            try:
+                payload = await request.json()
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
+            return await self._handle_openai_responses(session_id=session_id, payload=payload)
 
         @self._app.post("/sessions/{session_id}/v1/messages")
         async def _anthropic_messages(session_id: str, request: Request):
@@ -189,6 +213,36 @@ class _GatewayActor:
         if payload.get("stream") is True:
             return openai_stream_response(outcome, model=model)
         return JSONResponse(openai_build_response(outcome, model=model))
+
+    async def _handle_openai_responses(
+        self,
+        session_id: str,
+        payload: dict[str, Any],
+    ) -> JSONResponse | StreamingResponse:
+        """Validate a Responses API payload and serialize the session outcome."""
+        session = self._sessions.get(session_id)
+        if session is None:
+            raise HTTPException(status_code=404, detail=f"Unknown session_id: {session_id}")
+
+        try:
+            internal = responses_to_internal(
+                payload,
+                base_sampling_params=dict(session.sampling_params),
+                allowed_sampling_keys=self._allowed_request_sampling_param_keys,
+            )
+            _validate_sampling_params(internal["sampling_params"])
+        except MalformedRequestError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        outcome = await session.run_generation(internal, self._backend)
+        model = str(payload.get("model") or "unknown")
+        try:
+            if payload.get("stream") is True:
+                return responses_stream_response(outcome, payload=payload, model=model)
+            response = responses_build_response(outcome, payload=payload, model=model)
+        except MalformedRequestError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return JSONResponse(response)
 
     async def _handle_anthropic_messages(
         self,

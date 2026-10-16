@@ -179,6 +179,9 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
         sandbox_kwargs={
             "template": "my-ready-template",
             "allow_internet_access": True,
+            # Optional: proxy only E2B SDK traffic without setting a
+            # process-wide HTTP_PROXY in the training worker.
+            "proxy": "http://proxy.example:8080",
         },
     )
     ```
@@ -197,6 +200,11 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
 
     CPU and memory are part of the generated template name. Changing either
     value builds and uses a separate template.
+
+    `sandbox_kwargs.proxy` is forwarded to E2B template operations, sandbox
+    creation, and subsequent SDK requests. It does not set proxy variables
+    inside the remote sandbox; use `sandbox_kwargs.envs` with `HTTP_PROXY` /
+    `HTTPS_PROXY` when commands running in the sandbox also need a proxy.
 
     Commands and file operations run as `root` by default. Set
     `sandbox_kwargs.user: null` to use the template's default user instead.

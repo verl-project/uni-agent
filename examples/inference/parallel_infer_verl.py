@@ -330,7 +330,7 @@ def main() -> None:
     parser.add_argument(
         "--prompt-length",
         type=int,
-        default=int(os.getenv("PROMPT_LENGTH", DEFAULT_PROMPT_LENGTH)),
+        default=os.getenv("PROMPT_LENGTH", str(DEFAULT_PROMPT_LENGTH)),
         help="Prompt-token budget passed to the verl rollout and data config.",
     )
     parser.add_argument(

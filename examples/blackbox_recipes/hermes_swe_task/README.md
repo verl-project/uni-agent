@@ -41,8 +41,14 @@ separately. Provide a protected runtime-env YAML outside the checkout with
 `PYTHONPATH: verl` under `env_vars`, plus the provider settings needed by the
 execution environment. Ray applies these to the job driver and workers.
 Protect Ray's control plane and do not check credentials into source control or
-place that file in the uploaded working directory. Data, model and output paths
-must be available to the execution workers.
+place that file in the uploaded working directory. Data and model paths must be
+available to the execution workers. `OUTPUT_DIR`, `RESULT_PATH` (default:
+`$OUTPUT_DIR/result.json`) and `LOG_DIR` (default: `$OUTPUT_DIR/logs`) must use
+shared storage mounted at the same absolute paths on the submitting host, Ray
+job driver and workers. The launcher reads and validates the result and
+trajectory files on the submitting host after the Ray job finishes. This
+launcher requires shared storage; deployments without it must retrieve the
+artifacts before running local validation.
 
 ```bash
 DATA_PATH=/absolute/preprocessed-swe-bench.parquet \

@@ -54,6 +54,17 @@ class FakeTokenizer:
         return str(content)
 
 
+class QwenVLTokenizer(FakeTokenizer):
+    """FakeTokenizer variant with the Qwen ChatML end-of-turn token."""
+
+    _SPECIAL_IDS = {
+        "<|im_end|>": 151645,
+    }
+
+    def convert_tokens_to_ids(self, token):
+        return self._SPECIAL_IDS.get(token)
+
+
 class FakeProcessor:
     class _ImageProcessor:
         patch_size = 16

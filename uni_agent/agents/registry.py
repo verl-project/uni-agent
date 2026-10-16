@@ -25,6 +25,7 @@ AGENT_MODULES: dict[str, str] = {
     "openclaw": "uni_agent.agents.openclaw.agent",
     "mem_agent": "uni_agent.agents.mem_agent.agent",
     "hermes": "uni_agent.agents.hermes.agent",
+    "deepseek_harness": "uni_agent.agents.deepseek_harness.agent",
 }
 
 
