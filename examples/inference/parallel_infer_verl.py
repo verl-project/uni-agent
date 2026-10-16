@@ -1,8 +1,8 @@
-"""Parallel agent inference over a verl-launched engine, through the training path.
+"""Parallel agent inference over a verl-launched engine and agent framework.
 
 Same job as ``parallel_infer_api.py`` (run each row's task, report a score), but verl
-brings the engine up and rollouts flow through the *exact* training stack -- the agent
-framework adapter + TransferQueue (TQ):
+brings the engine up and rollouts flow through the agent framework adapter and
+TransferQueue (TQ):
 
     verl LLMServerManager (vLLM / SGLang)
     ->  AgentFrameworkRolloutAdapter.generate_sequences   (fire-and-forget -> TQ)
@@ -78,6 +78,8 @@ def init_config(args: argparse.Namespace, *, served_model_name: str):
     """Compose verl's ``ppo_trainer`` config and override the engine + framework knobs."""
     from hydra import compose, initialize_config_dir
 
+    prompt_length = getattr(args, "prompt_length", DEFAULT_PROMPT_LENGTH)
+
     config_dir = str(Path(verl.__file__).resolve().parent / "trainer" / "config")
     with initialize_config_dir(config_dir=config_dir, version_base=None):
         config = compose(config_name="ppo_trainer")
@@ -112,7 +114,7 @@ def init_config(args: argparse.Namespace, *, served_model_name: str):
     rollout.mode = "async"
     # Standalone inference has no trainer to broadcast weights.
     rollout.load_format = "auto"
-    rollout.prompt_length = DEFAULT_PROMPT_LENGTH
+    rollout.prompt_length = prompt_length
     rollout.response_length = response_length
     rollout.max_model_len = rollout.prompt_length + rollout.response_length
     rollout.tensor_model_parallel_size = args.tensor_parallel_size
@@ -166,7 +168,7 @@ def init_config(args: argparse.Namespace, *, served_model_name: str):
 
     # Data.
     config.data.return_raw_chat = True
-    config.data.max_prompt_length = DEFAULT_PROMPT_LENGTH
+    config.data.max_prompt_length = prompt_length
     config.data.max_response_length = response_length
 
     return config
@@ -324,6 +326,12 @@ def main() -> None:
         "--result-path",
         default=None,
         help="Optional path to write a JSON result file (mean rm_score and per-session scores).",
+    )
+    parser.add_argument(
+        "--prompt-length",
+        type=int,
+        default=os.getenv("PROMPT_LENGTH", str(DEFAULT_PROMPT_LENGTH)),
+        help="Prompt-token budget passed to the verl rollout and data config.",
     )
     parser.add_argument(
         "--limit",
