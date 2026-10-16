@@ -50,6 +50,15 @@ def build_gateway_manager(*, config, llm_client) -> GatewayManager:
     # Match AgentLoopWorker pattern: self-load tokenizer/processor via HFModelConfig.
     rollout_config: RolloutConfig = omega_conf_to_dataclass(rollout_cfg)
     model_config: HFModelConfig = omega_conf_to_dataclass(model_cfg)
+    annotation_policy_fqn = af_cfg.get("trajectory_annotation_policy_fqn")
+    if annotation_policy_fqn is None:
+        annotation_policy_fqn = "uni_agent.gateway.annotation.default_trajectory_annotation_policy"
+    elif not isinstance(annotation_policy_fqn, str) or not annotation_policy_fqn.strip():
+        raise ValueError("trajectory_annotation_policy_fqn must be a non-empty string")
+    annotation_policy = load_class_from_fqn(annotation_policy_fqn, description="trajectory annotation policy")
+    if not callable(annotation_policy):
+        raise TypeError(f"Trajectory annotation policy {annotation_policy_fqn!r} must resolve to a callable")
+
     gateway_actor_config = GatewayActorConfig(
         tokenizer=model_config.tokenizer,
         processor=model_config.processor,
@@ -64,6 +73,7 @@ def build_gateway_manager(*, config, llm_client) -> GatewayManager:
         enable_last_assistant_rollback=af_cfg.get("enable_last_assistant_rollback", True),
         allowed_request_sampling_param_keys=allowed_sampling_keys,
         coalesce_reserved_exact_requests=af_cfg.get("coalesce_reserved_exact_requests", True),
+        trajectory_annotation_policy=annotation_policy,
     )
 
     return GatewayManager(
