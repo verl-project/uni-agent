@@ -378,8 +378,10 @@ class TestInflightBlockPin:
         finally:
             collector.stop()
 
-    def test_release_without_block_list_warns_and_keeps_the_conservative_gauge(self, monkeypatch):
-        """A release that cannot recover the pinned block list (row evicted) warns and leaks (errs high)."""
+    def test_release_recovers_the_pinned_set_even_after_memo_eviction(self, monkeypatch):
+        """Releases carry no prompt (verl #7115), so the pin marker — not the hashing
+        memo — is the source of truth: evicting the memo row before release still
+        unwinds exactly what dispatch pinned."""
         from uni_agent.agent_aware_router.collectors import collector as collector_module
 
         prompt = list(range(4 * BLOCK_SIZE))
@@ -391,12 +393,12 @@ class TestInflightBlockPin:
         try:
             balancer.callbacks["on_acquire"][0]("r1", "s0", prompt)
             assert ds.get_metric("s0", MetricKey.INFLIGHT_BLOCKS) == 4
-            ds.del_per_request("r1", "prefix_hashes")  # evicted before the release
+            ds.del_per_request("r1", "prefix_hashes")  # memo evicted before the release
 
             balancer.callbacks["on_release"][0]("s0", "r1")
 
-            assert any("in-flight block set may leak" in w and "r1" in w for w in warnings), warnings
-            assert ds.get_metric("s0", MetricKey.INFLIGHT_BLOCKS) == 4  # conservative
+            assert not warnings, warnings
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_BLOCKS) == 0
             assert ds.get_metric("s0", MetricKey.COMPLETED_COUNT) == 1
         finally:
             collector.stop()
@@ -416,10 +418,41 @@ class TestInflightBlockPin:
             assert any("re-acquire without release" in w for w in warnings), warnings
             assert ds.get_metric("s0", MetricKey.INFLIGHT_BLOCKS) == 4
             assert ds.get_metric("s0", MetricKey.INFLIGHT_TOKENS) == 4 * BLOCK_SIZE
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_COUNT) == 1  # one turn genuinely in flight
 
             balancer.callbacks["on_release"][0]("s0", "r1")
             assert ds.get_metric("s0", MetricKey.INFLIGHT_BLOCKS) == 0
             assert ds.get_metric("s0", MetricKey.INFLIGHT_TOKENS) == 0
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_COUNT) == 0
+        finally:
+            collector.stop()
+
+    def test_reacquire_after_prompt_swap_unpins_the_stale_set_not_the_new_memo(self):
+        """score() re-resolves a shorter, content-disjoint prompt before the stale
+        re-acquire reaches the collector, so the memo no longer describes what the
+        stale dispatch pinned: the unpin must come from the pin marker, else the old
+        chain leaks (held would be 6, not 2)."""
+        from uni_agent.agent_aware_router.utils.prefix_cache import resolve_prefix_hashes
+
+        collector, balancer, ds = self._start()
+        swapped = list(range(1000, 1000 + 2 * BLOCK_SIZE))
+        try:
+            balancer.callbacks["on_acquire"][0]("r1", "s0", list(range(4 * BLOCK_SIZE)))
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_BLOCKS) == 4
+
+            # What score() does between the two dispatches: the memo row is replaced
+            # by the new prompt's disjoint chain before the collector sees the
+            # re-acquire.
+            resolve_prefix_hashes(swapped, "r1", ds)
+
+            balancer.callbacks["on_acquire"][0]("r1", "s0", swapped)
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_BLOCKS) == 2
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_COUNT) == 1  # one turn genuinely in flight
+
+            balancer.callbacks["on_release"][0]("s0", "r1")
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_BLOCKS) == 0
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_TOKENS) == 0
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_COUNT) == 0
         finally:
             collector.stop()
 

@@ -23,22 +23,6 @@ from .hash import get_prefix_hashes_incremental
 _PREFIX_HASH_KEY = "prefix_hashes"
 
 
-def get_prefix_hashes(request_id: str | None, store: Any) -> list[str] | None:
-    """Return the memoized full-block prefix hashes of ``request_id``, or None.
-
-    Read-only counterpart of :func:`resolve_prefix_hashes`: lets a release
-    event (which carries no prompt under verl #7115) recover the exact blocks
-    the request pinned. ``None`` means "never memoized" (no request_id, or the
-    row was evicted) — not "the request held nothing".
-    """
-    if not request_id:
-        return None
-    row = store.get_per_request(request_id, _PREFIX_HASH_KEY)
-    if not row:
-        return None
-    return row.get("hash_strs")
-
-
 def resolve_prefix_hashes(
     prompt_ids: list[int],
     request_id: str | None,

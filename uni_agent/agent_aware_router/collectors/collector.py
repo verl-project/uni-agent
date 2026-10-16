@@ -30,7 +30,7 @@ from ..insight import WriteEvent, WriteKind, emitter
 from ..store.data_store import DataStore
 from ..types import EmitKey, MetricKey
 from ..utils.knob import coerce_knob_value
-from ..utils.prefix_cache import get_prefix_hashes, resolve_prefix_hashes
+from ..utils.prefix_cache import resolve_prefix_hashes
 from .parse import KVCacheUpdate, MetricsUpdate, Parser, StickyUpdate
 from .transport.base import Transport
 
@@ -74,9 +74,11 @@ _CUMULATIVE_KEYS: tuple[str, ...] = (
 # per-request "turn" counter below.
 _PROMPT_LEN_KEY = "prompt_len"
 
-# Per-request bookkeeping key: the replica this request's prefix blocks are
-# pinned on. Release unpins through it and deletes it, so its presence at
-# acquire time means a release went missing.
+# Per-request bookkeeping key: ``{"replica": str, "hashes": [str, ...]}`` — the
+# replica and the exact hash list this dispatch pinned, snapshotted at pin time.
+# Release and stale-unpin unwind THIS list, not the live prefix-hash memo (which
+# the next turn's score() extends in place or replaces on shrink). Its presence
+# at acquire time means a release went missing.
 _INFLIGHT_BLOCK_PIN_KEY = "inflight_blocks_pin"
 
 
@@ -248,20 +250,22 @@ class Collector:
                     # A pin marker still on the request means its previous dispatch
                     # never released (a dropped COMPLETED_COUNT): unpin that set first
                     # and net its still-booked tokens out of this acquire's raw delta.
-                    stale_replica = self._data_store.get_per_request(update.request_id, _INFLIGHT_BLOCK_PIN_KEY, None)
-                    if stale_replica is not None:
+                    stale = self._data_store.get_per_request(update.request_id, _INFLIGHT_BLOCK_PIN_KEY, None)
+                    if stale is not None:
                         logger.warning(
-                            f"re-acquire without release request={update.request_id} on {stale_replica} "
+                            f"re-acquire without release request={update.request_id} on {stale['replica']} "
                             f"— unpinning the previous block set"
                         )
-                        self._data_store.unpin_inflight_blocks(
-                            stale_replica, get_prefix_hashes(update.request_id, self._data_store) or []
-                        )
+                        self._data_store.unpin_inflight_blocks(stale["replica"], stale["hashes"])
                         self._data_store.del_per_request(update.request_id, _INFLIGHT_BLOCK_PIN_KEY)
-                        self._refresh_inflight_blocks(stale_replica)
+                        self._refresh_inflight_blocks(stale["replica"])
                         deltas[MetricKey.INFLIGHT_TOKENS] = raw_tokens - self._data_store.get_per_request(
                             update.request_id, _PROMPT_LEN_KEY, 0
                         )
+                        # The dropped release's INFLIGHT_COUNT -1 never arrived either;
+                        # fold it into this acquire so the gauge nets to the one turn
+                        # genuinely in flight.
+                        deltas[MetricKey.INFLIGHT_COUNT] = deltas.get(MetricKey.INFLIGHT_COUNT, 0) - 1
                     self._data_store.set_per_request(update.request_id, _PROMPT_LEN_KEY, raw_tokens)
                     self._pin_dispatch_blocks(update.node_id, update.request_id, update.prompt_ids)
             elif is_release:
@@ -332,32 +336,29 @@ class Collector:
         # Resident record runs *after* the pin, on the same chain; idempotent
         # against the engine's later ``BlockStored`` for the same hashes.
         self._dispatch_recorded_blocks += self._data_store.record_dispatch_blocks(node_id, hash_strs)
-        self._data_store.set_per_request(request_id, _INFLIGHT_BLOCK_PIN_KEY, node_id)
+        # Snapshot the exact pinned list: release/stale-unpin must mirror THIS
+        # dispatch's set, whatever score() later does to the shared memo.
+        self._data_store.set_per_request(
+            request_id, _INFLIGHT_BLOCK_PIN_KEY, {"replica": node_id, "hashes": list(hash_strs)}
+        )
         self._refresh_inflight_blocks(node_id)
 
     def _release_inflight_blocks(self, node_id: str, request_id: str) -> None:
         """Unpin a finishing request's blocks and refresh its replica's held gauge.
 
-        The block list comes from the acquire-time hashing memo (releases carry
-        no prompt under verl #7115) and the replica from the acquire-time pin
-        marker. A missing memo means the held set cannot be unwound: warn and
-        leak (errs high) rather than subtract a guessed amount.
+        The replica and the exact pinned list come from the acquire-time pin
+        marker — a snapshot of what that dispatch pinned, immune to later memo
+        extension, shrink, or eviction (releases carry no prompt under verl
+        #7115). A missing marker means nothing was pinned at acquire.
         """
-        replica_id = self._data_store.get_per_request(request_id, _INFLIGHT_BLOCK_PIN_KEY, None)
-        if replica_id is None:
+        marker = self._data_store.get_per_request(request_id, _INFLIGHT_BLOCK_PIN_KEY, None)
+        if marker is None:
             # Nothing was pinned at acquire — the held set never knew about this request.
             logger.debug(f"release with no pinned blocks request={request_id} on {node_id}")
             return
-        hash_strs = get_prefix_hashes(request_id, self._data_store)
-        if hash_strs is None:
-            # Block list gone (per-request row evicted) — leak is the safe direction.
-            logger.warning(
-                f"release without block list request={request_id} on {replica_id} — in-flight block set may leak"
-            )
-            hash_strs = []
-        self._data_store.unpin_inflight_blocks(replica_id, hash_strs)
+        self._data_store.unpin_inflight_blocks(marker["replica"], marker["hashes"])
         self._data_store.del_per_request(request_id, _INFLIGHT_BLOCK_PIN_KEY)
-        self._refresh_inflight_blocks(replica_id)
+        self._refresh_inflight_blocks(marker["replica"])
 
     def _refresh_inflight_blocks(self, replica_id: str) -> None:
         """Write a replica's held-block count as an absolute ``INFLIGHT_BLOCKS`` gauge.

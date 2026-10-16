@@ -249,6 +249,10 @@ class KVCacheAwareStrategy:
             return load > self.load_threshold
         if self.overload_mode == OverloadMode.REMAINING_CAP:
             cap = self._total_token_capacity(store)
+            if cap <= 0:
+                # No capacity yardstick yet (first NUM_GPU_BLOCKS poll not in): no gate
+                # can be evaluated, so never break sticky on missing data.
+                return False
             thresh = cap * (1.0 - self.capacity_threshold)
             block_size = store.get_block_size() or 16
             inflight_blocks = store.get_metric(replica.replica_id, MetricKey.INFLIGHT_BLOCKS) or 0

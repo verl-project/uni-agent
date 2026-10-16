@@ -119,7 +119,7 @@ def test_parse_failure_surfaces_exception_not_swallowed():
 
 def _chained_stored(node_hashes, tokens_per_block=2, parent=None, medium="GPU"):
     """One BlockStored frame: [timestamp, [[tag, hashes, parent, tokens, block_size, None, medium]]]."""
-    ids = [i for base in range(len(node_hashes)) for i in range(base * tokens_per_block, base * tokens_per_block + 2)]
+    ids = list(range(len(node_hashes) * tokens_per_block))
     return [0, [["stored", list(node_hashes), parent, ids, tokens_per_block, None, medium]]]
 
 

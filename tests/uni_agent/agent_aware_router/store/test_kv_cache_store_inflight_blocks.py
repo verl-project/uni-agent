@@ -48,7 +48,7 @@ def test_held_set_ref_counts_shared_blocks() -> None:
 
 
 def test_pin_table_edges_and_cleanup() -> None:
-    """Pins are per replica; unknown hashes are ignored; clear_replica drops pins."""
+    """Pins are per replica; unknown hashes are ignored; clear_replica keeps pins."""
     store = _store()
 
     store.pin_inflight_blocks("s0", [])  # unresolvable prompt pins nothing
@@ -66,5 +66,5 @@ def test_pin_table_edges_and_cleanup() -> None:
     assert store.inflight_block_count("ghost-replica") == 0
 
     store.clear_replica("s0")
-    assert store.inflight_block_count("s0") == 0
+    assert store.inflight_block_count("s0") == 4  # a cache flush must not drop live reservations
     assert store.inflight_block_count("s1") == 5  # clear_replica must not touch s1

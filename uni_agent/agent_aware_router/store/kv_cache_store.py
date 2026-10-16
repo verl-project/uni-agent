@@ -59,7 +59,7 @@ class KVCacheStore:
     # ── Replica management ──────────────────────────────────────────────
 
     def clear_replica(self, replica_id: str) -> None:
-        """Clear all blocks for a replica from the reverse index.
+        """Clear a replica's resident blocks from the reverse index.
 
         O(n) in the number of unique blocks, but replica count is typically small (< 100).
         """
@@ -75,8 +75,6 @@ class KVCacheStore:
                 del self.replicas_by_block[bh]
             for layer_counts in self._replica_layer_counts.values():
                 layer_counts.pop(replica_id, None)
-            # Its pins must not linger as phantom in-flight load if it comes back.
-            self._inflight_blocks.pop(replica_id, None)
 
     # ── Block management ────────────────────────────────────────────────
 
