@@ -168,6 +168,12 @@ class SGLangInferenceServer:
         return await self._server.resume_kv_cache()
 
     async def abort_all_requests(self, reject_request=False):
+        """Abort current generations and pause new requests until resumed.
+
+        ``reject_request`` is retained for verl's control interface. SGLang
+        cannot reject arrivals while paused: True logs a warning, and those
+        requests wait for ``resume_generation()`` instead of failing.
+        """
         if reject_request:
             logger.warning("SGLang pauses new requests until resume_generation; reject_request=True is not supported")
         return await self._server.abort_all_requests()

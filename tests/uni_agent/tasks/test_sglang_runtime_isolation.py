@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import subprocess
@@ -12,7 +13,10 @@ import pytest
 @pytest.mark.cpu
 @pytest.mark.level0
 @pytest.mark.parametrize("engine", ["vllm", "sglang"])
-def test_mini_swe_launcher_preserves_defaults_without_forwarding_local_runtime(tmp_path, monkeypatch, engine):
+@pytest.mark.parametrize("language_model_only", [False, True])
+def test_mini_swe_launcher_preserves_defaults_without_forwarding_local_runtime(
+    tmp_path, monkeypatch, engine, language_model_only
+):
     if sys.platform == "win32":
         pytest.skip("the Ray inference launcher targets POSIX hosts")
     repo_root = Path(__file__).resolve().parents[3]
@@ -35,7 +39,7 @@ def test_mini_swe_launcher_preserves_defaults_without_forwarding_local_runtime(t
     monkeypatch.setenv("ENGINE", engine)
     monkeypatch.setenv("UNI_AGENT_SGLANG_PYTHON", "/selected/runtime/python")
     monkeypatch.setenv("UNI_AGENT_SGLANG_PYTHONPATH", "/selected/runtime/packages")
-    if engine == "sglang":
+    if language_model_only:
         monkeypatch.setenv("LANGUAGE_MODEL_ONLY", "true")
     result = subprocess.run(
         ["bash", "examples/mini_swe_agent/run_infer_mini_swe_agent.sh"],
@@ -51,7 +55,7 @@ def test_mini_swe_launcher_preserves_defaults_without_forwarding_local_runtime(t
     assert argv[argv.index("--n-gpus-per-node") + 1] == "2"
     assert argv[argv.index("--gateway-count") + 1] == "4"
     assert runtime["CUDA_VISIBLE_DEVICES"] == "0,1"
-    assert ("--language-model-only" in argv) is (engine == "sglang")
+    assert ("--language-model-only" in argv) is language_model_only
     assert "--enforce-eager" not in argv
     assert "UNI_AGENT_SGLANG_PYTHON" not in runtime
     assert "UNI_AGENT_SGLANG_PYTHONPATH" not in runtime
@@ -83,18 +87,29 @@ assert not any(name == "sglang" or name.startswith("sglang.") for name in sys.mo
 
 @pytest.mark.cpu
 @pytest.mark.level0
-def test_vllm_standalone_preserves_upstream_checkpoint_worker(monkeypatch):
-    from verl.checkpoint_engine.base import CheckpointEngineWorker
-    from verl.workers.rollout import replica as replica_module
-    from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMReplica
+def test_vllm_standalone_preserves_upstream_checkpoint_worker():
+    if importlib.util.find_spec("vllm") is None:
+        pytest.skip("the checkpoint-worker contract requires the optional vLLM runtime")
+    # Keep optional serving imports and their logging setup out of pytest's process.
+    child = """
+from verl.checkpoint_engine.base import CheckpointEngineWorker
+from verl.workers.rollout import replica as replica_module
+from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMReplica
 
-    replica = object.__new__(vLLMReplica)
-    replica.config = object()
-    replica.model_config = object()
-    replica.replica_rank = 0
-    replica.rollout_mode = replica_module.RolloutMode.STANDALONE
-    monkeypatch.setattr(replica_module.ray, "remote", lambda worker_class: worker_class)
-
-    worker_spec = replica.get_ray_class_with_init_args()
-
-    assert worker_spec.cls is CheckpointEngineWorker
+replica = object.__new__(vLLMReplica)
+replica.config = object()
+replica.model_config = object()
+replica.replica_rank = 0
+replica.rollout_mode = replica_module.RolloutMode.STANDALONE
+replica_module.ray.remote = lambda worker_class: worker_class
+worker_spec = replica.get_ray_class_with_init_args()
+assert worker_spec.cls is CheckpointEngineWorker
+"""
+    subprocess.run(
+        [sys.executable, "-c", child],
+        cwd=Path(__file__).resolve().parents[3],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=120,
+    )

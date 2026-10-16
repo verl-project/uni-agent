@@ -77,7 +77,7 @@ def test_inference_sampling_uses_run_options_and_preserves_length_configuration(
 @pytest.mark.level0
 @pytest.mark.parametrize("engine", ["vllm", "sglang"])
 @pytest.mark.parametrize("language_model_only", [False, True])
-def test_parallel_infer_routes_language_model_only_to_sglang_native_config(engine, language_model_only):
+def test_parallel_infer_routes_language_model_only_to_sglang_native_config(engine, language_model_only, caplog):
     args = Namespace(
         temperature=0.4,
         top_p=0.85,
@@ -103,6 +103,9 @@ def test_parallel_infer_routes_language_model_only_to_sglang_native_config(engin
 
     config = init_config(args, served_model_name="policy")
     rollout = config.actor_rollout_ref.rollout
+
+    ignored_flag_warnings = [record for record in caplog.records if "--language-model-only" in record.getMessage()]
+    assert len(ignored_flag_warnings) == int(engine == "vllm" and language_model_only)
 
     assert rollout.name == engine
     assert rollout.enforce_eager is True

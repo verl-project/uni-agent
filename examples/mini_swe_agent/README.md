@@ -239,10 +239,11 @@ rewritten through the reverse tunnel when `proxy_port` is set).
 
 The inference launcher selects the existing verl rollout backend with
 `ENGINE=vllm` (the default) or `ENGINE=sglang`. Its two-GPU defaults are
-unchanged. `LANGUAGE_MODEL_ONLY=1` selects SGLang text-only serving for
-Qwen3.5/Qwen3-VL through the native model-config override; the vLLM path ignores
-this flag. `ENFORCE_EAGER=1` disables graph capture for either backend. Both
-options are disabled by default.
+unchanged. `LANGUAGE_MODEL_ONLY=1` forwards `--language-model-only` to the Python
+entrypoint. It selects SGLang text-only serving through the native model-config
+override; with `ENGINE=vllm`, Python emits a warning and leaves the vLLM
+configuration unchanged. `ENFORCE_EAGER=1` disables graph capture for either
+backend. Both options are disabled by default.
 
 Use the unmodified community sources for verl release/v0.9.1
 (`1876b06d0a3e4e71e06230be10af14492ca8a75b`) and SGLang release/v0.5.20
@@ -257,7 +258,14 @@ training workers, PD, pipeline parallelism, LoRA, quantization and MTP rollout.
 
 For Qwen3.5, the launcher sets
 `json_model_override_args='{"language_model_only": true}'`, which selects the
-upstream model's language-only implementation. The Uni-Agent gateway supplies
+upstream model's language-only implementation. This sets the HF model config,
+not SGLang's top-level `ServerArgs.language_model_only` flag. In SGLang 0.5.20,
+the top-level flag remains false, so its architecture allowlist and incompatible
+serving-flag checks do not apply to this route. The two modes do not promise the
+same media-input rejection behavior. Models must consume the HF config option;
+the real single-task validation covers Qwen3.5-9B, not arbitrary VLMs.
+
+The Uni-Agent gateway supplies
 tokenizer EOS IDs when the SGLang backend skips tokenizer initialization. It
 respects per-request `ignore_eos` and explicit stops, without injecting string
 stop sequences or reloading the tokenizer.

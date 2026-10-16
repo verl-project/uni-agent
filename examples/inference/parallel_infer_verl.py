@@ -124,6 +124,8 @@ def init_config(args: argparse.Namespace, *, served_model_name: str):
     rollout.free_cache_engine = False
     OmegaConf.update(config, "actor_rollout_ref.rollout.enable_sleep_mode", False, force_add=True)
     if args.engine == "vllm":
+        if getattr(args, "language_model_only", False):
+            logger.warning("--language-model-only configures SGLang HF text-only mode; ignoring it for vLLM.")
         OmegaConf.update(
             config,
             "actor_rollout_ref.rollout.engine_kwargs.vllm.kv_cache_dtype",
@@ -132,7 +134,7 @@ def init_config(args: argparse.Namespace, *, served_model_name: str):
         )
 
     if args.engine == "sglang" and getattr(args, "language_model_only", False):
-        # Qwen3.5/Qwen3-VL consume this native HF-config option in SGLang.
+        # Set the model's HF-config option, not SGLang's top-level serving flag.
         OmegaConf.update(
             config,
             "actor_rollout_ref.rollout.engine_kwargs.sglang.json_model_override_args",
@@ -368,7 +370,7 @@ def main() -> None:
     parser.add_argument(
         "--language-model-only",
         action="store_true",
-        help="Enable SGLang HF-config text-only mode for Qwen3.5/Qwen3-VL; ignored by vLLM.",
+        help="Enable SGLang HF-config text-only mode (validated on Qwen3.5-9B); ignored by vLLM with a warning.",
     )
     parser.add_argument(
         "--enforce-eager",
