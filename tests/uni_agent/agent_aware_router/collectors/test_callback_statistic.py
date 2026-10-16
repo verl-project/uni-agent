@@ -26,6 +26,7 @@ from __future__ import annotations
 import asyncio
 
 import pytest
+from conftest import BLOCK_SIZE
 
 from uni_agent.agent_aware_router.collectors.parse import MetricsUpdate, StickyUpdate
 from uni_agent.agent_aware_router.collectors.parse.basic.inflight import InflightParser
@@ -34,6 +35,7 @@ from uni_agent.agent_aware_router.collectors.transport.callback import (
     CallbackTransport,
     StatisticEvent,
 )
+from uni_agent.agent_aware_router.strategies import route
 from uni_agent.agent_aware_router.types import MetricKey
 
 pytestmark = [pytest.mark.level0, pytest.mark.cpu]
@@ -87,6 +89,7 @@ class TestInflightParser:
         }
         assert upd.is_delta is True
         assert upd.request_id == "r1"  # carried so the collector attributes the dispatch's turn
+        assert upd.prompt_ids == ()  # no token list on the event → nothing to look up
 
     def test_on_release_emits_inflight_minus_completed_delta(self):
         upd = InflightParser().parse(StatisticEvent("on_release", replica_id="s0", request_id="r1"), "")
@@ -189,14 +192,17 @@ class TestCollectorCallbackIntegration:
 
     @pytest.fixture(autouse=True)
     def _reset_singletons(self):
+        from uni_agent.agent_aware_router.store.kv_cache_store import KVCacheStore
         from uni_agent.agent_aware_router.store.per_replica_store import PerReplicaStore
         from uni_agent.agent_aware_router.store.per_request_store import PerRequestStore
 
         PerReplicaStore._instance = None
         PerRequestStore._instance = None
+        KVCacheStore._instance = None  # carries per-request block pins now
         yield
         PerReplicaStore._instance = None
         PerRequestStore._instance = None
+        KVCacheStore._instance = None
 
     def test_sticky_collector_writes_binding_on_acquire(self):
         from uni_agent.agent_aware_router.collectors.collector import Collector
@@ -241,6 +247,26 @@ class TestCollectorCallbackIntegration:
             # prompt-len sum: s0 accumulates 3+10; s1 gets 0 (None prompt not forwarded)
             assert ds.get_metric("s0", MetricKey.PROMPT_LEN_SUM) == 13
             assert ds.get_metric("s1", MetricKey.PROMPT_LEN_SUM) == 0
+        finally:
+            collector.stop()
+
+    def test_missing_prompt_ids_or_block_size_still_books_raw_len(self):
+        """No token list / no learned block size → nothing pinned, raw plen booked."""
+        from uni_agent.agent_aware_router.collectors.collector import Collector
+        from uni_agent.agent_aware_router.store.data_store import DataStore
+
+        ds = DataStore()  # block_size never learned → the chain is unresolvable
+        balancer = _FakeBalancer()
+        collector = Collector(CallbackTransport(balancer), InflightParser())
+        collector.start()
+        try:
+            balancer.callbacks["on_acquire"][0]("r1", "s0", list(range(64)))  # no block size
+            balancer.callbacks["on_acquire"][0]("r2", "s0", None)  # no prompt at all
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_TOKENS) == 64  # raw
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_BLOCKS) == 0  # nothing pinned
+
+            balancer.callbacks["on_release"][0]("s0", "r1")
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_TOKENS) == 0  # balanced
         finally:
             collector.stop()
 
@@ -298,6 +324,209 @@ class TestCollectorCallbackIntegration:
         ds = DataStore()
         assert ds.get_per_request("r1", "turn", 0) == 0  # no dispatch → no turn recorded
         assert ds.get_metric("s0", MetricKey.INFLIGHT_TURN_SUM) == 0
+
+
+class TestInflightBlockPin:
+    """Held-block account: acquire pins, release unpins, ``INFLIGHT_BLOCKS`` is an absolute gauge."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_singletons(self):
+        from uni_agent.agent_aware_router.store.kv_cache_store import KVCacheStore
+        from uni_agent.agent_aware_router.store.per_replica_store import PerReplicaStore
+        from uni_agent.agent_aware_router.store.per_request_store import PerRequestStore
+
+        PerReplicaStore._instance = None
+        PerRequestStore._instance = None
+        KVCacheStore._instance = None
+        yield
+        PerReplicaStore._instance = None
+        PerRequestStore._instance = None
+        KVCacheStore._instance = None
+
+    @staticmethod
+    def _start(block_size: int = BLOCK_SIZE):
+        from uni_agent.agent_aware_router.collectors.collector import Collector
+        from uni_agent.agent_aware_router.store.data_store import DataStore
+
+        ds = DataStore()
+        ds.set_block_size(block_size)
+        balancer = _FakeBalancer()
+        collector = Collector(CallbackTransport(balancer), InflightParser())
+        collector.start()
+        return collector, balancer, ds
+
+    def test_concurrent_same_prefix_counts_once_and_survives_one_release(self):
+        """Two dispatches of one prompt: held once (not 8), ``INFLIGHT_TOKENS`` stays raw; one release frees nothing."""
+        prompt = list(range(4 * BLOCK_SIZE))
+        collector, balancer, ds = self._start()
+        try:
+            balancer.callbacks["on_acquire"][0]("r1", "s0", prompt)
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_BLOCKS) == 4
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_TOKENS) == 4 * BLOCK_SIZE  # raw
+
+            balancer.callbacks["on_acquire"][0]("r2", "s0", prompt)
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_BLOCKS) == 4  # dedup
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_TOKENS) == 8 * BLOCK_SIZE  # raw again
+
+            balancer.callbacks["on_release"][0]("s0", "r1")
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_BLOCKS) == 4  # r2 still holds all
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_TOKENS) == 4 * BLOCK_SIZE  # r1's row only
+
+            balancer.callbacks["on_release"][0]("s0", "r2")
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_BLOCKS) == 0
+            assert ds.get_metric("s0", MetricKey.COMPLETED_COUNT) == 2
+        finally:
+            collector.stop()
+
+    def test_release_recovers_the_pinned_set_even_after_memo_eviction(self, monkeypatch):
+        """Releases carry no prompt (verl #7115), so the pin marker — not the hashing
+        memo — is the source of truth: evicting the memo row before release still
+        unwinds exactly what dispatch pinned."""
+        from uni_agent.agent_aware_router.collectors import collector as collector_module
+
+        prompt = list(range(4 * BLOCK_SIZE))
+        collector, balancer, ds = self._start()
+        # The router's logging namespace is mounted with propagate=False, so the
+        # module logger is captured directly rather than through caplog.
+        warnings: list[str] = []
+        monkeypatch.setattr(collector_module.logger, "warning", lambda msg, *a, **k: warnings.append(str(msg)))
+        try:
+            balancer.callbacks["on_acquire"][0]("r1", "s0", prompt)
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_BLOCKS) == 4
+            ds.del_per_request("r1", "prefix_hashes")  # memo evicted before the release
+
+            balancer.callbacks["on_release"][0]("s0", "r1")
+
+            assert not warnings, warnings
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_BLOCKS) == 0
+            assert ds.get_metric("s0", MetricKey.COMPLETED_COUNT) == 1
+        finally:
+            collector.stop()
+
+    def test_reacquire_without_release_does_not_double_count(self, monkeypatch):
+        """A dropped release: re-acquire unpins the stale set (warns) and nets the booked tokens."""
+        from uni_agent.agent_aware_router.collectors import collector as collector_module
+
+        prompt = list(range(4 * BLOCK_SIZE))
+        collector, balancer, ds = self._start()
+        warnings: list[str] = []
+        monkeypatch.setattr(collector_module.logger, "warning", lambda msg, *a, **k: warnings.append(str(msg)))
+        try:
+            balancer.callbacks["on_acquire"][0]("r1", "s0", prompt)
+            balancer.callbacks["on_acquire"][0]("r1", "s0", prompt)
+
+            assert any("re-acquire without release" in w for w in warnings), warnings
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_BLOCKS) == 4
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_TOKENS) == 4 * BLOCK_SIZE
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_COUNT) == 1  # one turn genuinely in flight
+
+            balancer.callbacks["on_release"][0]("s0", "r1")
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_BLOCKS) == 0
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_TOKENS) == 0
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_COUNT) == 0
+        finally:
+            collector.stop()
+
+    def test_reacquire_after_prompt_swap_unpins_the_stale_set_not_the_new_memo(self):
+        """score() re-resolves a shorter, content-disjoint prompt before the stale
+        re-acquire reaches the collector, so the memo no longer describes what the
+        stale dispatch pinned: the unpin must come from the pin marker, else the old
+        chain leaks (held would be 6, not 2)."""
+        from uni_agent.agent_aware_router.utils.prefix_cache import resolve_prefix_hashes
+
+        collector, balancer, ds = self._start()
+        swapped = list(range(1000, 1000 + 2 * BLOCK_SIZE))
+        try:
+            balancer.callbacks["on_acquire"][0]("r1", "s0", list(range(4 * BLOCK_SIZE)))
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_BLOCKS) == 4
+
+            # What score() does between the two dispatches: the memo row is replaced
+            # by the new prompt's disjoint chain before the collector sees the
+            # re-acquire.
+            resolve_prefix_hashes(swapped, "r1", ds)
+
+            balancer.callbacks["on_acquire"][0]("r1", "s0", swapped)
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_BLOCKS) == 2
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_COUNT) == 1  # one turn genuinely in flight
+
+            balancer.callbacks["on_release"][0]("s0", "r1")
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_BLOCKS) == 0
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_TOKENS) == 0
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_COUNT) == 0
+        finally:
+            collector.stop()
+
+    def test_avail_holds_steady_across_a_shared_prefix_dispatch(self):
+        """End-to-end: shared-prefix rollouts keep ``INFLIGHT_BLOCKS`` (and thus routing) steady.
+
+        s0 near-full and s1 pinned full; r1/r2 take the same 9-block prompt on s0 —
+        the gauge must not move on r2's acquire or r1's release, so routing keeps s0.
+        """
+        from uni_agent.agent_aware_router.strategies.base import ReplicaInfo
+        from uni_agent.agent_aware_router.strategies.kvc_aware import KVCacheAwareStrategy
+        from uni_agent.agent_aware_router.types import SlowCut
+
+        prompt = list(range(9 * BLOCK_SIZE))
+        collector, balancer, ds = self._start()
+        ds.refresh_metrics(
+            {
+                "s0": {MetricKey.NUM_GPU_BLOCKS: 10},
+                "s1": {MetricKey.NUM_GPU_BLOCKS: 10, MetricKey.INFLIGHT_BLOCKS: 10},
+            }
+        )
+        strat = KVCacheAwareStrategy(
+            alpha=0.7,
+            load_threshold=0.9,
+            layer_weights={"gpu": 0.7, "cpu": 0.2, "ssd": 0.1},
+            load_weights=(0.4, 0.2, 0.1, 0.3),
+            slow_cut=SlowCut.CAPACITY_TOKEN_AWARE,
+            do_shortcut=False,
+            tie_tolerance=0.0,
+        )
+        strat.set_capacity(64, 1024)
+        replicas = [ReplicaInfo(replica_id="s0"), ReplicaInfo(replica_id="s1")]
+        try:
+            balancer.callbacks["on_acquire"][0]("r1", "s0", prompt)
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_BLOCKS) == 9
+            assert route(strat, prompt, ds, replicas, "r1")[0] == "s0"
+
+            balancer.callbacks["on_acquire"][0]("r2", "s0", prompt)
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_BLOCKS) == 9  # dedup, not 18
+            assert route(strat, prompt, ds, replicas, "r2")[0] == "s0"
+
+            balancer.callbacks["on_release"][0]("s0", "r1")
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_BLOCKS) == 9  # r2 still holds
+            assert route(strat, prompt, ds, replicas, "r1")[0] == "s0"
+
+            balancer.callbacks["on_release"][0]("s0", "r2")
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_BLOCKS) == 0
+            assert route(strat, prompt, ds, replicas, "r2")[0] == "s0"
+        finally:
+            collector.stop()
+
+    def test_acquire_records_the_prefix_as_resident_and_release_keeps_it(self):
+        """Acquire alone makes the prefix a gpu_hit; the resident record outlives release."""
+        from uni_agent.agent_aware_router.utils.prefix_cache import resolve_prefix_hashes
+
+        prompt = list(range(4 * BLOCK_SIZE))
+        collector, balancer, ds = self._start()
+        try:
+            chain = resolve_prefix_hashes(prompt, None, ds)
+            assert ds.get_layer_prefix_hit_rate("s0", chain) == 0.0
+
+            balancer.callbacks["on_acquire"][0]("r1", "s0", prompt)
+            assert ds.get_layer_prefix_hit_rate("s0", chain) == 1.0
+            assert ds.per_replica_block_counts() == {"s0": 4}
+            assert collector._dispatch_recorded_blocks == 4
+
+            balancer.callbacks["on_release"][0]("s0", "r1")
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_BLOCKS) == 0  # held drops...
+            assert ds.per_replica_block_counts() == {"s0": 4}  # ...resident survives release
+
+            balancer.callbacks["on_acquire"][0]("r2", "s0", prompt)
+            assert collector._dispatch_recorded_blocks == 4  # r2's record is a no-op
+        finally:
+            collector.stop()
 
 
 class _RecordingRLInsight:

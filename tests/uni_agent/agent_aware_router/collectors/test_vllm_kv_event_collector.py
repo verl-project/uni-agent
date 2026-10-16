@@ -122,15 +122,17 @@ class TestVLLMKVEventCollector:
         """
         Feature: VLLMKVParser.remote_to_local_block_hash is populated after events
         Description:
-            Verify that the parser's hash mapping tracks remote->local block hashes,
-            and that every local hash appears in the KV cache store.
+            Verify that the parser's per-replica hash mapping tracks remote->local
+            block hashes, and that every local hash appears in the KV cache store.
         Expectation:
-            remote_to_local_block_hash is non-empty.
+            The map is keyed by node_id and holds this node's remote->local entries.
             All local hashes are present in the KV cache store.
         """
         store, collector = _run([kv_payload(make_stored_event("rh0", _block_ids(0)))])
 
-        mapping = collector._parser.remote_to_local_block_hash
+        node_maps = collector._parser.remote_to_local_block_hash
+        assert NODE_ID in node_maps, "map must be keyed by node_id (per-replica isolation)"
+        mapping = node_maps[NODE_ID]
         assert len(mapping) > 0, "remote_to_local_block_hash should have entries after processing events"
         for remote_bh, local_bh in mapping.items():
             assert isinstance(remote_bh, str)

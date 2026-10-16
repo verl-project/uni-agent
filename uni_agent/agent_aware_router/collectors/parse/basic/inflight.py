@@ -37,14 +37,15 @@ forwarded as a ``PROMPT_LEN_SUM`` delta — the per-replica cumulative
 request-size signal the plot derives an average dispatched prompt length from.
 
 ``INFLIGHT_TOKENS`` is the token-weighted sibling of the inflight gauge: acquire
-adds the request's ``prompt_len``. Releases carry no length (verl #7115
-serializes only ``request_id`` on release), so the collector folds the negative
-``INFLIGHT_TOKENS`` delta from its acquire-time per-request ``prompt_len`` row —
-the same acquire-record / release-consume shape as the turn handling below.
+adds the request's ``prompt_len``; releases carry no length (verl #7115), so the
+collector folds the negative delta from its acquire-time per-request row. Acquire
+also forwards ``prompt_ids`` so the collector can pin the dispatch's prefix blocks
+on the chosen replica (the held-block account behind ``INFLIGHT_BLOCKS``).
 
 Event → delta mapping:
 - ``on_acquire`` → ``INFLIGHT_COUNT``/``DISPATCHED_COUNT`` +1,
-  ``INFLIGHT_TOKENS``/``PROMPT_LEN_SUM`` +``prompt_len``, carrying ``request_id``.
+  ``INFLIGHT_TOKENS``/``PROMPT_LEN_SUM`` +``prompt_len``, carrying ``request_id``
+  and ``prompt_ids``.
 - ``on_release`` → ``INFLIGHT_COUNT`` -1, ``COMPLETED_COUNT`` +1, carrying
   ``request_id`` (the ``INFLIGHT_TOKENS`` subtraction is folded by the
   collector from acquire-time bookkeeping, not this event).
@@ -90,6 +91,7 @@ class InflightParser(Parser):
                 },
                 is_delta=True,
                 request_id=event.request_id,
+                prompt_ids=event.prompt_ids,
             )
         if event.event == "on_release":
             return MetricsUpdate(
