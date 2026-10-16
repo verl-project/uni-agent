@@ -1,0 +1,245 @@
+name: Test NPU Runner
+on:
+  pull_request:
+    branches: [ "main" ]
+    types: [ opened, synchronize, reopened ]
+jobs:
+  job_0:
+    runs-on: linux-aarch64-a2-1
+    container:
+      image: ascendai/cann:latest
+
+    strategy:
+      matrix:
+        python-version: [ "3.12" ]
+
+    env:
+      # 使用 GitHub 加速代理
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # set pypi source
+      PIP_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+      PIP_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi https://pypi.tuna.tsinghua.edu.cn/simple"
+      PIP_TRUSTED_HOST: cache-service.nginx-pypi-cache.svc.cluster.local
+
+    steps:
+      # 1. git clone code
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      # 2. set up python
+      - name: Install lsb-release
+        run: |
+          apt-get update
+          apt-get install -y lsb-release
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: 'pip'
+
+      # 3. install dependencies
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-test.txt -i https://pypi.org/simple
+
+          git clone --branch v4.1.0 https://github.com/princeton-nlp/SWE-bench.git
+          cd SWE-bench
+          pip install -e .
+
+      # 4. Test with pytest
+      - name: Test with pytest
+        run: |
+          pip install pytest pytest-cov pytest-custom_exit_code
+          export PYTHONPATH="${PYTHONPATH}:${GITHUB_WORKSPACE}"
+          pytest tests/uni_agent/ -m="npu and level0 and one_card" --suppress-no-test-exit-code --cov=./uni_agent/ --cov-report=xml --cov-report=term
+
+      - name: Upload NPU coverage
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          file: ./coverage.xml
+          flags: npu-tests-card1
+#
+#  job_1:
+#    runs-on: linux-aarch64-a2-2
+#    container:
+#      image: ascendai/cann:latest
+#
+#    strategy:
+#      matrix:
+#        python-version: [ "3.12" ]
+#
+#    env:
+#      # 使用 GitHub 加速代理
+#      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+#      # set pypi source
+#      PIP_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+#      PIP_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi https://pypi.tuna.tsinghua.edu.cn/simple"
+#      PIP_TRUSTED_HOST: cache-service.nginx-pypi-cache.svc.cluster.local
+#
+#    steps:
+#      # 1. git clone code
+#      - name: Checkout code
+#        uses: actions/checkout@v4
+#        with:
+#          submodules: true
+#
+#      # 2. set up python
+#      - name: Install lsb-release
+#        run: |
+#          apt-get update
+#          apt-get install -y lsb-release
+#
+#      - name: Set up Python ${{ matrix.python-version }}
+#        uses: actions/setup-python@v5
+#        with:
+#          python-version: ${{ matrix.python-version }}
+#          cache: 'pip'
+#
+#      # 3. install dependencies
+#      - name: Install dependencies
+#        run: |
+#          python -m pip install --upgrade pip
+#          pip install -r requirements-test.txt -i https://pypi.org/simple
+#
+#          git clone --branch v4.1.0 https://github.com/princeton-nlp/SWE-bench.git
+#          cd SWE-bench
+#          pip install -e .
+#
+#      # 4. Test with pytest
+#      - name: Test with pytest
+#        run: |
+#          pip install pytest pytest-cov pytest-custom_exit_code
+#          export PYTHONPATH="${PYTHONPATH}:${GITHUB_WORKSPACE}"
+#          pytest tests/uni_agent/ -m="npu and level0 and two_card" --suppress-no-test-exit-code --cov=./uni_agent/ --cov-report=xml --cov-report=term
+#
+#      - name: Upload NPU coverage
+#        uses: codecov/codecov-action@v4
+#        with:
+#          token: ${{ secrets.CODECOV_TOKEN }}
+#          file: ./coverage.xml
+#          flags: npu-tests-card2
+#
+#  job_2:
+#    runs-on: linux-aarch64-a2-4
+#    container:
+#      image: ascendai/cann:latest
+#
+#    strategy:
+#      matrix:
+#        python-version: [ "3.12" ]
+#
+#    env:
+#      # 使用 GitHub 加速代理
+#      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+#      # set pypi source
+#      PIP_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+#      PIP_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi https://pypi.tuna.tsinghua.edu.cn/simple"
+#      PIP_TRUSTED_HOST: cache-service.nginx-pypi-cache.svc.cluster.local
+#
+#    steps:
+#      # 1. git clone code
+#      - name: Checkout code
+#        uses: actions/checkout@v4
+#        with:
+#          submodules: true
+#
+#      # 2. set up python
+#      - name: Install lsb-release
+#        run: |
+#          apt-get update
+#          apt-get install -y lsb-release
+#
+#      - name: Set up Python ${{ matrix.python-version }}
+#        uses: actions/setup-python@v5
+#        with:
+#          python-version: ${{ matrix.python-version }}
+#          cache: 'pip'
+#
+#      # 3. install dependencies
+#      - name: Install dependencies
+#        run: |
+#          python -m pip install --upgrade pip
+#          pip install -r requirements-test.txt -i https://pypi.org/simple
+#
+#          git clone --branch v4.1.0 https://github.com/princeton-nlp/SWE-bench.git
+#          cd SWE-bench
+#          pip install -e .
+#
+#      # 4. Test with pytest
+#      - name: Test with pytest
+#        run: |
+#          pip install pytest pytest-cov pytest-custom_exit_code
+#          export PYTHONPATH="${PYTHONPATH}:${GITHUB_WORKSPACE}"
+#          pytest tests/uni_agent/ -m="npu and level0 and four_card" --suppress-no-test-exit-code --cov=./uni_agent/ --cov-report=xml --cov-report=term
+#
+#      - name: Upload NPU coverage
+#        uses: codecov/codecov-action@v4
+#        with:
+#          token: ${{ secrets.CODECOV_TOKEN }}
+#          file: ./coverage.xml
+#          flags: npu-tests-card4
+#
+#  job_3:
+#    runs-on: linux-aarch64-a2-8
+#    container:
+#      image: ascendai/cann:latest
+#
+#    strategy:
+#      matrix:
+#        python-version: [ "3.12" ]
+#
+#    env:
+#      # 使用 GitHub 加速代理
+#      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+#      # set pypi source
+#      PIP_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+#      PIP_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi https://pypi.tuna.tsinghua.edu.cn/simple"
+#      PIP_TRUSTED_HOST: cache-service.nginx-pypi-cache.svc.cluster.local
+#
+#    steps:
+#      # 1. git clone code
+#      - name: Checkout code
+#        uses: actions/checkout@v4
+#        with:
+#          submodules: true
+#
+#      # 2. set up python
+#      - name: Install lsb-release
+#        run: |
+#          apt-get update
+#          apt-get install -y lsb-release
+#
+#      - name: Set up Python ${{ matrix.python-version }}
+#        uses: actions/setup-python@v5
+#        with:
+#          python-version: ${{ matrix.python-version }}
+#          cache: 'pip'
+#
+#      # 3. install dependencies
+#      - name: Install dependencies
+#        run: |
+#          python -m pip install --upgrade pip
+#          pip install -r requirements-test.txt -i https://pypi.org/simple
+#
+#          git clone --branch v4.1.0 https://github.com/princeton-nlp/SWE-bench.git
+#          cd SWE-bench
+#          pip install -e .
+#
+#      # 4. Test with pytest
+#      - name: Test with pytest
+#        run: |
+#          pip install pytest pytest-cov pytest-custom_exit_code
+#          export PYTHONPATH="${PYTHONPATH}:${GITHUB_WORKSPACE}"
+#          pytest tests/uni_agent/ -m="npu and level0 and eight_card" --suppress-no-test-exit-code --cov=./uni_agent/ --cov-report=xml --cov-report=term
+#
+#      - name: Upload NPU coverage
+#        uses: codecov/codecov-action@v4
+#        with:
+#          token: ${{ secrets.CODECOV_TOKEN }}
+#          file: ./coverage.xml
+#          flags: npu-tests-card8
