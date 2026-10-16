@@ -49,7 +49,7 @@ except ImportError:  # fall back to verl's shim (mock raises a clear error if TQ
     from verl.utils.transferqueue_utils import tq
 
 from uni_agent.framework.entry import AgentFrameworkRolloutAdapter
-from uni_agent.inference.server import InferenceServerManager as LLMServerManager
+from uni_agent.inference.server import InferenceServerManager
 from uni_agent.tasks import TaskConfigResolver
 from verl.utils import tensordict_utils as tu
 
@@ -438,7 +438,7 @@ def main() -> None:
     logger.info("initializing configuration, TransferQueue, and LLMServerManager...")
     config = init_config(args, served_model_name=served_model_name)
     tq.init(config.transfer_queue)
-    llm_server_manager = LLMServerManager.create(config=config)
+    llm_server_manager = InferenceServerManager.create(config=config)
 
     # 2. Framework rollout adapter over the engine.
     adapter = AgentFrameworkRolloutAdapter.create(
