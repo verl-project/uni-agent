@@ -62,7 +62,7 @@ PR titles are checked in CI and must use:
 Allowed areas:
 
 ```text
-agents, framework, gateway, logging, sandbox, tasks, tools, training,
+agents, framework, gateway, router, logging, sandbox, tasks, tools, training,
 app, docs, examples, ci, build, deps, misc
 ```
 

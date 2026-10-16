@@ -14,7 +14,7 @@ Briefly describe what this PR changes and why.
 
 Use `[area] type: summary`.
 
-- Areas: `agents`, `framework`, `gateway`, `logging`, `sandbox`, `tasks`, `tools`, `training`, `app`, `docs`, `examples`, `ci`, `build`, `deps`, `misc`
+- Areas: `agents`, `framework`, `gateway`, `router`, `logging`, `sandbox`, `tasks`, `tools`, `training`, `app`, `docs`, `examples`, `ci`, `build`, `deps`, `misc`
 - Types: `feat`, `fix`, `refactor`, `perf`, `test`, `docs`, `chore`, `revert`
 - Separate multiple areas with comma-space: `[agents, sandbox] feat: add isolated harness execution`
 - Prefix compatibility-breaking work with `[BREAKING]`: `[BREAKING][tasks, docs] refactor: replace task config schema`

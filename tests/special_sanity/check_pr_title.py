@@ -9,6 +9,7 @@ ALLOWED_AREAS = (
     "agents",
     "framework",
     "gateway",
+    "router",
     "logging",
     "sandbox",
     "tasks",

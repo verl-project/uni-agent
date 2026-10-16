@@ -28,7 +28,7 @@ from __future__ import annotations
 import time
 
 import pytest
-from conftest import BLOCK_SIZE, NODE_ID, FakeZMQTransport, kv_payload, make_stored_event
+from conftest import BLOCK_SIZE, NODE_ID, FakeZMQTransport, kv_payload, make_stored_event, mapping_event
 
 from uni_agent.agent_aware_router.collectors.collector import Collector
 from uni_agent.agent_aware_router.collectors.parse.vllm.kv import VLLMKVParser
@@ -136,3 +136,15 @@ class TestVLLMKVEventCollector:
             assert isinstance(remote_bh, str)
             assert isinstance(local_bh, str)
             assert store.has_kv_block(local_bh), f"Local hash '{local_bh}' from mapping not found in KV cache store"
+
+
+def test_wire_events_change_store():
+    """Mapping events store and remove blocks through the collector."""
+    events = [
+        ["BlockStored", [101, 102], None, list(range(2 * BLOCK_SIZE)), BLOCK_SIZE, None, "GPU"],
+        ["BlockRemoved", [102], "GPU", 0],
+    ]
+    store, collector = _run([kv_payload(mapping_event(event)) for event in events])
+    assert store.get_block_size() == BLOCK_SIZE
+    assert store.get_kv_block_count() == 1
+    assert set(collector._parser.remote_to_local_block_hash) == {"101"}

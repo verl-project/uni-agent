@@ -18,9 +18,13 @@ KVCacheEvent — standardized KV cache event data structure.
 
 from __future__ import annotations
 
+import logging
 import struct
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -55,13 +59,19 @@ class KVCacheEvent:
 
         Parsing pattern::
 
-            timestamp    = raw_data[0]               # ignored for routing
-            event_list   = raw_data[1]               # list of events
-            event_tag    = raw_data[1][i][0]          # tag for event i
-            event_fields = raw_data[1][i][1:]         # fields for event i
+            timestamp  = raw_data[0]  # ignored for routing
+            event_list = raw_data[1]
+
+            # Array event:
+            event_tag    = event_entry[0]
+            event_fields = event_entry[1:]
+
+            # Mapping event:
+            event_tag    = event_entry["type"]
+            event_fields = event_entry
 
         Args:
-            raw_data: Msgpack-decoded list ``[timestamp, [[tag, fields...], ...]]``.
+            raw_data: Msgpack-decoded batch ``[timestamp, [event, ...], ...]``.
             default_node_id: Fallback node_id when raw data lacks it.
 
         Returns:
@@ -79,11 +89,15 @@ class KVCacheEvent:
 
         results: list[KVCacheEvent] = []
         for event_entry in event_list:
-            if not isinstance(event_entry, list | tuple) or len(event_entry) < 1:
+            if isinstance(event_entry, Mapping):
+                tag = event_entry.get("type")
+                fields = event_entry
+            elif isinstance(event_entry, list | tuple) and event_entry:
+                tag = event_entry[0]
+                fields = event_entry[1:]
+            else:
                 continue
 
-            tag = event_entry[0]
-            fields = event_entry[1:]
             event_type = cls._resolve_event_type(tag)
             if event_type.startswith("unknown"):
                 continue
@@ -93,7 +107,8 @@ class KVCacheEvent:
                 event = cls._build_event(event_type, fields, node_id)
                 if event is not None:
                     results.append(event)
-            except (ValueError, TypeError, IndexError):
+            except (ValueError, TypeError, IndexError, KeyError) as exc:
+                logger.debug("Skipping malformed KV event (type=%s, node=%s): %s", event_type, node_id, exc)
                 continue
 
         return results
@@ -104,10 +119,23 @@ class KVCacheEvent:
     def _build_event(
         cls,
         event_type: str,
-        fields: list | tuple,
+        fields: list | tuple | Mapping,
         node_id: str,
     ) -> KVCacheEvent | None:
-        """Dispatch to the appropriate builder by event_type."""
+        """Normalize named fields to the legacy layout and share the builders."""
+        if isinstance(fields, Mapping):
+            if event_type == "stored":
+                fields = [
+                    fields["block_hashes"],
+                    fields["parent_block_hash"],
+                    fields["token_ids"],
+                    fields["block_size"],
+                    None,  # Legacy lora_id position; not used by the router.
+                    fields.get("medium"),
+                ]
+            elif event_type == "removed":
+                fields = [fields["block_hashes"], fields.get("medium")]
+
         if event_type == "stored":
             return cls._build_block_stored(fields, node_id)
         elif event_type == "removed":
