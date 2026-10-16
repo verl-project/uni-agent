@@ -47,6 +47,8 @@ export OPENYUANRONG_TUNNEL_SSL_VERIFY="0"   # optional, defaults to 0
 
 The kvc-router metrics dashboard (`verl_agentic_rollout.json`) ships in `uni_agent/agent_aware_router/insight/`. Both drivers pass that directory to `rl-insight server start --extra-dashboard-dir` ([rl-insight #183](https://github.com/verl-project/rl-insight/pull/183)), so the installed rl-insight package stays untouched and json updates apply on every restart. This requires an rl-insight build with the flag; older builds fail at startup.
 
+Signal levels: the emitter tags each metric `basic` (counters + core gauges) or `debug` (score histograms + the derived `inflight_avg_turn` gauge). `VERL_RL_INSIGHT_LEVEL` selects the level, default `basic`; set `VERL_RL_INSIGHT_LEVEL=debug` to fill the dashboard panels that show score histograms and `inflight_avg_turn`.
+
 ## Single-node usage
 
 Prerequisites: a host with >= 8 GPUs (`--n-gpus-per-node` is pinned at 8), a local

@@ -22,6 +22,7 @@ mount points (``on_score``/``on_route``) and all four ``on_write`` kinds.
 
 from __future__ import annotations
 
+import logging
 import sys
 from typing import Any
 
@@ -34,8 +35,6 @@ from uni_agent.agent_aware_router.insight.emitter import (
     emitter,
 )
 from uni_agent.agent_aware_router.types.emit_spec import EMIT_SPECS, EmitKey
-
-pytestmark = [pytest.mark.level0, pytest.mark.cpu]
 
 
 class FakeRLInsight:
@@ -83,21 +82,41 @@ class FakeRLInsight:
 
 @pytest.fixture(autouse=True)
 def _isolate(monkeypatch: pytest.MonkeyPatch):
-    """Start each test with emit off and a clean gate cache; restore after."""
+    """Start each test with emit off and clean gate/level caches; restore after."""
     monkeypatch.delenv(facade.ENABLE_ENV, raising=False)
     monkeypatch.setattr(facade, "_enabled", None)
+    monkeypatch.delenv(facade.LEVEL_ENV, raising=False)
+    monkeypatch.setattr(facade, "_level", None)
+    monkeypatch.setattr(facade, "_level_warned", False)
     yield
 
 
 @pytest.fixture
 def enabled_emitter(monkeypatch: pytest.MonkeyPatch) -> FakeRLInsight:
-    """Enable emit and inject a recording fake as the rl_insight module.
+    """Enable emit at ``debug`` level and inject a recording fake as the rl_insight module.
 
     The fake goes into ``sys.modules`` so the facade's real gate → import →
-    init path runs; only the module itself is the test double.
+    init path runs; only the module itself is the test double. ``debug`` keeps
+    the pre-gating full-signal behavior for the tests below that pin it.
     """
     monkeypatch.setenv(facade.ENABLE_ENV, "1")
     monkeypatch.setattr(facade, "_enabled", True)  # pre-flip gate cache
+    monkeypatch.setenv(facade.LEVEL_ENV, "debug")
+    monkeypatch.setattr(facade, "_level", None)
+    monkeypatch.setattr(facade, "_level_warned", False)
+    fake = FakeRLInsight()
+    monkeypatch.setitem(sys.modules, "rl_insight", fake)
+    yield fake
+
+
+@pytest.fixture
+def basic_emitter(monkeypatch: pytest.MonkeyPatch) -> FakeRLInsight:
+    """Enable emit at the default (``basic``) level: no LEVEL env, fresh cache."""
+    monkeypatch.setenv(facade.ENABLE_ENV, "1")
+    monkeypatch.setattr(facade, "_enabled", True)  # pre-flip gate cache
+    monkeypatch.delenv(facade.LEVEL_ENV, raising=False)
+    monkeypatch.setattr(facade, "_level", None)
+    monkeypatch.setattr(facade, "_level_warned", False)
     fake = FakeRLInsight()
     monkeypatch.setitem(sys.modules, "rl_insight", fake)
     yield fake
@@ -110,6 +129,8 @@ def _by_name(calls: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
 # ── env gating ───────────────────────────────────────────────────────
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_disabled_short_circuits_before_importing_rl_insight(monkeypatch: pytest.MonkeyPatch):
     # env off — the facade must short-circuit before it ever imports rl_insight.
     monkeypatch.delenv(facade.ENABLE_ENV, raising=False)
@@ -123,6 +144,8 @@ def test_disabled_short_circuits_before_importing_rl_insight(monkeypatch: pytest
 # ── A-class: on_score / on_route ─────────────────────────────────────
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_on_score_emits_each_component_with_replica_label(
     enabled_emitter: FakeRLInsight,
 ):
@@ -135,12 +158,16 @@ def test_on_score_emits_each_component_with_replica_label(
     assert _by_name(enabled_emitter.calls)[EmitKey.LOAD]["value"] == 0.3
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_on_score_skips_unknown_component_keys(enabled_emitter: FakeRLInsight):
     emitter.on_score("n0", {"load": 0.3, "not_a_metric": 9.9})
 
     assert [c["name"] for c in enabled_emitter.calls] == [EmitKey.LOAD]
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_on_route_emits_global_latency_histogram(enabled_emitter: FakeRLInsight):
     emitter.on_route(0.005)
 
@@ -157,6 +184,8 @@ def test_on_route_emits_global_latency_histogram(enabled_emitter: FakeRLInsight)
 # ── B-class: on_write by kind ────────────────────────────────────────
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_on_write_poll_emits_levels_cumulatives_and_load(
     enabled_emitter: FakeRLInsight,
 ):
@@ -180,6 +209,8 @@ def test_on_write_poll_emits_levels_cumulatives_and_load(
     assert all(c["labels"] == {"replica": "n0"} for c in enabled_emitter.calls)
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_on_write_acquire_emits_counters_tokens_and_avg_turn(
     enabled_emitter: FakeRLInsight,
 ):
@@ -211,6 +242,8 @@ def test_on_write_acquire_emits_counters_tokens_and_avg_turn(
     assert by_name[EmitKey.INFLIGHT_AVG_TURN]["value"] == 1.5
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_on_write_release_emits_completed_tokens_and_avg_turn_zero_when_idle(
     enabled_emitter: FakeRLInsight,
 ):
@@ -235,6 +268,8 @@ def test_on_write_release_emits_completed_tokens_and_avg_turn_zero_when_idle(
     assert by_name[EmitKey.INFLIGHT_AVG_TURN]["value"] == 0.0  # count 0 → defined as 0
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_on_write_kv_removed_emits_eviction_delta(enabled_emitter: FakeRLInsight):
     emitter.on_write(WriteEvent(kind=WriteKind.KV_REMOVED, node="n0", deltas={EmitKey.KV_EVICTIONS: 7}))
 
@@ -247,6 +282,8 @@ def test_on_write_kv_removed_emits_eviction_delta(enabled_emitter: FakeRLInsight
     )
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_on_write_acquire_without_optional_fields_skips_them(
     enabled_emitter: FakeRLInsight,
 ):
@@ -265,6 +302,8 @@ def test_on_write_acquire_without_optional_fields_skips_them(
 # ── contract sanity: every WriteEvent-reachable primitive is in EMIT_SPECS ──
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_emit_spec_contract_covers_all_referenced_primitives():
     referenced = {
         EmitKey.KV_CACHE_USAGE_PERC,
@@ -285,3 +324,103 @@ def test_emit_spec_contract_covers_all_referenced_primitives():
         EmitKey.ROUTE_LATENCY_SECONDS,
     }
     assert referenced <= set(EMIT_SPECS)
+
+
+# ── level gating (VERL_RL_INSIGHT_LEVEL) ─────────────────────────────
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_emit_spec_levels_are_valid_and_classification_is_pinned():
+    assert all(spec.get("level") in ("basic", "debug") for spec in EMIT_SPECS.values())
+    debug_keys = {k for k, spec in EMIT_SPECS.items() if spec["level"] == "debug"}
+    # debug = the 6 A-class histograms + the derived inflight_avg_turn gauge;
+    # everything else (counters + core gauges) is basic.
+    assert debug_keys == {
+        EmitKey.LOAD,
+        EmitKey.S_CACHE,
+        EmitKey.AVAIL_RATIO,
+        EmitKey.NEED_RATIO,
+        EmitKey.REMAINING_RATIO,
+        EmitKey.ROUTE_LATENCY_SECONDS,
+        EmitKey.INFLIGHT_AVG_TURN,
+    }
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_default_level_is_basic_and_gates_debug_signals(basic_emitter: FakeRLInsight):
+    assert facade.get_emit_level() == "basic"
+    emitter.on_score("n0", {"load": 0.3, "s_cache": 0.7})
+    emitter.on_route(0.005)
+    emitter.on_write(
+        WriteEvent(
+            kind=WriteKind.ACQUIRE,
+            node="n0",
+            deltas={EmitKey.DISPATCHED_COUNT: 1, EmitKey.PROMPT_LEN_SUM: 2163},
+            new_values={EmitKey.INFLIGHT_TOKENS: 2163},
+            turn_sum=3,
+            inflight_count=2,
+        )
+    )
+
+    # Debug signals (A-class histograms + derived avg turn) are no-ops;
+    # basic signals still emit.
+    assert [c["name"] for c in basic_emitter.calls] == [
+        EmitKey.DISPATCHED_COUNT,
+        EmitKey.PROMPT_LEN_SUM,
+        EmitKey.INFLIGHT_TOKENS,
+    ]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_debug_level_emits_full_set_like_before_gating(enabled_emitter: FakeRLInsight):
+    assert facade.get_emit_level() == "debug"
+    emitter.on_score("n0", {"load": 0.3, "s_cache": 0.7})
+    emitter.on_route(0.005)
+    emitter.on_write(
+        WriteEvent(
+            kind=WriteKind.ACQUIRE,
+            node="n0",
+            deltas={EmitKey.DISPATCHED_COUNT: 1, EmitKey.PROMPT_LEN_SUM: 2163},
+            new_values={EmitKey.INFLIGHT_TOKENS: 2163},
+            turn_sum=3,
+            inflight_count=2,
+        )
+    )
+
+    assert set(_by_name(enabled_emitter.calls)) == {
+        EmitKey.LOAD,
+        EmitKey.S_CACHE,
+        EmitKey.ROUTE_LATENCY_SECONDS,
+        EmitKey.DISPATCHED_COUNT,
+        EmitKey.PROMPT_LEN_SUM,
+        EmitKey.INFLIGHT_TOKENS,
+        EmitKey.INFLIGHT_AVG_TURN,
+    }
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_invalid_level_warns_once_and_falls_back_to_basic(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+):
+    monkeypatch.setenv(facade.ENABLE_ENV, "1")
+    monkeypatch.setattr(facade, "_enabled", True)
+    monkeypatch.setenv(facade.LEVEL_ENV, "verbose")
+    monkeypatch.setattr(facade, "_level", None)
+    monkeypatch.setattr(facade, "_level_warned", False)
+    fake = FakeRLInsight()
+    monkeypatch.setitem(sys.modules, "rl_insight", fake)
+
+    with caplog.at_level(logging.WARNING, logger=facade.__name__):
+        emitter.on_score("n0", {"load": 0.3})
+        emitter.on_score("n0", {"load": 0.4})
+
+    warnings = [r.getMessage() for r in caplog.records if "falling back to 'basic'" in r.getMessage()]
+    assert warnings == ["invalid VERL_RL_INSIGHT_LEVEL='verbose'; falling back to 'basic'"]
+    # Invalid level behaves as basic: debug gated out, basic still emits.
+    assert fake.calls == []
+    emitter.on_write(WriteEvent(kind=WriteKind.KV_REMOVED, node="n0", deltas={EmitKey.KV_EVICTIONS: 7}))
+    assert [c["name"] for c in fake.calls] == [EmitKey.KV_EVICTIONS]

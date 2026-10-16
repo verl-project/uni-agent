@@ -73,6 +73,12 @@ worker_exec() {
 # container's editable installs (uni-agent/verl), not PYTHONPATH.
 worker_exec_with_env() {
     local host=$1 hip=$2; shift 2
+    local rl_insight_level="${VERL_RL_INSIGHT_LEVEL:-basic}"
+    case "${rl_insight_level}" in
+        basic|debug) ;;
+        *) log "WARNING: invalid VERL_RL_INSIGHT_LEVEL; using basic"
+           rl_insight_level=basic ;;
+    esac
     local ascend_env=""
     if [ "$DEVICE" = "ascend" ]; then
         ascend_env="-e HCCL_IF_BASE_PORT=${HCCL_IF_BASE_PORT:-26100} \
@@ -82,6 +88,7 @@ worker_exec_with_env() {
     ssh -o StrictHostKeyChecking=no "${host}" "docker exec \
         -e VERL_LOGGING_LEVEL=${VERL_LOGGING_LEVEL:-INFO} \
         -e VERL_RL_INSIGHT_ENABLE=1 \
+        -e VERL_RL_INSIGHT_LEVEL=${rl_insight_level} \
         -e RL_INSIGHT_SERVER_URL=http://${hip}:${RL_INSIGHT_PORT} \
         -e OPENYUANRONG_SERVER_ADDRESS=${OPENYUANRONG_SERVER_ADDRESS} \
         -e OPENYUANRONG_TOKEN=${OPENYUANRONG_TOKEN} \
