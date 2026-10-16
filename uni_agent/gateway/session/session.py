@@ -7,6 +7,7 @@ import hashlib
 import json
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any
@@ -25,6 +26,24 @@ _TRAJECTORY_CAPACITY_HINT = (
     "CLAUDE_CODE_MAX_OUTPUT_TOKENS alone will not help. Check the rollout prompt_length/response_length "
     "budget or compact context earlier; the episode may be unfinished."
 )
+
+
+async def _wait_until_done(
+    task: asyncio.Task[Any], *, on_cancel: Callable[[], None] | None = None
+) -> asyncio.CancelledError | None:
+    """Wait through caller cancellation; the caller must retrieve the task's outcome."""
+    cancellation = None
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError as exc:
+            if not task.cancelled():
+                cancellation = cancellation or exc
+            if on_cancel is not None:
+                on_cancel()
+        except Exception:
+            pass  # The caller handles the completed task's result or exception.
+    return cancellation
 
 
 class SessionPhase(str, Enum):
@@ -229,6 +248,9 @@ class GatewaySession:
         self.materialized_chains: list[MaterializedChain] = []
         self.reserved_chain_ids: set[int] = set()
         self._inflight_exact_requests: dict[str, InflightRequest] = {}
+        # Each value records whether we have already requested cancellation.
+        self._generation_tasks: dict[asyncio.Task[GenerationOutcome], bool] = {}
+        self._abort_task: asyncio.Task[None] | None = None
         self._next_chain_id = 1
         self._order_seq = 0
         self._rollback_count = 0
@@ -245,6 +267,27 @@ class GatewaySession:
         return dict(self._sampling_params)
 
     async def run_generation(self, request: InternalGenerationRequest, backend) -> GenerationOutcome:
+        """Own one generation task and settle it before propagating cancellation."""
+        if self.phase != SessionPhase.ACTIVE:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Session {self.handle.session_id} is {self.phase.value.lower()}",
+            )
+        # Admission and registration are one event-loop operation. The owned
+        # task covers preparation, backend generation, commit and cleanup.
+        task = asyncio.create_task(self._run_generation(request, backend))
+        self._generation_tasks[task] = False
+        try:
+            cancellation = await _wait_until_done(task, on_cancel=lambda: self._cancel_generation_task(task))
+            if cancellation is not None:
+                if not task.cancelled():
+                    task.exception()
+                raise cancellation
+            return task.result()
+        finally:
+            self._generation_tasks.pop(task, None)
+
+    async def _run_generation(self, request: InternalGenerationRequest, backend) -> GenerationOutcome:
         """Run one provider-normalized generation request and return its business outcome.
 
         The backend is passed in for this call only; the session does not own the
@@ -508,13 +551,44 @@ class GatewaySession:
             return ordered_trajectories
 
     async def abort(self) -> None:
-        """Abort the session and prevent further generation."""
-        async with self.request_lock:
-            if self.phase == SessionPhase.ABORTED:
-                return
-            if self.phase == SessionPhase.FINALIZED:
-                raise RuntimeError(f"Session {self.handle.session_id} is finalized")
+        """Close admission and settle generation before the actor removes the session.
+
+        The caller can release backend routes only after this returns. Backend
+        cancellation may itself wait for request-slot release, so both repeated
+        aborts and cancelled callers must wait for the same owned cleanup task.
+        """
+        if self.phase == SessionPhase.FINALIZED:
+            raise RuntimeError(f"Session {self.handle.session_id} is finalized")
+        if asyncio.current_task() in self._generation_tasks:
+            raise RuntimeError("Cannot abort a session from its own generation task")
+        if self._abort_task is None:
+            # No await separates closing admission and taking ownership of the
+            # registered calls. Do not wait for request_lock here: preparation
+            # and decode hold it across awaits and must be cancellable too.
             self.phase = SessionPhase.ABORTED
+            self._touch()
+            self._abort_task = asyncio.create_task(self._cancel_generation_tasks(tuple(self._generation_tasks)))
+        abort_task = self._abort_task
+
+        # Do not hold request_lock: generation cleanup needs it to release chain
+        # reservations. Shield the shared task through repeated cancellation.
+        cancellation = await _wait_until_done(abort_task)
+        abort_task.result()
+        if cancellation is not None:
+            raise cancellation
+
+    def _cancel_generation_task(self, task: asyncio.Task[GenerationOutcome]) -> None:
+        # We own these tasks, so all cancellation requests pass this gate. A
+        # second cancel would interrupt backend finally/request-slot cleanup.
+        if not task.done() and not self._generation_tasks.get(task, False):
+            self._generation_tasks[task] = True
+            task.cancel()
+
+    async def _cancel_generation_tasks(self, tasks: tuple[asyncio.Task[GenerationOutcome], ...]) -> None:
+        for task in tasks:
+            self._cancel_generation_task(task)
+        await asyncio.gather(*tasks, return_exceptions=True)
+        async with self.request_lock:
             self.active_chains = []
             self.materialized_chains = []
             self.reserved_chain_ids.clear()

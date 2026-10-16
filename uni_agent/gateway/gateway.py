@@ -342,8 +342,16 @@ class _GatewayActor:
         session = self._sessions.get(session_id)
         if session is None:
             return  # Already finalized or aborted — treat as idempotent.
-        await session.abort()
+        cancellation: asyncio.CancelledError | None = None
+        try:
+            await session.abort()
+        except asyncio.CancelledError as exc:
+            # Session.abort settles generation before surfacing cancellation.
+            # Complete the actor's owned removal before propagating it too.
+            cancellation = exc
         self._sessions.pop(session_id, None)
+        if cancellation is not None:
+            raise cancellation
 
     async def get_session_state(self, session_id: str) -> dict[str, Any]:
         """Return a snapshot of a live session's state."""
