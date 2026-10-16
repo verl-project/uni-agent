@@ -34,6 +34,21 @@ def _parse_inference_args(monkeypatch, *argv):
 
 @pytest.mark.cpu
 @pytest.mark.level0
+@pytest.mark.parametrize("override", [False, True])
+def test_prompt_length_cli_can_override_invalid_environment(monkeypatch, capsys, override):
+    monkeypatch.setenv("PROMPT_LENGTH", "invalid")
+    if override:
+        args = _parse_inference_args(monkeypatch, "--prompt-length", "2048")
+        assert args.prompt_length == 2048
+    else:
+        with pytest.raises(SystemExit) as exc:
+            _parse_inference_args(monkeypatch)
+        assert exc.value.code == 2
+        assert "--prompt-length: invalid int value" in capsys.readouterr().err
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_shared_inference_preserves_defaults_and_accepts_recipe_overrides(monkeypatch):
     monkeypatch.setenv("LIMIT", "7")
     with monkeypatch.context() as context:
