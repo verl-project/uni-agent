@@ -466,8 +466,6 @@ def _messages_from_input(payload: dict[str, Any]) -> list[dict[str, Any]]:
                 }
             )
             continue
-        if item_type in {"compaction", "compaction_summary"}:
-            raise MalformedRequestError(f"Unsupported Responses input item type {item_type!r} at {param}")
         raise MalformedRequestError(f"Unsupported Responses input item type {item_type!r} at {param}")
     _flush_assistant_pending(messages, pending)
     if not any(message.get("role") in {"system", "user"} for message in messages):
@@ -483,8 +481,9 @@ def responses_to_internal(
 ) -> InternalGenerationRequest:
     if not isinstance(payload, dict):
         raise MalformedRequestError("Request body must be a JSON object")
-    if "max_tokens" in payload:
-        raise MalformedRequestError("max_tokens is not a Responses field; use max_output_tokens")
+    for key in ("max_tokens", "max_completion_tokens"):
+        if key in payload:
+            raise MalformedRequestError(f"{key} is not a Responses field; use max_output_tokens")
     if payload.get("background") is True:
         raise MalformedRequestError("background Responses are not supported")
     if payload.get("store") is True:
@@ -528,15 +527,14 @@ def responses_to_internal(
 
     converted_tools, _, _ = _convert_tools(_collect_tool_defs(payload), drop_deferred=True)
     chat_payload: dict[str, Any] = {
+        **payload,
         "messages": _messages_from_input(payload),
         "tools": None if tool_choice == "none" else converted_tools or None,
         "tool_choice": tool_choice,
     }
-    for key in ("temperature", "top_p", "top_k", "stop"):
-        if payload.get(key) is not None:
-            chat_payload[key] = payload[key]
-    if payload.get("max_output_tokens") is not None:
-        chat_payload["max_tokens"] = payload["max_output_tokens"]
+    max_output_tokens = chat_payload.pop("max_output_tokens", None)
+    if max_output_tokens is not None:
+        chat_payload["max_tokens"] = max_output_tokens
     return openai_to_internal(
         chat_payload,
         base_sampling_params=base_sampling_params,

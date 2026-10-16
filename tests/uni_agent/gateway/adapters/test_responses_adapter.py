@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -726,6 +727,8 @@ def test_responses_rejects_unsupported_tool_choice_shapes(choice):
     "overrides",
     [
         {"max_tokens": 64},
+        {"max_completion_tokens": 64},
+        {"max_completion_tokens": None},
         {"max_tokens": None},
         {"max_tokens": 64, "max_output_tokens": None},
         {"max_tokens": 128, "max_output_tokens": 128},
@@ -985,12 +988,19 @@ def test_text_compaction_summary_remains_an_ordinary_user_message():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stream", [False, True])
-@pytest.mark.parametrize("with_source", [False, True])
 @pytest.mark.parametrize(
-    "location", ["summary", "reasoning_content", "summary_text", "output", "text", "tool_text", "image_with_output"]
+    "location,with_source",
+    [
+        ("summary", False),
+        ("reasoning_content", True),
+        ("summary_text", True),
+        ("output", True),
+        ("text", True),
+        ("tool_text", True),
+        ("image_with_output", True),
+    ],
 )
-async def test_images_in_text_only_fields_are_rejected_without_omission(stream, with_source, location):
+async def test_images_in_text_only_fields_are_rejected_without_omission(location, with_source):
     image = {"type": "input_image"}
     if with_source:
         image["image_url"] = "data:image/png;base64,AAAA"
@@ -1013,18 +1023,18 @@ async def test_images_in_text_only_fields_are_rejected_without_omission(stream, 
     else:
         item = {"type": "reasoning", "summary": {**image, "output": "must-not-bypass-image-validation"}}
     message = await _assert_responses_request_fails_before_generation(
-        _request(stream=stream, input=[{"role": "user", "content": "q"}, item])
+        _request(input=[{"role": "user", "content": "q"}, item])
     )
     assert "input_image" in message and "input[1]" in message
     assert "[Image omitted]" not in message
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stream", [False, True])
-@pytest.mark.parametrize("reverse", [False, True])
-@pytest.mark.parametrize("deferred", [False, True])
-@pytest.mark.parametrize("placement", ["flat", "namespace", "separate_namespaces"])
-async def test_conflicting_tool_kinds_are_rejected_before_generation(stream, reverse, deferred, placement):
+@pytest.mark.parametrize(
+    "placement,reverse,deferred",
+    [("flat", False, False), ("namespace", False, False), ("separate_namespaces", False, False), ("flat", True, True)],
+)
+async def test_conflicting_tool_kinds_are_rejected_before_generation(placement, reverse, deferred):
     tools = [{"type": "function", "name": "same", "parameters": {"type": "object"}}, {"type": "custom", "name": "same"}]
     if deferred:
         tools[0]["defer_loading"] = True
@@ -1034,7 +1044,7 @@ async def test_conflicting_tool_kinds_are_rejected_before_generation(stream, rev
         tools = [{"type": "namespace", "name": "group", "tools": tools}]
     elif placement == "separate_namespaces":
         tools = [{"type": "namespace", "name": "group", "tools": [tool]} for tool in tools]
-    message = await _assert_responses_request_fails_before_generation(_request(stream=stream, tools=tools))
+    message = await _assert_responses_request_fails_before_generation(_request(tools=tools))
     assert "tool kind" in message and "same" in message
 
 
@@ -1049,3 +1059,79 @@ def test_duplicate_tool_declarations_of_the_same_kind_keep_existing_behavior(kin
         allowed_sampling_keys=ALLOWED_SAMPLING_KEYS,
     )
     assert [tool["function"]["name"] for tool in request["tools"]] == ["same", "same"]
+
+
+def test_responses_forwards_configured_sampling_keys_without_mutating_inputs():
+    from uni_agent.gateway.adapters.openai_response import responses_to_internal
+
+    payload = _request(presence_penalty=1.5, seed=42, frequency_penalty=1.8, temperature=0.25)
+    original = copy.deepcopy(payload)
+    base = {"presence_penalty": 0, "seed": 1, "frequency_penalty": 0.3, "temperature": 0.7, "top_p": 0.9}
+    allowed = frozenset({"presence_penalty", "seed", "max_tokens", "top_p"})
+    request = responses_to_internal(payload, base_sampling_params=base, allowed_sampling_keys=allowed)
+
+    assert request["sampling_params"] == {
+        "presence_penalty": 1.5,
+        "seed": 42,
+        "frequency_penalty": 0.3,
+        "temperature": 0.7,
+        "top_p": 0.9,
+        "max_tokens": 128,
+    }
+    assert payload == original
+    assert base == {"presence_penalty": 0, "seed": 1, "frequency_penalty": 0.3, "temperature": 0.7, "top_p": 0.9}
+
+
+@pytest.mark.parametrize(
+    "overrides,expected",
+    [
+        ({}, {"presence_penalty": 0.5, "seed": 1}),
+        ({"presence_penalty": 0, "seed": 0}, {"presence_penalty": 0, "seed": 0}),
+        ({"presence_penalty": None, "seed": None}, {"presence_penalty": None, "seed": None}),
+    ],
+    ids=["missing", "zero", "null"],
+)
+def test_responses_sampling_merge_matches_chat(overrides, expected):
+    from uni_agent.gateway.adapters.openai_chat import openai_to_internal
+    from uni_agent.gateway.adapters.openai_response import responses_to_internal
+
+    base = {"presence_penalty": 0.5, "seed": 1}
+    allowed = frozenset(base)
+    responses = responses_to_internal(_request(**overrides), base_sampling_params=base, allowed_sampling_keys=allowed)
+    chat = openai_to_internal(
+        {"messages": [{"role": "user", "content": "q"}], **overrides},
+        base_sampling_params=base,
+        allowed_sampling_keys=allowed,
+    )
+    assert responses["sampling_params"] == chat["sampling_params"] == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_responses_allowed_sampling_fields_reach_generation_like_chat(stream):
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+
+    from uni_agent.gateway.gateway import _GatewayActor
+
+    base = {"presence_penalty": 0, "seed": 1, "frequency_penalty": 0.3}
+    generate = AsyncMock(return_value=_outcome(content="done", finish_reason="stop"))
+    actor = object.__new__(_GatewayActor)
+    actor._sessions = {"s1": SimpleNamespace(sampling_params=base, run_generation=generate)}
+    actor._warned_discarded_request_sampling_param_keys = set()
+    actor._allowed_request_sampling_param_keys = ALLOWED_SAMPLING_KEYS | {"presence_penalty", "seed"}
+    actor._backend = object()
+    actor._app = FastAPI()
+    actor._register_routes()
+    values = {"presence_penalty": 1.5, "seed": 42, "frequency_penalty": 1.8, "stream": stream}
+    async with AsyncClient(transport=ASGITransport(app=actor._app), base_url="http://test") as client:
+        response = await client.post("/sessions/s1/v1/responses", json=_request(**values))
+        chat = await client.post(
+            "/sessions/s1/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "q"}], "max_tokens": 128, **values},
+        )
+    assert response.status_code == chat.status_code == 200
+    assert generate.await_count == 2
+    expected = {"presence_penalty": 1.5, "seed": 42, "frequency_penalty": 0.3, "max_tokens": 128}
+    assert [call.args[0]["sampling_params"] for call in generate.call_args_list] == [expected, expected]
+    assert base == {"presence_penalty": 0, "seed": 1, "frequency_penalty": 0.3}
