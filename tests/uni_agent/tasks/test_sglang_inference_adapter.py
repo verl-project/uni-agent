@@ -14,8 +14,10 @@ from verl.workers.config import RolloutConfig
 from verl.workers.rollout.replica import RolloutMode
 
 
-def _backend(**overrides):
-    config = RolloutConfig(name="sglang", max_model_len=1024, tensor_model_parallel_size=8)
+def _backend(skip_tokenizer_init=True, **overrides):
+    config = RolloutConfig(
+        name="sglang", max_model_len=1024, tensor_model_parallel_size=8, skip_tokenizer_init=skip_tokenizer_init
+    )
     config.engine_kwargs = {"sglang": {"json_model_override_args": '{"language_model_only": true}'}}
     backend = SimpleNamespace(
         config=config,
@@ -68,13 +70,14 @@ def test_manager_selects_recipe_replica_without_replacing_verl_registry(monkeypa
 @pytest.mark.cpu
 @pytest.mark.level0
 @pytest.mark.parametrize("nnodes,host,expected", [(1, None, None), (2, "::1", "[::1]:12345")])
-def test_native_server_args_keep_config_and_separate_tokenizer(nnodes, host, expected):
-    backend = _backend(nnodes=nnodes, _master_address=host, _master_port=12345)
+@pytest.mark.parametrize("skip_tokenizer_init", [False, True])
+def test_native_server_args_keep_config_and_separate_tokenizer(nnodes, host, expected, skip_tokenizer_init):
+    backend = _backend(skip_tokenizer_init=skip_tokenizer_init, nnodes=nnodes, _master_address=host, _master_port=12345)
     original = copy.deepcopy(backend.config.engine_kwargs)
     args = _engine_args(backend)
     assert args["tp_size"] == 8
     assert args["tokenizer_path"] == "/tokenizer"
-    assert args["skip_tokenizer_init"] is True
+    assert args["skip_tokenizer_init"] is skip_tokenizer_init
     assert args["enable_weights_cpu_backup"] is False
     assert args.get("dist_init_addr") == expected
     assert args["json_model_override_args"] == '{"language_model_only": true}'

@@ -90,7 +90,6 @@ class MessageCodec:
         vision_info_extractor_kwargs: dict[str, Any] | None = None,
         tool_parser_name: str | None = None,
         rollout_backend: str | None = None,
-        skip_tokenizer_init: bool = False,
         enable_tool_parser_cache: bool = True,
         hf_model_type: str | None = None,
         apply_chat_template_kwargs: dict[str, Any] | None = None,
@@ -124,7 +123,6 @@ class MessageCodec:
             )
         self._tool_parser_name = tool_parser_name
         self._rollout_backend = rollout_backend
-        self._skip_tokenizer_init = skip_tokenizer_init
         self._enable_tool_parser_cache = enable_tool_parser_cache
         # Backend parser construction performs expensive setup, so reuse parsers
         # within this actor-scoped codec. SGLang/vLLM bind tool schemas at
@@ -135,21 +133,6 @@ class MessageCodec:
         # optimization for parser implementations that require request-scoped
         # instances.
         self._tool_parser_cache: dict[tuple[str, ...], Any] = {}
-
-    def prepare_sampling_params(self, sampling_params: dict[str, Any]) -> dict[str, Any]:
-        """Supply tokenizer stops for SGLang's token-only input contract."""
-        params = dict(sampling_params)
-        if self._rollout_backend != "sglang" or not self._skip_tokenizer_init or params.get("ignore_eos", False):
-            return params
-        eos = getattr(self._tokenizer, "eos_token_id", None)
-        eos_ids = [eos] if isinstance(eos, int) else list(eos or [])
-        stop_ids = set(params.get("stop_token_ids") or [])
-        stop_ids.update(eos_ids)
-        stop_ids.update(getattr(self._tokenizer, "additional_stop_token_ids", None) or [])
-        if stop_ids:
-            params["stop_token_ids"] = sorted(stop_ids)
-        # Explicit string stops retain their native backend validation semantics.
-        return params
 
     @property
     def mm_processor_kwargs(self) -> dict[str, Any]:

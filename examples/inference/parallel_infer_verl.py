@@ -123,6 +123,8 @@ def init_config(args: argparse.Namespace, *, served_model_name: str):
     rollout.disable_log_stats = False
     rollout.free_cache_engine = False
     OmegaConf.update(config, "actor_rollout_ref.rollout.enable_sleep_mode", False, force_add=True)
+    if args.engine == "sglang":
+        rollout.skip_tokenizer_init = False
     if args.engine == "vllm":
         if getattr(args, "language_model_only", False):
             logger.warning("--language-model-only configures SGLang HF text-only mode; ignoring it for vLLM.")

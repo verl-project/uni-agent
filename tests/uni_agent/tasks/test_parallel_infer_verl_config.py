@@ -108,6 +108,7 @@ def test_parallel_infer_routes_language_model_only_to_sglang_native_config(engin
     assert len(ignored_flag_warnings) == int(engine == "vllm" and language_model_only)
 
     assert rollout.name == engine
+    assert rollout.skip_tokenizer_init is (engine == "vllm")
     assert rollout.enforce_eager is True
     assert "enabled" not in rollout.checkpoint_engine
     assert "language_model_only" not in rollout.engine_kwargs[engine]
