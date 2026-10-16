@@ -22,6 +22,7 @@ AGENT_MODULES: dict[str, str] = {
     "react": "uni_agent.agents.react.agent",
     "claude_code": "uni_agent.agents.claude_code.agent",
     "mini_swe_agent": "uni_agent.agents.mini_swe_agent.agent",
+    "codex": "uni_agent.agents.codex.agent",
     "openclaw": "uni_agent.agents.openclaw.agent",
     "mem_agent": "uni_agent.agents.mem_agent.agent",
     "deepseek_harness": "uni_agent.agents.deepseek_harness.agent",
