@@ -76,8 +76,10 @@ class BlockSGLang(importlib.abc.MetaPathFinder):
         return None
 
 sys.meta_path.insert(0, BlockSGLang())
-from uni_agent.inference.sglang import SGLangInferenceReplica
-assert SGLangInferenceReplica.__name__ == "SGLangInferenceReplica"
+from examples.inference import parallel_infer_verl
+from verl.workers.rollout.llm_server import LLMServerManager
+
+assert parallel_infer_verl.LLMServerManager is LLMServerManager
 assert not any(name == "sglang" or name.startswith("sglang.") for name in sys.modules)
 """
     env = os.environ.copy()

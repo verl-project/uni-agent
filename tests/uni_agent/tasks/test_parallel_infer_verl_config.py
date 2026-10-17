@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from argparse import Namespace
+from types import SimpleNamespace
 
 import pytest
 
@@ -77,7 +78,13 @@ def test_inference_sampling_uses_run_options_and_preserves_length_configuration(
 @pytest.mark.level0
 @pytest.mark.parametrize("engine", ["vllm", "sglang"])
 @pytest.mark.parametrize("language_model_only", [False, True])
-def test_parallel_infer_routes_language_model_only_to_sglang_native_config(engine, language_model_only, caplog):
+@pytest.mark.parametrize("device", ["cuda", "npu"])
+def test_parallel_infer_routes_language_model_only_to_sglang_native_config(
+    monkeypatch, engine, language_model_only, device, caplog
+):
+    from verl.plugin import platform
+
+    monkeypatch.setattr(platform, "get_platform", lambda: SimpleNamespace(device_name=device))
     args = Namespace(
         temperature=0.4,
         top_p=0.85,
@@ -112,6 +119,13 @@ def test_parallel_infer_routes_language_model_only_to_sglang_native_config(engin
     assert rollout.enforce_eager is True
     assert "enabled" not in rollout.checkpoint_engine
     assert "language_model_only" not in rollout.engine_kwargs[engine]
+    if engine == "sglang":
+        assert rollout.engine_kwargs.sglang.random_seed == rollout.seed
+        for key, value in {"device": "npu", "attention_backend": "ascend", "enable_memory_saver": False}.items():
+            if device == "npu":
+                assert rollout.engine_kwargs.sglang[key] == value
+            else:
+                assert key not in rollout.engine_kwargs.sglang
     if engine == "sglang" and language_model_only:
         assert json.loads(rollout.engine_kwargs.sglang.json_model_override_args) == {"language_model_only": True}
     else:

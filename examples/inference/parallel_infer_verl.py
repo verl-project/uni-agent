@@ -49,9 +49,9 @@ except ImportError:  # fall back to verl's shim (mock raises a clear error if TQ
     from verl.utils.transferqueue_utils import tq
 
 from uni_agent.framework.entry import AgentFrameworkRolloutAdapter
-from uni_agent.inference.server import InferenceServerManager
 from uni_agent.tasks import TaskConfigResolver
 from verl.utils import tensordict_utils as tu
+from verl.workers.rollout.llm_server import LLMServerManager
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 logger = logging.getLogger(__name__)
@@ -125,6 +125,14 @@ def init_config(args: argparse.Namespace, *, served_model_name: str):
     OmegaConf.update(config, "actor_rollout_ref.rollout.enable_sleep_mode", False, force_add=True)
     if args.engine == "sglang":
         rollout.skip_tokenizer_init = False
+        from verl.plugin.platform import get_platform
+
+        sglang_kwargs = {"random_seed": rollout.seed}
+        if get_platform().device_name == "npu":
+            sglang_kwargs.update(device="npu", attention_backend="ascend", enable_memory_saver=False)
+        OmegaConf.update(
+            config, "actor_rollout_ref.rollout.engine_kwargs.sglang", sglang_kwargs, merge=True, force_add=True
+        )
     if args.engine == "vllm":
         if getattr(args, "language_model_only", False):
             logger.warning("--language-model-only configures SGLang HF text-only mode; ignoring it for vLLM.")
@@ -440,7 +448,7 @@ def main() -> None:
     logger.info("initializing configuration, TransferQueue, and LLMServerManager...")
     config = init_config(args, served_model_name=served_model_name)
     tq.init(config.transfer_queue)
-    llm_server_manager = InferenceServerManager.create(config=config)
+    llm_server_manager = LLMServerManager.create(config=config)
 
     # 2. Framework rollout adapter over the engine.
     adapter = AgentFrameworkRolloutAdapter.create(
