@@ -31,6 +31,7 @@ _FINISH_REASON_MAP = {
     "abort": "stop",
 }
 
+# Both names explicitly select verl's non-streaming Qwen3 parser in the gateway.
 _SGLANG_TOOL_PARSER_ALIASES = {
     "qwen3_xml": "qwen3_coder",
 }
@@ -348,11 +349,23 @@ class MessageCodec:
         try:
             if parser_backend == "sglang":
                 sglang_name = _SGLANG_TOOL_PARSER_ALIASES.get(parser_name, parser_name)
+                if sglang_name == "qwen3_coder":
+                    # Use verl's non-streaming Qwen3 parser without requiring
+                    # SGLang in the gateway. Other parser names still use SGLang;
+                    # malformed output and schema edge cases follow verl's parser.
+                    return await self._process_tool_calls_verl(response_ids, tools, sglang_name)
                 return self._process_tool_calls_sglang(text, tools, sglang_name)
             if parser_backend == "vllm":
                 vllm_name = _VLLM_TOOL_PARSER_ALIASES.get(parser_name, parser_name)
                 return self._process_tool_calls_vllm(text, tools, vllm_name)
             return await self._process_tool_calls_verl(response_ids, tools, parser_name)
+        except ModuleNotFoundError as exc:
+            if parser_backend == "sglang" and (exc.name == "sglang" or (exc.name or "").startswith("sglang.")):
+                raise RuntimeError(
+                    f"SGLang tool parser {parser_name!r} requires SGLang in the gateway environment. "
+                    "Only qwen3_coder (alias qwen3_xml) uses verl without that dependency."
+                ) from exc
+            raise RuntimeError(f"{parser_backend} tool parser {parser_name!r} failed") from exc
         except Exception as exc:
             raise RuntimeError(f"{parser_backend} tool parser {parser_name!r} failed") from exc
 

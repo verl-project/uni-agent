@@ -57,10 +57,10 @@ After deployment, verify these two prerequisites:
 | 4 | **A policy model** | any path/`hf://` ref accepted by the vLLM engine (`MODEL_PATH`) |
 | 5 | **Multi-node NPU/GPU cluster** | the script starts Ray with `NPU` resources by default; GPU users switch the `ray start` flags (see `run_train.sh`) |
 
-> This recipe is developed and validated against verl **`release/v0.9.1`**
-> (`separate_async` trainer mode + the black-box agent framework). Older verl
-> versions (e.g. `v0.8.x`) are not supported and may fail on trainer config or
-> API compatibility.
+> This checkout pins verl **`main@18cfb74852a053a27dcf301d3318a093be81b628`**
+> for its native SGLang 0.5.20 inference service. The earlier training validation
+> used `release/v0.9.1`; it does not establish training compatibility with this
+> newer dependency.
 
 ## Quick start
 
@@ -73,9 +73,8 @@ It is recommended to select an open-source image from the verl ecosystem as the 
 git clone https://github.com/verl-project/uni-agent.git
 cd uni-agent
 
-# Fetch and checkout the specified verl version
-git -C verl fetch origin release/v0.9.1
-git -C verl checkout -q origin/release/v0.9.1
+# Initialize the exact verl revision pinned by this checkout
+git submodule update --init verl
 
 # Install dependencies
 pip install --no-deps -e ./verl
@@ -234,6 +233,72 @@ rewritten through the reverse tunnel when `proxy_port` is set).
 | `TRAIN_MAX_SAMPLES` / `VAL_MAX_SAMPLES` | `-1` | Cap samples per split (`-1` = all) |
 | `VAL_BEFORE_TRAIN` | `true` | Run validation before the first step |
 | `CKPTS_DIR` | `checkpoints/${PROJECT_NAME}/${EXPERIMENT_NAME}` | Checkpoint root |
+
+## Single-task inference
+
+The inference launcher selects the existing verl rollout backend with
+`ENGINE=vllm` (the default) or `ENGINE=sglang`. Its two-GPU defaults are
+unchanged. `LANGUAGE_MODEL_ONLY=1` forwards `--language-model-only` to the Python
+entrypoint. It selects SGLang text-only serving through the native model-config
+override; with `ENGINE=vllm`, Python emits a warning and leaves the vLLM
+configuration unchanged. `ENFORCE_EAGER=1` disables graph capture for either
+backend. Both options are disabled by default.
+
+Use the unmodified community sources for verl main
+(`18cfb74852a053a27dcf301d3318a093be81b628`) and SGLang release/v0.5.20
+(`94602c9c2b7cbdb8efd5c52802dac6a1c180089e`). Both are used without source patches.
+
+The entrypoint uses verl's `LLMServerManager` directly. verl selects and owns the
+backend replica, server startup, generation and lifecycle; Uni-Agent configures
+the rollout and retains its existing gateway, task and trajectory handling.
+Selecting SGLang requires its package in both the driver and server environments.
+Selecting vLLM does not require SGLang. Default checkpoint workers are retained.
+The example configures SGLang's native tokenizer and seed; on Ascend it also sets
+the NPU device, attention backend and memory-saver option through `engine_kwargs`.
+
+For Qwen3.5, the launcher sets
+`json_model_override_args='{"language_model_only": true}'`, which selects the
+upstream model's language-only implementation. This sets the HF model config,
+not SGLang's top-level `ServerArgs.language_model_only` flag. In SGLang 0.5.20,
+the top-level flag remains false, so its architecture allowlist and incompatible
+serving-flag checks do not apply to this route. The two modes do not promise the
+same media-input rejection behavior. Models must consume the HF config option;
+the HF-config tests cover Qwen3.5, not arbitrary VLMs.
+
+The SGLang example sets `skip_tokenizer_init=False`, so SGLang loads its native
+tokenizer and handles EOS. The gateway retains the backend's token IDs and
+logprobs for trajectory capture.
+
+The SGLang runtime must satisfy SGLang 0.5.20's dependencies, including its
+Torch version. The pinned verl revision's `sglang` extra selects SGLang 0.5.20;
+install the backend dependencies appropriate to the target device.
+
+For example, with the existing Ray cluster and sandbox settings configured:
+
+```bash
+DATA_PATH=/path/to/one-row-swe-bench.parquet \
+MODEL_PATH=/path/to/Qwen3.5-9B \
+ENGINE=sglang LANGUAGE_MODEL_ONLY=1 \
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+TENSOR_PARALLEL_SIZE=8 N_GPUS_PER_NODE=8 \
+LIMIT=1 N=1 CONCURRENCY=1 GATEWAY_COUNT=1 \
+LOG_DIR=artifacts/example/logs RESULT_PATH=artifacts/example/result.json \
+bash examples/mini_swe_agent/run_infer_mini_swe_agent.sh
+```
+
+The launcher does not install dependencies or alter compiler/library paths.
+Use an environment compatible with the selected backend and verl. The gateway
+uses verl's non-streaming parser for `qwen3_coder` and its `qwen3_xml` alias.
+Tests compare complete tool calls against SGLang's parser; malformed calls and
+schema edge cases can differ, so full parser equivalence is not claimed.
+Other SGLang parser names require SGLang in the gateway environment.
+This example targets text-only, non-streaming mini-swe-agent generation.
+Public launcher defaults, configuration and token/logprob contracts have CPU
+regression coverage. The native verl service path has not completed a real
+GPU/NPU single-task validation. Earlier successful task runs used the removed
+Uni-Agent service adapter and do not validate this replacement. The pinned
+upstream version also has a known `/server_info` metadata incompatibility with
+SGLang 0.5.20; the token-generation RPC does not call that endpoint.
 
 ### How the time budgets relate
 

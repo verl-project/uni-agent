@@ -110,6 +110,7 @@ def init_config(args: argparse.Namespace, *, served_model_name: str):
     config.actor_rollout_ref.model.path = os.path.expanduser(args.model_path)
     rollout.name = args.engine
     rollout.mode = "async"
+    rollout.enforce_eager = bool(getattr(args, "enforce_eager", False))
     # Standalone inference has no trainer to broadcast weights.
     rollout.load_format = "auto"
     rollout.prompt_length = DEFAULT_PROMPT_LENGTH
@@ -122,11 +123,32 @@ def init_config(args: argparse.Namespace, *, served_model_name: str):
     rollout.disable_log_stats = False
     rollout.free_cache_engine = False
     OmegaConf.update(config, "actor_rollout_ref.rollout.enable_sleep_mode", False, force_add=True)
+    if args.engine == "sglang":
+        rollout.skip_tokenizer_init = False
+        from verl.plugin.platform import get_platform
+
+        sglang_kwargs = {"random_seed": rollout.seed}
+        if get_platform().device_name == "npu":
+            sglang_kwargs.update(device="npu", attention_backend="ascend", enable_memory_saver=False)
+        OmegaConf.update(
+            config, "actor_rollout_ref.rollout.engine_kwargs.sglang", sglang_kwargs, merge=True, force_add=True
+        )
     if args.engine == "vllm":
+        if getattr(args, "language_model_only", False):
+            logger.warning("--language-model-only configures SGLang HF text-only mode; ignoring it for vLLM.")
         OmegaConf.update(
             config,
             "actor_rollout_ref.rollout.engine_kwargs.vllm.kv_cache_dtype",
             getattr(args, "kv_cache_dtype", "auto"),
+            force_add=True,
+        )
+
+    if args.engine == "sglang" and getattr(args, "language_model_only", False):
+        # Set the model's HF-config option, not SGLang's top-level serving flag.
+        OmegaConf.update(
+            config,
+            "actor_rollout_ref.rollout.engine_kwargs.sglang.json_model_override_args",
+            json.dumps({"language_model_only": True}),
             force_add=True,
         )
 
@@ -354,6 +376,16 @@ def main() -> None:
         default="vllm",
         choices=["vllm", "sglang"],
         help="Inference engine backend.",
+    )
+    parser.add_argument(
+        "--language-model-only",
+        action="store_true",
+        help="Enable SGLang HF-config text-only mode (validated on Qwen3.5-9B); ignored by vLLM with a warning.",
+    )
+    parser.add_argument(
+        "--enforce-eager",
+        action="store_true",
+        help="Disable CUDA graph capture in the selected engine.",
     )
     parser.add_argument(
         "--enable-rollout-routing-replay",

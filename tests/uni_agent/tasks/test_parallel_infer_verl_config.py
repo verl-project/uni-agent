@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from argparse import Namespace
+from types import SimpleNamespace
 
 import pytest
 
@@ -25,6 +27,7 @@ def test_inference_sampling_uses_run_options_and_preserves_length_configuration(
         n_gpus_per_node=1,
         model_path="/tmp/test-model",
         engine="vllm",
+        language_model_only=False,
         tensor_parallel_size=1,
         gpu_memory_utilization=0.8,
         enable_rollout_routing_replay=False,
@@ -69,3 +72,61 @@ def test_inference_sampling_uses_run_options_and_preserves_length_configuration(
         assert not task_runner.runner_kwargs
     else:
         assert task_runner.runner_kwargs.task_config_path == args.task_config
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize("engine", ["vllm", "sglang"])
+@pytest.mark.parametrize("language_model_only", [False, True])
+@pytest.mark.parametrize("device", ["cuda", "npu"])
+def test_parallel_infer_routes_language_model_only_to_sglang_native_config(
+    monkeypatch, engine, language_model_only, device, caplog
+):
+    from verl.plugin import platform
+
+    monkeypatch.setattr(platform, "get_platform", lambda: SimpleNamespace(device_name=device))
+    args = Namespace(
+        temperature=0.4,
+        top_p=0.85,
+        top_k=20,
+        allowed_request_sampling_param_keys=[],
+        n=1,
+        nnodes=1,
+        n_gpus_per_node=8,
+        model_path="/model",
+        engine=engine,
+        language_model_only=language_model_only,
+        enforce_eager=True,
+        tensor_parallel_size=8,
+        gpu_memory_utilization=0.9,
+        enable_rollout_routing_replay=False,
+        tool_parser="qwen3_coder",
+        gateway_count=1,
+        concurrency=1,
+        task_config="/task.yaml",
+        log_dir="/logs",
+        response_length=1024,
+    )
+
+    config = init_config(args, served_model_name="policy")
+    rollout = config.actor_rollout_ref.rollout
+
+    ignored_flag_warnings = [record for record in caplog.records if "--language-model-only" in record.getMessage()]
+    assert len(ignored_flag_warnings) == int(engine == "vllm" and language_model_only)
+
+    assert rollout.name == engine
+    assert rollout.skip_tokenizer_init is (engine == "vllm")
+    assert rollout.enforce_eager is True
+    assert "enabled" not in rollout.checkpoint_engine
+    assert "language_model_only" not in rollout.engine_kwargs[engine]
+    if engine == "sglang":
+        assert rollout.engine_kwargs.sglang.random_seed == rollout.seed
+        for key, value in {"device": "npu", "attention_backend": "ascend", "enable_memory_saver": False}.items():
+            if device == "npu":
+                assert rollout.engine_kwargs.sglang[key] == value
+            else:
+                assert key not in rollout.engine_kwargs.sglang
+    if engine == "sglang" and language_model_only:
+        assert json.loads(rollout.engine_kwargs.sglang.json_model_override_args) == {"language_model_only": True}
+    else:
+        assert "json_model_override_args" not in rollout.engine_kwargs[engine]
