@@ -110,16 +110,42 @@ python -m pytest tests/uni_agent/agents/test_opencode_agent.py -q
 
 A separate development probe ran the **real 1.19.3 CLI** through LocalSandbox
 against a local synthetic Chat Completions SSE server. Text completion, a
-harmless bash tool call followed by completion, and an HTTP 401 failure were
-observed. The tool scenario made two requests to the configured session path;
-the text scenario made one. These are CLI/protocol observations with scripted
-responses, not real model evaluation or a Uni-Agent Gateway integration run.
+harmless bash tool call followed by completion, an HTTP 401 failure, request
+timeout, timeout after a tool process started, cancellation after a tool process
+started, missing CLI, and wrong-version rejection were observed. The tool
+scenario made two requests to the configured session path; the text scenario
+made one. These use scripted responses, not real model evaluation.
 
-Actual Gateway trajectory capture, tokenizer/tool-parser behavior, reverse
-tunnels, remote Sandbox execution, long-context behavior, GPU inference, and RL
-training remain unverified. No public API migration is required. Other OpenCode
-versions deliberately fail preflight until their command/config/event contracts
-are verified and the adapter's pinned version is updated.
+An optional integration test also exercised the real local GatewayActor HTTP
+routes, session creation/continuation, codec path, and trajectory finalization
+with the real CLI and a deterministic synthetic CPU backend. The test substitutes
+only a deterministic tool-call parser for the vLLM-specific parser. It verified
+a tool-written temporary file, two backend generations, and a four-turn
+trajectory. This does not validate remote Ray deployment, the production
+tokenizer/parser stack, or real model inference. AgentResult.finished reflects
+OpenCode harness completion; trajectory completion is owned by the Task or
+Framework.
+
+Both optional black-box tests are disabled unless OPENCODE_BIN is explicitly
+set. To run them against a provisioned OpenCode 1.19.3 executable (as a command
+on PATH or an executable path):
+
+```bash
+OPENCODE_BIN=/opt/opencode/node_modules/.bin/opencode \
+  python -m pytest \
+  tests/uni_agent/agents/test_opencode_cli_probe.py \
+  tests/uni_agent/agents/test_opencode_gateway_integration.py -q
+```
+
+The synthetic endpoints use no account, credential, GPU, or external model.
+They are opt-in because they launch the native CLI and local subprocesses.
+Cancellation probes currently expose the LocalSandbox child-process cleanup
+limitation; exact test-owned PIDs are terminated by the probe after observation.
+This does not validate process-group containment. Reverse tunnels, remote
+Sandbox execution, long-context behavior, GPU inference, and RL training remain
+unverified. No public API migration is required. Other OpenCode versions
+deliberately fail preflight until their command/config/event contracts are
+verified and the adapter's pinned version is updated.
 
 ## Sources
 
