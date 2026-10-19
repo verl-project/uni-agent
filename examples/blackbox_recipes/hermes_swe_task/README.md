@@ -10,7 +10,7 @@ memory, delegation, fallback providers and context compression are disabled.
 ## Build and configure
 
 ```bash
-bash examples/blackbox_recipes/hermes_swe_task/build_tool.sh --tag <your-tag>
+bash examples/blackbox_recipes/hermes_swe_task/build_tool.sh --tag my-hermes-tag
 # Optional: add --registry <registry/namespace> to publish the built image.
 ```
 
@@ -32,16 +32,99 @@ sidecar layouts may override the path fields.
 Use the current `openyuanrong-sandbox` / `yr_sandbox` provider supported by the
 repository; this recipe does not include the legacy SDK bridge.
 
+## Prepare the inference environment and data
+
+Follow the [installation guide](../../../docs/source/quickstart/installation.md)
+in a dedicated Python environment. This entrypoint needs a compatible engine
+environment with PyTorch, vLLM or SGLang, Ray Jobs and TransferQueue.
+Use the `verl` commit pinned by this checkout;
+do not replace it with an unrelated release branch. From the repository root:
+
+```bash
+git submodule update --init --recursive
+python -m pip install -e .
+python -m pip install --no-deps -e ./verl
+python -m pip install swebench==4.1.0 openyuanrong-sandbox
+```
+
+The `--no-deps` command registers the pinned `verl` source; it assumes its engine
+dependencies are already installed. Install a sandbox SDK version compatible
+with your service on every execution node; see the
+[OpenYuanrong provider setup](../../../docs/source/quickstart/launch-sandbox.md).
+Hermes and its Python dependencies live in the sidecar, not this host environment.
+
+Prepare one SWE-bench Verified sample for a smoke run:
+
+```bash
+python -m uni_agent.tasks.swe_bench.preprocess \
+    --local-save-dir "$HOME/data/hermes" --max-instances 1
+```
+
+This writes `$HOME/data/hermes/swe_bench_verified.parquet`. Omit
+`--max-instances 1` to prepare the full dataset. Each row contains
+`extra_info.tools_kwargs.task`, including the task name, metadata and canonical
+`sandbox.image`; `sandbox.image_map` in the task YAML maps that image to your
+service's registry. The sandbox service must be able to pull both the mapped
+SWE image and the Hermes sidecar image.
+
+## Configure the provider and Ray
+
+The sandbox SDK reads `OPENYUANRONG_SERVER_ADDRESS` and `OPENYUANRONG_TOKEN`
+from the environment of the Ray process that creates the sandbox. Store these
+shell assignments in a protected file outside the checkout, for example
+`$HOME/.config/uni-agent/openyuanrong.env`, using your service's values. Configure
+`OPENYUANRONG_TLS`, `OPENYUANRONG_GATEWAY_ADDRESS`, `OPENYUANRONG_GATEWAY_TLS`,
+`OPENYUANRONG_TLS_VERIFY` and `OPENYUANRONG_TUNNEL_SSL_VERIFY` there only as required
+by your deployment. The gateway session model endpoint and key are injected by
+Uni-Agent; do not add them to the task YAML.
+
+Load the provider environment **before starting Ray on the head and worker nodes**.
+Exporting variables only in the submitting shell does not configure an already
+running remote Ray cluster. For an existing cluster, use its administrator's
+secret injection mechanism. The following is a single-node example for a
+dedicated eight-GPU cluster; adjust the GPU count and tensor parallelism to your
+hardware:
+
+```bash
+# Activate the prepared inference environment first.
+set +x
+chmod 600 "$HOME/.config/uni-agent/openyuanrong.env"
+set -a
+. "$HOME/.config/uni-agent/openyuanrong.env"
+set +a
+export N_GPUS_PER_NODE=8 TENSOR_PARALLEL_SIZE=8
+ray start --head --num-gpus="${N_GPUS_PER_NODE}" \
+    --dashboard-host=127.0.0.1 --dashboard-port=8265
+```
+
+Ray workers inherit the cluster environment. Keep all Ray ports on a trusted
+network and the Jobs API private; see [Ray security](https://docs.ray.io/en/latest/ray-security/index.html)
+and [cluster startup options](https://docs.ray.io/en/latest/cluster/cli.html#ray-start).
+For a remote head, use the deployment's protected Jobs API address instead of
+the loopback address below.
+
+Create a minimal runtime-env file outside the uploaded checkout. It contains
+only non-secret job settings; the provider credentials remain in the node
+environment:
+
+```bash
+umask 077
+mkdir -p "$HOME/.config/uni-agent"
+cat > "$HOME/.config/uni-agent/hermes-runtime-env.yaml" <<'YAML'
+env_vars:
+  PYTHONPATH: "verl"
+YAML
+chmod 600 "$HOME/.config/uni-agent/hermes-runtime-env.yaml"
+```
+
+The launcher supplies `--working-dir .` to Ray Jobs. The runtime environment
+applies to the job driver and its tasks/actors; see
+[Ray environment inheritance](https://docs.ray.io/en/latest/ray-core/handling-dependencies.html#runtime-environment-specified-by-both-job-and-driver).
+Do not put credentials in this YAML, the task config or the uploaded directory.
+
 ## Inference
 
-Install Uni-Agent and the repository's inference dependencies, including the
-pinned `verl` submodule. Use the standard SWE-bench preprocessor; input rows
-must already contain `extra_info.tools_kwargs.task`. Start/configure Ray
-separately. Provide a protected runtime-env YAML outside the checkout with
-`PYTHONPATH: verl` under `env_vars`, plus the provider settings needed by the
-execution environment. Ray applies these to the job driver and workers.
-Protect Ray's control plane and do not check credentials into source control or
-place that file in the uploaded working directory. Data and model paths must be
+Run the launcher from the prepared environment. Data and model paths must be
 available to the execution workers. `OUTPUT_DIR`, `RESULT_PATH` (default:
 `$OUTPUT_DIR/result.json`) and `LOG_DIR` (default: `$OUTPUT_DIR/logs`) must use
 shared storage mounted at the same absolute paths on the submitting host, Ray
@@ -51,11 +134,11 @@ launcher requires shared storage; deployments without it must retrieve the
 artifacts before running local validation.
 
 ```bash
-DATA_PATH=/absolute/preprocessed-swe-bench.parquet \
+DATA_PATH="$HOME/data/hermes/swe_bench_verified.parquet" \
 MODEL_PATH=/absolute/model \
 OUTPUT_DIR=/absolute/new-run-directory \
-RAY_RUNTIME_ENV=/absolute/protected-runtime-env.yaml \
-RAY_API_SERVER_ADDRESS=http://ray-head.example:8265 \
+RAY_RUNTIME_ENV="$HOME/.config/uni-agent/hermes-runtime-env.yaml" \
+RAY_API_SERVER_ADDRESS=http://127.0.0.1:8265 \
 LANGUAGE_MODEL_ONLY=1 \
 bash examples/blackbox_recipes/hermes_swe_task/run_infer_hermes.sh
 ```
@@ -72,6 +155,40 @@ The launcher waits for submission, rejects stale result/log files, and checks
 the scored-session count plus one finished trajectory entry per session. It
 returns nonzero if inference fails or the result is incomplete.
 
+## Episode budgets
+
+The task YAML owns the agent and sandbox limits; the launcher owns the rollout
+capacity. Defaults are:
+
+| Setting | Default | Scope |
+|---|---|---|
+| `agent.max_iterations` | `100` | Hermes loop iteration limit |
+| `agent.terminal_timeout` | `600 s` | One terminal command |
+| `agent.run_budget_seconds` | `6600 s` | Hermes loop wall-clock budget |
+| `agent.run_timeout` | `7200 s` | Host-side timeout for the runner command |
+| `eval_timeout` | `900 s` | SWE-bench verification |
+| `sandbox.runtime_timeout` | `10800 s` | Sandbox lifetime, including execution and verification |
+| `agent.sampling_params_override.max_tokens_per_turn` | `8192` | Per-request output cap, passed as `limits.max_tokens` to Hermes and as HTTP `max_tokens` for the Qwen/custom Chat Completions route |
+| `PROMPT_LENGTH` | `4096` | Rollout/data prompt budget; contributes to total trajectory capacity |
+| `RESPONSE_LENGTH` | `65536` | Rollout continuation capacity, not a per-request generation cap |
+
+Keep the Hermes run budget below the runner timeout, and allow the sandbox
+lifetime to cover startup, runner execution, verification and cleanup margin.
+Terminal commands run within the agent episode; the terminal and agent budgets
+are nested limits, not durations to add together. This inference entrypoint does
+not set a separate framework session timeout. The iteration limit counts Hermes
+loop iterations; a final summary request can follow exhaustion, so it is not an
+exact HTTP request-count limit. Exhausting a Hermes iteration/time budget remains
+unfinished; increasing the sandbox lifetime alone does not extend those inner limits.
+
+The shared inference entrypoint sets `max_model_len` and the Gateway's total
+trajectory capacity to `PROMPT_LENGTH + RESPONSE_LENGTH` (`69632` by default).
+Before each model call, the Gateway clamps `max_tokens` to the smaller of the
+requested output cap and the remaining trajectory capacity after the encoded
+context. Prior model replies and tool messages therefore consume capacity;
+`8192` is not granted afresh regardless of history. Context compression is
+disabled in this recipe.
+
 ## Completion
 
 `finished=True` means Hermes returned an unambiguous completed response; it does
@@ -82,5 +199,6 @@ The launcher records the inference result and framework logs. It does not turn a
 task reward into a launcher success/failure gate; inspect the task result and
 framework trajectory for the run you care about. A single-task acceptance run
 must separately verify one scored session, one raw trajectory entry,
-`finished=true`, and the task reward. Hermes-local diagnostics stay inside the
-sandbox.
+`finished=true`, and the task reward. Non-empty failure summaries are redacted and
+length-limited before being included in `TaskResult.extra_info.agent_error`.
+Raw Hermes logs stay inside the sandbox.

@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from contextlib import asynccontextmanager
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -17,13 +19,22 @@ from uni_agent.agents.hermes.agent import (
     validate_messages,
     validate_result,
 )
-from uni_agent.sandbox.base import ExecResult
+from uni_agent.sandbox.base import ExecResult, SandboxConfig
 
 
 class FakeSandbox:
-    def __init__(self, *, exit_code: int = 0, stderr: str = ""):
+    def __init__(
+        self,
+        *,
+        exit_code: int = 0,
+        stderr: str = "",
+        result_overrides: dict | None = None,
+        result_bytes: bytes | None = None,
+    ):
         self.exit_code = exit_code
         self.stderr = stderr
+        self.result_overrides = result_overrides or {}
+        self.result_bytes = result_bytes
         self.files: dict[str, bytes] = {}
         self.commands: list[str] = []
 
@@ -50,7 +61,10 @@ class FakeSandbox:
                 "stop_reason": "text_response",
                 "stats": {"api_calls": 3},
             }
-            self.files[result_path] = json.dumps(envelope).encode()
+            envelope.update(self.result_overrides)
+            self.files[result_path] = (
+                self.result_bytes if self.result_bytes is not None else json.dumps(envelope).encode()
+            )
         return ExecResult(exit_code=self.exit_code, stdout="noise", stderr=self.stderr)
 
 
@@ -136,6 +150,7 @@ def test_run_reads_result_and_preserves_endpoint_and_messages():
     result = asyncio.run(agent.run(sandbox=sandbox, messages=messages, workdir="/testbed"))
     assert result.finished is True
     assert result.output["status"] == "completed"
+    assert "error" not in result.info
     assert result.transcript == messages
     assert len(sandbox.commands) == 1
     payload = json.loads(next(iter(sandbox.files.values())))
@@ -156,3 +171,139 @@ def test_timeout_is_not_treated_as_success():
     )
     assert result.finished is False
     assert result.output["status"] == "timeout"
+    assert result.info["error"] == "exec timed out"
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize(
+    "sandbox_kwargs,expected_error",
+    [
+        (
+            {"result_overrides": {"status": "error", "finished": False, "error": "API request failed"}},
+            "API request failed",
+        ),
+        ({"result_bytes": b"not JSON"}, "missing or malformed Hermes runner result"),
+    ],
+    ids=["api-error", "malformed-result"],
+)
+def test_failed_run_exposes_error_to_task(sandbox_kwargs, expected_error):
+    result = asyncio.run(
+        _agent().run(
+            sandbox=FakeSandbox(**sandbox_kwargs),
+            messages=[{"role": "user", "content": "fix it"}],
+        )
+    )
+    assert result.finished is False
+    assert result.info["status"] == "error"
+    assert result.info["error_kind"] == "agent_failure"
+    assert result.info["error"] == expected_error
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize("source", ["runner", "timeout"])
+@pytest.mark.parametrize("boundary_secret", [None, "endpoint", "api_key"])
+def test_error_diagnostics_redact_secrets_before_truncation(source, boundary_secret):
+    endpoint = "http://gateway/sessions/private-session/v1"
+    api_key = "private-gateway-key"
+    bearer = "private-bearer-token"
+    error = f"request failed for {endpoint} credential={api_key}; Authorization: Bearer {bearer}\n" + "x" * 5000
+    if boundary_secret is not None:
+        secret = endpoint if boundary_secret == "endpoint" else api_key
+        error = "x" * 3990 + secret + " trailing text"
+    sandbox = (
+        FakeSandbox(result_overrides={"status": "error", "finished": False, "error": error})
+        if source == "runner"
+        else FakeSandbox(exit_code=-1, stderr=error)
+    )
+    result = asyncio.run(
+        _agent(model=ModelConfig(base_url=endpoint, model_name="policy", api_key=api_key)).run(
+            sandbox=sandbox,
+            messages=[{"role": "user", "content": "fix it"}],
+        )
+    )
+    diagnostic = result.info["error"]
+    assert len(diagnostic) <= 4000
+    if boundary_secret is None:
+        assert diagnostic.startswith("request failed for <redacted> credential=<redacted>;")
+    else:
+        assert diagnostic == "x" * 3990 + "<redacted>"
+        assert secret[:10] not in diagnostic
+    for secret in (endpoint, api_key, bearer):
+        assert secret not in diagnostic
+    assert result.finished is False
+    assert result.info["status"] == ("timeout" if source == "timeout" else "error")
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize("boundary_secret", ["endpoint", "api_key"])
+def test_error_diagnostics_redact_secret_prefix_truncated_by_sidecar(boundary_secret):
+    import importlib.util
+    from pathlib import Path
+
+    runner_path = Path(__file__).resolve().parents[3] / "examples/blackbox_recipes/hermes_swe_task/run_hermes.py"
+    spec = importlib.util.spec_from_file_location("hermes_recipe_runner_mapping", runner_path)
+    assert spec is not None and spec.loader is not None
+    runner = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(runner)
+
+    endpoint = "http://gateway/sessions/private-session/v1"
+    api_key = "private-gateway-key"
+    secret = endpoint if boundary_secret == "endpoint" else api_key
+    mapped = runner.map_hermes_result({"error": "x" * 3990 + secret + " trailing text", "failed": True})
+    assert len(mapped["error"]) == 4000
+    assert mapped["error"].endswith(secret[:10])
+    mapped.pop("run_id")  # The fake sandbox supplies the current invocation's run id.
+
+    result = asyncio.run(
+        _agent(model=ModelConfig(base_url=endpoint, model_name="policy", api_key=api_key)).run(
+            sandbox=FakeSandbox(result_overrides=mapped),
+            messages=[{"role": "user", "content": "fix it"}],
+        )
+    )
+
+    assert result.info["error"] == "x" * 3990 + "<redacted>"
+    assert secret[:10] not in result.info["error"]
+    assert result.output["error"] == result.info["error"]
+    assert result.finished is False
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize("agent_error", [None, "API request failed"])
+def test_swe_task_keeps_hermes_error_without_changing_reward(monkeypatch, agent_error):
+    from uni_agent.tasks.swe_bench import reward
+    from uni_agent.tasks.swe_bench.task import SWEBenchTask, SWEBenchTaskConfig
+
+    sandbox = FakeSandbox(
+        result_overrides={"status": "error", "finished": False, "error": agent_error} if agent_error else None
+    )
+
+    @asynccontextmanager
+    async def build_sandbox():
+        yield sandbox
+
+    task = SWEBenchTask(
+        SWEBenchTaskConfig(
+            sandbox=SandboxConfig(provider="docker", image="test-image"),
+            agent=_agent().config,
+            metadata={"instance_id": "test"},
+            prompt=[{"role": "user", "content": "fix it"}],
+        )
+    )
+    monkeypatch.setattr(task, "build_sandbox", build_sandbox)
+    scorer_result = {"resolved": True, "eval_report": {"found_eval_status": True}}
+    monkeypatch.setattr(reward, "compute_reward", AsyncMock(return_value=scorer_result))
+
+    result = asyncio.run(task.run())
+
+    assert result.reward == result.accuracy == 1.0
+    assert result.finished is (agent_error is None)
+    assert result.extra_info["eval_report"] == scorer_result["eval_report"]
+    assert "agent_error" not in scorer_result
+    if agent_error is None:
+        assert "agent_error" not in result.extra_info
+    else:
+        assert result.extra_info["agent_error"] == agent_error

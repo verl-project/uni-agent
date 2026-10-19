@@ -16,6 +16,8 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import Field
 
+from uni_agent.logging.redaction import _redact_sensitive_text
+
 from ..base import Agent, AgentConfig, AgentResult, RequestSamplingConfig
 from ..registry import register_agent
 
@@ -254,7 +256,7 @@ class HermesAgent(Agent):
                 "status": "timeout",
                 "finished": False,
                 "final_response": None,
-                "error": (process.stderr or "sandbox command timed out")[-4000:],
+                "error": process.stderr or "sandbox command timed out",
             }
         elif envelope is None:
             envelope = {
@@ -284,6 +286,26 @@ class HermesAgent(Agent):
                 "error": str(exc),
             }
 
+        error = envelope.get("error")
+        if isinstance(error, str):
+            was_sidecar_truncated = len(error) == 4000
+            secrets = sorted((model["endpoint"], model["api_key"]), key=len, reverse=True)
+            # Redact before truncating so a cut through a credential cannot expose it.
+            for secret in secrets:
+                error = error.replace(secret, "<redacted>")
+            if was_sidecar_truncated:
+                # Legacy sidecars may already have cut through a known secret.
+                secret_tail = ""
+                for secret in secrets:
+                    for length in range(min(len(secret) - 1, len(error)), len(secret_tail), -1):
+                        if error.endswith(secret[:length]):
+                            secret_tail = secret[:length]
+                            break
+                if secret_tail:
+                    error = error[: -len(secret_tail)] + "<redacted>"
+            error = _redact_sensitive_text(error)[:4000]
+            envelope["error"] = error
+
         info = {
             "run_id": run_id,
             "status": envelope.get("status"),
@@ -294,6 +316,8 @@ class HermesAgent(Agent):
         }
         if envelope["finished"] is not True:
             info["error_kind"] = "timeout" if envelope.get("status") == "timeout" else "agent_failure"
+            if isinstance(error, str) and error.strip():
+                info["error"] = error
         return AgentResult(
             output=envelope,
             transcript=list(messages),
