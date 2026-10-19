@@ -30,24 +30,44 @@ CONCURRENCY="${CONCURRENCY:-1}"
 LOG_DIR="${LOG_DIR:-/tmp/uni_agent_logs}"
 RESULT_PATH="${RESULT_PATH:-/tmp/mini_swe_agent_infer_result.json}"
 
-# `ray job submit` does not forward this shell's env into the job driver, so
-# the job's runtime env is spelled out here and passed via --runtime-env-json.
+ENGINE="${ENGINE:-vllm}"
+LANGUAGE_MODEL_ONLY="${LANGUAGE_MODEL_ONLY:-0}"
+ENFORCE_EAGER="${ENFORCE_EAGER:-0}"
+GATEWAY_COUNT="${GATEWAY_COUNT:-4}"
+case "${ENGINE}" in
+    vllm|sglang) ;;
+    *) echo "ENGINE must be vllm or sglang" >&2; exit 2 ;;
+esac
+EXTRA_ARGS=(--engine "${ENGINE}")
+for option in LANGUAGE_MODEL_ONLY ENFORCE_EAGER; do
+    case "${!option,,}" in
+        1|true)
+            if [[ "${option}" == "LANGUAGE_MODEL_ONLY" ]]; then
+                EXTRA_ARGS+=(--language-model-only)
+            else
+                EXTRA_ARGS+=(--enforce-eager)
+            fi
+            ;;
+        0|false) ;;
+        *) echo "${option} must be 0, 1, false, or true" >&2; exit 2 ;;
+    esac
+done
+RUNTIME_ENV_JSON="$(python3 - <<'PY'
+import json
+import os
+
+names = (
+    "DEPLOYMENT", "OPENYUANRONG_SERVER_ADDRESS", "OPENYUANRONG_TOKEN",
+    "OPENYUANRONG_TUNNEL_SSL_VERIFY", "TUNNEL_SSL_VERIFY", "CUDA_VISIBLE_DEVICES",
+)
+env_vars = {name: os.environ[name] for name in names}
+env_vars["PYTHONPATH"] = "verl"
+print(json.dumps({"env_vars": env_vars, "excludes": ["/.git/"]}))
+PY
+)"
+
 ray job submit \
-    --runtime-env-json "$(cat <<JSON
-{
-  "env_vars": {
-    "PYTHONPATH": "verl",
-    "DEPLOYMENT": "${DEPLOYMENT}",
-    "OPENYUANRONG_SERVER_ADDRESS": "${OPENYUANRONG_SERVER_ADDRESS}",
-    "OPENYUANRONG_TOKEN": "${OPENYUANRONG_TOKEN}",
-    "OPENYUANRONG_TUNNEL_SSL_VERIFY": "${OPENYUANRONG_TUNNEL_SSL_VERIFY}",
-    "TUNNEL_SSL_VERIFY": "${TUNNEL_SSL_VERIFY}",
-    "CUDA_VISIBLE_DEVICES": "${CUDA_VISIBLE_DEVICES}"
-  },
-  "excludes": ["/.git/"]
-}
-JSON
-)" \
+    --runtime-env-json "${RUNTIME_ENV_JSON}" \
     --working-dir . \
     -- python3 examples/inference/parallel_infer_verl.py \
     --data-path "${DATA_PATH}" \
@@ -60,5 +80,7 @@ JSON
     --limit "${LIMIT}" \
     --n "${N}" \
     --concurrency "${CONCURRENCY}" \
+    --gateway-count "${GATEWAY_COUNT}" \
     --log-dir "${LOG_DIR}" \
-    --result-path "${RESULT_PATH}"
+    --result-path "${RESULT_PATH}" \
+    "${EXTRA_ARGS[@]}"

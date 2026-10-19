@@ -110,6 +110,7 @@ def init_config(args: argparse.Namespace, *, served_model_name: str):
     config.actor_rollout_ref.model.path = os.path.expanduser(args.model_path)
     rollout.name = args.engine
     rollout.mode = "async"
+    rollout.enforce_eager = bool(getattr(args, "enforce_eager", False))
     # Standalone inference has no trainer to broadcast weights.
     rollout.load_format = "auto"
     rollout.prompt_length = DEFAULT_PROMPT_LENGTH
@@ -122,7 +123,17 @@ def init_config(args: argparse.Namespace, *, served_model_name: str):
     rollout.disable_log_stats = False
     rollout.free_cache_engine = False
     OmegaConf.update(config, "actor_rollout_ref.rollout.enable_sleep_mode", False, force_add=True)
-    if args.engine == "vllm":
+    if args.engine == "sglang":
+        from verl.plugin.platform import get_platform
+
+        rollout.skip_tokenizer_init = False
+        sglang_kwargs = {"random_seed": rollout.seed}
+        if get_platform().device_name == "npu":
+            sglang_kwargs.update(device="npu", attention_backend="ascend", enable_memory_saver=False)
+        OmegaConf.update(
+            config, "actor_rollout_ref.rollout.engine_kwargs.sglang", sglang_kwargs, merge=True, force_add=True
+        )
+    elif args.engine == "vllm":
         OmegaConf.update(
             config,
             "actor_rollout_ref.rollout.engine_kwargs.vllm.kv_cache_dtype",
@@ -130,11 +141,19 @@ def init_config(args: argparse.Namespace, *, served_model_name: str):
             force_add=True,
         )
     if getattr(args, "language_model_only", False):
-        if args.engine != "vllm":
-            raise ValueError("--language-model-only is supported only with --engine vllm")
-        OmegaConf.update(
-            config, "actor_rollout_ref.rollout.engine_kwargs.vllm.language_model_only", True, force_add=True
-        )
+        if args.engine == "sglang":
+            OmegaConf.update(
+                config,
+                "actor_rollout_ref.rollout.engine_kwargs.sglang.json_model_override_args",
+                json.dumps({"language_model_only": True}),
+                force_add=True,
+            )
+        elif args.engine == "vllm":
+            OmegaConf.update(
+                config, "actor_rollout_ref.rollout.engine_kwargs.vllm.language_model_only", True, force_add=True
+            )
+        else:
+            raise ValueError("--language-model-only is supported only with --engine vllm or sglang")
     if getattr(args, "disable_thinking", False):
         OmegaConf.update(config, "data.apply_chat_template_kwargs.enable_thinking", False, force_add=True)
 
@@ -382,7 +401,12 @@ def main() -> None:
     parser.add_argument(
         "--language-model-only",
         action="store_true",
-        help="Load only the language-model component (required for text-only Qwen3.5 vLLM runs).",
+        help="Load only the language-model component (SGLang uses an HF model-config override).",
+    )
+    parser.add_argument(
+        "--enforce-eager",
+        action="store_true",
+        help="Disable CUDA graph capture in the selected engine.",
     )
     parser.add_argument(
         "--disable-thinking",
