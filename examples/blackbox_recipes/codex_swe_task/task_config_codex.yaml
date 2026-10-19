@@ -10,7 +10,7 @@
       - from: "swebench/**"
         to: "swr.cn-east-3.myhuaweicloud.com/openyuanrong/swe-bench-verified/**:v2"
     image_mounts:
-      - image: swr.cn-east-3.myhuaweicloud.com/openyuanrong/codex-tool@sha256:c9769b8d839a8ddcc6e4178c0022ffd508322ba5ad173d8c5a9c9e0ec6082828
+      - image: swr.cn-east-3.myhuaweicloud.com/openyuanrong/codex-tool@sha256:238a82f09cecddc7aa240583cd2048b40ded9aba86df0564d75cead5244129c4
         mount_path: /opt/codex
     sandbox_kwargs:
       proxy_port: 38197

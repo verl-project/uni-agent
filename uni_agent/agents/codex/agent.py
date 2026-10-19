@@ -16,6 +16,7 @@ import shlex
 import uuid
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlsplit
 
 from pydantic import Field
 
@@ -41,7 +42,7 @@ def _diagnostic(value: str | None, secret: str = "") -> str:
 def build_agent_command(
     *,
     task_b64: str,
-    tool_script: str,
+    codex_bin: str,
     gateway_url: str,
     model_name: str,
     api_key: str,
@@ -49,12 +50,12 @@ def build_agent_command(
     path: str | None = None,
     project_dir: str = "/testbed",
     model_catalog_path: str | None = None,
+    codex_home: str = "/tmp/codex-home",
 ) -> str:
-    """Build the shell command that pipes a task into the Codex sidecar.
+    """Pipe a task into the native Codex CLI with per-episode configuration.
 
     The prompt is base64-encoded to avoid argv length limits and shell quoting
-    hazards. Gateway and process settings are passed as environment variables
-    consumed by the sidecar entrypoint.
+    hazards. Provider settings use Codex's native configuration overrides.
     """
     conda_env_vars = ""
     if conda_env_path:
@@ -67,15 +68,45 @@ def build_agent_command(
     path_setup = f'PATH={shlex.quote(path_value)}:"$PATH" ' if path_value else ""
     env = (
         f"{conda_env_vars}{path_setup}"
-        f"CODEX_API_BASE={shlex.quote(gateway_url)} "
-        f"CODEX_MODEL={shlex.quote(model_name)} "
-        f"CODEX_API_KEY={shlex.quote(api_key)} "
-        f"CODEX_PROJECT_DIR={shlex.quote(project_dir)}"
+        f"CODEX_HOME={shlex.quote(codex_home)} "
+        f"OPENAI_API_KEY={shlex.quote(api_key)} "
+        'CODEX_MANAGED_PACKAGE_ROOT="${CODEX_MANAGED_PACKAGE_ROOT:-/opt/codex}" '
     )
-    catalog_args = ""
+    gateway_host = urlsplit(gateway_url).hostname
+    if gateway_host:
+        for key in ("NO_PROXY", "no_proxy"):
+            env += f'{key}="${{{key}:+${key},}}"{shlex.quote(gateway_host)} '
+
+    argv = [
+        codex_bin,
+        "exec",
+        "--json",
+        "--ephemeral",
+        "--skip-git-repo-check",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--cd",
+        project_dir,
+        "--model",
+        model_name,
+    ]
+    overrides = {
+        "model_provider": "gateway",
+        "model_providers.gateway.name": "Uni-Agent Gateway",
+        "model_providers.gateway.base_url": gateway_url,
+        "model_providers.gateway.wire_api": "responses",
+        "model_providers.gateway.requires_openai_auth": True,
+        "model_providers.gateway.env_key": "OPENAI_API_KEY",
+        "disable_response_storage": True,
+        "check_for_update_on_startup": False,
+    }
     if model_catalog_path is not None:
-        catalog_args = " -c " + shlex.quote("model_catalog_json=" + json.dumps(model_catalog_path))
-    return f"printf %s {shlex.quote(task_b64)} | base64 -d | env {env} bash {shlex.quote(tool_script)}{catalog_args}"
+        overrides["model_catalog_json"] = model_catalog_path
+    for key, value in overrides.items():
+        argv.extend(["-c", f"{key}={json.dumps(value)}"])
+    return (
+        f"mkdir -p {shlex.quote(codex_home)} && "
+        f"printf %s {shlex.quote(task_b64)} | base64 -d | env {env}{shlex.join(argv)}"
+    )
 
 
 def parse_agent_result(stdout: str, exit_code: int) -> dict[str, Any]:
@@ -188,7 +219,10 @@ class CodexConfig(AgentConfig):
         default=None,
         description="Host-side Codex model catalog JSON; copied into the sandbox when set.",
     )
-    tool_script: str = Field(default="/opt/codex/bin/run_agent.sh", description="Sidecar entrypoint.")
+    codex_bin: str = Field(
+        default="/opt/codex/vendor/x86_64-unknown-linux-musl/bin/codex",
+        description="Full in-sandbox path of the native Codex executable.",
+    )
 
 
 @register_agent("codex")
@@ -224,7 +258,7 @@ class CodexAgent(Agent):
             await sandbox.write_file(catalog_path, Path(cfg.model_catalog_path).read_text(encoding="utf-8"))
         command = build_agent_command(
             task_b64=task_b64,
-            tool_script=cfg.tool_script,
+            codex_bin=cfg.codex_bin,
             gateway_url=base_url,
             model_name=model_name,
             api_key=api_key,
@@ -232,6 +266,7 @@ class CodexAgent(Agent):
             conda_env_path=cfg.conda_env_path,
             path=cfg.path,
             model_catalog_path=catalog_path,
+            codex_home=f"/tmp/codex-home-{uuid.uuid4().hex}",
         )
 
         logger.info("codex: launch in %s", project_dir)

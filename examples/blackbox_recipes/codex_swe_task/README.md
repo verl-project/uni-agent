@@ -4,6 +4,11 @@ This recipe runs the Codex CLI as an inference-only sandbox agent. The CLI is
 mounted at `/opt/codex`, reads one task prompt from stdin, and calls the
 session's native Responses endpoint. Use a checkout that includes the Responses
 Gateway merged in [PR #224](https://github.com/verl-project/uni-agent/pull/224).
+The Agent invokes the native executable directly. `agent.codex_bin` defaults to
+`/opt/codex/vendor/x86_64-unknown-linux-musl/bin/codex`; set it to the full
+in-sandbox binary path if you use another sidecar layout. Provider and catalog
+settings are passed through Codex's native `-c` overrides, with a separate
+temporary `CODEX_HOME` for each episode.
 
 ## Prerequisites
 

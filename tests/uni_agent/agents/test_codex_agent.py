@@ -3,7 +3,10 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import os
 import shlex
+import subprocess
+import sys
 
 import pytest
 
@@ -28,7 +31,7 @@ class FakeSandbox:
 
 
 def make_agent(**kwargs):
-    kwargs.setdefault("tool_script", "/opt/codex/bin/run_agent.sh")
+    kwargs.setdefault("codex_bin", "/opt/codex/vendor/x86_64-unknown-linux-musl/bin/codex")
     kwargs.setdefault("conda_env_path", "/custom/conda/envs/testbed")
     kwargs.setdefault("path", "/custom/conda/envs/testbed/bin:/custom/conda/bin")
     kwargs.setdefault("model", ModelConfig(base_url="http://gateway/v1", model_name="policy"))
@@ -37,29 +40,97 @@ def make_agent(**kwargs):
 
 @pytest.mark.cpu
 @pytest.mark.level0
-def test_build_agent_command_uses_stdin_and_isolates_env():
-    task = base64.b64encode(b"fix 'this'").decode()
-    command = build_agent_command(
-        task_b64=task,
-        tool_script="/opt/codex/bin/run_agent.sh",
-        gateway_url="http://127.0.0.1:38197/sessions/s1/v1",
-        model_name="policy",
-        api_key="key",
-        conda_env_path="/sandbox/conda/envs/task",
-        path="/sandbox/conda/envs/task/bin:/sandbox/conda/bin",
-        project_dir="/testbed",
+@pytest.mark.parametrize("inherit_settings", [False, True])
+def test_direct_cli_launch_preserves_stdin_flags_and_environment(tmp_path, inherit_settings):
+    binary = tmp_path / "codex cli's"
+    binary.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, pathlib, sys\n"
+        "keys = ['CODEX_HOME', 'OPENAI_API_KEY', 'CODEX_MANAGED_PACKAGE_ROOT', 'CONDA_DEFAULT_ENV', "
+        "'CONDA_PREFIX', 'PATH', 'HTTP_PROXY', 'HTTPS_PROXY', 'NO_PROXY', 'no_proxy']\n"
+        "home = pathlib.Path(os.environ['CODEX_HOME'])\n"
+        "print(json.dumps({'argv': sys.argv[1:], 'stdin': sys.stdin.read(), "
+        "'env': {key: os.environ.get(key) for key in keys}, 'cwd': os.getcwd(), "
+        "'home_exists': home.is_dir(), 'config_exists': (home / 'config.toml').exists()}))\n"
     )
-    assert "| base64 -d |" in command
-    assert "CONDA_DEFAULT_ENV=task" in command
-    assert "CONDA_PREFIX=/sandbox/conda/envs/task" in command
-    assert 'PATH=/sandbox/conda/envs/task/bin:/sandbox/conda/bin:"$PATH"' in command
-    assert "/opt/miniconda3" not in command
-    assert "CODEX_API_BASE=http://127.0.0.1:38197/sessions/s1/v1" in command
-    assert "CODEX_MODEL=policy" in command
-    assert "CODEX_HOME=" not in command
-    assert "HTTP_PROXY" not in command
-    assert "PIP_PROGRESS" not in command
-    assert "fix 'this'" not in command
+    binary.chmod(0o755)
+    workdir = tmp_path / "repo's workdir"
+    workdir.mkdir()
+    home = tmp_path / "codex home's"
+    marker = tmp_path / "must-not-exist"
+    task = f"fix 'this'\n$(touch {marker})\nUnicode: 中文"
+    key = 'key\'s "quoted" value'
+    catalog = str(tmp_path / "model catalog's.json")
+    conda = "/sandbox/conda/envs/task" if inherit_settings else None
+    env = {
+        **os.environ,
+        "CONDA_DEFAULT_ENV": "parent-env",
+        "CONDA_PREFIX": "/parent-env",
+        "HTTP_PROXY": "http://proxy.invalid:8080",
+        "HTTPS_PROXY": "http://proxy.invalid:8080",
+    }
+    for name in ("CODEX_MANAGED_PACKAGE_ROOT", "NO_PROXY", "no_proxy"):
+        env.pop(name, None)
+    if inherit_settings:
+        env.update(
+            CODEX_MANAGED_PACKAGE_ROOT="/custom/package root", NO_PROXY="existing-upper", no_proxy="existing-lower"
+        )
+    command = build_agent_command(
+        task_b64=base64.b64encode(task.encode()).decode(),
+        codex_bin=str(binary),
+        gateway_url="http://127.0.0.1:38197/sessions/s1/v1",
+        model_name="policy's model",
+        api_key=key,
+        conda_env_path=conda,
+        project_dir=str(workdir),
+        model_catalog_path=catalog,
+        codex_home=str(home),
+    )
+    process = subprocess.run(["bash", "-c", command], cwd=workdir, env=env, text=True, capture_output=True, check=True)
+    captured = json.loads(process.stdout)
+    assert captured["stdin"] == task
+    assert task not in command and task not in captured["argv"]
+    assert not marker.exists()
+    assert captured["cwd"] == str(workdir)
+    assert captured["home_exists"] and not captured["config_exists"]
+    assert captured["env"]["CODEX_HOME"] == str(home)
+    assert captured["env"]["OPENAI_API_KEY"] == key
+    assert captured["env"]["CODEX_MANAGED_PACKAGE_ROOT"] == (
+        "/custom/package root" if inherit_settings else "/opt/codex"
+    )
+    assert captured["env"]["NO_PROXY"] == ("existing-upper,127.0.0.1" if inherit_settings else "127.0.0.1")
+    assert captured["env"]["no_proxy"] == ("existing-lower,127.0.0.1" if inherit_settings else "127.0.0.1")
+    assert captured["env"]["HTTP_PROXY"] == captured["env"]["HTTPS_PROXY"] == "http://proxy.invalid:8080"
+    assert captured["env"]["CONDA_PREFIX"] == (conda if inherit_settings else "/parent-env")
+    assert captured["env"]["CONDA_DEFAULT_ENV"] == ("task" if inherit_settings else "parent-env")
+    expected_path = f"{conda}/bin:/sandbox/conda/bin:{env['PATH']}" if inherit_settings else env["PATH"]
+    assert captured["env"]["PATH"] == expected_path
+    assert captured["argv"][:10] == [
+        "exec",
+        "--json",
+        "--ephemeral",
+        "--skip-git-repo-check",
+        "--dangerously-bypass-approvals-and-sandbox",
+        "--cd",
+        str(workdir),
+        "--model",
+        "policy's model",
+        "-c",
+    ]
+    args = captured["argv"][9:]
+    assert all(flag == "-c" for flag in args[::2])
+    overrides = {name: json.loads(value) for name, value in (item.split("=", 1) for item in args[1::2])}
+    assert overrides == {
+        "model_provider": "gateway",
+        "model_providers.gateway.name": "Uni-Agent Gateway",
+        "model_providers.gateway.base_url": "http://127.0.0.1:38197/sessions/s1/v1",
+        "model_providers.gateway.wire_api": "responses",
+        "model_providers.gateway.requires_openai_auth": True,
+        "model_providers.gateway.env_key": "OPENAI_API_KEY",
+        "disable_response_storage": True,
+        "check_for_update_on_startup": False,
+        "model_catalog_json": catalog,
+    }
 
 
 @pytest.mark.cpu
@@ -67,7 +138,7 @@ def test_build_agent_command_uses_stdin_and_isolates_env():
 def test_build_agent_command_skips_conda_when_unset():
     command = build_agent_command(
         task_b64="",
-        tool_script="/opt/codex/bin/run_agent.sh",
+        codex_bin="/opt/codex/vendor/x86_64-unknown-linux-musl/bin/codex",
         gateway_url="http://gateway/v1",
         model_name="policy",
         api_key="key",
@@ -172,7 +243,7 @@ def test_build_agent_command_passes_catalog_as_a_quoted_cli_override():
     path = "/tmp/model catalog's.json"
     command = build_agent_command(
         task_b64="",
-        tool_script="/opt/codex/bin/run_agent.sh",
+        codex_bin="/opt/codex/vendor/x86_64-unknown-linux-musl/bin/codex",
         gateway_url="http://gateway/v1",
         model_name="policy",
         api_key="EMPTY",
