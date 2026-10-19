@@ -18,7 +18,12 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _ensure_template(image: str, cpu_count: int, memory_mb: int) -> str:
+def _ensure_template(
+    image: str,
+    cpu_count: int,
+    memory_mb: int,
+    proxy: str | None = None,
+) -> str:
     """Build the image-backed template once and return its deterministic name."""
     import e2b
 
@@ -29,13 +34,15 @@ def _ensure_template(image: str, cpu_count: int, memory_mb: int) -> str:
     slug = re.sub(r"[^a-z0-9_-]+", "-", image.lower()).strip("-_")[:64] or "image"
     digest = hashlib.sha256(image.encode()).hexdigest()[:12]
     name = f"uni-agent-{slug}-{cpu_count}c-{memory_mb}mb-{digest}"
-    if not e2b.Template.exists(name):
+    connection_kwargs = {"proxy": proxy} if proxy is not None else {}
+    if not e2b.Template.exists(name, **connection_kwargs):
         e2b.Template.build(
             e2b.Template().from_image(image),
             name,
             cpu_count=cpu_count,
             memory_mb=memory_mb,
             on_build_logs=None,
+            **connection_kwargs,
         )
     return name
 
@@ -55,6 +62,7 @@ class E2BSandbox(Sandbox):
         user: str | None = "root",
         metadata: dict[str, str] | None = None,
         envs: dict[str, str] | None = None,
+        proxy: str | None = None,
         secure: bool = True,
         allow_internet_access: bool = True,
         network: dict[str, Any] | None = None,
@@ -77,6 +85,8 @@ class E2BSandbox(Sandbox):
             raise ValueError("template must be non-empty when provided")
         if image is None and template is None:
             raise ValueError("either image or template must be provided")
+        if proxy is not None and not proxy.strip():
+            raise ValueError("proxy must be non-empty when provided")
         if image_mounts:
             raise NotImplementedError(
                 "E2BSandbox does not support image mounts; build a composite E2B template instead"
@@ -90,6 +100,7 @@ class E2BSandbox(Sandbox):
         self.user = user
         self.metadata = dict(metadata or {})
         self.envs = dict(envs or {})
+        self.proxy = proxy.strip() if proxy is not None else None
         self.secure = secure
         self.allow_internet_access = allow_internet_access
         self.network = network
@@ -125,6 +136,7 @@ class E2BSandbox(Sandbox):
                 self.image,
                 self.cpu_count,
                 self.memory_mb,
+                self.proxy,
             )
 
         create_kwargs: dict[str, Any] = {
@@ -139,6 +151,8 @@ class E2BSandbox(Sandbox):
             create_kwargs["network"] = self.network
         if self.lifecycle is not None:
             create_kwargs["lifecycle"] = self.lifecycle
+        if self.proxy is not None:
+            create_kwargs["proxy"] = self.proxy
 
         sandbox = await AsyncSandbox.create(**create_kwargs)
         self._sandbox = sandbox

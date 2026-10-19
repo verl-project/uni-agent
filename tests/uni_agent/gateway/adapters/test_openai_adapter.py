@@ -12,7 +12,7 @@ ALLOWED_SAMPLING_KEYS = frozenset({"temperature", "top_p", "top_k", "max_tokens"
     "limits", [{"max_tokens": 32}, {"max_completion_tokens": 32}, {"max_tokens": 32, "max_completion_tokens": 32}]
 )
 def test_openai_output_limit_alias_preserves_sampling_policy_and_inputs(limits):
-    from uni_agent.gateway.adapters.openai import openai_to_internal
+    from uni_agent.gateway.adapters.openai_chat import openai_to_internal
 
     payload = {"messages": [{"role": "user", "content": "hello"}], "temperature": 0.9, **limits}
     before = copy.deepcopy(payload)
@@ -32,7 +32,7 @@ def test_openai_output_limit_alias_preserves_sampling_policy_and_inputs(limits):
 @pytest.mark.level0
 @pytest.mark.parametrize("value", [0, -1, True, False, 1.0, "32", None, [], {}])
 def test_openai_completion_token_limit_rejects_non_positive_integers(value):
-    from uni_agent.gateway.adapters.openai import openai_to_internal
+    from uni_agent.gateway.adapters.openai_chat import openai_to_internal
     from uni_agent.gateway.adapters.types import MalformedRequestError
 
     with pytest.raises(MalformedRequestError, match="max_completion_tokens must be a positive integer"):
@@ -47,7 +47,7 @@ def test_openai_completion_token_limit_rejects_non_positive_integers(value):
 @pytest.mark.level0
 @pytest.mark.parametrize("legacy_limit", [16, 0, -1, True, False, 32.0, "32", None])
 def test_openai_output_limit_alias_rejects_conflicting_or_invalid_legacy_limit(legacy_limit):
-    from uni_agent.gateway.adapters.openai import openai_to_internal
+    from uni_agent.gateway.adapters.openai_chat import openai_to_internal
     from uni_agent.gateway.adapters.types import MalformedRequestError
 
     with pytest.raises(MalformedRequestError, match="must specify the same positive integer"):
@@ -66,7 +66,7 @@ def test_openai_output_limit_alias_rejects_conflicting_or_invalid_legacy_limit(l
 @pytest.mark.level0
 @pytest.mark.parametrize("allowed", [frozenset(), frozenset({"max_completion_tokens"})])
 def test_openai_output_limit_alias_does_not_bypass_canonical_permission(allowed):
-    from uni_agent.gateway.adapters.openai import openai_to_internal
+    from uni_agent.gateway.adapters.openai_chat import openai_to_internal
 
     request = openai_to_internal(
         {"messages": [{"role": "user", "content": "hello"}], "max_completion_tokens": 32},
@@ -79,7 +79,7 @@ def test_openai_output_limit_alias_does_not_bypass_canonical_permission(allowed)
 @pytest.mark.cpu
 @pytest.mark.level0
 def test_openai_omitted_output_limit_preserves_session_default():
-    from uni_agent.gateway.adapters.openai import openai_to_internal
+    from uni_agent.gateway.adapters.openai_chat import openai_to_internal
 
     request = openai_to_internal(
         {"messages": [{"role": "user", "content": "hello"}]},
@@ -94,7 +94,7 @@ def test_openai_omitted_output_limit_preserves_session_default():
 def test_openai_build_response_shape():
     """A completed internal outcome serializes to the basic OpenAI chat
     completion envelope with ids, model, choices, and token usage."""
-    from uni_agent.gateway.adapters.openai import openai_build_response
+    from uni_agent.gateway.adapters.openai_chat import openai_build_response
     from uni_agent.gateway.session.session import GenerationOutcome
 
     outcome = GenerationOutcome(
@@ -116,7 +116,7 @@ def test_openai_build_response_shape():
 @pytest.mark.cpu
 @pytest.mark.level0
 def test_openai_build_response_serializes_internal_dict_tool_arguments():
-    from uni_agent.gateway.adapters.openai import openai_build_response
+    from uni_agent.gateway.adapters.openai_chat import openai_build_response
     from uni_agent.gateway.session.session import GenerationOutcome
 
     assistant_msg = {
@@ -150,7 +150,7 @@ def test_openai_build_response_serializes_internal_dict_tool_arguments():
 async def test_openai_stream_response_emits_compatible_sse_chunks():
     """A completed internal outcome is synthesized into OpenAI-compatible SSE
     chunks for role, reasoning, content, tool calls, final usage, and DONE."""
-    from uni_agent.gateway.adapters.openai import openai_stream_response
+    from uni_agent.gateway.adapters.openai_chat import openai_stream_response
     from uni_agent.gateway.session.session import GenerationOutcome
 
     resp = openai_stream_response(
@@ -204,7 +204,7 @@ def test_openai_to_internal_normalizes_messages_sampling_and_tools():
     """OpenAI wire requests lower to the internal shape: sampling params use the
     gateway allowlist, JSON-object tool arguments are parsed, non-object and
     malformed arguments stay strings, and tool_choice=none clears tool schemas."""
-    from uni_agent.gateway.adapters.openai import openai_to_internal
+    from uni_agent.gateway.adapters.openai_chat import openai_to_internal
 
     payload = {
         "messages": [

@@ -18,6 +18,7 @@ from tests.uni_agent.support import (
     InspectingBackend,
     InspectingSequencedBackend,
     QueuedBackend,
+    QwenVLTokenizer,
     RecordingConcurrentBackend,
     RejectRequestEnvelopeBackend,
     SequencedBackend,
@@ -633,7 +634,7 @@ async def test_gateway_actor_forwards_image_data_on_initial_multimodal_request(r
     """On the first turn of a multimodal session, ``image_data`` extracted
     from the request is forwarded to the backend and recorded in the
     resulting ``Trajectory.multi_modal_data``."""
-    from uni_agent.gateway.adapters.openai import openai_to_internal
+    from uni_agent.gateway.adapters.openai_chat import openai_to_internal
     from uni_agent.gateway.config import GatewayActorConfig
     from uni_agent.gateway.gateway import GatewayActor
 
@@ -863,71 +864,114 @@ async def test_gateway_actor_multimodal_reference_change_splits_trajectory(ray_r
 
 @pytest.mark.cpu
 @pytest.mark.level0
+@pytest.mark.parametrize("endpoint", ["chat/completions", "responses"])
+@pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.asyncio
-async def test_gateway_actor_rejects_ct_continuation_with_tool_returned_image(monkeypatch):
-    """Reject incremental media until Continuous Token context merging supports it."""
+async def test_gateway_actor_continues_with_tool_returned_image(monkeypatch, endpoint, stream):
+    """Both HTTP protocols carry tool images through CT on the same chain."""
     import uni_agent.gateway.session.codec as codec_mod
     from uni_agent.gateway.config import GatewayActorConfig
     from uni_agent.gateway.gateway import _GatewayActor
 
     monkeypatch.setattr(codec_mod.MessageCodec, "_extract_tool_calls", fake_tool_call_dispatch)
-    processor = FakeProcessor()
     tool_call_text = '<tool_call>\n{"name": "search", "arguments": {"query": "crop"}}\n</tool_call>'
     actor = _GatewayActor(
         GatewayActorConfig(
-            tokenizer=FakeTokenizer(),
-            processor=processor,
+            tokenizer=QwenVLTokenizer(),
+            processor=FakeProcessor(),
             tool_parser_name="hermes",
             vision_info_extractor=fake_vision_info_extractor,
+            hf_model_type="qwen2_5_vl",
         ),
         InspectingSequencedBackend([tool_call_text, "__inspect__"]),
     )
     await actor.start()
-    await actor.create_session("session-mm-tool-image")
-
-    tools = [{"type": "function", "function": {"name": "search", "parameters": {"type": "object"}}}]
-    initial_message = {
-        "role": "user",
-        "content": [
-            {"type": "image_url", "image_url": {"url": "image://a.png"}},
-            {"type": "text", "text": "find a crop"},
-        ],
-    }
-
-    first = await actor._handle_openai_chat_completions(
-        "session-mm-tool-image",
-        {
-            "model": "dummy-model",
-            "tools": tools,
-            "messages": [initial_message],
-        },
-    )
-    assert first.status_code == 200
-    assistant_message = json.loads(first.body)["choices"][0]["message"]
-    tool_message = {
-        "role": "tool",
-        "tool_call_id": assistant_message["tool_calls"][0]["id"],
-        "content": [
-            {"type": "image_url", "image_url": {"url": "image://tool-b.png"}},
-            {"type": "text", "text": "zoomed crop"},
-        ],
-    }
-
-    with pytest.raises(ValueError, match="does not currently support incremental image or video data"):
-        await actor._handle_openai_chat_completions(
-            "session-mm-tool-image",
-            {
-                "model": "dummy-model",
-                "tools": tools,
-                "messages": [initial_message, assistant_message, tool_message],
-            },
-        )
-
-    trajectories = await actor.finalize_session("session-mm-tool-image")
-    await actor.shutdown()
-
-    assert len(trajectories) == 1
-    assert trajectories[0].multi_modal_data == {"images": ["image://a.png"]}
+    try:
+        await actor.create_session("session-mm-tool-image")
+        if endpoint == "responses":
+            initial_message = {
+                "role": "user",
+                "content": [
+                    {"type": "input_image", "image_url": "image://a.png"},
+                    {"type": "input_text", "text": "find a crop"},
+                ],
+            }
+            tools = [{"type": "function", "name": "search", "parameters": {"type": "object"}}]
+            first_payload = {"input": [initial_message], "tools": tools}
+        else:
+            initial_message = {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": "image://a.png"}},
+                    {"type": "text", "text": "find a crop"},
+                ],
+            }
+            tools = [{"type": "function", "function": {"name": "search", "parameters": {"type": "object"}}}]
+            first_payload = {"messages": [initial_message], "tools": tools}
+        saved_first_payload = json.loads(json.dumps(first_payload))
+        transport = httpx.ASGITransport(app=actor._app, raise_app_exceptions=False)
+        path = f"/sessions/session-mm-tool-image/v1/{endpoint}"
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            first = await client.post(path, json=first_payload)
+            assert first.status_code == 200
+            if endpoint == "responses":
+                output = first.json()["output"]
+                call_id = next(item["call_id"] for item in output if item["type"] == "function_call")
+                tool_message = {
+                    "type": "function_call_output",
+                    "call_id": call_id,
+                    "output": [
+                        {"type": "input_image", "image_url": "image://tool-b.png"},
+                        {"type": "input_text", "text": "zoomed crop"},
+                    ],
+                }
+                second_payload = {"input": [initial_message, *output, tool_message], "tools": tools, "stream": stream}
+            else:
+                assistant_message = first.json()["choices"][0]["message"]
+                call_id = assistant_message["tool_calls"][0]["id"]
+                tool_message = {
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": "image://tool-b.png"}},
+                        {"type": "text", "text": "zoomed crop"},
+                    ],
+                }
+                second_payload = {
+                    "messages": [initial_message, assistant_message, tool_message],
+                    "tools": tools,
+                    "stream": stream,
+                }
+            saved_second_payload = json.loads(json.dumps(second_payload))
+            second = await client.post(path, json=second_payload)
+        assert second.status_code == 200
+        if stream:
+            events = [
+                json.loads(line[6:])
+                for line in second.text.splitlines()
+                if line.startswith("data: ") and line != "data: [DONE]"
+            ]
+            if endpoint == "responses":
+                final_response = next(event["response"] for event in events if event["type"] == "response.completed")
+                content = final_response["output"][0]["content"][0]["text"]
+            else:
+                content = "".join(event["choices"][0]["delta"].get("content", "") for event in events)
+        elif endpoint == "responses":
+            content = second.json()["output"][0]["content"][0]["text"]
+        else:
+            content = second.json()["choices"][0]["message"]["content"]
+        assert json.loads(content)["image_data"] == ["image://a.png", "image://tool-b.png"]
+        assert first_payload == saved_first_payload
+        assert second_payload == saved_second_payload
+        history = actor._sessions["session-mm-tool-image"].active_chains[0].message_history
+        assert history[-2]["role"] == "tool"
+        assert history[-2]["tool_call_id"] == call_id
+        assert history[-2]["content"][0] == {"type": "image_url", "image_url": {"url": "image://tool-b.png"}}
+        trajectories = await actor.finalize_session("session-mm-tool-image")
+        assert len(trajectories) == 1
+        assert trajectories[0].multi_modal_data == {"images": ["image://a.png", "image://tool-b.png"]}
+    finally:
+        await actor.shutdown()
 
 
 @pytest.mark.cpu
@@ -1753,3 +1797,148 @@ async def test_unhandled_exception_uses_provider_error_envelope(monkeypatch):
                 assert body["error"]["message"] == "Internal server error"
             finally:
                 await actor.shutdown()
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize("endpoint", ["chat/completions", "responses"])
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("image_role", ["user", "tool"])
+@pytest.mark.asyncio
+async def test_text_only_image_is_http_400_before_generation(endpoint, stream, image_role):
+    """Reject unsupported media through real ASGI routes before JSON or SSE starts."""
+    from uni_agent.gateway.config import GatewayActorConfig
+    from uni_agent.gateway.gateway import _GatewayActor
+
+    backend = SequencedBackend(["SHOULD_NOT_RUN"])
+    actor = _GatewayActor(GatewayActorConfig(tokenizer=FakeTokenizer()), backend)
+    await actor.start()
+    try:
+        await actor.create_session("media-error")
+        if endpoint == "responses":
+            image = {"type": "input_image", "image_url": "image://unsupported.png"}
+            item = (
+                {"type": "function_call_output", "call_id": "crop", "output": [image]}
+                if image_role == "tool"
+                else {"role": "user", "content": [image]}
+            )
+            payload = {"input": [{"role": "user", "content": "start"}, item], "stream": stream}
+        else:
+            image = {"type": "image_url", "image_url": {"url": "image://unsupported.png"}}
+            payload = {
+                "messages": [
+                    {"role": "user", "content": "start"},
+                    {"role": image_role, "tool_call_id": "crop", "content": [image]},
+                ],
+                "stream": stream,
+            }
+        transport = httpx.ASGITransport(app=actor._app, raise_app_exceptions=False)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            response = await client.post(f"/sessions/media-error/v1/{endpoint}", json=payload)
+        assert response.status_code == 400
+        assert response.headers["content-type"].startswith("application/json")
+        assert response.json()["error"]["type"] == "invalid_request_error"
+        assert "multimodal processor" in response.json()["error"]["message"]
+        assert backend.calls == []
+        assert await actor.finalize_session("media-error") == []
+    finally:
+        await actor.shutdown()
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.asyncio
+async def test_incremental_video_is_http_400_without_changing_chain(stream):
+    from uni_agent.gateway.config import GatewayActorConfig
+    from uni_agent.gateway.gateway import _GatewayActor
+
+    backend = SequencedBackend(["FIRST", "SHOULD_NOT_RUN"])
+    actor = _GatewayActor(
+        GatewayActorConfig(
+            tokenizer=FakeTokenizer(), processor=FakeProcessor(), vision_info_extractor=fake_vision_info_extractor
+        ),
+        backend,
+    )
+    await actor.start()
+    try:
+        await actor.create_session("video-error")
+        transport = httpx.ASGITransport(app=actor._app, raise_app_exceptions=False)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            first_message = {"role": "user", "content": "start"}
+            first = await client.post("/sessions/video-error/v1/chat/completions", json={"messages": [first_message]})
+            assert first.status_code == 200
+            response = await client.post(
+                "/sessions/video-error/v1/chat/completions",
+                json={
+                    "messages": [
+                        first_message,
+                        first.json()["choices"][0]["message"],
+                        {
+                            "role": "tool",
+                            "tool_call_id": "video",
+                            "content": [{"type": "video_url", "video_url": {"url": "video://unsupported.mp4"}}],
+                        },
+                    ],
+                    "stream": stream,
+                },
+            )
+        assert response.status_code == 400
+        assert response.json()["error"]["type"] == "invalid_request_error"
+        assert "incremental video" in response.json()["error"]["message"]
+        assert len(backend.calls) == 1
+        trajectories = await actor.finalize_session("video-error")
+        assert len(trajectories) == 1
+        assert trajectories[0].multi_modal_data is None
+    finally:
+        await actor.shutdown()
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize("endpoint", ["chat/completions", "responses"])
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.asyncio
+async def test_media_extractor_value_error_remains_http_500(endpoint, stream):
+    """Unexpected processor failures must not be reclassified as unsupported media."""
+    from uni_agent.gateway.config import GatewayActorConfig
+    from uni_agent.gateway.gateway import _GatewayActor
+
+    async def failing_extractor(*args, **kwargs):
+        raise ValueError("unexpected decoder failure")
+
+    backend = SequencedBackend(["SHOULD_NOT_RUN"])
+    actor = _GatewayActor(
+        GatewayActorConfig(
+            tokenizer=FakeTokenizer(), processor=FakeProcessor(), vision_info_extractor=failing_extractor
+        ),
+        backend,
+    )
+    await actor.start()
+    try:
+        await actor.create_session("decoder-error")
+        if endpoint == "responses":
+            payload = {
+                "input": [{"role": "user", "content": [{"type": "input_image", "image_url": "image://error.png"}]}],
+                "stream": stream,
+            }
+        else:
+            payload = {
+                "messages": [
+                    {"role": "user", "content": [{"type": "image_url", "image_url": {"url": "image://error.png"}}]}
+                ],
+                "stream": stream,
+            }
+        transport = httpx.ASGITransport(app=actor._app, raise_app_exceptions=False)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t") as client:
+            response = await client.post(f"/sessions/decoder-error/v1/{endpoint}", json=payload)
+        assert response.status_code == 500
+        assert response.json()["error"] == {
+            "type": "internal_server_error",
+            "message": "Internal server error",
+            "code": None,
+            "param": None,
+        }
+        assert backend.calls == []
+    finally:
+        await actor.shutdown()

@@ -225,6 +225,13 @@ ray job submit --no-wait \
 
 ## Recipes
 
+### Codex (inference only)
+
+The [Codex SWE-bench recipe](https://github.com/verl-project/uni-agent/blob/main/examples/blackbox_recipes/codex_swe_task/README.md)
+runs the pinned native Codex CLI inside an OpenYuanRong sandbox through the
+session's Responses endpoint. Follow its sidecar build, Qwen3.5-9B catalog, data
+preparation and Ray setup steps to run a single-task inference check.
+
 ### Claude Code
 
 Claude Code is a black-box Agent Harness: the complete CLI runs inside the sandbox and owns its interaction loop and tools. The following examples run it with `doubao-seed-2.1-pro` through an external API and with `qwen3.6-35b-a3b` through the verl rollout engine.
