@@ -213,6 +213,7 @@ def test_tool_result_image_appends_user_message():
     assert req["messages"][0]["role"] == "tool"
     assert req["messages"][1]["role"] == "user"
     assert req["messages"][1]["content"][0]["type"] == "image_url"
+    assert req["received_tool_result"] is True
 
 
 @pytest.mark.cpu
@@ -246,6 +247,41 @@ def test_tool_result_image_only_preserves_empty_tool_message():
     assert req["messages"][0] == {"role": "tool", "tool_call_id": "t", "content": ""}
     assert req["messages"][1]["role"] == "user"
     assert req["messages"][1]["content"][0]["type"] == "image_url"
+    assert req["received_tool_result"] is True
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize(
+    "content, expected",
+    [
+        ("new user turn", False),
+        ([{"type": "text", "text": "new user turn"}], False),
+        ([{"type": "image", "source": {"type": "url", "url": "https://example.com/user.png"}}], False),
+        ([{"type": "tool_result", "tool_use_id": "new", "content": "result"}], True),
+        (
+            [
+                {"type": "tool_result", "tool_use_id": "new", "content": "result"},
+                {"type": "text", "text": "continue using this result"},
+            ],
+            True,
+        ),
+    ],
+)
+def test_tool_result_metadata_describes_only_current_provider_turn(content, expected):
+    req = anthropic_to_internal(
+        {
+            "messages": [
+                {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "old", "content": "old result"}]},
+                {"role": "assistant", "content": "previous answer"},
+                {"role": "user", "content": content},
+            ]
+        },
+        **BASE,
+    )
+    assert req["received_tool_result"] is expected
+    assert "received_tool_result" not in req["sampling_params"]
+    assert all("received_tool_result" not in message for message in req["messages"])
 
 
 @pytest.mark.cpu
