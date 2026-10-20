@@ -14,7 +14,7 @@ import logging
 import re
 import shlex
 import uuid
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
@@ -46,8 +46,6 @@ def build_agent_command(
     gateway_url: str,
     model_name: str,
     api_key: str,
-    conda_env_path: str | None = None,
-    path: str | None = None,
     project_dir: str = "/testbed",
     model_catalog_path: str | None = None,
     codex_home: str = "/tmp/codex-home",
@@ -57,17 +55,7 @@ def build_agent_command(
     The prompt is base64-encoded to avoid argv length limits and shell quoting
     hazards. Provider settings use Codex's native configuration overrides.
     """
-    conda_env_vars = ""
-    if conda_env_path:
-        env_dir = PurePosixPath(conda_env_path)
-        conda_env_vars = f"CONDA_DEFAULT_ENV={shlex.quote(env_dir.name)} CONDA_PREFIX={shlex.quote(str(env_dir))} "
-    path_value = path
-    if path_value is None and conda_env_path:
-        env_dir = PurePosixPath(conda_env_path)
-        path_value = f"{env_dir / 'bin'}:{env_dir.parent.parent / 'bin'}"
-    path_setup = f'PATH={shlex.quote(path_value)}:"$PATH" ' if path_value else ""
     env = (
-        f"{conda_env_vars}{path_setup}"
         f"CODEX_HOME={shlex.quote(codex_home)} "
         f"OPENAI_API_KEY={shlex.quote(api_key)} "
         'CODEX_MANAGED_PACKAGE_ROOT="${CODEX_MANAGED_PACKAGE_ROOT:-/opt/codex}" '
@@ -207,14 +195,6 @@ class CodexConfig(AgentConfig):
 
     name: str = "codex"
     run_timeout: float = Field(default=7200.0, gt=0, description="Maximum wall-clock time for one Codex episode.")
-    conda_env_path: str | None = Field(
-        default=None,
-        description="Task-image path of the Conda environment; unset leaves the launch unactivated.",
-    )
-    path: str | None = Field(
-        default=None,
-        description="Optional colon-separated PATH entries; unset derives the task Conda bin paths.",
-    )
     model_catalog_path: str | None = Field(
         default=None,
         description="Host-side Codex model catalog JSON; copied into the sandbox when set.",
@@ -263,8 +243,6 @@ class CodexAgent(Agent):
             model_name=model_name,
             api_key=api_key,
             project_dir=project_dir,
-            conda_env_path=cfg.conda_env_path,
-            path=cfg.path,
             model_catalog_path=catalog_path,
             codex_home=f"/tmp/codex-home-{uuid.uuid4().hex}",
         )

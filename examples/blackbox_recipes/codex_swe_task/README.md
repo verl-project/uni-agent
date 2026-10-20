@@ -36,8 +36,23 @@ bash examples/blackbox_recipes/codex_swe_task/build_tool.sh \
 
 Record the resulting digest in
 `examples/blackbox_recipes/codex_swe_task/task_config_codex.yaml`. The task
-image owns `/testbed` and its Conda environment; `agent.conda_env_path` and
-`agent.path` describe that task image and do not assume a host installation.
+image owns `/testbed` and its environment. In the task YAML's existing `sandbox`
+block, configure `sandbox_kwargs` as follows. The Codex process and its tools
+inherit this environment:
+
+```yaml
+sandbox_kwargs:
+  proxy_port: 38197
+  env:
+    CONDA_DEFAULT_ENV: testbed
+    CONDA_PREFIX: /opt/miniconda3/envs/testbed
+  add_to_path:
+    - /opt/miniconda3/envs/testbed/bin
+    - /opt/miniconda3/bin
+```
+
+These paths belong to the task image, not the host. `add_to_path` prepends them
+while preserving the sandbox's existing `PATH`.
 
 The task config mounts the sidecar with `sandbox.image_mounts`, using `image`
 for the image reference and `mount_path` for `/opt/codex`. Provider-specific
@@ -63,7 +78,6 @@ YAML, or use a worker-readable copy of the YAML through `TASK_CONFIG`:
 agent:
   name: codex
   run_timeout: 7200
-  conda_env_path: /opt/miniconda3/envs/testbed
   model_catalog_path: examples/blackbox_recipes/codex_swe_task/model_catalog_qwen35.json
 ```
 

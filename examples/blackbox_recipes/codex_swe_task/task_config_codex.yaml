@@ -14,10 +14,15 @@
         mount_path: /opt/codex
     sandbox_kwargs:
       proxy_port: 38197
+      env:
+        CONDA_DEFAULT_ENV: testbed
+        CONDA_PREFIX: /opt/miniconda3/envs/testbed
+      add_to_path:
+        - /opt/miniconda3/envs/testbed/bin
+        - /opt/miniconda3/bin
   agent:
     name: codex
     run_timeout: 7200
-    conda_env_path: /opt/miniconda3/envs/testbed
   prompt_template:
     - role: user
       content: |-

@@ -7,8 +7,10 @@ import os
 import shlex
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
+import yaml
 
 from uni_agent.agents.base import AgentResult, ModelConfig
 from uni_agent.agents.codex.agent import CodexAgent, CodexConfig, build_agent_command, parse_agent_result
@@ -32,8 +34,6 @@ class FakeSandbox:
 
 def make_agent(**kwargs):
     kwargs.setdefault("codex_bin", "/opt/codex/vendor/x86_64-unknown-linux-musl/bin/codex")
-    kwargs.setdefault("conda_env_path", "/custom/conda/envs/testbed")
-    kwargs.setdefault("path", "/custom/conda/envs/testbed/bin:/custom/conda/bin")
     kwargs.setdefault("model", ModelConfig(base_url="http://gateway/v1", model_name="policy"))
     return CodexAgent(CodexConfig(**kwargs))
 
@@ -61,11 +61,11 @@ def test_direct_cli_launch_preserves_stdin_flags_and_environment(tmp_path, inher
     task = f"fix 'this'\n$(touch {marker})\nUnicode: 中文"
     key = 'key\'s "quoted" value'
     catalog = str(tmp_path / "model catalog's.json")
-    conda = "/sandbox/conda/envs/task" if inherit_settings else None
     env = {
         **os.environ,
-        "CONDA_DEFAULT_ENV": "parent-env",
-        "CONDA_PREFIX": "/parent-env",
+        "CONDA_DEFAULT_ENV": "testbed",
+        "CONDA_PREFIX": "/opt/miniconda3/envs/testbed",
+        "PATH": f"/opt/miniconda3/envs/testbed/bin:/opt/miniconda3/bin:{os.environ['PATH']}",
         "HTTP_PROXY": "http://proxy.invalid:8080",
         "HTTPS_PROXY": "http://proxy.invalid:8080",
     }
@@ -81,7 +81,6 @@ def test_direct_cli_launch_preserves_stdin_flags_and_environment(tmp_path, inher
         gateway_url="http://127.0.0.1:38197/sessions/s1/v1",
         model_name="policy's model",
         api_key=key,
-        conda_env_path=conda,
         project_dir=str(workdir),
         model_catalog_path=catalog,
         codex_home=str(home),
@@ -101,10 +100,8 @@ def test_direct_cli_launch_preserves_stdin_flags_and_environment(tmp_path, inher
     assert captured["env"]["NO_PROXY"] == ("existing-upper,127.0.0.1" if inherit_settings else "127.0.0.1")
     assert captured["env"]["no_proxy"] == ("existing-lower,127.0.0.1" if inherit_settings else "127.0.0.1")
     assert captured["env"]["HTTP_PROXY"] == captured["env"]["HTTPS_PROXY"] == "http://proxy.invalid:8080"
-    assert captured["env"]["CONDA_PREFIX"] == (conda if inherit_settings else "/parent-env")
-    assert captured["env"]["CONDA_DEFAULT_ENV"] == ("task" if inherit_settings else "parent-env")
-    expected_path = f"{conda}/bin:/sandbox/conda/bin:{env['PATH']}" if inherit_settings else env["PATH"]
-    assert captured["env"]["PATH"] == expected_path
+    for name in ("CONDA_PREFIX", "CONDA_DEFAULT_ENV", "PATH"):
+        assert captured["env"][name] == env[name]
     assert captured["argv"][:10] == [
         "exec",
         "--json",
@@ -135,17 +132,19 @@ def test_direct_cli_launch_preserves_stdin_flags_and_environment(tmp_path, inher
 
 @pytest.mark.cpu
 @pytest.mark.level0
-def test_build_agent_command_skips_conda_when_unset():
-    command = build_agent_command(
-        task_b64="",
-        codex_bin="/opt/codex/vendor/x86_64-unknown-linux-musl/bin/codex",
-        gateway_url="http://gateway/v1",
-        model_name="policy",
-        api_key="key",
-        path="/custom/bin",
-    )
-    assert "CONDA_PREFIX" not in command
-    assert "CONDA_DEFAULT_ENV" not in command
+def test_recipe_configures_the_sandbox_environment():
+    from uni_agent.sandbox.base import SandboxConfig
+    from uni_agent.sandbox.openyuanrong import OpenyuanrongSandbox
+
+    recipe = Path(__file__).resolve().parents[3] / "examples/blackbox_recipes/codex_swe_task/task_config_codex.yaml"
+    config = yaml.safe_load(recipe.read_text())[0]
+    sandbox = OpenyuanrongSandbox.from_config(SandboxConfig(image="swebench/test", **config["sandbox"]))
+    assert sandbox.env == {
+        "CONDA_DEFAULT_ENV": "testbed",
+        "CONDA_PREFIX": "/opt/miniconda3/envs/testbed",
+    }
+    assert sandbox.add_to_path == ("/opt/miniconda3/envs/testbed/bin", "/opt/miniconda3/bin")
+    assert sandbox.proxy_port == 38197
 
 
 @pytest.mark.cpu
@@ -231,8 +230,7 @@ def test_codex_agent_runs_and_returns_agent_result():
     assert result.output["content"] == "done"
     assert len(sandbox.calls) == 1
     assert sandbox.calls[0]["workdir"] == "/testbed"
-    assert "CONDA_PREFIX=/custom/conda/envs/testbed" in sandbox.calls[0]["script"]
-    assert 'PATH=/custom/conda/envs/testbed/bin:/custom/conda/bin:"$PATH"' in sandbox.calls[0]["script"]
+    assert sandbox.calls[0]["env"] is None
     assert base64.b64encode(b"fix bug").decode() in sandbox.calls[0]["script"]
     assert base64.b64encode(b"follow repository policy").decode() not in sandbox.calls[0]["script"]
 
