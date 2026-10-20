@@ -15,6 +15,12 @@
       - image: swr.cn-east-3.myhuaweicloud.com/openyuanrong/hermes-agent-tool:20260915
         mount_path: /opt/hermes
     sandbox_kwargs:
+      env:
+        CONDA_DEFAULT_ENV: testbed
+        CONDA_PREFIX: /opt/miniconda3/envs/testbed
+      add_to_path:
+        - /opt/miniconda3/envs/testbed/bin
+        - /opt/miniconda3/bin
       proxy_port: 38197
       tunnel_connect_timeout: 60
   agent:
@@ -23,7 +29,6 @@
     run_budget_seconds: 6600
     run_timeout: 7200
     terminal_timeout: 600
-    conda_env_path: /opt/miniconda3/envs/testbed
     sampling_params_override:
       temperature: 0.8
       top_p: 0.9

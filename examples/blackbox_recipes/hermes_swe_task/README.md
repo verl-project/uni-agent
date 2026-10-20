@@ -20,8 +20,17 @@ settings remain under `sandbox.sandbox_kwargs`. Update
 `task_config_hermes.yaml` with the image reference you built, preferably a digest,
 and a task image mapping accessible to your sandbox service. The included image
 reference records the original build; it is not a guarantee of registry access.
-Set `agent.conda_env_path` to the absolute Conda environment path in your task
-image, or omit it to inherit PATH. The recipe keeps
+The task image must already contain the `testbed` environment. The sandbox selects
+it through `sandbox.sandbox_kwargs.env`: `CONDA_DEFAULT_ENV=testbed` and
+`CONDA_PREFIX=/opt/miniconda3/envs/testbed`. Its `add_to_path` list prepends
+`/opt/miniconda3/envs/testbed/bin` and `/opt/miniconda3/bin` to the task image's
+existing PATH, so task commands use the preinstalled interpreter and tools.
+These sandbox settings do not download, create or install an environment. For a
+different task image, adjust or omit these settings together in
+[`task_config_hermes.yaml`](task_config_hermes.yaml). Hermes itself continues to
+run with the sidecar's absolute Python path.
+
+The recipe keeps
 `agent.sampling_params_override` because its `temperature`, `top_p`, and
 `max_tokens_per_turn` values define the Hermes request/budget policy. The
 standard sidecar uses the default `tool_python`, `runner_script`, and

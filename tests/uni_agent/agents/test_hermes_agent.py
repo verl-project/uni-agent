@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
+import subprocess
+import sys
 from contextlib import asynccontextmanager
 from unittest.mock import AsyncMock
 
@@ -103,7 +106,6 @@ def test_command_does_not_contain_prompt_or_key():
         messages_path="/tmp/hermes/run/messages.json",
         log_path="/tmp/hermes/run/runner.log",
         hermes_home="/tmp/hermes/run/home",
-        conda_env_path="/custom env/testbed",
         tool_python="/opt/hermes/bin/python",
         runner_script="/opt/hermes/bin/run_hermes.py",
         terminal_timeout=600,
@@ -117,8 +119,70 @@ def test_command_does_not_contain_prompt_or_key():
     assert "umask" not in command
     assert "TERMINAL_TIMEOUT=600" in command
     assert "TERMINAL_TIMEOUT=600.0" not in command
-    assert "'/custom env/testbed/bin'" in command
-    assert "/opt/miniconda3" not in command
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_runner_command_inherits_sandbox_environment_and_quotes_paths(tmp_path):
+    task_bin = tmp_path / "task runtime" / "bin"
+    task_bin.mkdir(parents=True)
+    (task_bin / "python").symlink_to(sys.executable)
+    episode = tmp_path / "episode 'quoted'"
+    episode.mkdir()
+    runner = episode / "probe runner.py"
+    runner.write_text(
+        "import json, os, shutil, sys\n"
+        "print(json.dumps({\n"
+        "    'path': os.environ['PATH'], 'prefix': os.environ['CONDA_PREFIX'],\n"
+        "    'env_name': os.environ['CONDA_DEFAULT_ENV'], 'home': os.environ['HERMES_HOME'],\n"
+        "    'tool_python': shutil.which('python'),\n"
+        "    'payload': json.load(sys.stdin), 'args': sys.argv[1:]\n"
+        "}))\n",
+        encoding="utf-8",
+    )
+    input_path = episode / "input.json"
+    payload = {"messages": [{"role": "user", "content": "an issue with 'quotes' and 中文"}]}
+    input_path.write_text(json.dumps(payload), encoding="utf-8")
+    result_path, messages_path, log_path = (episode / name for name in ("result.json", "messages.json", "runner.log"))
+    hermes_home = episode / "home"
+    config = HermesConfig(tool_python=sys.executable, runner_script=str(runner))
+    command = build_runner_command(
+        input_path=str(input_path),
+        result_path=str(result_path),
+        messages_path=str(messages_path),
+        log_path=str(log_path),
+        hermes_home=str(hermes_home),
+        tool_python=config.tool_python,
+        runner_script=config.runner_script,
+        terminal_timeout=config.terminal_timeout,
+        approval_mode=config.approval_mode,
+    )
+    environment = {
+        **os.environ,
+        "PATH": f"{task_bin}{os.pathsep}{os.environ['PATH']}",
+        "CONDA_PREFIX": str(task_bin.parent),
+        "CONDA_DEFAULT_ENV": "sandbox-runtime",
+    }
+
+    process = subprocess.run(
+        ["bash", "-c", command], env=environment, capture_output=True, text=True, check=True, timeout=10
+    )
+    observed = json.loads(process.stdout)
+
+    assert observed["path"] == environment["PATH"]
+    assert observed["prefix"] == environment["CONDA_PREFIX"]
+    assert observed["env_name"] == "sandbox-runtime"
+    assert observed["tool_python"] == str(task_bin / "python")
+    assert observed["home"] == str(hermes_home)
+    assert observed["payload"] == payload
+    assert observed["args"] == [
+        "--result-path",
+        str(result_path),
+        "--messages-path",
+        str(messages_path),
+        "--log-path",
+        str(log_path),
+    ]
 
 
 @pytest.mark.cpu

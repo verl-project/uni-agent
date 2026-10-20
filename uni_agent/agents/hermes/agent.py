@@ -41,10 +41,6 @@ class HermesConfig(AgentConfig):
     run_budget_seconds: float = Field(default=6600.0, gt=0)
     run_timeout: float = Field(default=7200.0, gt=0)
     terminal_timeout: int = Field(default=600, ge=1)
-    conda_env_path: str | None = Field(
-        default=None,
-        description="Task-image path of the Conda environment; unset leaves the launch unactivated.",
-    )
     tool_python: str = Field(default="/opt/hermes/bin/python", min_length=1)
     runner_script: str = Field(default="/opt/hermes/bin/run_hermes.py", min_length=1)
     approval_mode: Literal["off", "default"] = Field(
@@ -93,7 +89,6 @@ def build_runner_command(
     messages_path: str,
     log_path: str,
     hermes_home: str,
-    conda_env_path: str | None,
     tool_python: str,
     runner_script: str,
     terminal_timeout: int,
@@ -103,12 +98,10 @@ def build_runner_command(
 
     Only fixed paths and scalar controls appear in the command.  Prompt text and
     credentials are transferred through ``input_path`` instead of argv.
+    Task runtime paths and environment are inherited from the sandbox.
     """
 
     q = shlex.quote
-    if conda_env_path is not None and not conda_env_path.startswith("/"):
-        raise ValueError("conda_env_path must be an absolute sandbox path")
-    path_setup = f'export PATH={q(conda_env_path + "/bin")}:"${{PATH:-}}"; ' if conda_env_path else ""
     yolo = "1" if approval_mode == "off" else "0"
     assignments = " ".join(
         [
@@ -121,7 +114,6 @@ def build_runner_command(
         ]
     )
     return (
-        f"{path_setup}"
         f"env {assignments} {q(tool_python)} {q(runner_script)} "
         f"--result-path {q(result_path)} --messages-path {q(messages_path)} --log-path {q(log_path)} "
         f"< {q(input_path)}"
@@ -232,7 +224,6 @@ class HermesAgent(Agent):
             messages_path=messages_path,
             log_path=log_path,
             hermes_home=hermes_home,
-            conda_env_path=cfg.conda_env_path,
             tool_python=cfg.tool_python,
             runner_script=cfg.runner_script,
             terminal_timeout=cfg.terminal_timeout,
