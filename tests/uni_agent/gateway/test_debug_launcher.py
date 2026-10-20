@@ -152,18 +152,21 @@ def test_write_debug_snapshot_json_writes_message_history_and_session_state(tmp_
 @pytest.mark.level0
 def test_capture_debug_snapshot_preserves_multiple_active_chains():
     chains = [
-        SimpleNamespace(
-            chain_id=1,
-            message_history=[{"role": "user", "content": "main"}],
-            active_tool_schemas=None,
-        ),
-        SimpleNamespace(
-            chain_id=2,
-            message_history=[{"role": "user", "content": "subagent"}],
-            active_tool_schemas=[{"type": "function"}],
-        ),
+        {"chain_id": 1, "message_history": [{"role": "user", "content": "main"}], "active_tool_schemas": None},
+        {
+            "chain_id": 2,
+            "message_history": [{"role": "user", "content": "subagent"}],
+            "active_tool_schemas": [{"type": "function"}],
+        },
     ]
-    session = SimpleNamespace(active_chains=chains, snapshot_state=lambda: {"num_active_chains": 2})
+
+    def get_active_chains():
+        return chains
+
+    def snapshot_state():
+        return {"num_active_chains": 2}
+
+    session = SimpleNamespace(get_active_chains=get_active_chains, snapshot_state=snapshot_state)
     actor = SimpleNamespace(_sessions={"s-debug": session})
 
     snapshot = debug_launcher.capture_debug_snapshot(actor, "s-debug", {"openai_base_url": "http://local"})

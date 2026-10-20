@@ -101,7 +101,7 @@ async def test_gateway_actor_forwards_singleflight_to_session(options, expected)
     actor._server_base_url = "http://test"
     await actor.create_session("singleflight-enabled")
 
-    assert actor._sessions["singleflight-enabled"]._coalesce_reserved_exact_requests is expected
+    assert actor._sessions["singleflight-enabled"]._manager._coalesce_reserved_exact_requests is expected
 
 
 @pytest.mark.cpu
@@ -963,7 +963,8 @@ async def test_gateway_actor_continues_with_tool_returned_image(monkeypatch, end
         assert json.loads(content)["image_data"] == ["image://a.png", "image://tool-b.png"]
         assert first_payload == saved_first_payload
         assert second_payload == saved_second_payload
-        history = actor._sessions["session-mm-tool-image"].active_chains[0].message_history
+        [active_chain] = actor._sessions["session-mm-tool-image"].get_active_chains()
+        history = active_chain["message_history"]
         assert history[-2]["role"] == "tool"
         assert history[-2]["tool_call_id"] == call_id
         assert history[-2]["content"][0] == {"type": "image_url", "image_url": {"url": "image://tool-b.png"}}
@@ -1530,8 +1531,8 @@ async def test_gateway_actor_tool_call_decode_returns_openai_format(monkeypatch)
         assert "id" in tool_calls[0]
         # HTTP response arguments should be a JSON string (OpenAI compatible)
         assert isinstance(tool_calls[0]["function"]["arguments"], str)
-        [active_chain] = actor._sessions["session-tool-call"].active_chains
-        internal_arguments = active_chain.message_history[-1]["tool_calls"][0]["function"]["arguments"]
+        [active_chain] = actor._sessions["session-tool-call"].get_active_chains()
+        internal_arguments = active_chain["message_history"][-1]["tool_calls"][0]["function"]["arguments"]
         assert internal_arguments == {"query": "weather"}
 
         # Second request: agent sends back tool result as continuation
