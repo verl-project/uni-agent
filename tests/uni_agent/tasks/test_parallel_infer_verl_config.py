@@ -209,6 +209,6 @@ def test_inference_language_model_only_wires_vllm_and_rejects_other_engines():
     config = init_config(args, served_model_name="policy")
     assert config.actor_rollout_ref.rollout.engine_kwargs.vllm.language_model_only is True
 
-    args.engine = "sglang"
-    with pytest.raises(ValueError, match="only with --engine vllm"):
+    args.engine = "unsupported"
+    with pytest.raises(ValueError, match="only with --engine vllm or sglang"):
         init_config(args, served_model_name="policy")
