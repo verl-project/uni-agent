@@ -750,13 +750,6 @@ async def test_tree_persistence_follows_session_log_directory(tmp_path, terminal
     assert not list(tmp_path.iterdir())
     writer = Mock(wraps=manager._write_storage_state, side_effect=OSError("disk failure") if write_fails else None)
     manager._write_storage_state = writer
-    if terminal_action == "finalize" and write_fails:
-        with pytest.raises(OSError, match="disk failure"):
-            await session.finalize()
-        assert manager.root is not None
-        writer.side_effect = None
-        writer.reset_mock()
-        write_fails = False
     result = await getattr(session, terminal_action)()
     if terminal_action == "finalize":
         [trajectory] = result
@@ -778,7 +771,7 @@ async def test_tree_persistence_follows_session_log_directory(tmp_path, terminal
     assert writer.call_args.args[0] == expected_path
     if write_fails:
         assert not manager.storage_path.exists()
-        assert session.phase.value == "ABORTED"
+        assert session.phase.value == ("ABORTED" if terminal_action == "abort" else "FINALIZED")
         return
     assert manager.storage_path == expected_path
     if terminal_action == "abort":

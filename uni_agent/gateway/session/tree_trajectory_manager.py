@@ -739,7 +739,14 @@ class TreeTrajectoryManager:
                 for leaf in self.chains.values()
             ]
             if self._storage_path is not None:
-                await self._write_storage_state_locked(self._storage_path)
+                try:
+                    await self._write_storage_state_locked(self._storage_path)
+                except Exception:
+                    logger.warning(
+                        "Failed to persist trajectory tree %s",
+                        self._storage_path,
+                        exc_info=True,
+                    )
             self._num_trajectories = len(trajectories)
             self._unload_tree()
             return trajectories
