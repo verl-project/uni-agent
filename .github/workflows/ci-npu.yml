@@ -1,7 +1,7 @@
 name: tests-npu
 on:
   pull_request:
-    branches: [ "main" ]
+    branches: [ "develop" ]
     types: [ opened, synchronize, reopened ]
 jobs:
   test-npu:
