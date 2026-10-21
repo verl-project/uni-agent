@@ -65,6 +65,7 @@ The built-in ReAct Agent demonstrates the white-box pattern:
 2. Send messages and Tool schemas to an OpenAI-compatible model endpoint.
 3. Execute returned Tool calls.
 4. Append Tool observations to the transcript.
+   If a Tool returned images, they follow the turn's `tool` messages as one `user` message of `image_url` parts, including when the timeout budget ends the turn.
 5. Stop on `submit`/`finish`, token limit, timeout budget, or max steps.
 
 ReAct configuration exposes the loop:

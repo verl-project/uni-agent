@@ -218,6 +218,32 @@ def test_to_observation_clips_over_max_length():
     )  # under cap -> verbatim body
 
 
+def test_to_content_without_images_is_plain_observation():
+    result = ToolResult(text="hi")
+    assert result.to_content() == result.to_observation() == "Observation:\nhi"
+
+
+def test_to_content_with_images_adds_image_url_parts():
+    result = ToolResult(text="clicked", images=("data:image/png;base64,AAAA", "data:image/png;base64,BBBB"))
+    assert result.to_content() == [
+        {"type": "text", "text": "Observation:\nclicked"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,BBBB"}},
+    ]
+
+
+def test_to_content_with_images_and_no_text_keeps_image():
+    content = ToolResult(images=("data:image/png;base64,AAAA",)).to_content()
+    assert content[0] == {"type": "text", "text": "Observation:\n"}
+    assert len(content) == 2
+
+
+def test_to_content_clips_text_but_not_images():
+    content = ToolResult(text="x" * 50, images=("data:image/png;base64,AAAA",)).to_content(max_length=10)
+    assert "<response clipped>" in content[0]["text"]
+    assert content[1]["image_url"]["url"] == "data:image/png;base64,AAAA"
+
+
 if __name__ == "__main__":
     import sys
 
