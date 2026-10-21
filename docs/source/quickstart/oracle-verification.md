@@ -67,6 +67,72 @@ python examples/inference/parallel_run_oracle.py \
     --result-path ~/data/uni_agent/swe_bench_verified_oracle.json
 ```
 
+## Local Docker Smoke Test
+
+Use `examples/quickstart/oracle/task_config_docker.yaml` to run the same verifier
+against local Docker containers. Install the oracle runner dependencies in your
+Uni-Agent environment (`pip install ray datasets swebench==4.1.0 pyyaml`) and start
+the Docker daemon. No GPU or model endpoint is needed for oracle mode.
+
+The dataset supplies each sample's image; the Task Config selects Docker and sets
+pull/start budgets. Canonical SWE-Bench images are `linux/amd64`. ARM hosts need
+Docker's amd64 emulation and may take longer. Start with one sample and one worker:
+
+```bash
+python -m uni_agent.tasks.swe_bench.preprocess \
+    --local-save-dir /tmp/uni-agent-oracle --max-instances 1
+
+SANDBOX_STARTUP_TIMEOUT=1200 python examples/inference/parallel_run_oracle.py \
+    --data-path /tmp/uni-agent-oracle/swe_bench_verified.parquet \
+    --task-config examples/quickstart/oracle/task_config_docker.yaml \
+    --num-workers 1 --concurrency 1 --limit 1 \
+    --result-path /tmp/uni-agent-oracle/results.json
+```
+
+The outer startup budget includes image pulling, so it must allow enough time for
+the configured 900-second pull and 120-second start budgets. Images can also be
+pulled in advance. The example disables container networking; if a sample's
+verifier needs to install dependencies from the internet, adjust `run_args` for
+that sample. Avoid shared writable `/testbed` mounts between rollouts.
+
+For provider regression tests, use a local image with Bash and coreutils:
+
+```bash
+docker pull ubuntu:22.04
+UNI_AGENT_DOCKER_TEST_IMAGE=ubuntu:22.04 \
+    python -m pytest tests/uni_agent/sandbox/test_docker_integration.py -q
+```
+
+These tests check workspace isolation, file transfer, Agent-to-reward visibility,
+cleanup on agent/reward errors, timeout and cancellation, and name collisions.
+They are opt-in (`cpu`, `level1`); normal CPU CI runs the daemon-free lifecycle tests.
+
+To also exercise the actual SWE-Bench verifier, save a raw dataset row and pull its image:
+
+```bash
+python - <<'PY'
+import json
+from pathlib import Path
+from datasets import load_dataset
+
+dataset = load_dataset("princeton-nlp/SWE-bench_Verified", split="test")
+sample = next(row for row in dataset if row["instance_id"] == "psf__requests-1142")
+Path("/tmp/swe-bench-sample.json").write_text(json.dumps(sample))
+PY
+docker pull --platform linux/amd64 swebench/sweb.eval.x86_64.psf_1776_requests-1142
+UNI_AGENT_SWE_BENCH_SAMPLE=/tmp/swe-bench-sample.json \
+    python -m pytest tests/uni_agent/sandbox/test_docker_integration.py -k real_swe_bench -q
+```
+
+The negative control must receive reward `0` with no patch, and the gold patch must
+receive reward `1`. Both use `SWEBenchTask.run()` and the standard reward implementation,
+with separate containers removed after each episode. The test expects the image
+to have been pulled already and does not call an LLM.
+
+A local smoke test validates the environment and verifier path. Training-scale
+support additionally needs Linux/GPU training runs and sustained rollout concurrency
+measurements; increase concurrency only after checking memory, disk usage, and cleanup.
+
 ## Review the Results
 
 The test should finish without execution errors and should normally report every oracle sample as solved:
