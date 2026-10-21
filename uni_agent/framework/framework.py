@@ -11,7 +11,7 @@ import random
 from collections.abc import Awaitable, Callable
 from copy import deepcopy
 from dataclasses import dataclass, replace
-from functools import partial
+from functools import cache, partial
 from pathlib import Path
 from uuid import uuid4
 
@@ -138,6 +138,18 @@ def _short_failure_reason(error: BaseException) -> str:
     if not message:
         message = error.__class__.__name__
     return f"{error.__class__.__name__}:{message}"[:512]
+
+
+@cache
+def _session_tq_schema():
+    """Return VERL's TransferQueue key/tag protocol if it supports per-session status markers."""
+    try:
+        from verl.trainer.ppo.v1 import tq_schema
+    except ImportError:
+        # Replay buffers that predate tq_schema treat every non-prompt key as a trajectory,
+        # so session markers must not be written for them.
+        return None
+    return tq_schema
 
 
 def _select_session_trajectories(
@@ -629,11 +641,13 @@ class GatewayAgentFramework(AgentFramework):
         # Successful sessions are written to TQ; failed sessions only affect this uid's stats.
         await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "running"})
         tasks = [
-            self._run_agent_episode_with_concurrency_limit(
+            self._run_session_rollout(
+                uid=uid,
                 sample_fields=sample_fields,
                 sample_index=sample_index,
                 session_index=session_index,
                 global_steps=global_steps,
+                partition_id=partition_id,
                 sampling_params=sampling_params,
             )
             for session_index in range(num_sessions)
@@ -645,7 +659,7 @@ class GatewayAgentFramework(AgentFramework):
         success_outputs = 0
         unfinished_episodes = 0
         failure_reasons: list[str] = []
-        for session_index, outcome in enumerate(outcomes):
+        for outcome in outcomes:
             if isinstance(outcome, Exception):
                 failed_sessions += 1
                 failure_reasons.append(_short_failure_reason(outcome))
@@ -655,32 +669,12 @@ class GatewayAgentFramework(AgentFramework):
             if isinstance(outcome, BaseException):
                 raise outcome
 
-            trajectories, session_sample_fields = outcome
-            if not trajectories:
-                failed_sessions += 1
-                failure_reasons.append(f"empty trajectories for uid={uid} session_index={session_index}")
-                continue
-
-            try:
-                await self._write_session_trajectories_to_tq(
-                    uid=uid,
-                    session_index=session_index,
-                    trajectories=trajectories,
-                    sample_fields=session_sample_fields,
-                    global_steps=global_steps,
-                    partition_id=partition_id,
-                )
-            except Exception as e:
-                logger.exception(f"TQ write failed for uid={uid} session={session_index}: {e}")
-                failed_sessions += 1
-                failure_reasons.append(f"TQ write error: {e}")
-            else:
-                success_sessions += 1
-                success_outputs += len(trajectories)
-                # One session is one episode; its trajectories all carry the same
-                # session-level completion flag, so this counts episodes, not tokens.
-                if any(traj.finished is False for traj in trajectories):
-                    unfinished_episodes += 1
+            success_sessions += 1
+            success_outputs += len(outcome)
+            # One session is one episode; its trajectories all carry the same
+            # session-level completion flag, so this counts episodes, not tokens.
+            if any(traj.finished is False for traj in outcome):
+                unfinished_episodes += 1
 
         if success_sessions > 0:
             await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "finished"})
@@ -697,6 +691,62 @@ class GatewayAgentFramework(AgentFramework):
             "num_failed_uids": failed_uids,
             "failure_reasons": failure_reasons,
         }
+
+    async def _run_session_rollout(
+        self,
+        *,
+        uid: str,
+        sample_fields: dict[str, object],
+        sample_index: int,
+        session_index: int,
+        global_steps: int | None,
+        partition_id: str,
+        sampling_params: dict[str, object],
+    ) -> list[Trajectory]:
+        """Run one session, write its trajectories to TQ, then publish its terminal session status."""
+        schema = _session_tq_schema()
+        if schema is not None:
+            session_key = schema.session_key(uid, session_index)
+            await tq.async_kv_put(
+                key=session_key,
+                partition_id=partition_id,
+                tag=schema.session_tag(schema.SESSION_RUNNING, session_index),
+            )
+        try:
+            trajectories, session_sample_fields = await self._run_agent_episode_with_concurrency_limit(
+                sample_fields=sample_fields,
+                sample_index=sample_index,
+                session_index=session_index,
+                global_steps=global_steps,
+                sampling_params=sampling_params,
+            )
+            if not trajectories:
+                raise RuntimeError(f"empty trajectories for uid={uid} session_index={session_index}")
+            await self._write_session_trajectories_to_tq(
+                uid=uid,
+                session_index=session_index,
+                trajectories=trajectories,
+                sample_fields=session_sample_fields,
+                global_steps=global_steps,
+                partition_id=partition_id,
+            )
+        except Exception:
+            if schema is not None:
+                await tq.async_kv_put(
+                    key=session_key,
+                    partition_id=partition_id,
+                    tag=schema.session_tag(schema.SESSION_FAILURE, session_index),
+                )
+            raise
+
+        # Publish session completion only after all of its trajectory writes have finished.
+        if schema is not None:
+            await tq.async_kv_put(
+                key=session_key,
+                partition_id=partition_id,
+                tag=schema.session_tag(schema.SESSION_FINISHED, session_index),
+            )
+        return trajectories
 
     async def _run_agent_episode_with_concurrency_limit(
         self,
