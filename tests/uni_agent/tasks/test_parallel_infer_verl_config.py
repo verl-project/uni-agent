@@ -17,25 +17,13 @@ from examples.inference.parallel_infer_verl import init_config
 
 def _parse_inference_args(monkeypatch, *argv):
     parse_args = ArgumentParser.parse_args
-    captured = None
-
-    class ParsedArgs(Exception):
-        pass
 
     def capture(parser):
-        nonlocal captured
-        captured = parse_args(parser, ["--task-config", "/unused.yaml", *argv])
+        return parse_args(parser, ["--task-config", "/unused.yaml", *argv])
 
-        def parsed():
-            raise ParsedArgs
-
-        monkeypatch.setattr(parallel_infer_verl.ray, "init", parsed)
-        return captured
-
-    monkeypatch.setattr(ArgumentParser, "parse_args", capture)
-    with pytest.raises(ParsedArgs):
-        parallel_infer_verl.main()
-    return captured
+    with monkeypatch.context() as patch:
+        patch.setattr(ArgumentParser, "parse_args", capture)
+        return parallel_infer_verl.parse_args()
 
 
 @pytest.mark.cpu
