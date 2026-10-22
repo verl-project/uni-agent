@@ -17,6 +17,8 @@ flags:
     carryforward: true
   gpu-tests:
     carryforward: true
+  npu-tests:
+    carryforward: true
 
 comment:
   layout: "reach, diff, flags, files"

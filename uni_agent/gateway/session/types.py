@@ -14,7 +14,27 @@ class UnsupportedMediaError(ValueError):
     """A request requires media capabilities unavailable in the current session."""
 
 
-class InternalGenerationRequest(TypedDict):
+class AgentContext(TypedDict):
+    """Harness identity within an outer Gateway session, independent of backend routing.
+
+    IDs are opaque and scoped by ``provider`` and the harness ``session_id``.
+    ``agent_id=None`` denotes the main agent; ``parent_agent_id=None`` means
+    no explicit parent was supplied, not necessarily that the parent is main.
+    """
+
+    provider: str
+    session_id: str
+    agent_id: str | None
+    parent_agent_id: str | None
+
+
+class _InternalGenerationRequestRequired(TypedDict):
+    messages: list[dict[str, Any]]
+    tools: list[dict[str, Any]] | None
+    sampling_params: dict[str, Any]
+
+
+class InternalGenerationRequest(_InternalGenerationRequestRequired, total=False):
     """Lowered request consumed by GatewaySession.run_generation.
 
     Provider adapters lower OpenAI / Anthropic wire requests into this
@@ -22,9 +42,7 @@ class InternalGenerationRequest(TypedDict):
     provider-neutral block model.
     """
 
-    messages: list[dict[str, Any]]
-    tools: list[dict[str, Any]] | None
-    sampling_params: dict[str, Any]
+    agent_context: AgentContext
 
 
 @dataclass

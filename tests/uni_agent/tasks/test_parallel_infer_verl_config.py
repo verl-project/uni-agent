@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from argparse import ArgumentParser, Namespace
 
 import hydra
@@ -212,3 +213,29 @@ def test_inference_language_model_only_wires_vllm_and_rejects_other_engines():
     args.engine = "unsupported"
     with pytest.raises(ValueError, match="only with --engine vllm or sglang"):
         init_config(args, served_model_name="policy")
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_shared_inference_cli_preserves_existing_defaults(monkeypatch):
+    monkeypatch.setattr(sys, "argv", ["parallel_infer_verl.py", "--task-config", "unused.yaml"])
+    monkeypatch.delenv("LIMIT", raising=False)
+    parse_args = parallel_infer_verl.argparse.ArgumentParser.parse_args
+
+    class ParsedDefaults(Exception):
+        pass
+
+    def check_defaults(parser):
+        args = parse_args(parser)
+        assert args.limit is None
+        assert args.concurrency == int(os.getenv("GLOBAL_CONCURRENCY", 128))
+        assert args.n_gpus_per_node == 8
+        assert args.tensor_parallel_size == 4
+        assert args.gateway_count == 4
+        assert args.language_model_only is False
+        assert args.disable_thinking is False
+        raise ParsedDefaults
+
+    monkeypatch.setattr(parallel_infer_verl.argparse.ArgumentParser, "parse_args", check_defaults)
+    with pytest.raises(ParsedDefaults):
+        parallel_infer_verl.main()

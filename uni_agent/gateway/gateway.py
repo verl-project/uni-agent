@@ -15,6 +15,7 @@ import ray
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from uni_agent.gateway.adapters.agent_context import agent_context_from_headers
 from uni_agent.gateway.adapters.anthropic import (
     anthropic_build_response,
     anthropic_error_body,
@@ -36,6 +37,7 @@ from uni_agent.gateway.adapters.openai_response import (
 from uni_agent.gateway.adapters.types import AnthropicRequest, MalformedRequestError, OpenAIChatCompletionRequest
 from uni_agent.gateway.config import GatewayActorConfig
 from uni_agent.gateway.session import (
+    AgentContext,
     GatewaySession,
     MessageCodec,
     SessionHandle,
@@ -121,8 +123,9 @@ class _GatewayActor:
                 content=_error_body_for_path(request.url.path, exc.status_code, message),
             )
 
+        @self._app.exception_handler(MalformedRequestError)
         @self._app.exception_handler(UnsupportedMediaError)
-        async def _unsupported_media_handler(request: Request, exc: UnsupportedMediaError):
+        async def _bad_request_handler(request: Request, exc: ValueError):
             return JSONResponse(
                 status_code=400,
                 content=_error_body_for_path(request.url.path, 400, str(exc)),
@@ -146,7 +149,9 @@ class _GatewayActor:
                 payload = await request.json()
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
-            return await self._handle_openai_chat_completions(session_id=session_id, payload=payload)
+            return await self._handle_openai_chat_completions(
+                session_id=session_id, payload=payload, agent_context=agent_context_from_headers(request.headers)
+            )
 
         @self._app.post("/sessions/{session_id}/v1/responses")
         async def _openai_responses(session_id: str, request: Request):
@@ -154,7 +159,9 @@ class _GatewayActor:
                 payload = await request.json()
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
-            return await self._handle_openai_responses(session_id=session_id, payload=payload)
+            return await self._handle_openai_responses(
+                session_id=session_id, payload=payload, agent_context=agent_context_from_headers(request.headers)
+            )
 
         @self._app.post("/sessions/{session_id}/v1/messages")
         async def _anthropic_messages(session_id: str, request: Request):
@@ -162,7 +169,9 @@ class _GatewayActor:
                 payload = await request.json()
             except ValueError as exc:
                 raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
-            return await self._handle_anthropic_messages(session_id=session_id, payload=payload)
+            return await self._handle_anthropic_messages(
+                session_id=session_id, payload=payload, agent_context=agent_context_from_headers(request.headers)
+            )
 
     def _require_started(self) -> None:
         """Raise if the HTTP server has not been started."""
@@ -180,6 +189,7 @@ class _GatewayActor:
         self,
         session_id: str,
         payload: OpenAIChatCompletionRequest,
+        agent_context: AgentContext | None = None,
     ) -> JSONResponse | StreamingResponse:
         """Validate an OpenAI Chat Completions payload and serialize the session outcome."""
         session = self._sessions.get(session_id)
@@ -208,6 +218,8 @@ class _GatewayActor:
         except MalformedRequestError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+        if agent_context is not None:
+            internal["agent_context"] = agent_context
         outcome = await session.run_generation(internal, self._backend)
         model = str(payload.get("model") or "unknown")
         if payload.get("stream") is True:
@@ -218,6 +230,7 @@ class _GatewayActor:
         self,
         session_id: str,
         payload: dict[str, Any],
+        agent_context: AgentContext | None = None,
     ) -> JSONResponse | StreamingResponse:
         """Validate a Responses API payload and serialize the session outcome."""
         session = self._sessions.get(session_id)
@@ -234,6 +247,8 @@ class _GatewayActor:
         except MalformedRequestError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+        if agent_context is not None:
+            internal["agent_context"] = agent_context
         outcome = await session.run_generation(internal, self._backend)
         model = str(payload.get("model") or "unknown")
         try:
@@ -248,6 +263,7 @@ class _GatewayActor:
         self,
         session_id: str,
         payload: AnthropicRequest,
+        agent_context: AgentContext | None = None,
     ) -> JSONResponse | StreamingResponse:
         """Validate an Anthropic Messages payload and serialize the session outcome."""
         session = self._sessions.get(session_id)
@@ -276,6 +292,8 @@ class _GatewayActor:
         except MalformedRequestError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
+        if agent_context is not None:
+            internal["agent_context"] = agent_context
         outcome = await session.run_generation(internal, self._backend)
         model = str(payload.get("model") or "unknown")
         if payload.get("stream") is True:

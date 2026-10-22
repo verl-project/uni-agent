@@ -8,9 +8,10 @@ serves: trajectory buffering and message encoding/decoding.
 
 from .codec import MessageCodec
 from .session import GatewaySession, TrajectoryBuffer
-from .types import InternalGenerationRequest, SessionHandle, Trajectory
+from .types import AgentContext, InternalGenerationRequest, SessionHandle, Trajectory
 
 __all__ = [
+    "AgentContext",
     "InternalGenerationRequest",
     "GatewaySession",
     "MessageCodec",
