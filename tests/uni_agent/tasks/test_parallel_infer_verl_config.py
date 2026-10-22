@@ -25,7 +25,12 @@ def _parse_inference_args(monkeypatch, *argv):
     def capture(parser):
         nonlocal captured
         captured = parse_args(parser, ["--task-config", "/unused.yaml", *argv])
-        raise ParsedArgs
+
+        def parsed():
+            raise ParsedArgs
+
+        monkeypatch.setattr(parallel_infer_verl.ray, "init", parsed)
+        return captured
 
     monkeypatch.setattr(ArgumentParser, "parse_args", capture)
     with pytest.raises(ParsedArgs):
@@ -46,6 +51,27 @@ def test_prompt_length_cli_can_override_invalid_environment(monkeypatch, capsys,
             _parse_inference_args(monkeypatch)
         assert exc.value.code == 2
         assert "--prompt-length: invalid int value" in capsys.readouterr().err
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize("value", [0, -1, -65537])
+def test_prompt_length_rejects_non_positive_values(monkeypatch, capsys, value):
+    with pytest.raises(SystemExit) as exc:
+        _parse_inference_args(monkeypatch, "--prompt-length", str(value))
+    assert exc.value.code == 2
+    assert "must be >= 1" in capsys.readouterr().err
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize("value", [0, -1])
+def test_prompt_length_rejects_non_positive_environment_values(monkeypatch, capsys, value):
+    monkeypatch.setenv("PROMPT_LENGTH", str(value))
+    with pytest.raises(SystemExit) as exc:
+        _parse_inference_args(monkeypatch)
+    assert exc.value.code == 2
+    assert "must be >= 1" in capsys.readouterr().err
 
 
 @pytest.mark.cpu

@@ -26,7 +26,6 @@
   agent:
     name: hermes
     max_iterations: 100
-    run_budget_seconds: 6600
     run_timeout: 7200
     terminal_timeout: 600
     sampling_params_override:

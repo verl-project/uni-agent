@@ -173,16 +173,16 @@ capacity. Defaults are:
 |---|---|---|
 | `agent.max_iterations` | `100` | Hermes loop iteration limit |
 | `agent.terminal_timeout` | `600 s` | One terminal command |
-| `agent.run_budget_seconds` | `6600 s` | Hermes loop wall-clock budget |
-| `agent.run_timeout` | `7200 s` | Host-side timeout for the runner command |
+| `agent.run_timeout` | `7200 s` | Host-side timeout; Hermes receives `run_timeout - 600 s` to finish cleanly |
 | `eval_timeout` | `900 s` | SWE-bench verification |
 | `sandbox.runtime_timeout` | `10800 s` | Sandbox lifetime, including execution and verification |
 | `agent.sampling_params_override.max_tokens_per_turn` | `8192` | Per-request output cap, passed as `limits.max_tokens` to Hermes and as HTTP `max_tokens` for the Qwen/custom Chat Completions route |
 | `PROMPT_LENGTH` | `4096` | Rollout/data prompt budget; contributes to total trajectory capacity |
 | `RESPONSE_LENGTH` | `65536` | Rollout continuation capacity, not a per-request generation cap |
 
-Keep the Hermes run budget below the runner timeout, and allow the sandbox
-lifetime to cover startup, runner execution, verification and cleanup margin.
+The adapter reserves 600 seconds inside `agent.run_timeout` for Hermes to emit a
+structured final result before the host stops the runner. Keep the runner timeout
+within the sandbox lifetime, with enough room for startup, verification and cleanup.
 Terminal commands run within the agent episode; the terminal and agent budgets
 are nested limits, not durations to add together. This inference entrypoint does
 not set a separate framework session timeout. The iteration limit counts Hermes

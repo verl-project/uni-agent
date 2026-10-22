@@ -30,6 +30,7 @@ SCHEMA_VERSION = 1
 RESULT_MARKER = "HERMES_RECIPE_RESULT "
 MAX_RESULT_BYTES = 8 * 1024 * 1024
 _SAFE_RUN_ID = re.compile(r"[^A-Za-z0-9_.-]+")
+RUNNER_FINALIZATION_GRACE_SECONDS = 600.0
 
 
 class HermesConfig(AgentConfig):
@@ -38,8 +39,11 @@ class HermesConfig(AgentConfig):
     name: str = "hermes"
     sampling_params_override: RequestSamplingConfig = Field(default_factory=RequestSamplingConfig)
     max_iterations: int = Field(default=100, ge=1)
-    run_budget_seconds: float = Field(default=6600.0, gt=0)
-    run_timeout: float = Field(default=7200.0, gt=0)
+    run_timeout: float = Field(
+        default=7200.0,
+        gt=RUNNER_FINALIZATION_GRACE_SECONDS,
+        description="Host-side runner timeout; Hermes stops earlier to emit a final result.",
+    )
     terminal_timeout: int = Field(default=600, ge=1)
     tool_python: str = Field(default="/opt/hermes/bin/python", min_length=1)
     runner_script: str = Field(default="/opt/hermes/bin/run_hermes.py", min_length=1)
@@ -212,7 +216,7 @@ class HermesAgent(Agent):
             "limits": {
                 "max_iterations": cfg.max_iterations,
                 "max_tokens": cfg.sampling_params_override.max_tokens_per_turn,
-                "run_budget_seconds": cfg.run_budget_seconds,
+                "run_budget_seconds": cfg.run_timeout - RUNNER_FINALIZATION_GRACE_SECONDS,
                 "terminal_timeout": cfg.terminal_timeout,
             },
             "approval_mode": cfg.approval_mode,

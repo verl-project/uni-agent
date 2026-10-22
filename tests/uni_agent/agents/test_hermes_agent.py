@@ -15,6 +15,7 @@ import pytest
 
 from uni_agent.agents.base import ModelConfig, RequestSamplingConfig
 from uni_agent.agents.hermes.agent import (
+    RUNNER_FINALIZATION_GRACE_SECONDS,
     HermesAgent,
     HermesConfig,
     build_runner_command,
@@ -222,6 +223,20 @@ def test_run_reads_result_and_preserves_endpoint_and_messages():
     assert payload["messages"] == messages
     assert payload["sampling"] == {"temperature": 0.7, "top_p": 0.8, "top_k": 20}
     assert payload["limits"]["max_tokens"] == 8192
+    assert payload["limits"]["run_budget_seconds"] == 7200 - RUNNER_FINALIZATION_GRACE_SECONDS
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_run_timeout_is_the_single_episode_budget_and_must_leave_finalization_time():
+    with pytest.raises(ValueError, match="run_timeout"):
+        HermesConfig(run_timeout=RUNNER_FINALIZATION_GRACE_SECONDS)
+
+    agent = _agent(run_timeout=1234)
+    sandbox = FakeSandbox()
+    asyncio.run(agent.run(sandbox=sandbox, messages=[{"role": "user", "content": "fix it"}]))
+    payload = json.loads(next(iter(sandbox.files.values())))
+    assert payload["limits"]["run_budget_seconds"] == 1234 - RUNNER_FINALIZATION_GRACE_SECONDS
 
 
 @pytest.mark.cpu

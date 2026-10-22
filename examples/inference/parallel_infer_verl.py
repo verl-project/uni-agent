@@ -445,6 +445,8 @@ def main() -> None:
     )
 
     args = parser.parse_args()
+    if args.prompt_length < 1:
+        parser.error("--prompt-length must be >= 1")
 
     ray.init()
 
