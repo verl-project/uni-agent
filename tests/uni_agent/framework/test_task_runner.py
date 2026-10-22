@@ -41,9 +41,10 @@ def test_extract_upstream_none_without_port():
 
 @pytest.mark.cpu
 @pytest.mark.level0
-def test_inject_gateway_tunnel_rewrites_upstream_and_base_url():
+@pytest.mark.parametrize("provider", ["openyuanrong", "agent_dx"])
+def test_inject_gateway_tunnel_rewrites_upstream_and_base_url(provider):
     task = {
-        "sandbox": {"provider": "openyuanrong", "sandbox_kwargs": {"proxy_port": 38197, "image": "x"}},
+        "sandbox": {"provider": provider, "sandbox_kwargs": {"proxy_port": 38197, "image": "x"}},
         "agent": {"step_limit": 10},
     }
     merged = _inject_gateway_tunnel(task, "http://gateway.example:40169/sessions/abc/v1")
@@ -53,6 +54,44 @@ def test_inject_gateway_tunnel_rewrites_upstream_and_base_url():
     # The agent receives the tunnel-rewritten base_url; unrelated keys are preserved.
     assert merged["agent"]["model"]["base_url"] == "http://127.0.0.1:38197/sessions/abc/v1"
     assert merged["agent"]["step_limit"] == 10
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize(
+    ("base_url", "expected"),
+    [
+        ("https://gateway.example:443/sessions/abc/v1", "https://gateway.example:443"),
+        ("http://[::1]:8000/sessions/abc/v1", "[::1]:8000"),
+        ("https://[2001:db8::1]:443/v1", "https://[2001:db8::1]:443"),
+        ("https://gateway.example/v1", "https://gateway.example:443"),
+        ("http://gateway.example/v1", "gateway.example:80"),
+    ],
+)
+def test_agent_dx_tunnel_preserves_https_and_ipv6(base_url, expected):
+    task = {"sandbox": {"provider": "agent_dx", "sandbox_kwargs": {"proxy_port": 38197}}}
+    merged = _inject_gateway_tunnel(task, base_url)
+    assert merged["sandbox"]["sandbox_kwargs"]["upstream"] == expected
+    assert merged["agent"]["model"]["base_url"].startswith("http://127.0.0.1:38197/")
+    assert "upstream" not in task["sandbox"]["sandbox_kwargs"]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize("port", [True, 0, -1, 1, 65536, "38197"])
+def test_tunnel_rejects_invalid_proxy_port(port):
+    task = {"sandbox": {"provider": "agent_dx", "sandbox_kwargs": {"proxy_port": port}}}
+    with pytest.raises(ValueError, match="proxy_port"):
+        _inject_gateway_tunnel(task, "http://gateway:8000/v1")
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize("url", ["ftp://gateway:123/v1", "http:/v1", "https://user:secret@gateway/v1"])
+def test_agent_dx_tunnel_rejects_unsupported_or_credentialed_urls(url):
+    task = {"sandbox": {"provider": "agent_dx", "sandbox_kwargs": {"proxy_port": 38197}}}
+    with pytest.raises(ValueError, match="HTTP\\(S\\) base_url without embedded credentials"):
+        _inject_gateway_tunnel(task, url)
 
 
 @pytest.mark.cpu

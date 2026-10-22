@@ -131,7 +131,7 @@ The Quickstart provides separate Task Configs for ReAct and Claude Code. Each re
     ```yaml
     - name: swe_rebench
       sandbox:
-        provider: openyuanrong  # the reverse tunnel is openYuanrong-only
+        provider: openyuanrong  # agent_dx also supports this reverse-tunnel contract
         runtime_timeout: 7200
         image_mounts:
           - image: swr.cn-east-3.myhuaweicloud.com/openyuanrong/dsh-tool:latest

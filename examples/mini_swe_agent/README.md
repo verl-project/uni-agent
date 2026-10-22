@@ -188,6 +188,39 @@ Runtime-managed (do **not** set in the YAML): `sandbox.sandbox_kwargs.upstream`
 `api_key` / `model_name` (injected from the gateway session; `base_url` is
 rewritten through the reverse tunnel when `proxy_port` is set).
 
+### Agent DX backend
+
+Install the verified `adx-environment` SDK on every execution worker. Select the
+backend in either Mini-SWE-Agent launcher:
+
+```bash
+export ADX_SERVER_ADDRESS="<adx-api-host>:<port>"
+export ADX_TOKEN="<token>"
+export ADX_TLS="1"
+export ADX_TLS_VERIFY="1"
+SANDBOX_PROVIDER=agent_dx bash examples/mini_swe_agent/run_infer_mini_swe_agent.sh
+# Training uses Ray job submission for credential propagation.
+SANDBOX_PROVIDER=agent_dx RAY_SUBMIT_MODE=job bash examples/mini_swe_agent/run_train.sh
+```
+
+This selects `task_config_agent_dx.yaml` by default; `TASK_CONFIG` can override it.
+The ADX configuration reserves 8400 seconds for the agent's 7200-second budget,
+the 600-second evaluator and cleanup margin. Verify that the cluster can pull the
+task and tool images referenced in that file. The existing OCI registry namespace
+does not imply use of the Yuanrong Sandbox backend.
+
+The launchers forward ADX connection variables with a private temporary Ray
+runtime-env file and remove it after submission. ADX tokens are not placed in the
+launcher command arguments. Training inherits these variables from the Ray job;
+it does not repeat them in `ray.init(runtime_env=...)`, which would conflict with
+Ray's environment merge. The ADX training launcher requires `RAY_SUBMIT_MODE=job`.
+Certificates referenced by `SSL_CERT_FILE` or `SSL_CERT_DIR` must exist on every
+worker. Ray must be deployed with appropriate access control for job metadata.
+
+Before a model run, use `examples/quickstart/sandbox/agent_dx_smoke.py` to validate
+the Environment service. Real inference, rewards, distributed training and
+physical resource cleanup still require verification in the target deployment.
+
 ### Training script env vars
 
 **Required**

@@ -66,7 +66,7 @@ sandbox:
     claude: /opt/agent-runtime/bin/claude
 ```
 
-Docker, Modal, and OpenYuanRong support `image_mounts`. `image_map` rewrites only the task `image`, so mounted image references must already be complete and pullable. `executable_paths` exposes selected mounted commands after startup; Local and veFaaS reject it.
+Docker, Modal, OpenYuanRong, and Agent DX support `image_mounts`. `image_map` rewrites only the task `image`, so mounted image references must already be complete and pullable. `executable_paths` exposes selected mounted commands after startup; Local and veFaaS reject it.
 
 ## Lifecycle
 
@@ -110,11 +110,20 @@ All providers share the public `Sandbox.exec()` error policy:
 - A timeout becomes `ExecResult(exit_code=-1)`.
 - A normal command/provider error while the sandbox is alive becomes `exit_code=127`.
 - An infrastructure error after the sandbox has died is re-raised.
+- A provider's `_is_fatal_exec_error()` hook can preserve infrastructure errors even while the runtime is alive. Agent DX uses this for unknown command outcomes, lost results, and truncated output.
 
 This policy prevents one bad agent command from crashing an otherwise healthy episode while still surfacing backend failures.
 
+Agent DX also records unrecoverable failures. `raise_if_unavailable()` rejects subsequent operations and a successful context exit, including when a caller caught the original exception. Other providers use the default no-op implementation.
+
 !!! warning "Do not override `exec()`"
     Custom providers implement `_exec()`. The public `exec()` wrapper owns the cross-provider error policy and is enforced by tests.
+
+## Gateway Reverse Tunnel
+
+OpenYuanRong and Agent DX declare `supports_reverse_tunnel = True`. With `sandbox_kwargs.proxy_port`, the task runner supplies the Gateway Session's upstream and rewrites the model URL to the in-sandbox HTTP proxy, preserving the Session path. Providers without this capability reject the configuration. A provider class can be inspected without installing its SDK or creating a remote environment.
+
+Agent DX's `runtime_timeout` runs a local lifetime timer from Environment creation success and requests deletion on expiry. It depends on the worker process and event loop remaining alive. `idle_timeout` is a separate server-side idle policy; deployment operators still need to reconcile resources after worker loss.
 
 ## Custom Backend
 

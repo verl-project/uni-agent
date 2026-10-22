@@ -271,6 +271,79 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
     )
     ```
 
+=== "Agent DX"
+
+    **Self-hosted Environment service.** The `agent_dx` provider uses the public
+    `adx_environment.Environment` SDK. Install a verified SDK source checkout or
+    wheel on every execution worker:
+
+    ```bash
+    pip install /path/to/agent-dx/platform/sdk/environment/python
+    export ADX_SERVER_ADDRESS="<adx-api-host>:<port>"
+    export ADX_TOKEN="<token>"
+    export ADX_TLS="1"
+    export ADX_TLS_VERIFY="1"
+    ```
+
+    Certificate verification is enabled by default. `ADX_TLS=0` selects plain
+    HTTP for an auth-disabled development service; `ADX_TLS_VERIFY=0` disables
+    certificate verification for a test service. SDK `ADX_GATEWAY_ADDRESS` and
+    `ADX_GATEWAY_TLS` select a separate gateway when the deployment uses one.
+
+    ```yaml
+    sandbox:
+      provider: agent_dx
+      image: python:3.12
+      runtime_timeout: 3600
+      sandbox_kwargs:
+        cpu: 2000
+        memory: 4096
+        cpu_limit: 8000
+        mem_limit: 12288
+        idle_timeout: 7200
+        create_timeout: 120
+        rootfs_readonly: false
+        port_forwardings: [8080]
+    ```
+
+    `image_mounts`, `executable_paths`, `add_to_path`, binary files, directory
+    transfers, and native persistent shells are supported. Directories require
+    `tar` and `gzip` in the task image. Optional `mounts` dictionaries become
+    SDK `Mount` objects, including nested `s3_config` dictionaries. Trusted
+    Python callers may supply an SDK `ConnectionConfig` instance as `connection`.
+    Keep tokens and S3 credentials out of task YAML.
+
+    For in-sandbox model calls, set `sandbox_kwargs.proxy_port: 38197` in a Task
+    Config. `run_task` derives `upstream` from the live Gateway Session. For a
+    standalone sandbox, supply `upstream` explicitly. The ADX gateway must route
+    the configured proxy port and its WebSocket port (`proxy_port - 1`).
+
+    `runtime_timeout` requests deletion using a worker-local timer; it is
+    distinct from `idle_timeout` and requires the worker to remain alive.
+    Commands default to 60 seconds; positive fractional timeouts round up.
+    Unknown command outcomes, truncated output, and lost shell state raise
+    `AgentDxSandboxError`. A shell timeout or cancellation invalidates and
+    deletes the Environment. Create cancellation waits for the SDK's bounded
+    create attempt so a late successful Environment can be collected and deleted.
+
+    Port routes may require authentication. `expose_port()` returns the SDK URL;
+    `get_port_auth_headers()` supplies headers to trusted HTTP callers without
+    putting credentials in the URL.
+
+    Run the explicit development-cluster smoke check:
+
+    ```bash
+    python examples/quickstart/sandbox/agent_dx_smoke.py
+    # Also exercise a worker-side HTTP service with a /health endpoint:
+    python examples/quickstart/sandbox/agent_dx_smoke.py \\
+      --upstream 127.0.0.1:8000 --proxy-port 38197 --tunnel-path /health
+    ```
+
+    The smoke check creates and deletes an Environment. Its cleanup result
+    records SDK request acceptance; verify physical resource removal in the
+    deployment separately. For Mini-SWE-Agent, use
+    `examples/mini_swe_agent/task_config_agent_dx.yaml` with the existing driver.
+
 `image_mounts` allows Uni-Agent to attach self-contained runtime images for black-box
 agent harnesses to task sandboxes while keeping harness dependencies isolated
 from task images; `executable_paths` exposes selected runtime commands.
@@ -410,6 +483,13 @@ After configuring a supported backend above, run the complete connectivity and p
 
     ```bash
     DEBUG_MODE=1 SANDBOX_PROVIDER=openyuanrong python examples/quickstart/sandbox/demo.py
+    ```
+
+=== "Agent DX"
+
+    ```bash
+    DEBUG_MODE=1 SANDBOX_PROVIDER=agent_dx IMAGE=python:3.12 \\
+      python examples/quickstart/sandbox/demo.py
     ```
 
 Next, [verify task oracle solutions](oracle-verification.md) against the configured sandbox before running agent inference or training.

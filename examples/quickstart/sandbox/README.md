@@ -47,4 +47,33 @@ export E2B_API_KEY="<e2b-api-key>"
 DEBUG_MODE=1 SANDBOX_PROVIDER=e2b IMAGE=python:3.12 python examples/quickstart/sandbox/demo.py
 ```
 
+## Run with Agent DX
+
+Install the verified Agent DX Environment SDK and configure the service on each worker:
+
+```bash
+pip install /path/to/agent-dx/platform/sdk/environment/python
+export ADX_SERVER_ADDRESS="<adx-api-host>:<port>"
+export ADX_TOKEN="<token>"
+export ADX_TLS="1"
+export ADX_TLS_VERIFY="1"
+DEBUG_MODE=1 SANDBOX_PROVIDER=agent_dx IMAGE=python:3.12 python examples/quickstart/sandbox/demo.py
+```
+
+The SDK is optional; other providers work without it. Use a verified source checkout
+or wheel rather than assuming the SDK version has been published to a public index.
+
+For a smaller check without the demo's package installation, run:
+
+```bash
+python examples/quickstart/sandbox/agent_dx_smoke.py
+# Optional: the sandbox should reach an HTTP /health on the worker.
+python examples/quickstart/sandbox/agent_dx_smoke.py --upstream 127.0.0.1:8000
+```
+
+This creates an Environment, checks commands, binary files, directories and persistent
+shell state, and requests deletion. The optional upstream checks the reverse tunnel.
+Physical resource cleanup requires deployment-side verification. The task image needs
+Python 3, bash, tar, and gzip. The smoke command prints no authentication headers.
+
 See the [Launch a Sandbox](../../../docs/source/quickstart/launch-sandbox.md) guide for a step-by-step explanation.
