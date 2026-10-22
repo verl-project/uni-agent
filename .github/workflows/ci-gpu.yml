@@ -2,7 +2,7 @@ name: tests-gpu
 
 on:
   pull_request:
-    branches: [ "main" ]
+    branches: [ "develop" ]
     types: [ opened, synchronize, reopened ]
 
 permissions:
