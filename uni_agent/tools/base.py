@@ -80,7 +80,8 @@ def _normalize_json_schema(value: Any) -> Any:
 
     Drops ``title``, collapses ``Optional[...]`` ``anyOf`` down to the non-null
     variant, removes ``default: null`` and applies a stable key order, yielding
-    the standard OpenAI function-call parameter schema.
+    the standard OpenAI function-call parameter schema. Names in schema maps
+    and literal values are preserved rather than interpreted as schema keywords.
     """
     if isinstance(value, list):
         return [_normalize_json_schema(item) for item in value]
@@ -91,7 +92,12 @@ def _normalize_json_schema(value: Any) -> Any:
     for key, item in value.items():
         if key == "title":
             continue
-        normalized_item = _normalize_json_schema(item)
+        if key in {"properties", "$defs", "definitions", "patternProperties", "dependentSchemas"}:
+            normalized_item = {name: _normalize_json_schema(schema) for name, schema in item.items()}
+        elif key in {"default", "const", "enum", "examples"}:
+            normalized_item = item
+        else:
+            normalized_item = _normalize_json_schema(item)
         if key == "default" and normalized_item is None:
             continue
         normalized[key] = normalized_item
