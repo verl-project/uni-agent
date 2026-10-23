@@ -15,6 +15,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path, PurePosixPath
 from typing import Any, ClassVar, Protocol, runtime_checkable
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -349,6 +350,14 @@ class Sandbox(abc.ABC):
     supports_shell: ClassVar[bool] = False
     #: Whether the provider can route in-sandbox HTTP to the SDK worker's upstream.
     supports_reverse_tunnel: ClassVar[bool] = False
+
+    @classmethod
+    def tunnel_upstream(cls, base_url: str) -> str | None:
+        """Return the provider's upstream address; default to an explicit host:port."""
+        parsed = urlparse(base_url)
+        if not parsed.hostname or not parsed.port:
+            return None
+        return f"{parsed.hostname}:{parsed.port}"
 
     @classmethod
     def from_config(cls, config: SandboxConfig) -> Sandbox:

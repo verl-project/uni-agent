@@ -10,8 +10,6 @@ import pytest
 
 from uni_agent.sandbox import ExecResult, Sandbox, SandboxConfig, agent_dx, build_sandbox
 
-pytestmark = [pytest.mark.cpu, pytest.mark.level0]
-
 
 def result(code=0, stdout="", stderr="", status="SUCCEEDED", **kwargs):
     return SimpleNamespace(exit_code=code, stdout=stdout, stderr=stderr, status=status, **kwargs)
@@ -140,6 +138,8 @@ def sdk(monkeypatch):
     return state
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_registry_stays_lazy_and_consumes_common_config(sdk):
     sandbox = build_sandbox(SandboxConfig(provider="agent_dx", image="task:image", runtime_timeout=42))
     assert isinstance(sandbox, agent_dx.AgentDxSandbox)
@@ -148,12 +148,16 @@ def test_registry_stays_lazy_and_consumes_common_config(sdk):
     assert sandbox.exec.__func__ is Sandbox.exec
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_missing_sdk_has_actionable_error(monkeypatch):
     monkeypatch.setitem(sys.modules, "adx_environment", None)
     with pytest.raises(ImportError, match="adx-environment"):
         agent_dx._load_sdk()
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.parametrize(
     "kwargs",
     [
@@ -180,11 +184,15 @@ def test_invalid_configuration_fails_before_network(kwargs, sdk):
     assert not sdk.creates
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_unknown_sdk_options_are_rejected():
     with pytest.raises(TypeError, match="detached"):
         agent_dx.AgentDxSandbox(image="task:image", detached=True)
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_mount_targets_are_unique_after_path_normalization(sdk):
     sandbox = agent_dx.AgentDxSandbox(
@@ -196,6 +204,8 @@ async def test_mount_targets_are_unique_after_path_normalization(sdk):
     assert not sdk.creates
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_start_maps_resources_mounts_connection_and_explicit_name(sdk):
     connection = sdk.module.ConnectionConfig(server_address="private", token="explicit-token")
@@ -232,6 +242,8 @@ async def test_start_maps_resources_mounts_connection_and_explicit_name(sdk):
     assert sdk.kills == 1
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_create_failure_never_resubmits_on_same_instance(sdk):
     sdk.create_error = RuntimeError("lost create response")
@@ -242,6 +254,8 @@ async def test_create_failure_never_resubmits_on_same_instance(sdk):
     assert len(sdk.creates) == 1
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_executable_setup_failure_rolls_back_environment(sdk, monkeypatch):
     sandbox = agent_dx.AgentDxSandbox(image="task:image", executable_paths={"tool": "/opt/tool/bin/tool"})
@@ -257,6 +271,71 @@ async def test_executable_setup_failure_rolls_back_environment(sdk, monkeypatch)
     assert not await sandbox.is_alive()
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancelled", [False, True])
+async def test_startup_rollback_failure_preserves_original_error_and_delete_identity(
+    sdk, monkeypatch, caplog, cancelled
+):
+    sandbox = agent_dx.AgentDxSandbox(image="task:image")
+    original = RuntimeError("configured executable is unavailable")
+    setup_started = asyncio.Event()
+    sdk.kill_error = RuntimeError("kill unavailable")
+    sdk.delete_error = RuntimeError("delete unavailable")
+
+    async def setup(paths):
+        setup_started.set()
+        if cancelled:
+            await asyncio.Future()
+        raise original
+
+    monkeypatch.setattr(sandbox, "_setup_executable_paths", setup)
+    task = asyncio.create_task(sandbox.start())
+    await setup_started.wait()
+    if cancelled:
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    else:
+        with pytest.raises(RuntimeError) as error:
+            await task
+        assert error.value is original
+    assert "startup rollback failed" in caplog.text
+    assert sandbox.environment_id == "env-test" and sdk.deletes == ["env-test"]
+    assert not sandbox._initializing and sandbox._timer is None
+    sdk.delete_error = None
+    await sandbox.stop()
+    assert sdk.deletes == ["env-test", "env-test"]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+async def test_context_startup_retries_preserve_setup_failure(sdk, monkeypatch, cleanup_fails):
+    sandbox = agent_dx.AgentDxSandbox(image="task:image")
+    original = RuntimeError("configured executable is unavailable")
+    if cleanup_fails:
+        sdk.kill_error = RuntimeError("kill unavailable")
+        sdk.delete_error = RuntimeError("delete unavailable")
+
+    async def setup(paths):
+        raise original
+
+    monkeypatch.setattr(sandbox, "_setup_executable_paths", setup)
+    try:
+        with pytest.raises(RuntimeError) as error:
+            await sandbox.__aenter__(retry=2)
+        assert error.value is original
+        assert len(sdk.creates) == 1
+    finally:
+        sdk.delete_error = None
+        await sandbox.stop()
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_name_prefix_is_used_only_when_explicit_name_is_missing(sdk, monkeypatch):
     monkeypatch.setenv("SANDBOX_NAME_PREFIX", "fixture-")
@@ -266,6 +345,8 @@ async def test_name_prefix_is_used_only_when_explicit_name_is_missing(sdk, monke
     await sandbox.stop()
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_missing_recoverable_command_capability_fails_before_create(sdk):
     sdk.module.SDK_CAPABILITIES = {"local-close"}
@@ -275,6 +356,8 @@ async def test_missing_recoverable_command_capability_fails_before_create(sdk):
     assert not sdk.creates
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_cancelled_create_collects_late_environment_and_deletes_it(sdk):
     sdk.release_create = threading.Event()
@@ -296,6 +379,8 @@ async def test_cancelled_create_collects_late_environment_and_deletes_it(sdk):
     assert not await sandbox.is_alive()
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_delete_failure_uses_public_delete_and_retains_id_for_retry(sdk):
     sandbox = agent_dx.AgentDxSandbox(image="task:image")
@@ -310,6 +395,8 @@ async def test_delete_failure_uses_public_delete_and_retains_id_for_retry(sdk):
     assert sdk.deletes == ["env-test", "env-test"]
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_runtime_timeout_deletes_and_prevents_successful_context_exit(sdk):
     sandbox = agent_dx.AgentDxSandbox(image="task:image", runtime_timeout=0.01)
@@ -322,6 +409,8 @@ async def test_runtime_timeout_deletes_and_prevents_successful_context_exit(sdk)
             assert sdk.kills == 1
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_command_preserves_argv_nonzero_cwd_env_and_fractional_budget(sdk):
     sdk.results = [result(2, b"partial\xff", "request timed out after 5 seconds", status="FAILED")]
@@ -336,6 +425,8 @@ async def test_command_preserves_argv_nonzero_cwd_env_and_fractional_budget(sdk)
     await sandbox.stop()
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_running_wait_result_observes_same_command_without_resubmitting(sdk):
     sdk.results = [result(None, status="RUNNING", error_code="WAIT_TIMEOUT"), result(stdout="done")]
@@ -346,6 +437,8 @@ async def test_running_wait_result_observes_same_command_without_resubmitting(sd
     await sandbox.stop()
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_authoritative_command_timeout_uses_shared_error_policy(sdk):
     sdk.results = [result(-1, stderr="deadline", status="TIMED_OUT")]
@@ -357,6 +450,58 @@ async def test_authoritative_command_timeout_uses_shared_error_policy(sdk):
     await sandbox.stop()
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_delayed_server_timeout_keeps_environment_alive(sdk):
+    sandbox = agent_dx.AgentDxSandbox(image="task:image")
+    await sandbox.start()
+
+    class Handle:
+        calls = 0
+
+        async def wait_async(self, timeout=None):
+            self.calls += 1
+            if self.calls == 1:
+                await asyncio.sleep(1.05)
+                return result(None, status="RUNNING", error_code="WAIT_TIMEOUT")
+            return result(None, stderr="execution deadline", status="TIMED_OUT")
+
+    handle = Handle()
+
+    def submit(command, **kwargs):
+        assert kwargs["timeout"] == 1
+        return handle
+
+    sandbox._environment.commands.run = submit
+    value = await sandbox.exec(["sleep", "100"], timeout=1)
+    assert value.exit_code == -1 and handle.calls == 2
+    assert await sandbox.is_alive() and sdk.kills == 0
+    sandbox.raise_if_unavailable()
+    await sandbox.stop()
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_command_result_backstop_still_invalidates_environment(sdk, monkeypatch):
+    monkeypatch.setattr(agent_dx, "_COMMAND_RESULT_GRACE_SECONDS", 0.01, raising=False)
+    sandbox = agent_dx.AgentDxSandbox(image="task:image")
+    await sandbox.start()
+
+    class Handle:
+        async def wait_async(self, timeout=None):
+            await asyncio.sleep(timeout)
+            return result(None, status="RUNNING", error_code="WAIT_TIMEOUT")
+
+    sandbox._environment.commands.run = lambda *args, **kwargs: Handle()
+    with pytest.raises(agent_dx.AgentDxSandboxError, match="COMMAND_DEADLINE_EXCEEDED"):
+        await sandbox.exec(["sleep", "100"], timeout=1)
+    assert sdk.kills == 1 and not await sandbox.is_alive()
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 @pytest.mark.parametrize("bad_result", [result(truncated=True), result(None), result(-1, status="KILLED")])
 async def test_incomplete_command_results_are_fatal_even_when_environment_is_alive(sdk, bad_result):
@@ -370,6 +515,8 @@ async def test_incomplete_command_results_are_fatal_even_when_environment_is_ali
     await sandbox.stop()
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_sdk_fault_is_not_downgraded_to_exit_127(sdk):
     sdk.command_error = RuntimeError("lost command result")
@@ -381,6 +528,8 @@ async def test_sdk_fault_is_not_downgraded_to_exit_127(sdk):
     await sandbox.stop()
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_transport_timeout_is_fatal_instead_of_confirmed_command_timeout(sdk):
     sdk.command_error = TimeoutError("connection timed out, command outcome unknown")
@@ -391,6 +540,8 @@ async def test_transport_timeout_is_fatal_instead_of_confirmed_command_timeout(s
     await sandbox.stop()
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_caught_infrastructure_fault_cannot_return_success_from_context(sdk):
     sdk.command_error = RuntimeError("lost command result")
@@ -404,6 +555,8 @@ async def test_caught_infrastructure_fault_cannot_return_success_from_context(sd
     assert sdk.kills == 1
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_cancelled_command_marks_environment_unusable_and_deletes_it(sdk):
     sdk.results = [result(None, status="RUNNING", error_code="WAIT_TIMEOUT")]
@@ -420,6 +573,8 @@ async def test_cancelled_command_marks_environment_unusable_and_deletes_it(sdk):
         sandbox.raise_if_unavailable()
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_shell_initializes_quoted_cwd_env_and_path(sdk):
     sandbox = agent_dx.AgentDxSandbox(image="task:image", cwd="/base", add_to_path=["/opt/tool"])
@@ -438,6 +593,8 @@ async def test_shell_initializes_quoted_cwd_env_and_path(sdk):
     await sandbox.stop()
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_shell_timeout_destroys_environment_and_is_not_returned_as_success(sdk):
     sandbox = agent_dx.AgentDxSandbox(image="task:image")
@@ -449,6 +606,8 @@ async def test_shell_timeout_destroys_environment_and_is_not_returned_as_success
     assert sdk.kills == 1
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_native_files_and_ports_use_public_sdk_api(sdk, tmp_path):
     sandbox = agent_dx.AgentDxSandbox(image="task:image", port_forwardings=[8080])
@@ -468,6 +627,8 @@ async def test_native_files_and_ports_use_public_sdk_api(sdk, tmp_path):
     await sandbox.stop()
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_cancelled_file_write_finishes_before_environment_cleanup(sdk):
     started = threading.Event()
@@ -495,6 +656,8 @@ async def test_cancelled_file_write_finishes_before_environment_cleanup(sdk):
     assert sdk.files["/tmp/data"] == b"content" and sdk.kills == 1
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 @pytest.mark.parametrize("timeout", [0, -1, True, float("nan"), float("inf")])
 async def test_invalid_command_budget_raises_without_poisoning_environment(sdk, timeout):

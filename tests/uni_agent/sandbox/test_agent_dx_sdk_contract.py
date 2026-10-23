@@ -8,9 +8,9 @@ import pytest
 
 from uni_agent.sandbox.agent_dx import AgentDxSandbox, _connection_config
 
-pytestmark = [pytest.mark.cpu, pytest.mark.level0]
 
-
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 async def test_actual_sdk_create_commands_shell_files_ports_and_delete(monkeypatch):
     sdk = pytest.importorskip("adx_environment", reason="install the Agent DX SDK to run its HTTP contract")
@@ -125,6 +125,8 @@ async def test_actual_sdk_create_commands_shell_files_ports_and_delete(monkeypat
             client.close()
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_real_connection_uses_only_adx_variables_and_enables_tls_verification(monkeypatch):
     sdk = pytest.importorskip("adx_environment")
     monkeypatch.setenv("ADX_SERVER_ADDRESS", "sdk.invalid:7443")

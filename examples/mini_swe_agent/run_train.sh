@@ -115,7 +115,11 @@ MAX_CONCURRENT_SESSIONS="${MAX_CONCURRENT_SESSIONS:-256}"
 # Hard cap per-session runtime (seconds). A runner that hangs without raising
 # (e.g. remote sandbox OOM-killed without surfacing an error) otherwise holds its
 # concurrency slot forever and stalls the whole training batch.
-SESSION_TIMEOUT_SECONDS="${SESSION_TIMEOUT_SECONDS:-3600}"
+if [[ "${SANDBOX_PROVIDER}" == "agent_dx" ]]; then
+    SESSION_TIMEOUT_SECONDS="${SESSION_TIMEOUT_SECONDS:-8400}"
+else
+    SESSION_TIMEOUT_SECONDS="${SESSION_TIMEOUT_SECONDS:-3600}"
+fi
 SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-$(basename "${MODEL_PATH}")}"
 # The agent reports finished explicitly (exit_status == "Submitted"); set True to
 # exclude unfinished episodes from the loss (paired with the finished field in agent.py).

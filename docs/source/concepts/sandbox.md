@@ -123,6 +123,8 @@ Agent DX also records unrecoverable failures. `raise_if_unavailable()` rejects s
 
 OpenYuanRong and Agent DX declare `supports_reverse_tunnel = True`. With `sandbox_kwargs.proxy_port`, the task runner supplies the Gateway Session's upstream and rewrites the model URL to the in-sandbox HTTP proxy, preserving the Session path. Providers without this capability reject the configuration. A provider class can be inspected without installing its SDK or creating a remote environment.
 
+Providers own their upstream format through the `Sandbox.tunnel_upstream(base_url)` classmethod. The default requires an explicit `host:port`; Agent DX preserves HTTPS, supplies standard HTTP(S) ports, and brackets IPv6 addresses. The task runner delegates this formatting to the selected provider.
+
 Agent DX's `runtime_timeout` runs a local lifetime timer from Environment creation success and requests deletion on expiry. It depends on the worker process and event loop remaining alive. `idle_timeout` is a separate server-side idle policy; deployment operators still need to reconcile resources after worker loss.
 
 ## Custom Backend

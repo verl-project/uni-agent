@@ -321,6 +321,9 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
     `runtime_timeout` requests deletion using a worker-local timer; it is
     distinct from `idle_timeout` and requires the worker to remain alive.
     Commands default to 60 seconds; positive fractional timeouts round up.
+    The server enforces that execution budget. The client allows at least 30
+    additional seconds for its terminal result, extended by a larger SDK
+    `communication_margin_seconds`; a lost result still invalidates the Environment.
     Unknown command outcomes, truncated output, and lost shell state raise
     `AgentDxSandboxError`. A shell timeout or cancellation invalidates and
     deletes the Environment. Create cancellation waits for the SDK's bounded
@@ -335,7 +338,7 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
     ```bash
     python examples/quickstart/sandbox/agent_dx_smoke.py
     # Also exercise a worker-side HTTP service with a /health endpoint:
-    python examples/quickstart/sandbox/agent_dx_smoke.py \\
+    python examples/quickstart/sandbox/agent_dx_smoke.py \
       --upstream 127.0.0.1:8000 --proxy-port 38197 --tunnel-path /health
     ```
 
@@ -488,7 +491,7 @@ After configuring a supported backend above, run the complete connectivity and p
 === "Agent DX"
 
     ```bash
-    DEBUG_MODE=1 SANDBOX_PROVIDER=agent_dx IMAGE=python:3.12 \\
+    DEBUG_MODE=1 SANDBOX_PROVIDER=agent_dx IMAGE=python:3.12 \
       python examples/quickstart/sandbox/demo.py
     ```
 

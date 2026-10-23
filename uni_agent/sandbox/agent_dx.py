@@ -11,6 +11,7 @@ import shlex
 import uuid
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 
 from .base import ExecResult, ImageMount, Sandbox, _to_str
 from .registry import register_sandbox
@@ -21,6 +22,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 _REQUIRED_CAPABILITIES = {"local-close", "explicit-connection-config", "recoverable-commands", "tunnel-proxy-port"}
+_COMMAND_RESULT_GRACE_SECONDS = 30.0
 
 
 class AgentDxSandboxError(RuntimeError):
@@ -97,6 +99,22 @@ class AgentDxSandbox(Sandbox):
 
     supports_shell = True
     supports_reverse_tunnel = True
+
+    @classmethod
+    def tunnel_upstream(cls, base_url: str) -> str:
+        """Format the HTTP(S) service address expected by the Environment SDK."""
+        parsed = urlparse(base_url)
+        if (
+            parsed.scheme not in ("http", "https")
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+        ):
+            raise ValueError("Agent DX gateway tunnel requires an HTTP(S) base_url without embedded credentials")
+        host = f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        address = f"{host}:{port}"
+        return f"https://{address}" if parsed.scheme == "https" else address
 
     def __init__(
         self,
@@ -209,6 +227,7 @@ class AgentDxSandbox(Sandbox):
         self._delete_pending = False
         self._initializing = False
         self._fatal_error: AgentDxSandboxError | None = None
+        self._startup_error: BaseException | None = None
         self._timer: asyncio.Task | None = None
         self._lifecycle_lock = asyncio.Lock()
 
@@ -258,6 +277,8 @@ class AgentDxSandbox(Sandbox):
 
     async def start(self) -> None:
         async with self._lifecycle_lock:
+            if self._startup_error is not None:
+                raise self._startup_error
             self.raise_if_unavailable()
             if self._environment is not None:
                 return
@@ -309,9 +330,13 @@ class AgentDxSandbox(Sandbox):
             try:
                 await self._setup_executable_paths(self.executable_paths)
                 self.raise_if_unavailable()
-            except BaseException:
+            except BaseException as exc:
+                self._startup_error = exc
                 self._cancel_timer()
-                await _settle(asyncio.create_task(self._delete()))
+                try:
+                    await _settle(asyncio.create_task(self._delete()))
+                except Exception:
+                    logger.warning("Agent DX startup rollback failed (environment_id=%s)", self.environment_id)
                 raise
             finally:
                 self._initializing = False
@@ -427,7 +452,12 @@ class AgentDxSandbox(Sandbox):
         )
         try:
             handle = await asyncio.shield(submission)
-            deadline = asyncio.get_running_loop().time() + budget
+            # The server owns the execution budget; allow its terminal result to arrive.
+            grace = max(
+                _COMMAND_RESULT_GRACE_SECONDS,
+                getattr(self._connection, "communication_margin_seconds", 0.0),
+            )
+            deadline = asyncio.get_running_loop().time() + budget + grace
             while True:
                 remaining = deadline - asyncio.get_running_loop().time()
                 if remaining <= 0:

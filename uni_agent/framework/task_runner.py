@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 from uni_agent.rl_insight.adapter import task_span
+from uni_agent.sandbox import Sandbox
 from uni_agent.sandbox.registry import get_sandbox_cls
 from uni_agent.tasks import TaskConfigResolver, TaskResult, get_task
 from uni_agent.tasks.config import _deep_merge
@@ -30,15 +31,8 @@ def _rewrite_gateway_url(gateway_url: str, proxy_port: int) -> str:
 
 
 def _extract_upstream(gateway_url: str) -> str | None:
-    """Extract ``host:port`` from a gateway URL (the tunnel's ``upstream``).
-
-    Returns ``None`` when the URL carries no host or port, so callers can fail
-    loudly instead of forwarding a ``None:None`` upstream.
-    """
-    parsed = urlparse(gateway_url)
-    if not parsed.hostname or not parsed.port:
-        return None
-    return f"{parsed.hostname}:{parsed.port}"
+    """Return the default Sandbox upstream format."""
+    return Sandbox.tunnel_upstream(gateway_url)
 
 
 def _inject_gateway_tunnel(task: dict[str, Any], base_url: str) -> dict[str, Any]:
@@ -57,34 +51,20 @@ def _inject_gateway_tunnel(task: dict[str, Any], base_url: str) -> dict[str, Any
     ``127.0.0.1`` address).
     """
     provider = (task.get("sandbox") or {}).get("provider")
-    if not provider or not get_sandbox_cls(provider).supports_reverse_tunnel:
+    sandbox_cls = get_sandbox_cls(provider) if provider else None
+    if sandbox_cls is None or not sandbox_cls.supports_reverse_tunnel:
         raise ValueError(
             "the gateway reverse tunnel (sandbox.sandbox_kwargs.proxy_port) is "
-            "supported only on 'openyuanrong' or another provider declaring supports_reverse_tunnel=True, "
+            "supported only on providers declaring supports_reverse_tunnel=True, "
             f"got provider={provider!r}; "
             "switch the sandbox provider or drop proxy_port"
         )
     proxy_port = task["sandbox"]["sandbox_kwargs"]["proxy_port"]
     if isinstance(proxy_port, bool) or not isinstance(proxy_port, int) or not 2 <= proxy_port <= 65535:
         raise ValueError("gateway tunnel proxy_port must be an integer between 2 and 65535")
-    if provider == "agent_dx":
-        parsed = urlparse(base_url)
-        if (
-            parsed.scheme not in ("http", "https")
-            or not parsed.hostname
-            or parsed.username is not None
-            or parsed.password is not None
-        ):
-            raise ValueError("Agent DX gateway tunnel requires an HTTP(S) base_url without embedded credentials")
-        host = f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname
-        port = parsed.port or (443 if parsed.scheme == "https" else 80)
-        upstream = f"{host}:{port}"
-        if parsed.scheme == "https":
-            upstream = f"https://{upstream}"
-    else:
-        upstream = _extract_upstream(base_url)
-        if upstream is None:
-            raise ValueError(f"cannot derive gateway tunnel upstream from base_url={base_url!r}")
+    upstream = sandbox_cls.tunnel_upstream(base_url)
+    if upstream is None:
+        raise ValueError(f"cannot derive gateway tunnel upstream from base_url={base_url!r}")
     return _deep_merge(
         task,
         {
