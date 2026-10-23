@@ -474,14 +474,7 @@ def capture_debug_snapshot(actor: _GatewayActor, session_id: str, urls: dict[str
             "provider_urls": dict(urls),
             "note": "session was not available when debug snapshot was captured",
         }
-    active_chains = [
-        {
-            "chain_id": chain.chain_id,
-            "message_history": list(chain.message_history),
-            "active_tool_schemas": chain.active_tool_schemas,
-        }
-        for chain in session.active_chains
-    ]
+    active_chains = session.get_active_chains()
     snapshot = {
         "session_state": session.snapshot_state(),
         # Keep the original single-chain fields for existing debug consumers.

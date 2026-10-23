@@ -798,7 +798,7 @@ class GatewayAgentFramework(AgentFramework):
         async with _log_scope(parent_log):
             session = await self.gateway_manager.create_session(
                 session_id,
-                metadata={"_trace_identity": trace_identity},
+                metadata={"_trace_identity": trace_identity, "_log_dir": str(run_dir) if run_dir is not None else None},
                 sampling_params=dict(sampling_params),
             )
             logger.info(
