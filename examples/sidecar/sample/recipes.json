@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "recipes": {
+    "my-tool": {
+      "context": ".",
+      "dockerfile": "Dockerfile",
+      "image": "my-tool-sidecar",
+      "tag": "{TOOL_VERSION}",
+      "platform": "linux/amd64",
+      "mount_target": "/opt/my-tool",
+      "entrypoint": ["/opt/my-tool/bin/busybox", "sha256sum"],
+      "probe_argv": ["/opt/my-tool/bin/busybox", "true"],
+      "version_arg": "TOOL_VERSION",
+      "build_args": {
+        "BASE_IMAGE": "busybox:1.36.1-musl",
+        "TOOL_VERSION": "1.36.1"
+      }
+    }
+  }
+}

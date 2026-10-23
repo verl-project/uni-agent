@@ -51,6 +51,7 @@ nav:
   - Quickstart:
       - Installation: quickstart/installation.md
       - Launch a Sandbox: quickstart/launch-sandbox.md
+      - Contribute a Sidecar: quickstart/sidecar-contribution.md
       - Verify Oracle Solutions: quickstart/oracle-verification.md
       - Run Agent Inference: quickstart/agent-inference.md
       - Run the Agent Aware Router: quickstart/agent-aware-router.md

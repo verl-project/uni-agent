@@ -45,6 +45,8 @@ Follow the end-to-end path:
 
 For detailed guides and examples, we strongly recommend reading the [Uni-Agent documentation](https://uni-agent.readthedocs.io/en/latest/).
 
+新增第三方工具请参考 [Sidecar 构建与接入指南](docs/source/quickstart/sidecar-contribution.md)及[公共脚本](examples/sidecar/README.md)。
+
 ## Results 📊
 
 ### Parallel Inference & Verification
