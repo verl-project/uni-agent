@@ -1,10 +1,10 @@
-# 第三方 Sidecar 构建与接入指南
+# Build and Integrate a Third-Party Sidecar
 
-本文面向要给 Uni-Agent 新增工具的贡献者，例如新增 OpenCode。交付物是工具镜像、验证用例、Agent 适配和任务配置。下文统一使用 `my-tool` 作为镜像 recipe 名、`my_tool` 作为 Agent 注册名；接入 OpenCode 时换成 `opencode`。公共脚本接受自定义 manifest，无需修改脚本来添加工具名称。
+This guide is for contributors adding a new tool to Uni-Agent, such as OpenCode. The deliverables are a tool image, validation cases, an Agent adapter, and task configuration. The examples use `my-tool` as the image recipe name and `my_tool` as the Agent registry name; replace both with `opencode` when adding OpenCode. The shared scripts load custom manifests, so adding a tool does not require changing their list of supported tool names.
 
-## 1. 准备环境和目录
+## 1. Prepare the environment and directory
 
-在包含[公共脚本](https://github.com/verl-project/uni-agent/blob/main/examples/sidecar/README.md)的源码 checkout 根目录执行命令。准备 Linux x86_64、Python 3.11、可访问的 Docker Engine，以及下载基础镜像和工具依赖的网络。先检查：
+Run the commands from the root of a source checkout containing the [shared scripts](https://github.com/verl-project/uni-agent/blob/main/examples/sidecar/README.md). You need Linux x86_64, Python 3.11, an accessible Docker Engine, and network access to download base images and tool dependencies. Check these prerequisites first:
 
 ```bash
 set -euo pipefail
@@ -15,53 +15,53 @@ test -f examples/sidecar/build.py
 test -f examples/sidecar/validation.py
 ```
 
-新增工具的文件放在一个独立目录：
+Keep the new tool's files in a dedicated directory:
 
 ```text
 examples/my_tool/
-  Dockerfile             # 安装固定版本工具和运行时
-  .dockerignore          # 只允许 COPY 所需的文件
-  recipes.json           # 构建参数、挂载位置、入口与依赖探针
-  run_agent.py           # 将框架输入转换成工具调用，归一化结果
-  checks.py              # 需要定制协议时提供的功能检查
-  fixtures/              # 检查所需的输入及期望结果
-  task_config.yaml       # 挂载与 Agent 配置
-  README.md              # 工具版本、额外依赖、运行方式和验证结果
+  Dockerfile             # Install fixed versions of the tool and its runtime
+  .dockerignore          # Allow only files needed by COPY
+  recipes.json           # Build arguments, mount location, entrypoint, dependency probe
+  run_agent.py           # Convert framework input into tool calls and normalize results
+  checks.py              # Functional checks for a custom protocol, when needed
+  fixtures/              # Check inputs and expected results
+  task_config.yaml       # Mount and Agent configuration
+  README.md              # Tool versions, extra dependencies, usage, validation results
 ```
 
-构建机运行公共脚本；sidecar 提供工具文件；任务镜像提供 shell、项目目录和工具需要的系统库。检查脚本使用任务镜像中的 `python3`；模型工具可以另外携带自己的 Python、Node 或其他运行时。构建及固定响应检查无需 GPU 或真实模型凭据。
+The build host runs the shared scripts. The sidecar supplies the tool files. The task image supplies the shell, project directory, and system libraries required by the tool. Check scripts use `python3` from the task image; model tools may also bundle their own Python, Node, or other runtime. Building and deterministic checks require neither a GPU nor real model credentials.
 
-## 2. 定义镜像和 manifest
+## 2. Define the image and manifest
 
-在新工具目录编写 `recipes.json`，完整格式可复制[最小自定义 manifest](https://github.com/verl-project/uni-agent/blob/main/examples/sidecar/sample/recipes.json)。新增工具逐项替换安装、版本、路径和入口；示例中的 BusyBox 只演示文件布局，不属于新增工具的验收步骤。
+Create `recipes.json` in the new tool's directory. Copy the complete structure from the [minimal custom manifest](https://github.com/verl-project/uni-agent/blob/main/examples/sidecar/sample/recipes.json), then replace the installation, versions, paths, and entrypoints for your tool. The BusyBox example demonstrates the filesystem layout; use your new tool's own checks for acceptance.
 
-| 字段 | 约定 |
+| Field | Contract |
 | --- | --- |
-| `schema_version`、`recipes` | 版本为 `1`；`recipes` 是 recipe 名到配置的映射 |
-| `context`、`dockerfile` | 相对 manifest 所在目录解析，构建上下文只包含这个工具 |
-| `image`、`tag` | 不含 registry 前缀的镜像名和 tag；tag 可引用 `build_args` 中的版本，例如 `{TOOL_VERSION}` |
-| `platform` | 当前公共流程支持 `linux/amd64` |
-| `mount_target` | 沙箱内的绝对目录，例如 `/opt/opencode` |
-| `entrypoint` | argv 数组，例如 `["/opt/opencode/bin/python", "/opt/opencode/bin/run_agent.py"]` |
-| `probe_argv` | 检查工具可执行、版本和依赖的 argv；成功返回 `0`，缺依赖或版本不符返回非零 |
-| `version_arg` | `build_args` 中主工具版本的键，例如 `TOOL_VERSION` |
-| `build_args` | 字符串到字符串的映射，至少包含 `BASE_IMAGE` 和主工具版本 |
+| `schema_version`, `recipes` | Use schema version `1`; `recipes` maps recipe names to configurations |
+| `context`, `dockerfile` | Resolve paths relative to the manifest directory; keep the build context specific to this tool |
+| `image`, `tag` | Image name without a registry prefix, and tag; the tag may reference a version in `build_args`, such as `{TOOL_VERSION}` |
+| `platform` | The shared workflow currently supports `linux/amd64` |
+| `mount_target` | Absolute sandbox directory, such as `/opt/opencode` |
+| `entrypoint` | Argument array, such as `["/opt/opencode/bin/python", "/opt/opencode/bin/run_agent.py"]` |
+| `probe_argv` | Argument array that checks executability, versions, and dependencies; return `0` on success and nonzero for missing dependencies or version mismatches |
+| `version_arg` | Key for the primary tool version in `build_args`, such as `TOOL_VERSION` |
+| `build_args` | String-to-string mapping containing at least `BASE_IMAGE` and the primary tool version |
 
-真实工具的 Dockerfile 使用固定基础镜像、工具版本和依赖版本，并在构建阶段执行版本或依赖检查。最终层使用 `FROM scratch`，将完整工具目录的**内容**复制到镜像根目录：
+Pin the base image, tool version, and dependency versions in the tool's Dockerfile, and run version or dependency checks during the build. Use `FROM scratch` for the final stage and copy the **contents** of the complete tool directory into the image root:
 
 ```dockerfile
-# builder 中已安装工具及完整运行时到 /opt/my-tool。
+# The builder has installed the tool and its complete runtime in /opt/my-tool.
 FROM scratch
 COPY --from=builder /opt/my-tool/ /
 ```
 
-这是 Dockerfile 最终层片段；安装步骤由工具自己的 builder 阶段提供。例如将 `bin/` 放在镜像根目录后，挂载到 `/opt/my-tool` 才会得到 `/opt/my-tool/bin/`。镜像本身无需启动命令，使用公共验证脚本挂载执行。
+This is the final-stage fragment; provide the installation steps in the tool's builder stage. For example, placing `bin/` at the image root produces `/opt/my-tool/bin/` after mounting at `/opt/my-tool`. The image needs no startup command: the shared validation scripts mount and execute its files.
 
-打包时一并携带解释器、原生二进制、动态库、数据文件和离线启动需要的缓存。处理好可执行权限、shebang、运行时前缀和共享库查找路径；普通 Python venv 应从最终挂载前缀构建，或使用可重定位运行时。构建机的系统库不会自动出现在任务沙箱中，动态链接程序需要兼容的 libc 和加载器；静态二进制没有该动态链接要求。`.dockerignore` 只允许所需源码和入口，凭据文件保存在目录外。
+Bundle the interpreter, native binaries, shared libraries, data files, and caches needed for offline startup. Set executable permissions, shebangs, runtime prefixes, and library search paths correctly. Build a Python venv at its final mount prefix, or use a relocatable runtime. Host libraries do not automatically appear in the task sandbox: dynamically linked programs need compatible libc and loaders, while static binaries have no such dynamic-linking requirement. Allow only required sources and entrypoints through `.dockerignore`, and keep credential files outside the directory.
 
-## 3. 构建自己的镜像
+## 3. Build your image
 
-以下命令针对刚创建的目录。替换真实工具后，继续使用它自己的 manifest 和 recipe 名：
+The commands below target the directory you created. Use your tool's own manifest and recipe name after replacing the example implementation:
 
 ```bash
 python3 examples/sidecar/build.py my-tool \
@@ -74,15 +74,15 @@ LOCAL_SIDECAR_IMAGE=$(printf '%s' "$RESOLVED_RECIPE" | python3 -c 'import json,s
 export LOCAL_SIDECAR_IMAGE
 ```
 
-`--describe` 输出解析后的配置，`--dry-run` 只打印命令。`--version` 覆盖 `version_arg` 对应版本；`--tag` 覆盖标签；`--base-image` 覆盖基础镜像；`--build-arg KEY=VALUE` 仅覆盖 manifest 已声明的键。公开包源可通过 `--pip-index`、`--npm-registry` 指定，但该 recipe 必须先声明对应参数。
+`--describe` prints the resolved configuration, and `--dry-run` prints commands without executing them. `--version` overrides the version selected by `version_arg`; `--tag` overrides the tag; `--base-image` overrides the base image. `--build-arg KEY=VALUE` accepts only keys declared in the manifest. Use `--pip-index` or `--npm-registry` for public package mirrors after declaring the corresponding argument in the recipe.
 
-后续命令在同一 shell 按顺序执行。修改版本参数时，构建和 `--describe` 使用同一组参数，以免解析成旧标签。安装目录、挂载目录和入口一起变更。发布可重建镜像时记录源码 SHA、基础镜像 digest、工具版本、完整依赖锁和最终 registry digest。
+Run subsequent commands in order in the same shell. When overriding versions, pass the same arguments to the build and `--describe` so the resolved reference matches the image you built. Update the installation directory, mount directory, and entrypoint together. For reproducible releases, record the source SHA, base-image digest, tool versions, complete dependency lock, and final registry digest.
 
-## 4. 验证工具入口
+## 4. Check the tool entrypoint
 
-### 输入与输出确定的工具
+### Tools with deterministic input and output
 
-通用检查会先执行 `probe_argv`，再执行 `entrypoint`，传入输入文件的原始字节，并逐字节比较 stdout，包括末尾换行：
+The generic check first executes `probe_argv`, then executes `entrypoint` with the input file's raw bytes on stdin. It compares stdout byte for byte, including the final newline:
 
 ```bash
 python3 examples/sidecar/smoke.py my-tool \
@@ -92,11 +92,11 @@ python3 examples/sidecar/smoke.py my-tool \
   --expected-stdout-file examples/my_tool/fixtures/expected.txt
 ```
 
-最后一行应有 `"smoke":"passed"` 和 `"cleanup":"passed"`，实际 JSON 含空格。脚本导出 sidecar，在新容器内只读挂载并关闭外网，完成后清理临时容器。输入、输出错误或检查失败均返回非零。可用 `--runtime-image "$TASK_IMAGE"` 检查与实际任务镜像的兼容性；该镜像必须提供 `python3`。
+The final JSON line should include `"smoke": "passed"` and `"cleanup": "passed"`. The script exports the sidecar, mounts it read-only in a fresh container, disables external networking, and removes its temporary containers when finished. Incorrect output or a failed check returns nonzero. Use `--runtime-image "$TASK_IMAGE"` to check compatibility with the actual task image; that image must provide `python3`.
 
-### OpenCode 等模型工具
+### Model tools such as OpenCode
 
-先让模型工具的 wrapper 实现第 7 节的 stdio 契约。Chat Completions 工具可以直接使用公共[模型检查脚本](https://github.com/verl-project/uni-agent/blob/main/examples/sidecar/check_model.py)：它启动本地固定响应端点，兼容流式和非流式请求，要求工具真正执行 shell 命令并返回完成状态。无需真实模型凭据：
+First make the model tool's wrapper implement the stdio contract in section 7. Chat Completions tools can use the shared [model check](https://github.com/verl-project/uni-agent/blob/main/examples/sidecar/check_model.py). It starts a deterministic local model endpoint, supports streaming and non-streaming requests, and requires the real tool to execute a shell command and report completion. No real model credentials are needed:
 
 ```bash
 python3 examples/sidecar/smoke.py my-tool \
@@ -105,15 +105,15 @@ python3 examples/sidecar/smoke.py my-tool \
   --check-script examples/sidecar/check_model.py
 ```
 
-公共模型检查支持 `bash`、`exec_command`、`shell_command` 工具调用。使用其他协议或工具定义时，在新增工具目录实现 `checks.py`，将 `--check-script` 指向它。该脚本仅依赖标准库，接受 `--case CASE_JSON`。JSON 提供 `recipe`、`mount_target`、`entrypoint`、`probe_argv`；同时传入两个 fixture 参数时，还提供 `stdin_base64`、`expected_stdout_base64`。检查脚本在容器内启动，只能访问该容器的 localhost、任务文件和只读 sidecar。
+The shared model check supports `bash`, `exec_command`, and `shell_command` tool calls. For another protocol or tool definition, implement `checks.py` in the new tool's directory and pass its path to `--check-script`. The check must use only the Python standard library and accept `--case CASE_JSON`. The JSON provides `recipe`, `mount_target`, `entrypoint`, and `probe_argv`. When both fixture arguments are supplied, it also provides `stdin_base64` and `expected_stdout_base64`. The check runs inside the container and can access its localhost, task files, and read-only sidecar.
 
-检查脚本应启动本地固定模型端点，让真实工具执行一条可断言的命令，例如写入 `/testbed/probe.txt`，再断言工具正常完成、文件内容正确且收到预期模型请求。全部成功才输出最终一行 `{"result":"passed"}` 并退出 `0`；异常时返回非零，关闭本地服务并回收子进程。单独运行 `--version` 只能证明启动和依赖，不算模型功能检查。仅在返回码和最终 JSON 都成功时，公共脚本才报告通过。
+Start a deterministic local model endpoint in the check, make the real tool execute an assertable command such as writing `/testbed/probe.txt`, and assert successful completion, correct file contents, and the expected model requests. Only after every assertion passes should the check print a final line containing `{"result":"passed"}` and exit `0`. On failure, return nonzero; close the local service and reap child processes. Running only `--version` checks startup and dependencies, not model functionality. The shared scripts require both a successful exit status and a successful final JSON result.
 
-OpenCode 的非交互入口是 `opencode run --format json`，模型通过 `--model provider/model` 指定；wrapper 要解析该固定版本的事件并识别成功、错误和未完成状态。provider 的 `baseURL` 与 `apiKey` 从本次请求读取，模型名及完整 session 路径原样传递。按所选协议选择 provider 包：Chat Completions 使用 `@ai-sdk/openai-compatible`，Responses 使用 `@ai-sdk/openai`。配置可通过 `OPENCODE_CONFIG_CONTENT` 在运行时传入。接口依据：[CLI](https://opencode.ai/docs/cli/)、[provider](https://opencode.ai/docs/providers/#custom-provider)、[配置](https://opencode.ai/docs/config/)。
+OpenCode's non-interactive entrypoint is `opencode run --format json`, with `--model provider/model` selecting the model. The wrapper must parse events from the pinned version and distinguish success, errors, and unfinished runs. Read the provider's `baseURL` and `apiKey` from the current request, and preserve the supplied model name and complete session path. Select the provider package for the protocol: `@ai-sdk/openai-compatible` for Chat Completions, or `@ai-sdk/openai` for Responses. Pass runtime configuration through `OPENCODE_CONFIG_CONTENT`. See the [CLI](https://opencode.ai/docs/cli/), [provider](https://opencode.ai/docs/providers/#custom-provider), and [configuration](https://opencode.ai/docs/config/) references.
 
-## 5. 发布镜像并固定 digest
+## 5. Publish the image and pin its digest
 
-沙箱服务需要从 registry 拉取镜像。通过组织提供的方式登录仓库，并给新增工具发布独立 tag：
+The sandbox service must pull the image from a registry. Authenticate using your organization's supported method, then publish a dedicated tag for the new tool:
 
 ```bash
 docker login registry.example.com
@@ -133,11 +133,11 @@ SIDECAR_IMAGE=$(
 export SIDECAR_IMAGE
 ```
 
-`--registry` 只指定目标名称，`--push` 才上传。服务端也必须具备该仓库的 pull 权限。构建、版本探针及本地登录成功都不能证明服务端拉取成功。记录完整 `repository@sha256:...`，后续挂载与验收使用此不可变引用。
+`--registry` selects the destination name; `--push` uploads it. Configure registry pull permissions on the service as well. A successful build, version probe, or local login does not establish that the service can pull the image. Record the complete `repository@sha256:...` reference and use that immutable reference for subsequent mounts and acceptance checks.
 
-## 6. 在真实沙箱验证自定义 sidecar
+## 6. Validate the custom sidecar in a real sandbox
 
-准备可用的 OpenYuanRong 服务、frontend JWT 和任务镜像。任务镜像需要 Linux amd64、Bash、`python3`、pip 及可写的 `/testbed`，并能安装 `swe-rex`。在 Linux 验证机保留完整 checkout、工具目录、manifest 和 fixture，然后配置 SDK：
+Prepare an available OpenYuanRong service, a frontend JWT, and a task image. The task image needs Linux amd64, Bash, `python3`, pip, a writable `/testbed`, and the ability to install `swe-rex`. Keep the complete checkout, tool directory, manifest, and fixtures on the Linux validation host, then configure the SDK:
 
 ```bash
 SIDECAR_VENV="$HOME/.venvs/sidecar-validation"
@@ -150,7 +150,7 @@ python -m pip install 'openyuanrong-sandbox==0.10.2rc9'
 python -c 'import importlib.metadata, yr_sandbox; assert importlib.metadata.version("openyuanrong-sandbox") == "0.10.2rc9"; print(yr_sandbox.__file__)'
 ```
 
-已有环境先检查再复用。服务凭据放在仓库外的文件中，由编辑器或安全渠道填写；不写进构建参数、镜像、命令参数或版本库：
+Check an existing environment before reusing it. Store service credentials in a file outside the repository, populated through an editor or secure channel. Keep credentials out of build arguments, images, command-line arguments, and version control:
 
 ```bash
 install -d -m 700 "$HOME/.config/uni-agent"
@@ -159,7 +159,7 @@ chmod 600 "$HOME/.config/uni-agent/openyuanrong.env"
 ${EDITOR:-vi} "$HOME/.config/uni-agent/openyuanrong.env"
 ```
 
-文件提供 `AKERNEL_SERVER_ADDRESS='实际服务主机:端口'` 和 `AKERNEL_TOKEN='实际frontend JWT'`。服务地址不带 URL scheme，短 ACL 标识不能替代 JWT。443 端点由脚本设置 `gateway_use_tls=True`；默认验证服务证书，私有 CA 应加入验证机的信任配置。
+Provide `AKERNEL_SERVER_ADDRESS='your-service-host:443'` and `AKERNEL_TOKEN='your-frontend-jwt'` in the file. The service address has no URL scheme, and a short ACL identifier cannot replace the JWT. For port 443, the script sets `gateway_use_tls=True`. Certificate verification is enabled by default; add private CAs to the validation host's trust configuration.
 
 ```bash
 set +x
@@ -177,31 +177,31 @@ python test_sandbox.py \
   --report artifacts/my-tool-remote.json
 ```
 
-模型工具将两个 fixture 参数替换为 `--check-script examples/sidecar/check_model.py`，或该工具自己的检查文件。本地和远端调用同一检查文件及 manifest，挂载目标读取 `mount_target`，不按工具名写死。
+For model tools, replace the two fixture arguments with `--check-script examples/sidecar/check_model.py`, or with the tool's own check. Local and remote validation use the same check file and manifest. The mount location comes from `mount_target` rather than a tool-name lookup.
 
-通过标准是命令退出 `0`、报告 `success=true`，且创建、命令执行、工具入口、SWE-ReX 安装、8000 端口内外健康与最终清理全部成功，`cleanup.confirmed=true`。报告记录实际 SDK 版本、文件路径、SHA-256 和 CPU/内存请求。默认请求为 `2000m/4096MB`，可通过 `--cpu`、`--memory` 明确调整；容量不足时保留报告，待有可调度节点后使用新的报告路径复验。
+Acceptance requires exit status `0`, `success=true` in the report, successful creation, command execution, tool entrypoint, SWE-ReX installation, internal and external port-8000 health checks, and final cleanup with `cleanup.confirmed=true`. The report records the installed SDK version, file path, SHA-256, and CPU/memory request. The default request is `2000m/4096MB`; override it explicitly with `--cpu` and `--memory`. If capacity is unavailable, retain the report and retry with a new report path once a node can satisfy the request.
 
-## 7. 适配 Agent 和任务配置
+## 7. Adapt the Agent and task configuration
 
-Sidecar 挂载验证之后，还需把工具接到 Uni-Agent 的 Agent 接口。提供的[Agent 模板](https://github.com/verl-project/uni-agent/blob/main/examples/sidecar/agent_template.py)定义了一个可复用的 stdio 契约：
+After validating the sidecar mount, connect the tool to Uni-Agent's Agent interface. The [Agent template](https://github.com/verl-project/uni-agent/blob/main/examples/sidecar/agent_template.py) defines a reusable stdio contract:
 
 ```json
 {
-  "messages": [{"role": "user", "content": "任务说明"}],
-  "model": {"base_url": "本次模型端点", "api_key": "本次运行凭据", "model_name": "本次模型名"},
+  "messages": [{"role": "user", "content": "Task description"}],
+  "model": {"base_url": "Model endpoint for this run", "api_key": "Runtime API key", "model_name": "Model name for this run"},
   "workdir": "/testbed"
 }
 ```
 
-`run_agent.py` 从 stdin 读取该 JSON，调用本工具的真实 CLI，并向 stdout 输出**一个完整 JSON 对象**。CLI 的原始事件、进度和日志由 wrapper 解析或写入 stderr，stdout 的规范结果是：
+`run_agent.py` reads this JSON from stdin, invokes the tool's real CLI, and writes **one complete JSON object** to stdout. The wrapper parses raw CLI events or sends events, progress, and logs to stderr. The normalized stdout result is:
 
 ```json
-{"output": {"content": "最终结果"}, "finished": true}
+{"output": {"content": "Final result"}, "finished": true}
 ```
 
-`finished` 必须是布尔值，仅在实际任务完成时为 true；进程成功退出不能代替完成断言。CLI 返回错误、超时或没有完成事件时返回非零或 `finished=false`。OpenCode wrapper 在这里将自身事件转换为此结构；需要任务 patch、submission 等字段时将它们放进 `output`，与任务评分接口对齐。
+`finished` must be a Boolean and may be true only when the task has actually completed. A successful process exit cannot replace a completion assertion. For CLI errors, timeouts, or missing completion events, return nonzero or `finished=false`. The OpenCode wrapper translates its events into this structure. Put task-specific patch, submission, or other fields in `output` as required by the task's scoring interface.
 
-复制模板并注册新的 Agent：
+Copy the template and register the new Agent:
 
 ```bash
 mkdir -p uni_agent/agents/my_tool
@@ -209,9 +209,9 @@ cp examples/sidecar/agent_template.py uni_agent/agents/my_tool/agent.py
 touch uni_agent/agents/my_tool/__init__.py
 ```
 
-将模板里的注册名和 `ToolConfig.name` 改成新工具的名称，并在 [`AGENT_MODULES`](https://github.com/verl-project/uni-agent/blob/main/uni_agent/agents/registry.py) 现有字典中追加 `"my_tool": "uni_agent.agents.my_tool.agent"`。新增 OpenCode 时，这三个位置均使用 `opencode`。适配器只调用框架传入的 sandbox；沙箱生命周期由任务管理。
+Set the template's registration name and `ToolConfig.name` to the new tool's name, then add `"my_tool": "uni_agent.agents.my_tool.agent"` to the existing [`AGENT_MODULES`](https://github.com/verl-project/uni-agent/blob/main/uni_agent/agents/registry.py) dictionary. Use `opencode` in all three positions when adding OpenCode. The adapter uses the sandbox supplied by the framework; the task owns its lifecycle.
 
-把下列配置合并到目标任务的 `task_config.yaml`，填写实际已验证镜像和入口。该文件是按任务名组成的列表，示例针对已有的 `swe_bench` 任务；任务镜像、项目和评估 metadata 仍由该任务的数据配置提供：
+Merge the following configuration into the target task's `task_config.yaml`, using the verified image and entrypoint. The file is a list keyed by task name; this example targets the existing `swe_bench` task. Its data configuration still supplies the task image, project, and evaluation metadata:
 
 ```yaml
 - name: swe_bench
@@ -228,9 +228,9 @@ touch uni_agent/agents/my_tool/__init__.py
     run_timeout: 600
 ```
 
-这是替换为真实模型工具后的配置，最小 BusyBox 示例不实现该模型协议。宿主框架按此配置实例化 Agent，并将模型配置从 `agent.model` 传入 wrapper。通过 [`run_task`](https://github.com/verl-project/uni-agent/blob/main/uni_agent/framework/task_runner.py) 的 `task_config_path` 指向该文件；该入口还会按当前 Gateway session 注入隧道 upstream，保留模型 URL 的完整 `/sessions/<session_id>/v1` 路径。运行使用此 provider 的任务前，令 `OPENYUANRONG_SERVER_ADDRESS`、`OPENYUANRONG_TOKEN` 指向已验证的服务地址及 frontend JWT。
+Use this configuration after replacing the example with a real model tool; the minimal BusyBox example does not implement the model protocol. The host framework instantiates the Agent and passes `agent.model` through to the wrapper. Set [`run_task`](https://github.com/verl-project/uni-agent/blob/main/uni_agent/framework/task_runner.py)'s `task_config_path` to this file. That entrypoint also injects the tunnel upstream for the current Gateway session while preserving the complete `/sessions/<session_id>/v1` model URL path. Set `OPENYUANRONG_SERVER_ADDRESS` and `OPENYUANRONG_TOKEN` to the verified service address and frontend JWT before running a task with this provider.
 
-加载任务前先验证新进程中的懒加载注册和配置解析，确认工具名称、入口与挂载目录一致：
+Before launching a task, check lazy registration and configuration parsing in a fresh process. Confirm that the tool name, entrypoint, and mount directory agree:
 
 ```bash
 python - <<'PY'
@@ -253,13 +253,13 @@ export OPENYUANRONG_TLS_VERIFY=1
 export OPENYUANRONG_TUNNEL_SSL_VERIFY=1
 ```
 
-以上连接参数对应 TLS frontend 和 TLS gateway，证书通过验证机信任的 CA 校验；其他部署按服务端配置调整。该检查只加载配置，不执行模型任务。需要的框架依赖按[安装文档](installation.md)准备；只安装 SDK 的环境不足以运行正式任务。先运行目标数据的一条任务，检查：CLI 真正执行、任务改动存在、`AgentResult.finished` 与工具完成状态一致、目标任务的 reward/评估完成，且沙箱被回收；再增加并发或启动训练。
+These connection settings assume a TLS frontend and TLS gateway, with certificates validated against the host's trusted CAs; adjust them for other service deployments. This check only loads configuration and does not run a model task. Install the framework dependencies described in the [installation guide](installation.md); an SDK-only environment is insufficient for a full task. Run one task from the target dataset first. Check real CLI execution, task changes, agreement between `AgentResult.finished` and tool completion, completed reward/evaluation, and sandbox cleanup before increasing concurrency or starting training.
 
-## 8. 提交新增工具前
+## 8. Before submitting the new tool
 
-- 新工具目录包含固定版本构建、manifest、wrapper、功能检查、fixture、任务配置和工具 README。
-- 只构建并验证新增工具；本地检查、真实挂载和目标任务的报告使用同一源码及已发布 digest。
-- 模型协议、运行时依赖和任务评分字段都有明确映射；错误或未完成不能返回成功。
-- 镜像、源码和日志中没有服务凭据；报告保留通过阶段、失败阶段和清理结果。
+- Include a fixed-version build, manifest, wrapper, functional checks, fixtures, task configuration, and tool README in the new tool's directory.
+- Build and validate the new tool. Use the same source and published digest for local checks, real sandbox mounts, and target-task reports.
+- Map the model protocol, runtime dependencies, and task-scoring fields explicitly. Errors and unfinished runs must not report success.
+- Keep credentials out of images, source, and logs. Retain reports showing successful stages, failed stages, and cleanup results.
 
-常见失败：`Exec format error` 检查架构；文件存在却报找不到文件时检查 shebang、动态链接器和共享库；`MANIFEST_UNKNOWN` 检查发布和 digest；模型 404 检查协议与 session 路径；`ERR_RESOURCE_NOT_ENOUGH` 检查同一节点能否同时满足 CPU 与内存请求。
+For `Exec format error`, check the architecture. If an existing file reports that it cannot be found, check its shebang, dynamic loader, and shared libraries. For `MANIFEST_UNKNOWN`, check publishing and the digest. For model HTTP 404 errors, check the protocol and session path. For `ERR_RESOURCE_NOT_ENOUGH`, check that a single node can satisfy both the CPU and memory request.
