@@ -1,0 +1,39 @@
+name: Upload Coverage to Codecov
+
+on:
+  workflow_call:
+    inputs:
+      coverage-file:
+        description: 'coverage file name'
+        required: true
+        type: string
+      flags:
+        description: 'Codecov flag name'
+        required: false
+        type: string
+        default: ''
+      artifact-name:
+        description: 'artifact name'
+        required: true
+        type: string
+    secrets:
+      CODECOV_TOKEN:
+        required: true
+
+jobs:
+  upload:
+    # run on ubuntu provided by GitHub
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download coverage artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact-name }}
+          path: ./coverage-artifact
+
+      - name: Upload to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          file: ./coverage-artifact/${{ inputs.coverage-file }}
+          flags: ${{ inputs.flags }}

@@ -3,6 +3,14 @@ on:
   pull_request:
     branches: [ "main" ]
     types: [ opened, synchronize, reopened ]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
   test-npu:
     runs-on: linux-aarch64-a2-8
@@ -56,16 +64,25 @@ jobs:
       # 4. Test with pytest
       - name: Test with pytest
         run: |
-          pip install pytest pytest-cov pytest-custom_exit_code
+          uv pip install pytest pytest-cov pytest-custom_exit_code
           export PYTHONPATH="${PYTHONPATH}:${GITHUB_WORKSPACE}"
           pytest tests/uni_agent/ -m="npu and level0" --suppress-no-test-exit-code --cov=./uni_agent/ --cov-report=xml --cov-report=term
 
-      - name: Set CodeCov Environment
-        run: apt-get install -y gnupg
-
-      - name: Upload NPU coverage
-        uses: codecov/codecov-action@v5
+      # Upload coverage file to artifact
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
         with:
-          token: ${{ secrets.CODECOV_TOKEN }}
-          files: ./coverage.xml
-          flags: npu-tests
+          name: coverage-report
+          path: coverage.xml
+          retention-days: 1
+
+  upload:
+    # Call upload workflow, which is running in Ubuntu provided by GitHub
+    needs: test-npu
+    uses: ./.github/workflows/upload_npu_assister.yml
+    with:
+      coverage-file: coverage.xml
+      flags: npu-tests
+      artifact-name: coverage-report
+    secrets:
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
