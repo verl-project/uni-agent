@@ -131,7 +131,7 @@ The Quickstart provides separate Task Configs for ReAct and Claude Code. Each re
     ```yaml
     - name: swe_rebench
       sandbox:
-        provider: openyuanrong  # the reverse tunnel is openYuanrong-only
+        provider: openyuanrong  # agent_dx also supports this reverse-tunnel contract
         runtime_timeout: 7200
         image_mounts:
           - image: swr.cn-east-3.myhuaweicloud.com/openyuanrong/dsh-tool:latest
@@ -152,10 +152,11 @@ The Quickstart provides separate Task Configs for ReAct and Claude Code. Each re
     The `swe_bench` entry is identical apart from `name`. The full Task Config ships at
     `examples/deepseek_harness/task_config_deepseek_harness.yaml`.
 
-    !!! warning "openYuanrong only"
+    !!! warning "Reverse-tunnel provider required"
         This recipe drives the in-sandbox `dsh` CLI through the session-scoped
-        Gateway reverse tunnel (`sandbox.sandbox_kwargs.proxy_port`), which is an
-        openYuanrong capability. The other sandbox providers cannot serve it.
+        Gateway reverse tunnel (`sandbox.sandbox_kwargs.proxy_port`). Use a
+        provider declaring `supports_reverse_tunnel`, such as `openyuanrong` or
+        `agent_dx`, and configure its SDK and connection settings on every worker.
 
 The ReAct launchers permit these request overrides through the Agent Framework
 allowlist. See [Sampling configuration](../concepts/gateway-and-trajectories.md#sampling-configuration)

@@ -100,14 +100,26 @@ PPO_MICRO_BATCH_SIZE_PER_GPU="${PPO_MICRO_BATCH_SIZE_PER_GPU:-1}"
 # ── Agent-framework rollout (unified run_task bridge) ────────────────────
 # mini-swe-agent knobs (step_limit/run_timeout/conda_env_path) and the tool-image
 # mount are configured in TASK_CONFIG (task_config_mini_swe_agent.yaml).
-TASK_CONFIG="${TASK_CONFIG:-examples/mini_swe_agent/task_config_mini_swe_agent.yaml}"
+SANDBOX_PROVIDER="${SANDBOX_PROVIDER:-openyuanrong}"
+if [[ "${SANDBOX_PROVIDER}" == "agent_dx" ]]; then
+    TASK_CONFIG="${TASK_CONFIG:-examples/mini_swe_agent/task_config_agent_dx.yaml}"
+elif [[ "${SANDBOX_PROVIDER}" == "openyuanrong" ]]; then
+    TASK_CONFIG="${TASK_CONFIG:-examples/mini_swe_agent/task_config_mini_swe_agent.yaml}"
+else
+    echo "SANDBOX_PROVIDER must be openyuanrong or agent_dx" >&2
+    exit 2
+fi
 TOOL_PARSER="${TOOL_PARSER:-qwen3_coder}"   # gateway tool-call parser; must match the model chat template
 GATEWAY_COUNT="${GATEWAY_COUNT:-8}"
 MAX_CONCURRENT_SESSIONS="${MAX_CONCURRENT_SESSIONS:-256}"
 # Hard cap per-session runtime (seconds). A runner that hangs without raising
 # (e.g. remote sandbox OOM-killed without surfacing an error) otherwise holds its
 # concurrency slot forever and stalls the whole training batch.
-SESSION_TIMEOUT_SECONDS="${SESSION_TIMEOUT_SECONDS:-3600}"
+if [[ "${SANDBOX_PROVIDER}" == "agent_dx" ]]; then
+    SESSION_TIMEOUT_SECONDS="${SESSION_TIMEOUT_SECONDS:-8400}"
+else
+    SESSION_TIMEOUT_SECONDS="${SESSION_TIMEOUT_SECONDS:-3600}"
+fi
 SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-$(basename "${MODEL_PATH}")}"
 # The agent reports finished explicitly (exit_status == "Submitted"); set True to
 # exclude unfinished episodes from the loss (paired with the finished field in agent.py).
@@ -206,6 +218,20 @@ RUNTIME_ENV_ARGS=()
 if [ -n "${RUNTIME_ENV}" ]; then
     RUNTIME_ENV_ARGS=(--runtime-env "${RUNTIME_ENV}")
 fi
+if [[ "${SANDBOX_PROVIDER}" == "agent_dx" ]]; then
+    if [[ "${RAY_SUBMIT_MODE}" != "job" ]]; then
+        echo "Agent DX training requires RAY_SUBMIT_MODE=job to forward worker credentials" >&2
+        exit 2
+    fi
+    export ADX_TLS_VERIFY="${ADX_TLS_VERIFY:-1}"
+    ADX_RUNTIME_ARGS=(--provider agent_dx)
+    if [[ -n "${RUNTIME_ENV}" ]]; then
+        ADX_RUNTIME_ARGS+=(--base "${RUNTIME_ENV}")
+    fi
+    ADX_RUNTIME_FILE="$(python3 "${SCRIPT_DIR}/sandbox_runtime_env.py" "${ADX_RUNTIME_ARGS[@]}")"
+    trap 'rm -f -- "${ADX_RUNTIME_FILE}"' EXIT
+    RUNTIME_ENV_ARGS=(--runtime-env "${ADX_RUNTIME_FILE}")
+fi
 
 # Env vars forwarded to every Ray actor through verl's ray.init runtime_env.
 # Only the (fixed) keys below go here, and all values are quoted strings (so
@@ -227,10 +253,14 @@ RAY_INIT_ENV_ARGS=(
     "+ray_kwargs.ray_init.runtime_env.env_vars.NCCL_SHM_DISABLE=\"1\""
     "+ray_kwargs.ray_init.runtime_env.env_vars.SANDBOX_NAME_PREFIX=\"${SANDBOX_NAME_PREFIX}\""
     "+ray_kwargs.ray_init.runtime_env.env_vars.RL_INSIGHT_SERVER_URL=\"${RL_INSIGHT_SERVER_URL}\""
-    "+ray_kwargs.ray_init.runtime_env.env_vars.OPENYUANRONG_SERVER_ADDRESS=\"${OPENYUANRONG_SERVER_ADDRESS}\""
-    "+ray_kwargs.ray_init.runtime_env.env_vars.OPENYUANRONG_TOKEN=\"${OPENYUANRONG_TOKEN}\""
-    "+ray_kwargs.ray_init.runtime_env.env_vars.OPENYUANRONG_TLS=\"${OPENYUANRONG_TLS}\""
 )
+if [[ "${SANDBOX_PROVIDER}" == "openyuanrong" ]]; then
+    RAY_INIT_ENV_ARGS+=(
+        "+ray_kwargs.ray_init.runtime_env.env_vars.OPENYUANRONG_SERVER_ADDRESS=\"${OPENYUANRONG_SERVER_ADDRESS}\""
+        "+ray_kwargs.ray_init.runtime_env.env_vars.OPENYUANRONG_TOKEN=\"${OPENYUANRONG_TOKEN}\""
+        "+ray_kwargs.ray_init.runtime_env.env_vars.OPENYUANRONG_TLS=\"${OPENYUANRONG_TLS}\""
+    )
+fi
 # TRANSFER_QUEUE_ENABLE is a REQUIRED key here: verl main_ppo overwrites it to
 # "1" itself when transfer_queue.enable=True. It must already exist in the
 # (struct) env_vars dict or verl's assignment crashes ("Key ... is not in

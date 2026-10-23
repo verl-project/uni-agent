@@ -1,0 +1,53 @@
+# Alternative defaults for the existing Mini-SWE-Agent recipe.
+# Dataset rows supply sandbox.image. The mounted OCI tool image is shared with
+# the existing recipe; its registry namespace does not select a runtime backend.
+# Set TASK_CONFIG to this file when running the existing recipe scripts.
+- name: swe_rebench
+  sandbox:
+    provider: agent_dx
+    runtime_timeout: 8400
+    image_map:
+      - from: "swerebench/sweb.eval.x86_64.**"
+        to: "swr.cn-east-3.myhuaweicloud.com/openyuanrong/swe-rebench/**:latest"
+    image_mounts:
+      - image: swr.cn-east-3.myhuaweicloud.com/openyuanrong/mini-swe-agent-tool:20260910
+        mount_path: /opt/mini-swe-agent
+    sandbox_kwargs:
+      proxy_port: 38197
+      create_timeout: 120
+      schedule_timeout: 30
+      init_timeout: 30
+      rootfs_readonly: false
+  eval_timeout: 600
+  agent:
+    name: mini_swe_agent
+    step_limit: 100
+    run_timeout: 7200
+    conda_env_path: /opt/miniconda3/envs/testbed
+    tool_python: /opt/mini-swe-agent/bin/python
+    run_agent_script: /opt/mini-swe-agent/bin/run_agent.py
+
+- name: swe_bench
+  sandbox:
+    provider: agent_dx
+    runtime_timeout: 8400
+    image_map:
+      - from: "swebench/**"
+        to: "swr.cn-east-3.myhuaweicloud.com/openyuanrong/swe-bench-verified/**:v2"
+    image_mounts:
+      - image: swr.cn-east-3.myhuaweicloud.com/openyuanrong/mini-swe-agent-tool:20260910
+        mount_path: /opt/mini-swe-agent
+    sandbox_kwargs:
+      proxy_port: 38197
+      create_timeout: 120
+      schedule_timeout: 30
+      init_timeout: 30
+      rootfs_readonly: false
+  eval_timeout: 600
+  agent:
+    name: mini_swe_agent
+    step_limit: 100
+    run_timeout: 7200
+    conda_env_path: /opt/miniconda3/envs/testbed
+    tool_python: /opt/mini-swe-agent/bin/python
+    run_agent_script: /opt/mini-swe-agent/bin/run_agent.py

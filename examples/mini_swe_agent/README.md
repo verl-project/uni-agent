@@ -188,6 +188,40 @@ Runtime-managed (do **not** set in the YAML): `sandbox.sandbox_kwargs.upstream`
 `api_key` / `model_name` (injected from the gateway session; `base_url` is
 rewritten through the reverse tunnel when `proxy_port` is set).
 
+### Agent DX backend
+
+Install the verified `adx-environment` SDK on every execution worker. Select the
+backend in either Mini-SWE-Agent launcher:
+
+```bash
+export ADX_SERVER_ADDRESS="<adx-api-host>:<port>"
+export ADX_TOKEN="<token>"
+export ADX_TLS="1"
+export ADX_TLS_VERIFY="1"
+SANDBOX_PROVIDER=agent_dx bash examples/mini_swe_agent/run_infer_mini_swe_agent.sh
+# Training uses Ray job submission for credential propagation.
+SANDBOX_PROVIDER=agent_dx RAY_SUBMIT_MODE=job bash examples/mini_swe_agent/run_train.sh
+```
+
+This selects `task_config_agent_dx.yaml` by default; `TASK_CONFIG` can override it.
+The ADX configuration reserves 8400 seconds for the agent's 7200-second budget,
+the 600-second evaluator and cleanup margin. Its default Framework session limit
+is also 8400 seconds; `SESSION_TIMEOUT_SECONDS` can override it. Verify that the cluster can pull the
+task and tool images referenced in that file. The existing OCI registry namespace
+does not imply use of the Yuanrong Sandbox backend.
+
+The launchers forward ADX connection variables with a private temporary Ray
+runtime-env file and remove it after submission. ADX tokens are not placed in the
+launcher command arguments. Training inherits these variables from the Ray job;
+it does not repeat them in `ray.init(runtime_env=...)`, which would conflict with
+Ray's environment merge. The ADX training launcher requires `RAY_SUBMIT_MODE=job`.
+Certificates referenced by `SSL_CERT_FILE` or `SSL_CERT_DIR` must exist on every
+worker. Ray must be deployed with appropriate access control for job metadata.
+
+Before a model run, use `examples/quickstart/sandbox/agent_dx_smoke.py` to validate
+the Environment service. Real inference, rewards, distributed training and
+physical resource cleanup still require verification in the target deployment.
+
 ### Training script env vars
 
 **Required**
@@ -212,7 +246,7 @@ rewritten through the reverse tunnel when `proxy_port` is set).
 | `TASK_CONFIG` | `examples/mini_swe_agent/task_config_mini_swe_agent.yaml` | Task-config YAML |
 | `GATEWAY_COUNT` | `8` | Gateway actors fronting the engine |
 | `MAX_CONCURRENT_SESSIONS` | `256` | Max in-flight rollout sessions (runner cap) |
-| `SESSION_TIMEOUT_SECONDS` | `3600` (recipe) / none (framework) | Framework cap per session; guards against runners that hang without raising |
+| `SESSION_TIMEOUT_SECONDS` | `8400` (Agent DX) / `3600` (OpenYuanrong) / none (framework) | Framework cap per session; guards against runners that hang without raising; explicit values override the provider default |
 | `NUM_AGENT_WORKERS` | `8` | Ray workers executing the runner |
 | `SERVED_MODEL_NAME` | `basename ${MODEL_PATH}` | Model name served at the gateway |
 | `TOOL_PARSER` | `qwen3_coder` | Gateway tool-call parser; must match the model chat template |
@@ -263,7 +297,8 @@ Uni-Agent retains the generated token IDs and logprobs in the trajectory.
 - `agent.run_timeout` caps the in-sandbox agent process (per sample).
 - `SESSION_TIMEOUT_SECONDS` caps the whole session at the framework level (a
   safety net for runners that hang without raising, e.g. an OOM-killed remote
-  sandbox). It defaults to no cap; the recipe sets it to `3600` — sessions
+  sandbox). The Framework defaults to no cap; this recipe uses `8400` for Agent DX
+  and `3600` for OpenYuanrong. Sessions
   exceeding it are cancelled (the Ray task is `ray.cancel`-ed, then the session
   aborted) and the sample is dropped from the batch without stopping training.
   Raise it when legitimate episodes regularly run longer.
@@ -282,11 +317,12 @@ toward a zero reward.
 | Symptom | Likely cause / fix |
 |---|---|
 | `OPENYUANRONG_SERVER_ADDRESS and OPENYUANRONG_TOKEN ... must be set` | Credentials missing; export both before `run_train.sh` |
+| `ADX_SERVER_ADDRESS` or `ADX_TOKEN` must be set | Set `SANDBOX_PROVIDER=agent_dx` and export both ADX variables before launching; verify that the private Ray runtime-env reaches every worker |
 | Sandbox cannot pull the SWE image | The canonical ref is mapped by `sandbox.image_map` in the task YAML; edit the `to:` targets (or add a rule) so it points at the registry the sandbox service can reach |
 | Sandbox cannot pull the **tool** image | `image_mounts[].image` in the task YAML must be a full, pullable address — push it with `build_tool.sh --registry <registry>` |
-| Agent never reaches the policy / requests fail inside the sandbox | Reverse tunnel misconfigured: `proxy_port` must be set in `sandbox_kwargs` (single source of truth) and the provider must be `openyuanrong`; `run_task` injects `upstream` + rewrites `base_url` |
-| `ValueError: ... supported only on 'openyuanrong' ...` | `proxy_port` configured on a non-Yuanrong sandbox provider — switch the provider or drop `proxy_port` |
-| Sessions aborted at a round number | `SESSION_TIMEOUT_SECONDS` too low for your episode lengths (recipe default `3600`) — raise it when legitimate runs are being cut short |
+| Agent never reaches the policy / requests fail inside the sandbox | Use `openyuanrong` or `agent_dx` with `proxy_port` in `sandbox_kwargs`; `run_task` injects `upstream` and rewrites `base_url`. Check the provider's API/gateway addresses, token and TLS settings. On ADX, verify routes for `proxy_port` and `proxy_port - 1`; on Yuanrong, also check the SDK TunnelClient connection and deployment port mapping |
+| `ValueError: ... supports_reverse_tunnel=True ...` | `proxy_port` requires a provider declaring this capability, including `openyuanrong` and `agent_dx`. Select a supported provider; omit the tunnel only when the sandbox can reach a routable Gateway address directly |
+| Sessions aborted at a round number | `SESSION_TIMEOUT_SECONDS` is too low for the agent plus evaluator and cleanup; defaults are `8400` for Agent DX and `3600` for OpenYuanrong. Raise it if legitimate runs need longer |
 | Every episode "unfinished" / loss mask all zeros | Agent errored before submitting: check `exit_status` in the task logs under `AGENT_LOG_DIR`; or set `MASK_UNFINISHED_EPISODE=False` while debugging |
 | Gateway tool-call parsing errors | `TOOL_PARSER` (`qwen3_coder`) must match the model's chat template |
 | `config.model.base_url is not set` | Agent run outside the framework with no runtime model binding — only happens on standalone use; keep `base_url` in the config then |

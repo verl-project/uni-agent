@@ -77,13 +77,31 @@ def test_backend_config(monkeypatch, engine, device, text_only):
 def test_mini_swe_launcher(tmp_path, monkeypatch, engine):
     repo_root = Path(__file__).resolve().parents[3]
     ray = tmp_path / "ray"
-    ray.write_text(f"#!{sys.executable}\nimport json,sys\nprint(json.dumps(sys.argv[1:]))\n", encoding="utf-8")
+    runtime_capture = tmp_path / "runtime.json"
+    ray.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, sys\n"
+        "from pathlib import Path\n"
+        "args = sys.argv[1:]\n"
+        "runtime = Path(args[args.index('--runtime-env') + 1])\n"
+        "Path(os.environ['RAY_RUNTIME_CAPTURE']).write_text(runtime.read_text())\n"
+        "print(json.dumps(args))\n",
+        encoding="utf-8",
+    )
     ray.chmod(0o700)
-    monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
+    monkeypatch.setenv("PATH", os.pathsep.join((str(tmp_path), str(Path(sys.executable).parent), os.environ["PATH"])))
     monkeypatch.setenv("REPO_ROOT", str(repo_root))
+    monkeypatch.setenv("RAY_RUNTIME_CAPTURE", str(runtime_capture))
     monkeypatch.setenv("OPENYUANRONG_SERVER_ADDRESS", "https://sandbox.example")
     monkeypatch.setenv("OPENYUANRONG_TOKEN", "synthetic-test-token")
-    for name in ("ENGINE", "CUDA_VISIBLE_DEVICES", "TENSOR_PARALLEL_SIZE", "N_GPUS_PER_NODE", "GATEWAY_COUNT"):
+    for name in (
+        "ENGINE",
+        "CUDA_VISIBLE_DEVICES",
+        "TENSOR_PARALLEL_SIZE",
+        "N_GPUS_PER_NODE",
+        "GATEWAY_COUNT",
+        "SANDBOX_PROVIDER",
+    ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("LANGUAGE_MODEL_ONLY", str(int(engine == "sglang")))
     monkeypatch.setenv("ENFORCE_EAGER", str(int(engine == "sglang")))
@@ -104,6 +122,8 @@ def test_mini_swe_launcher(tmp_path, monkeypatch, engine):
     assert argv[argv.index("--gateway-count") + 1] == "4"
     assert ("--language-model-only" in argv) is (engine == "sglang")
     assert ("--enforce-eager" in argv) is (engine == "sglang")
-    runtime = json.loads(argv[argv.index("--runtime-env-json") + 1])["env_vars"]
+    runtime = json.loads(runtime_capture.read_text())["env_vars"]
     assert runtime["CUDA_VISIBLE_DEVICES"] == "0,1"
     assert not any(key.startswith("UNI_AGENT_SGLANG_") for key in runtime)
+    assert not Path(argv[argv.index("--runtime-env") + 1]).exists()
+    assert "synthetic-test-token" not in result.stdout + result.stderr

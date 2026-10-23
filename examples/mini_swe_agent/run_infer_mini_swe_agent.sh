@@ -10,16 +10,25 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${REPO_ROOT:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"
 cd "${REPO_ROOT}"
 
-export DEPLOYMENT="${DEPLOYMENT:-openyuanrong}"
-export OPENYUANRONG_SERVER_ADDRESS="${OPENYUANRONG_SERVER_ADDRESS:?OPENYUANRONG_SERVER_ADDRESS must be set}"
-export OPENYUANRONG_TOKEN="${OPENYUANRONG_TOKEN:?OPENYUANRONG_TOKEN must be set}"
-export OPENYUANRONG_TUNNEL_SSL_VERIFY="${OPENYUANRONG_TUNNEL_SSL_VERIFY:-0}"
-export TUNNEL_SSL_VERIFY="${TUNNEL_SSL_VERIFY:-0}"
+SANDBOX_PROVIDER="${SANDBOX_PROVIDER:-openyuanrong}"
+export DEPLOYMENT="${DEPLOYMENT:-${SANDBOX_PROVIDER}}"
+case "${SANDBOX_PROVIDER}" in
+    openyuanrong)
+        export OPENYUANRONG_TUNNEL_SSL_VERIFY="${OPENYUANRONG_TUNNEL_SSL_VERIFY:-0}"
+        export TUNNEL_SSL_VERIFY="${TUNNEL_SSL_VERIFY:-0}"
+        DEFAULT_TASK_CONFIG="examples/mini_swe_agent/task_config_mini_swe_agent.yaml"
+        ;;
+    agent_dx)
+        export ADX_TLS_VERIFY="${ADX_TLS_VERIFY:-1}"
+        DEFAULT_TASK_CONFIG="examples/mini_swe_agent/task_config_agent_dx.yaml"
+        ;;
+    *) echo "SANDBOX_PROVIDER must be openyuanrong or agent_dx" >&2; exit 2 ;;
+esac
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
 
 DATA_PATH="${DATA_PATH:-/swe_bench_verified.parquet}"
 MODEL_PATH="${MODEL_PATH:-/models/Qwen/Qwen3.5-9B}"
-TASK_CONFIG="${TASK_CONFIG:-examples/mini_swe_agent/task_config_mini_swe_agent.yaml}"
+TASK_CONFIG="${TASK_CONFIG:-${DEFAULT_TASK_CONFIG}}"
 TOOL_PARSER="${TOOL_PARSER:-qwen3_coder}"
 TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-2}"
 NNODES="${NNODES:-1}"
@@ -52,22 +61,11 @@ for option in LANGUAGE_MODEL_ONLY ENFORCE_EAGER; do
         *) echo "${option} must be 0, 1, false, or true" >&2; exit 2 ;;
     esac
 done
-RUNTIME_ENV_JSON="$(python3 - <<'PY'
-import json
-import os
-
-names = (
-    "DEPLOYMENT", "OPENYUANRONG_SERVER_ADDRESS", "OPENYUANRONG_TOKEN",
-    "OPENYUANRONG_TUNNEL_SSL_VERIFY", "TUNNEL_SSL_VERIFY", "CUDA_VISIBLE_DEVICES",
-)
-env_vars = {name: os.environ[name] for name in names}
-env_vars["PYTHONPATH"] = "verl"
-print(json.dumps({"env_vars": env_vars, "excludes": ["/.git/"]}))
-PY
-)"
+RUNTIME_ENV_FILE="$(python3 "${SCRIPT_DIR}/sandbox_runtime_env.py" --provider "${SANDBOX_PROVIDER}" --inference)"
+trap 'rm -f -- "${RUNTIME_ENV_FILE}"' EXIT
 
 ray job submit \
-    --runtime-env-json "${RUNTIME_ENV_JSON}" \
+    --runtime-env "${RUNTIME_ENV_FILE}" \
     --working-dir . \
     -- python3 examples/inference/parallel_infer_verl.py \
     --data-path "${DATA_PATH}" \

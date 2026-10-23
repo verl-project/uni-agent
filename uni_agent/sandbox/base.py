@@ -15,6 +15,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path, PurePosixPath
 from typing import Any, ClassVar, Protocol, runtime_checkable
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -347,6 +348,16 @@ class Sandbox(abc.ABC):
     provider: ClassVar[str] = ""
     #: Whether this sandbox natively supports a long-lived shell session. False by default.
     supports_shell: ClassVar[bool] = False
+    #: Whether the provider can route in-sandbox HTTP to the SDK worker's upstream.
+    supports_reverse_tunnel: ClassVar[bool] = False
+
+    @classmethod
+    def tunnel_upstream(cls, base_url: str) -> str | None:
+        """Return the provider's upstream address; default to an explicit host:port."""
+        parsed = urlparse(base_url)
+        if not parsed.hostname or not parsed.port:
+            return None
+        return f"{parsed.hostname}:{parsed.port}"
 
     @classmethod
     def from_config(cls, config: SandboxConfig) -> Sandbox:
@@ -455,14 +466,25 @@ class Sandbox(abc.ABC):
 
     async def __aexit__(self, *exc) -> None:
         await self.stop()
+        if not exc or exc[0] is None:
+            self.raise_if_unavailable()
 
     @asynccontextmanager
     async def entered(self, **start_kwargs: Any) -> AsyncIterator[Sandbox]:
         await self.__aenter__(**start_kwargs)
         try:
             yield self
+            self.raise_if_unavailable()
         finally:
             await self.stop()
+
+    def raise_if_unavailable(self) -> None:
+        """Reject a result after a provider has recorded an unrecoverable fault."""
+        return None
+
+    def _is_fatal_exec_error(self, exc: BaseException) -> bool:
+        """Whether an infrastructure/configuration error must escape exec's result conversion."""
+        return False
 
     # ----- data plane: providers implement the _exec primitive -----
     @abc.abstractmethod
@@ -489,6 +511,8 @@ class Sandbox(abc.ABC):
         try:
             return await self._exec(argv, timeout=timeout, workdir=workdir, env=env)
         except Exception as exc:
+            if self._is_fatal_exec_error(exc):
+                raise
             if self._is_timeout_error(exc):
                 return ExecResult(exit_code=-1, stdout="", stderr=f"exec timed out after {timeout}s: {exc}")
             if not await self.is_alive():
