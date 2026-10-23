@@ -4,7 +4,7 @@ This directory contains the Markdown source files for the **Uni-Agent**
 documentation, built with
 [Material for MkDocs](https://squidfunk.github.io/mkdocs-material/).
 
-For image builds, validation, and Agent integration of a new tool, see the [sidecar contribution guide](source/quickstart/sidecar-contribution.md) and [shared-script reference](../examples/sidecar/README.md).
+For image builds, validation, and Agent integration of a new tool, see the [sidecar contribution guide](source/quickstart/sidecar-contribution.md).
 
 ## Install Dependencies
 

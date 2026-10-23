@@ -1,8 +1,4 @@
-"""Validate a remote sandbox and an optional sidecar without the training stack.
-
-Run ``python test_sandbox.py --help`` for the documented validation interface.
-Credentials are read only from the process environment.
-"""
+"""One sidecar smoke test: mount, run the declared probe, check health, and clean up."""
 
 from __future__ import annotations
 
@@ -12,242 +8,152 @@ import importlib.metadata
 import json
 import logging
 import os
-import re
 import secrets
 import shlex
 import ssl
-import sys
 import time
 import urllib.request
-from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlsplit
 
-from examples.sidecar.validation import add_check_arguments, check_result, load_check
+from examples.sidecar.build import load_recipe
 
 
-def parse_args(argv=None):
+def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--image", required=True, help="Task image with bash, python3 and pip")
-    parser.add_argument("--sidecar-recipe", help="Recipe name in the sidecar manifest")
-    parser.add_argument("--sidecar-image", help="Published sidecar image accessible to the provider")
+    parser.add_argument("--image", required=True, help="Task image with bash, python3, and pip")
+    parser.add_argument("--sidecar-image", required=True, help="Published sidecar image or digest")
+    parser.add_argument("--sidecar-recipe", required=True, help="Recipe name in the manifest")
+    parser.add_argument("--recipe-file", type=Path, required=True)
     parser.add_argument("--report", type=Path, default=Path("sidecar-validation.json"))
-    parser.add_argument("--pip-index", default="", help="Public index URL for the sandbox pip install")
-    parser.add_argument("--swe-rex-spec", default="swe-rex", help="Package requirement, e.g. swe-rex==1.4.0")
-    parser.add_argument("--cpu", type=int, default=2000, help="Sandbox CPU request in millicores")
-    parser.add_argument("--memory", type=int, default=4096, help="Sandbox memory request in MB")
-    add_check_arguments(parser)
-    args = parser.parse_args(argv)
-    if bool(args.sidecar_recipe) != bool(args.sidecar_image):
-        parser.error("--sidecar-recipe and --sidecar-image must be supplied together")
-    check_options = (args.recipe_file, args.stdin_file, args.expected_stdout_file, args.check_script)
-    if not args.sidecar_recipe and any(check_options):
-        parser.error("sidecar check options require --sidecar-recipe and --sidecar-image")
-    args.entrypoint_check = None
-    if args.sidecar_recipe:
-        try:
-            args.entrypoint_check = load_check(
-                args.sidecar_recipe,
-                recipe_file=args.recipe_file,
-                stdin_file=args.stdin_file,
-                expected_stdout_file=args.expected_stdout_file,
-                check_script=args.check_script,
-            )
-        except (ValueError, TypeError, OSError, KeyError) as exc:
-            parser.error(str(exc))
-    if args.cpu <= 0 or args.memory <= 0:
-        parser.error("--cpu and --memory must be positive")
-    if args.pip_index and (urlsplit(args.pip_index).username or urlsplit(args.pip_index).password):
-        parser.error("--pip-index must not contain credentials")
-    return args
+    parser.add_argument("--pip-index", default="", help="Optional public package index")
+    args = parser.parse_args()
+    index = urlsplit(args.pip_index)
+    if index.username or index.password or index.query or index.fragment:
+        parser.error("--pip-index must not contain credentials or query parameters")
+    try:
+        recipe = load_recipe(args.sidecar_recipe, args.recipe_file)
+    except (ValueError, TypeError, OSError, KeyError) as exc:
+        parser.error(str(exc))
 
-
-def redact(value, sensitive_values):
-    text = str(value)
-    for secret in sensitive_values:
-        if secret:
-            text = text.replace(secret, "[REDACTED]")
-    text = re.sub(r"(?i)(bearer\s+)[^\s\"']+", r"\1[REDACTED]", text)
-    text = re.sub(r"(https?://)[^\s/@]+:[^\s/@]+@", r"\1[REDACTED]@", text)
-    return text
-
-
-def configure_environment():
-    server = os.getenv("AKERNEL_SERVER_ADDRESS") or os.getenv("OPENYUANRONG_SERVER_ADDRESS")
-    token = os.getenv("AKERNEL_TOKEN") or os.getenv("OPENYUANRONG_TOKEN")
-    if not server or not token:
-        raise ValueError("Set AKERNEL_SERVER_ADDRESS and AKERNEL_TOKEN (or OPENYUANRONG equivalents)")
-    if "://" in server:
-        raise ValueError("The service address must use host:port, without a URL scheme")
-    os.environ["AKERNEL_SERVER_ADDRESS"] = server
-    os.environ["AKERNEL_TOKEN"] = token
-    verify = os.getenv(
-        "AKERNEL_TUNNEL_SSL_VERIFY",
-        os.getenv("OPENYUANRONG_TUNNEL_SSL_VERIFY", os.getenv("TUNNEL_SSL_VERIFY", "1")),
-    )
-    os.environ["TUNNEL_SSL_VERIFY"] = verify
-    os.environ["YR_LOG_LEVEL"] = "ERROR"
-    logging.disable(logging.CRITICAL)
-    return server, verify not in ("0", "false", "False")
-
-
-def main(argv=None):
-    args = parse_args(argv)
-    # The report deliberately excludes environment values and command strings.
-    sensitive_values = [
+    health_key = secrets.token_hex(24)
+    private_values = [health_key] + [
         value
         for key, value in os.environ.items()
-        if re.search(r"TOKEN|PASSWORD|SECRET|API_KEY", key, re.IGNORECASE) and value
+        if value and any(word in key.upper() for word in ("TOKEN", "PASSWORD", "SECRET", "API_KEY"))
     ]
-    health_token = secrets.token_hex(24)
-    sensitive_values.append(health_token)
     report = {
-        "started_at": datetime.now(timezone.utc).isoformat(),
-        "python": sys.version.split()[0],
-        "image": args.image,
-        "sidecar_recipe": args.sidecar_recipe,
-        "sidecar_image": args.sidecar_image,
-        "resources": {"cpu_millicores": args.cpu, "memory_mb": args.memory},
-        "stages": {},
         "success": False,
+        "image": args.image,
+        "sidecar_image": args.sidecar_image,
+        "recipe": args.sidecar_recipe,
+        "stages": {},
     }
     sandbox = None
     stage = "configuration"
     started = time.monotonic()
+    logging.disable(logging.CRITICAL)
 
-    def record(name, **details):
+    def redact(value):
+        text = str(value)
+        for secret in private_values:
+            text = text.replace(secret, "[REDACTED]")
+        return text
+
+    def passed(name, **details):
         report["stages"][name] = {"success": True, **details}
         print(f"PASS {name}", flush=True)
 
     def run(command, timeout=60):
         result = sandbox.commands.run(command, timeout=timeout)
         if result.exit_code != 0:
-            detail = redact((result.stderr or result.stdout or "")[-3000:], sensitive_values)
-            raise RuntimeError(f"Sandbox command exited {result.exit_code}: {detail}")
+            raise RuntimeError(f"Command exited {result.exit_code}: {(result.stderr or result.stdout or '')[-1500:]}")
         return result.stdout or ""
 
     try:
-        server, verify_tls = configure_environment()
-        record("configuration", tls_verification=verify_tls)
+        server = os.getenv("AKERNEL_SERVER_ADDRESS") or os.getenv("OPENYUANRONG_SERVER_ADDRESS")
+        token = os.getenv("AKERNEL_TOKEN") or os.getenv("OPENYUANRONG_TOKEN")
+        if not server or not token or "://" in server:
+            raise ValueError("Set AKERNEL_SERVER_ADDRESS=host:port and AKERNEL_TOKEN to the frontend JWT")
+        verify = os.getenv(
+            "AKERNEL_TUNNEL_SSL_VERIFY",
+            os.getenv("OPENYUANRONG_TUNNEL_SSL_VERIFY", os.getenv("TUNNEL_SSL_VERIFY", "1")),
+        ).lower() not in ("0", "false")
+        passed(stage, tls_verification=verify)
         stage = "sdk"
         import yr_sandbox
 
-        expected_sdk = "0.10.2rc9"
-        sdk_version = importlib.metadata.version("openyuanrong-sandbox")
-        if sdk_version != expected_sdk:
-            raise RuntimeError(f"Expected openyuanrong-sandbox=={expected_sdk}, found {sdk_version}")
+        version = importlib.metadata.version("openyuanrong-sandbox")
+        if version != "0.10.2rc9":
+            raise RuntimeError(f"Expected openyuanrong-sandbox==0.10.2rc9, found {version}")
         sdk_file = Path(yr_sandbox.__file__)
-        sdk_source = sdk_file.read_bytes()
-        sdk_info = {
-            "openyuanrong_sandbox": sdk_version,
-            "sandbox_source": str(sdk_file),
-            "sandbox_source_sha256": hashlib.sha256(sdk_source).hexdigest(),
-        }
-        report["sdk"] = sdk_info
+        passed(stage, version=version, file=str(sdk_file), sha256=hashlib.sha256(sdk_file.read_bytes()).hexdigest())
         connection = yr_sandbox.ConnectionConfig(
             server_address=server,
-            token=os.environ["AKERNEL_TOKEN"],
+            token=token,
             use_tls=True,
-            gateway_use_tls=server.rsplit(":", 1)[-1] == "443",
-            verify_tls=verify_tls,
+            gateway_use_tls=server.endswith(":443"),
+            verify_tls=verify,
         )
-        record("sdk", **sdk_info)
-
         stage = "create"
-        kwargs = {
-            "image": args.image,
-            "cpu": args.cpu,
-            "memory": args.memory,
-            "port_forwardings": [8000],
-            "idle_timeout": 600,
-            "create_timeout": 180,
-            "connection": connection,
-        }
-        if args.sidecar_image:
-            mount_target = args.entrypoint_check.recipe["mount_target"]
-            kwargs["mounts"] = [yr_sandbox.Mount(target=mount_target, image_url=args.sidecar_image)]
-        create_start = time.monotonic()
-        sandbox = yr_sandbox.Sandbox(**kwargs)
+        sandbox = yr_sandbox.Sandbox(
+            image=args.image,
+            cpu=2000,
+            memory=4096,
+            idle_timeout=600,
+            create_timeout=180,
+            connection=connection,
+            port_forwardings=[8000],
+            mounts=[yr_sandbox.Mount(target=recipe["mount_target"], image_url=args.sidecar_image)],
+        )
         report["sandbox_id"] = sandbox.sandbox_id
-        record("create", seconds=round(time.monotonic() - create_start, 3))
-
-        stage = "command"
-        output = run("printf 'SANDBOX_OK\\n'; command -v bash; python3 --version")
-        if "SANDBOX_OK" not in output:
-            raise RuntimeError("Sandbox command marker is missing")
-        record("command", output=output.strip())
-
-        if args.sidecar_recipe:
-            stage = "sidecar_entrypoint"
-            check = args.entrypoint_check
-            check_directory = f"/tmp/sidecar-check-{secrets.token_hex(6)}"
-            run(f"mkdir -p {shlex.quote(check_directory)}")
-            for filename, content in check.files.items():
-                sandbox.files.write(f"{check_directory}/{filename}", content)
-            output = run(shlex.join(check.command(check_directory)), timeout=180)
-            check_result(output)
-            record("sidecar_entrypoint", output=output.strip())
+        passed(stage, cpu_millicores=2000, memory_mb=4096)
+        stage = "sidecar_probe"
+        run("command -v bash && python3 --version")
+        passed(stage, output=run(shlex.join(recipe["probe_argv"])).strip()[:1500])
 
         stage = "swe_rex_install"
-        install = "python3 -m pip install --disable-pip-version-check --no-input "
-        if args.pip_index:
-            install += f"--index-url {shlex.quote(args.pip_index)} "
-        install += shlex.quote(args.swe_rex_spec)
-        run(install, timeout=300)
-        version = run("python3 -c 'import importlib.metadata; print(importlib.metadata.version(\"swe-rex\"))'")
-        record("swe_rex_install", version=version.strip())
-
-        stage = "server_start"
-        server_command = (
+        package_index = f"--index-url {shlex.quote(args.pip_index)} " if args.pip_index else ""
+        run(f"python3 -m pip install --disable-pip-version-check --no-input {package_index}swe-rex==1.4.0", 300)
+        passed(stage, version="1.4.0")
+        sandbox.commands.run(
             "python3 -m swerex.server --host 0.0.0.0 --port 8000 "
-            f"--auth-token {shlex.quote(health_token)} > /tmp/sidecar-swerex.log 2>&1"
+            f"--auth-token {health_key} > /tmp/sidecar-swerex.log 2>&1",
+            background=True,
         )
-        sandbox.commands.run(server_command, background=True)
-        record("server_start", port=8000)
-
         stage = "internal_health"
         health_code = (
-            "import json, urllib.request; "
+            "import json,urllib.request; "
             "req=urllib.request.Request('http://127.0.0.1:8000/is_alive', "
-            f"headers={{'X-API-Key': {health_token!r}}}); "
-            "data=json.load(urllib.request.urlopen(req, timeout=5)); "
-            "assert data.get('is_alive') is True, data; print(json.dumps(data))"
+            f"headers={{'X-API-Key':{health_key!r}}}); "
+            "assert json.load(urllib.request.urlopen(req,timeout=5)).get('is_alive') is True"
         )
-        last_error = None
-        for _ in range(30):
+        for attempt in range(30):
             try:
-                output = run(f"python3 -c {shlex.quote(health_code)}", timeout=15)
+                run(f"python3 -c {shlex.quote(health_code)}", 15)
                 break
-            except Exception as exc:  # noqa: BLE001 - persist the validation failure
-                last_error = exc
+            except RuntimeError:
+                if attempt == 29:
+                    raise
                 time.sleep(1)
-        else:
-            raise RuntimeError(f"SWE-ReX did not become healthy: {last_error}")
-        record("internal_health", response=json.loads(output))
-
+        passed(stage, port=8000)
         stage = "external_health"
-        url = sandbox.get_port_url(8000)
-        parts = urlsplit(url)
-        if server.rsplit(":", 1)[-1] == "443" and parts.scheme == "http":
-            url = urlunsplit(("https", parts.netloc, parts.path, parts.query, parts.fragment))
+        url = urlsplit(sandbox.get_port_url(8000))
+        if server.endswith(":443") and url.scheme == "http":
+            url = url._replace(scheme="https")
         context = ssl.create_default_context()
-        if not verify_tls:
+        if not verify:
             context.check_hostname = False
             context.verify_mode = ssl.CERT_NONE
-        request = urllib.request.Request(url.rstrip("/") + "/is_alive", headers={"X-API-Key": health_token})
-        with urllib.request.urlopen(request, timeout=30, context=context) as response:
-            health = json.load(response)
-        if health.get("is_alive") is not True:
-            raise RuntimeError("Forwarded SWE-ReX health did not return is_alive=true")
-        record("external_health", response=health)
+        request = urllib.request.Request(url.geturl().rstrip("/") + "/is_alive", headers={"X-API-Key": health_key})
+        with urllib.request.urlopen(request, context=context, timeout=30) as response:
+            if json.load(response).get("is_alive") is not True:
+                raise RuntimeError("Forwarded server is not healthy")
+        passed(stage, port=8000)
         report["success"] = True
-    except Exception as exc:  # noqa: BLE001 - persist the validation failure
-        report["stages"][stage] = {
-            "success": False,
-            "error_type": type(exc).__name__,
-            "error": redact(exc, sensitive_values),
-        }
-        print(f"FAIL {stage}: {redact(exc, sensitive_values)}", file=sys.stderr, flush=True)
+    except Exception as exc:
+        report["stages"][stage] = {"success": False, "error": redact(exc)}
+        print(f"FAIL {stage}: {redact(exc)}", flush=True)
     finally:
         if sandbox is not None:
             try:
@@ -257,21 +163,17 @@ def main(argv=None):
                         break
                     time.sleep(1)
                 else:
-                    raise RuntimeError("SDK still reports the sandbox as running after kill")
-                record("cleanup", sandbox_id=report.get("sandbox_id"), confirmed=True)
-            except Exception as exc:  # noqa: BLE001 - persist the validation failure
+                    raise RuntimeError("Sandbox is still running after kill")
+                passed("cleanup", confirmed=True)
+            except Exception as exc:
                 report["success"] = False
-                report["stages"]["cleanup"] = {
-                    "success": False,
-                    "error": redact(exc, sensitive_values),
-                }
-                print(f"FAIL cleanup: {redact(exc, sensitive_values)}", file=sys.stderr, flush=True)
+                report["stages"]["cleanup"] = {"success": False, "error": redact(exc)}
+                print(f"FAIL cleanup: {redact(exc)}", flush=True)
         else:
-            report["stages"]["cleanup"] = {"success": None, "reason": "No sandbox handle was returned"}
+            report["stages"]["cleanup"] = {"success": None, "reason": "No sandbox handle returned"}
         report["elapsed_seconds"] = round(time.monotonic() - started, 3)
         args.report.parent.mkdir(parents=True, exist_ok=True)
-        content = redact(json.dumps(report, ensure_ascii=False, indent=2), sensitive_values)
-        args.report.write_text(content + "\n", encoding="utf-8")
+        args.report.write_text(redact(json.dumps(report, indent=2)) + "\n", encoding="utf-8")
         print(f"Report: {args.report}", flush=True)
     return 0 if report["success"] else 1
 

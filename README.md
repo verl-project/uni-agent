@@ -45,7 +45,7 @@ Follow the end-to-end path:
 
 For detailed guides and examples, we strongly recommend reading the [Uni-Agent documentation](https://uni-agent.readthedocs.io/en/latest/).
 
-To add a third-party tool, follow the [sidecar contribution guide](docs/source/quickstart/sidecar-contribution.md) and [shared-script reference](examples/sidecar/README.md).
+To add a third-party tool, follow the [sidecar contribution guide](docs/source/quickstart/sidecar-contribution.md).
 
 ## Results 📊
 
