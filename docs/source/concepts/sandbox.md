@@ -158,13 +158,19 @@ def from_config(cls, config: SandboxConfig):
     )
 ```
 
-Register the lazy module in `SANDBOX_MODULES`:
+In-tree providers also register the lazy module in `SANDBOX_MODULES`:
 
 ```python
 SANDBOX_MODULES["my_backend"] = "my_package.sandbox"
 ```
 
 The module is imported only when the provider is selected, so optional SDKs do not affect other backends.
+
+External providers can set `UNI_AGENT_SANDBOX_PLUGINS` to a comma-separated list
+of importable modules. Each module calls `register_sandbox` at import time;
+built-in provider names cannot be replaced. A missing or failed module raises an
+error when an external provider is requested. Configure this variable and install
+the plugin on every worker; for Ray Jobs, use `runtime_env.env_vars`.
 
 ## Implementation Rules
 
