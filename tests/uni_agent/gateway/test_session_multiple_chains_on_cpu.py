@@ -108,6 +108,14 @@ async def _run(session: GatewaySession, backend: SequencedBackend, messages: lis
     return await session.run_generation(request, backend)
 
 
+async def _wait_for(predicate):
+    async def wait():
+        while not predicate():
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(wait(), timeout=5)
+
+
 class _LogprobBackend:
     def __init__(self, steps):
         self.steps = list(steps)
@@ -957,7 +965,7 @@ async def test_exact_retry_reuses_inflight_generation(chain_path, caplog):
     await backend.wait_for_calls(1)
     duplicate = asyncio.create_task(_run(session, backend, continuation))
     second_duplicate = asyncio.create_task(_run(session, backend, continuation))
-    await asyncio.sleep(0)
+    await _wait_for(lambda: session.snapshot_state()["num_coalesced_requests"] == 2)
 
     assert len(backend.calls) == 1
     assert session.snapshot_state()["num_coalesced_requests"] == 2
@@ -1698,14 +1706,57 @@ async def test_multiple_chains_terminal_state_rejects_late_commit(terminal_actio
     if terminal_action == "finalize":
         terminal_result = await session.finalize()
         assert [_decode_response_ids(trajectory.response_ids) for trajectory in terminal_result] == ["FIRST"]
+        pending_backend.release_call(0)
+        with pytest.raises(HTTPException) as exc_info:
+            await pending_task
+        assert exc_info.value.status_code == 409
     else:
         await session.abort()
-
-    pending_backend.release_call(0)
-    with pytest.raises(HTTPException) as exc_info:
-        await pending_task
-    assert exc_info.value.status_code == 409
+        with pytest.raises(asyncio.CancelledError):
+            await pending_task
     assert session.snapshot_state()["active_chain_ids"] == []
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_abort_cancels_preparation_while_it_holds_request_lock(monkeypatch):
+    session = _session("abort-prepare")
+    prepare_started = asyncio.Event()
+
+    async def stalled_prepare(request):
+        prepare_started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(session, "_prepare_generation_inputs", stalled_prepare)
+    backend = SequencedBackend(["SHOULD_NOT_RUN"])
+    generation = asyncio.create_task(_run(session, backend, [{"role": "user", "content": "hello"}]))
+    try:
+        await asyncio.wait_for(prepare_started.wait(), timeout=5)
+        await asyncio.wait_for(session.abort(), timeout=5)
+        with pytest.raises(asyncio.CancelledError):
+            await generation
+        assert not session.request_lock.locked()
+        assert backend.calls == []
+    finally:
+        generation.cancel()
+        await asyncio.gather(generation, return_exceptions=True)
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_completed_generation_does_not_hide_caller_cancellation():
+    session = _session("cancel-completed-core")
+    backend = _ControlledParallelBackend(["COMPLETED"])
+    generation = asyncio.create_task(_run(session, backend, [{"role": "user", "content": "hello"}]))
+    await backend.wait_for_calls(1)
+    [core] = session._generation_tasks
+    core.add_done_callback(lambda _: generation.cancel())
+    backend.release_call(0)
+    with pytest.raises(asyncio.CancelledError):
+        await generation
+    assert core.done() and not core.cancelled() and core.exception() is None
 
 
 @pytest.mark.cpu
