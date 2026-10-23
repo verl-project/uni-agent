@@ -88,6 +88,9 @@ class KVCacheEvent:
             raise ValueError(f"Expected raw_data[1] as event list, got {type(event_list)}")
 
         results: list[KVCacheEvent] = []
+        node_id = default_node_id or ""
+        malformed_count = 0
+        first_error: tuple[str, str] | None = None
         for event_entry in event_list:
             if isinstance(event_entry, Mapping):
                 tag = event_entry.get("type")
@@ -102,15 +105,23 @@ class KVCacheEvent:
             if event_type.startswith("unknown"):
                 continue
 
-            node_id = default_node_id or ""
             try:
                 event = cls._build_event(event_type, fields, node_id)
                 if event is not None:
                     results.append(event)
             except (ValueError, TypeError, IndexError, KeyError) as exc:
-                logger.debug("Skipping malformed KV event (type=%s, node=%s): %s", event_type, node_id, exc)
+                malformed_count += 1
+                if first_error is None:
+                    first_error = (event_type, str(exc))
                 continue
 
+        if first_error is not None:
+            logger.warning(
+                "Skipping malformed KV events (node=%s, count=%d, first_type=%s): %s",
+                node_id,
+                malformed_count,
+                *first_error,
+            )
         return results
 
     # ── Build helpers ────────────────────────────────────────────────────
@@ -135,6 +146,9 @@ class KVCacheEvent:
                 ]
             elif event_type == "removed":
                 fields = [fields["block_hashes"], fields.get("medium")]
+
+        if event_type in ("stored", "removed") and not isinstance(fields[0], list | tuple):
+            raise TypeError("block_hashes must be a list or tuple")
 
         if event_type == "stored":
             return cls._build_block_stored(fields, node_id)

@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import json
+import logging
 import os
 import sys
 from argparse import ArgumentParser, Namespace
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import hydra
 import pytest
@@ -10,6 +14,7 @@ from omegaconf import OmegaConf, open_dict
 
 pytest.importorskip("ray")
 
+from examples.agent_aware_router import run_infer
 from examples.agent_aware_router.run_infer import init_config as init_router_config
 from examples.inference import parallel_infer_verl
 from examples.inference.parallel_infer_verl import init_config
@@ -135,14 +140,9 @@ def test_language_model_only_is_opt_in_and_preserves_config(monkeypatch, configu
         assert OmegaConf.select(engine, "language_model_only") is configured
 
 
-@pytest.mark.cpu
-@pytest.mark.level0
-@pytest.mark.parametrize(
-    "entrypoint,simulated_runner",
-    [(init_config, None), (init_router_config, None), (init_router_config, "example.simulated_runner")],
-)
-def test_inference_sampling_uses_run_options_and_preserves_length_configuration(entrypoint, simulated_runner):
-    args = Namespace(
+@pytest.fixture
+def router_args():
+    return Namespace(
         temperature=0.4,
         top_p=0.85,
         top_k=20,
@@ -164,15 +164,29 @@ def test_inference_sampling_uses_run_options_and_preserves_length_configuration(
         num_workers=1,
         max_model_len=32768,
         max_num_seqs=16,
-        enable_mooncake=False,
+        mooncake_config_path=None,
+        mooncake_save_decode_cache=False,
+        device="gpu",
         kv_events=False,
         router_config_path="uni_agent/agent_aware_router/configs/agent_aware_router.yaml",
-        simulated_runner_fqn=simulated_runner,
+        simulated_runner_fqn=None,
         load_threshold=0.5,
         prompt_length=2048,
         response_length=8192,
     )
 
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize(
+    "entrypoint,simulated_runner",
+    [(init_config, None), (init_router_config, None), (init_router_config, "example.simulated_runner")],
+)
+def test_inference_sampling_uses_run_options_and_preserves_length_configuration(
+    entrypoint, simulated_runner, router_args
+):
+    args = router_args
+    args.simulated_runner_fqn = simulated_runner
     config = entrypoint(
         args,
         served_model_name="policy",
@@ -265,3 +279,292 @@ def test_shared_inference_cli_preserves_existing_defaults(monkeypatch):
     monkeypatch.setattr(parallel_infer_verl.argparse.ArgumentParser, "parse_args", check_defaults)
     with pytest.raises(ParsedDefaults):
         parallel_infer_verl.main()
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize(
+    "enabled,save_decode,device",
+    [(False, False, "gpu"), (True, False, "gpu"), (True, True, "gpu"), (True, False, "ascend")],
+)
+def test_mooncake_engine_config(router_args, enabled, save_decode, device):
+    router_args.mooncake_config_path = "/tmp/store.json" if enabled else None
+    router_args.mooncake_save_decode_cache = save_decode
+    router_args.device = device
+    rollout = init_router_config(router_args, served_model_name="policy").actor_rollout_ref.rollout
+    assert rollout.enable_prefix_caching
+    if not enabled:
+        assert "kv_transfer_config" not in rollout.engine_kwargs.vllm
+    else:
+        assert rollout.engine_kwargs.vllm.kv_transfer_config == {
+            "kv_connector": "MooncakeStoreConnector" if device == "gpu" else "MooncakeConnectorStoreV1",
+            "kv_role": "kv_both",
+            "kv_connector_extra_config": {"save_decode_cache": save_decode} if device == "gpu" else {},
+        }
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize("address", [None, "auto"])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_mooncake_ray_job_env(router_args, tmp_path, monkeypatch, address, enabled):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "store.json").write_text("{}")
+    router_args.mooncake_config_path = "store.json" if enabled else None
+    monkeypatch.setenv("MOONCAKE_CONFIG_PATH", "stale-driver-path")
+    monkeypatch.setenv("MOONCAKE_PREFERRED_SEGMENT", "127.0.0.1:50053")
+    monkeypatch.setenv("PYTHONHASHSEED", "42")
+    if address:
+        monkeypatch.setenv("RAY_ADDRESS", address)
+    else:
+        monkeypatch.delenv("RAY_ADDRESS", raising=False)
+    monkeypatch.setattr(run_infer.ray, "is_initialized", lambda: False)
+    init = Mock()
+    monkeypatch.setattr(run_infer.ray, "init", init)
+    env_vars = run_infer._prepare_mooncake_env(router_args)
+    run_infer._init_ray(env_vars)
+    kwargs = init.call_args.kwargs
+    if enabled:
+        env = kwargs["runtime_env"]["env_vars"]
+        assert env["MOONCAKE_CONFIG_PATH"] == str(tmp_path / "store.json")
+        assert router_args.mooncake_config_path == "store.json"
+        assert env["MOONCAKE_PREFERRED_SEGMENT"] == "127.0.0.1:50053"
+        assert env["PYTHONHASHSEED"] == "42"
+    else:
+        assert "runtime_env" not in kwargs
+    if address:
+        assert kwargs["address"] == "auto"
+        assert "_system_config" not in kwargs
+    else:
+        assert "idle_worker_killing_time_threshold_ms" in kwargs["_system_config"]
+    assert os.environ["MOONCAKE_CONFIG_PATH"] == "stale-driver-path"
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize("contents", [None, "not json", "[]", "null"])
+def test_invalid_mooncake_config_fails_before_ray(router_args, tmp_path, monkeypatch, contents):
+    path = tmp_path / "store.json"
+    router_args.mooncake_config_path = str(path)
+    if contents is not None:
+        path.write_text(contents)
+    init = Mock()
+    monkeypatch.setattr(run_infer.ray, "init", init)
+    monkeypatch.setattr(run_infer, "_parse_args", lambda: router_args)
+    with pytest.raises(ValueError, match="Mooncake"):
+        run_infer.main()
+    init.assert_not_called()
+    assert router_args.mooncake_config_path == str(path)
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_mooncake_expands_home(router_args, tmp_path, monkeypatch):
+    # Patch expanduser rather than changing the process HOME.
+    path = tmp_path / "store.json"
+    path.write_text("{}")
+    router_args.mooncake_config_path = "~/store.json"
+    monkeypatch.setattr(run_infer.Path, "expanduser", lambda self: path)
+    monkeypatch.setenv("MOONCAKE_CONFIG_PATH", "old")
+    assert run_infer._prepare_mooncake_env(router_args)["MOONCAKE_CONFIG_PATH"] == str(path)
+    assert router_args.mooncake_config_path == "~/store.json"
+    assert os.environ["MOONCAKE_CONFIG_PATH"] == "old"
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize("matches", [False, True])
+def test_already_initialized_ray_requires_matching_env(router_args, tmp_path, monkeypatch, matches):
+    path = tmp_path / "store.json"
+    path.write_text("{}")
+    router_args.mooncake_config_path = str(path)
+    monkeypatch.setenv("MOONCAKE_CONFIG_PATH", "old")
+    monkeypatch.setenv("PYTHONHASHSEED", "42")
+    env = run_infer._prepare_mooncake_env(router_args)
+    monkeypatch.setattr(run_infer.ray, "is_initialized", lambda: True)
+    monkeypatch.setattr(
+        run_infer.ray,
+        "get_runtime_context",
+        lambda: Namespace(runtime_env={"env_vars": env if matches else {}}),
+    )
+    init = Mock()
+    monkeypatch.setattr(run_infer.ray, "init", init)
+    if matches:
+        run_infer._init_ray(env)
+    else:
+        with pytest.raises(ValueError, match="already initialized") as error:
+            run_infer._init_ray(env)
+        assert f"MOONCAKE_CONFIG_PATH: requested={str(path)!r}, active=<unset>" in str(error.value)
+        assert "PYTHONHASHSEED: requested='42', active=<unset>" in str(error.value)
+    init.assert_not_called()
+    assert os.environ["MOONCAKE_CONFIG_PATH"] == "old"
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize("enabled", [False, True])
+def test_report_records_submitted_mooncake_config(router_args, tmp_path, monkeypatch, enabled):
+    router_args.mooncake_config_path = "/tmp/store.json" if enabled else None
+    router_args.mooncake_save_decode_cache = enabled
+    router_args.result_path = str(tmp_path / "result.json")
+    router_args.data_path = "/tmp/data.parquet"
+    build_config = Mock(wraps=run_infer._mooncake_transfer_config)
+    monkeypatch.setattr(run_infer, "_mooncake_transfer_config", build_config)
+    config = init_router_config(router_args, served_model_name="policy")
+    snapshot = run_infer._mooncake_metadata(config, router_args.mooncake_config_path)
+    router_args.device = "ascend"
+    router_args.mooncake_save_decode_cache = True
+    router_args.mooncake_config_path = "/changed.json"
+    if enabled:
+        transfer = config.actor_rollout_ref.rollout.engine_kwargs.vllm.kv_transfer_config
+        transfer.kv_connector_extra_config.save_decode_cache = False
+    run_infer._report(
+        {"scores": [1.0], "per_uid": {"task": [1.0]}, "uid_status": {"task": "finished"}},
+        wall=1.0,
+        num_prompts=1,
+        n=1,
+        args=router_args,
+        served_model_name="policy",
+        mooncake_metadata=snapshot,
+    )
+    metadata = json.loads((tmp_path / "result.json").read_text())["mooncake"]
+    assert metadata["enabled"] == enabled
+    if enabled:
+        assert metadata["kv_transfer_config"]["kv_connector"] == "MooncakeStoreConnector"
+        assert metadata["kv_transfer_config"]["kv_connector_extra_config"] == {"save_decode_cache": True}
+        assert metadata["config_path"] == "/tmp/store.json"
+    else:
+        assert metadata["config_path"] is None and metadata["kv_transfer_config"] is None
+    build_config.assert_called_once()
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize(
+    "options,path,save_decode",
+    [
+        ([], None, False),
+        (["--mooncake-config-path", "store.json"], "store.json", False),
+        (["--mooncake-config-path", "store.json", "--mooncake-save-decode-cache"], "store.json", True),
+    ],
+)
+def test_mooncake_cli_uses_optional_path_and_store_true(options, path, save_decode, monkeypatch):
+    monkeypatch.setenv("MOONCAKE_CONFIG_PATH", "/stale-driver.json")
+    args = run_infer._parse_args(["--task-config", "unused.yaml", *options])
+    assert args.mooncake_config_path == path
+    assert args.mooncake_save_decode_cache == save_decode
+    assert not hasattr(args, "enable_mooncake")
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize("option", ["--enable-mooncake", "--no-mooncake-save-decode-cache"])
+def test_removed_mooncake_cli_options_are_rejected(option, capsys):
+    with pytest.raises(SystemExit) as error:
+        run_infer._parse_args(["--task-config", "unused.yaml", option])
+    assert error.value.code == 2
+    assert "unrecognized arguments" in capsys.readouterr().err
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize(
+    "engine,device,enabled,save_decode,message",
+    [
+        ("vllm", "gpu", False, True, "requires --mooncake-config-path"),
+        ("vllm", "ascend", True, True, "only supported.*gpu"),
+        ("sglang", "gpu", True, False, "requires --engine vllm"),
+    ],
+)
+def test_invalid_mooncake_options_fail_before_ray(
+    router_args, tmp_path, monkeypatch, engine, device, enabled, save_decode, message
+):
+    path = tmp_path / "store.json"
+    path.write_text("{}")
+    router_args.mooncake_config_path = str(path) if enabled else None
+    router_args.engine, router_args.device = engine, device
+    router_args.mooncake_save_decode_cache = save_decode
+    monkeypatch.setattr(run_infer, "_parse_args", lambda: router_args)
+    init = Mock()
+    monkeypatch.setattr(run_infer.ray, "init", init)
+    with pytest.raises(ValueError, match=message):
+        run_infer.main()
+    init.assert_not_called()
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_ray_env_error_reports_only_mismatching_variables(monkeypatch):
+    env = {"MOONCAKE_CONFIG_PATH": "/store.json", "PYTHONHASHSEED": "42"}
+    active = {**env, "PYTHONHASHSEED": "123", "UNRELATED": "not-in-error"}
+    monkeypatch.setattr(run_infer.ray, "is_initialized", lambda: True)
+    monkeypatch.setattr(run_infer.ray, "get_runtime_context", lambda: Namespace(runtime_env={"env_vars": active}))
+    with pytest.raises(ValueError, match="already initialized") as error:
+        run_infer._init_ray(env)
+    text = str(error.value)
+    assert "PYTHONHASHSEED: requested='42', active='123'" in text
+    assert "MOONCAKE_CONFIG_PATH" not in text and "UNRELATED" not in text
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_mooncake_forwarded_keys_are_logged_without_values(monkeypatch, caplog):
+    monkeypatch.setattr(run_infer.ray, "is_initialized", lambda: False)
+    monkeypatch.setattr(run_infer.ray, "init", Mock())
+    module_logger = logging.getLogger(run_infer.__name__)
+    monkeypatch.setattr(module_logger, "propagate", False)
+    module_logger.addHandler(caplog.handler)
+    try:
+        with caplog.at_level(logging.INFO, logger=run_infer.__name__):
+            run_infer._init_ray({"MOONCAKE_CONFIG_PATH": "/private-config-value.json", "PYTHONHASHSEED": "42"})
+    finally:
+        module_logger.removeHandler(caplog.handler)
+    messages = [record.getMessage() for record in caplog.records if record.name == run_infer.__name__]
+    assert len(messages) == 1
+    assert "Mooncake Ray job environment keys: MOONCAKE_CONFIG_PATH, PYTHONHASHSEED" in messages[0]
+    assert "/private-config-value.json" not in messages[0]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_main_passes_resolved_path_and_original_connector_snapshot(router_args, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "store.json").write_text("{}")
+    router_args.mooncake_config_path = "store.json"
+    router_args.result_path = str(tmp_path / "result.json")
+    router_args.data_path, router_args.shuffle, router_args.limit = "data.parquet", False, None
+    monkeypatch.setenv("MOONCAKE_CONFIG_PATH", "old-driver-path")
+    monkeypatch.setattr(run_infer, "_parse_args", lambda: router_args)
+    init_ray = Mock()
+    monkeypatch.setattr(run_infer, "_init_ray", init_ray)
+    monkeypatch.setattr(run_infer, "TaskConfigResolver", SimpleNamespace(from_file=Mock()))
+    monkeypatch.setattr(run_infer, "load_dataset", lambda *a, **kw: SimpleNamespace(to_list=lambda: [{}]))
+    monkeypatch.setattr(run_infer, "tq", SimpleNamespace(init=Mock()))
+    monkeypatch.setattr(run_infer, "_build_prompts", Mock(return_value="batch"))
+    monkeypatch.setattr(
+        run_infer,
+        "_read_rm_scores",
+        lambda *a, **kw: {"scores": [1.0], "per_uid": {"task": [1.0]}, "uid_status": {"task": "finished"}},
+    )
+    server = Mock()
+
+    def create_engine(*, config):
+        assert router_args.mooncake_config_path == str(tmp_path / "store.json")
+        router_args.device, router_args.mooncake_save_decode_cache = "ascend", True
+        router_args.mooncake_config_path = "/changed.json"
+        transfer = config.actor_rollout_ref.rollout.engine_kwargs.vllm.kv_transfer_config
+        transfer.kv_connector_extra_config.save_decode_cache = True
+        return server
+
+    monkeypatch.setattr(run_infer, "LLMServerManager", SimpleNamespace(create=create_engine))
+    monkeypatch.setattr(run_infer, "AgentFrameworkRolloutAdapter", SimpleNamespace(create=Mock(return_value=Mock())))
+    build_config = Mock(wraps=run_infer._mooncake_transfer_config)
+    monkeypatch.setattr(run_infer, "_mooncake_transfer_config", build_config)
+    run_infer.main()
+    build_config.assert_called_once()
+    assert init_ray.call_args.args[0]["MOONCAKE_CONFIG_PATH"] == str(tmp_path / "store.json")
+    metadata = json.loads((tmp_path / "result.json").read_text())["mooncake"]
+    assert metadata["config_path"] == str(tmp_path / "store.json")
+    assert metadata["kv_transfer_config"]["kv_connector"] == "MooncakeStoreConnector"
+    assert metadata["kv_transfer_config"]["kv_connector_extra_config"] == {"save_decode_cache": False}
+    assert os.environ["MOONCAKE_CONFIG_PATH"] == "old-driver-path"

@@ -14,6 +14,7 @@ For setup and concepts, see the documentation:
 - `single-node.sh`: single-node matrix driver (the main entry).
 - `multi-node.sh`: the same matrix on a multi-node Ray cluster.
 - `run_infer.sh` / `run_infer.py`: one-shot inference driver the matrix calls per run (`--help` for the full flag set).
+- [Mooncake Store integration](mooncake_store/README.md): optional embedded/standalone CPU Store setup and usage.
 - `task_config_mini_swe_agent.yaml`: task/agent config used by the matrix (mini-swe-agent in an openyuanrong sandbox).
 - `uni_agent/agent_aware_router/insight/`: the Grafana dashboard json (kvc-router metrics); the drivers mount it into rl-insight at startup.
 

@@ -127,10 +127,10 @@ class KVCacheStore:
         GPU: walk the local reverse index (``replicas_by_block``) along the
         supplied ``hash_strs`` chain until a hash isn't cached on this node.
 
-        CPU/SSD return 0.0 today — not just because the mooncake collector is
-        unwired, but because ``add_blocks`` only indexes GPU blocks into
-        ``replicas_by_block`` (CPU/SSD are counted in ``_replica_layer_counts``
-        only). Supporting CPU/SSD hit queries requires extending the reverse
+        CPU/SSD return 0.0 today: ``add_blocks`` only indexes GPU blocks into
+        ``replicas_by_block``. Generic CPU/SSD writes only change counts;
+        the vLLM parser excludes CPU, SSD and unknown-medium events.
+        Supporting CPU/SSD hit queries would require extending the reverse
         index to be layer-keyed (``dict[Layer, dict[str, set[str]]]``) and
         indexing those blocks in ``add_blocks``; until then ``layer`` here is a
         placeholder that short-circuits to 0.0.

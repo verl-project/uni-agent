@@ -13,7 +13,7 @@
 # Matrix params are env-overridable like single-node.sh:
 #   CONCURRENCYS/CONTEXTS/LTS/MAX_SAMPLES/N/RES_LEN.
 # Note: cross-replica KV sharing via mooncake is deliberately NOT enabled
-# (run_infer.sh only attaches the connector with --enable-mooncake).
+# (run_infer.sh only attaches the connector when --mooncake-config-path is supplied).
 
 set -euo pipefail
 

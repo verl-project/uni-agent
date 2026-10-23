@@ -122,6 +122,77 @@ def _resolve_router_config_path(path: str) -> str:
     return os.path.abspath(path)
 
 
+def _prepare_mooncake_env(args: argparse.Namespace) -> dict[str, str]:
+    """Validate the optional config before starting Ray; return job environment."""
+    if args.mooncake_config_path is None:
+        return {}
+    path = Path(args.mooncake_config_path).expanduser().resolve()
+    try:
+        with path.open(encoding="utf-8") as stream:
+            config = json.load(stream)
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"Cannot read Mooncake JSON config {path}: {exc}") from exc
+    if not isinstance(config, dict):
+        raise ValueError(f"Mooncake config must be a JSON object: {path}")
+    # Connector-specific fields are validated by the installed engine version.
+    env_vars = {"MOONCAKE_CONFIG_PATH": str(path)}
+    # Explicitly propagate optional Store controls when joining an existing cluster.
+    for name in (
+        "MOONCAKE_PREFERRED_SEGMENT",
+        "MOONCAKE_REQUESTER_LOCAL_HOSTNAME",
+        "VLLM_MOONCAKE_STORE_TIER_LOG",
+        "PYTHONHASHSEED",
+    ):
+        if name in os.environ:
+            env_vars[name] = os.environ[name]
+    return env_vars
+
+
+def _init_ray(env_vars: dict[str, str]) -> None:
+    """Pass Mooncake configuration at job scope, including address='auto'."""
+    if env_vars:
+        logger.info("Mooncake Ray job environment keys: %s", ", ".join(sorted(env_vars)))
+    if ray.is_initialized():
+        if env_vars:
+            active_env = ray.get_runtime_context().runtime_env.get("env_vars") or {}
+            mismatches = []
+            for key, value in env_vars.items():
+                if active_env.get(key) != value:
+                    active = repr(active_env[key]) if key in active_env else "<unset>"
+                    mismatches.append(f"{key}: requested={value!r}, active={active}")
+            if mismatches:
+                raise ValueError(
+                    "Ray is already initialized with a different Mooncake runtime_env; "
+                    f"start a new job. Mismatches: {'; '.join(mismatches)}"
+                )
+        return
+    kwargs = {"runtime_env": {"env_vars": env_vars}} if env_vars else {}
+    if os.environ.get("RAY_ADDRESS"):
+        ray.init(address="auto", **kwargs)
+    else:
+        # Keep agent workers alive between dispatches, as in the non-Mooncake path.
+        ray.init(_system_config={"idle_worker_killing_time_threshold_ms": _RAY_IDLE_WORKER_TIMEOUT_MS}, **kwargs)
+
+
+def _mooncake_transfer_config(args: argparse.Namespace) -> dict | None:
+    if args.mooncake_config_path is None:
+        if args.mooncake_save_decode_cache:
+            raise ValueError("--mooncake-save-decode-cache requires --mooncake-config-path")
+        return None
+    if args.engine != "vllm":
+        raise ValueError("Mooncake Store integration in this entrypoint requires --engine vllm")
+    extra_config = {}
+    if args.device == "gpu":
+        extra_config["save_decode_cache"] = args.mooncake_save_decode_cache
+    elif args.mooncake_save_decode_cache:
+        raise ValueError("--mooncake-save-decode-cache is only supported by this entrypoint on --device gpu")
+    return {
+        "kv_connector": "MooncakeConnectorStoreV1" if args.device == "ascend" else "MooncakeStoreConnector",
+        "kv_role": "kv_both",
+        "kv_connector_extra_config": extra_config,
+    }
+
+
 def init_config(args: argparse.Namespace, *, served_model_name: str):
     """Compose verl's ``ppo_trainer`` config with the KV-cache-aware router plugin and
     override the engine + framework knobs.
@@ -131,6 +202,8 @@ def init_config(args: argparse.Namespace, *, served_model_name: str):
     of the removed ``rollout/router@...=kvcaware`` Hydra group. The framework/TQ path
     (``rollout.custom.agent_framework``, ``transfer_queue``) is preserved untouched.
     """
+    kv_transfer_config = _mooncake_transfer_config(args)
+
     from hydra import compose, initialize_config_dir
 
     config_dir = str(Path(verl.__file__).resolve().parent / "trainer" / "config")
@@ -182,15 +255,15 @@ def init_config(args: argparse.Namespace, *, served_model_name: str):
 
     # vLLM engine kwargs: MFU metric (always on) + optional mooncake connector / kv-events.
     vllm_kwargs: dict = {"enable_mfu_metrics": True}
-    if args.enable_mooncake:
-        # Cross-replica KV sharing via mooncake (config via MOONCAKE_CONFIG_PATH env).
-        # GPU build uses "MooncakeStoreConnector"; vllm-ascend uses "MooncakeConnectorStoreV1".
-        mooncake_connector = "MooncakeConnectorStoreV1" if args.device == "ascend" else "MooncakeStoreConnector"
-        vllm_kwargs["kv_transfer_config"] = {
-            "kv_connector": mooncake_connector,
-            "kv_role": "kv_both",
-            "kv_connector_extra_config": {},
-        }
+    if kv_transfer_config is not None:
+        vllm_kwargs["kv_transfer_config"] = kv_transfer_config
+        logger.info(
+            "Mooncake enabled: config=%s kv_transfer_config=%s",
+            args.mooncake_config_path,
+            vllm_kwargs["kv_transfer_config"],
+        )
+    else:
+        logger.info("Mooncake disabled")
     if args.kv_events:
         # vLLM kv-events (zmq publisher) — kvcaware load signal (retained-cache
         # occupancy). Ports are placeholders (the uni-agent kv-events server
@@ -247,6 +320,16 @@ def init_config(args: argparse.Namespace, *, served_model_name: str):
     config.data.max_response_length = args.response_length
 
     return config
+
+
+def _mooncake_metadata(config, config_path: str | None) -> dict:
+    """Snapshot the submitted connector settings before engine initialization."""
+    transfer = OmegaConf.select(config, "actor_rollout_ref.rollout.engine_kwargs.vllm.kv_transfer_config")
+    return {
+        "enabled": transfer is not None,
+        "config_path": config_path if transfer is not None else None,
+        "kv_transfer_config": OmegaConf.to_container(transfer, resolve=True) if transfer is not None else None,
+    }
 
 
 def _build_prompts(samples: list, uids: list):
@@ -316,7 +399,14 @@ def _read_rm_scores(uids: list, *, partition_id: str = PARTITION_ID) -> dict:
 
 
 def _report(
-    read: dict, *, wall: float, num_prompts: int, n: int, args: argparse.Namespace, served_model_name: str
+    read: dict,
+    *,
+    wall: float,
+    num_prompts: int,
+    n: int,
+    args: argparse.Namespace,
+    served_model_name: str,
+    mooncake_metadata: dict,
 ) -> None:
     """Print the mean-rm_scores summary and optionally persist a JSON result file."""
     scores = read["scores"]
@@ -360,13 +450,14 @@ def _report(
             "mean_rm_score_over_prompts": mean_over_prompts,
             "scores": scores,
             "scores_by_uid": per_uid,
+            "mooncake": mooncake_metadata,
         }
         with open(result_path, "w") as f:
             json.dump(payload, f, indent=2)
         logger.info(f"wrote result file to: {result_path}")
 
 
-def main() -> None:
+def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Parallel agent inference over a verl-launched engine with the KV-cache-aware router (framework + TQ path)."
@@ -510,15 +601,15 @@ def main() -> None:
         "observations, no container); the e2e tests drive the loop through this.",
     )
     parser.add_argument(
-        "--enable-mooncake",
-        action="store_true",
-        help="Attach MooncakeStoreConnector for cross-replica KV sharing.",
-    )
-    parser.add_argument(
         "--mooncake-config-path",
         type=str,
-        default="mooncake_config.json",
-        help="Path to the mooncake config JSON (used with --enable-mooncake).",
+        default=None,
+        help="Enable Mooncake Store using this JSON config; omit to disable.",
+    )
+    parser.add_argument(
+        "--mooncake-save-decode-cache",
+        action="store_true",
+        help="Save completed decode KV blocks to Mooncake (GPU only, default: disabled).",
     )
     parser.add_argument(
         "--device",
@@ -537,21 +628,19 @@ def main() -> None:
         "read by the balancer from rollout.custom.agent_framework.router at construction.",
     )
 
-    args = parser.parse_args()
+    return parser.parse_args(argv)
 
-    if args.enable_mooncake and args.mooncake_config_path:
-        os.environ["MOONCAKE_CONFIG_PATH"] = os.path.expanduser(args.mooncake_config_path)
 
-    if not ray.is_initialized():
-        if os.environ.get("RAY_ADDRESS"):
-            ray.init(address="auto")
-        else:
-            # Disable Ray's idle-worker reaper so agent workers survive dispatch gaps
-            # (default ~10 s threshold would kill them prematurely).
-            ray.init(_system_config={"idle_worker_killing_time_threshold_ms": _RAY_IDLE_WORKER_TIMEOUT_MS})
+def main() -> None:
+    args = _parse_args()
+    env_vars = _prepare_mooncake_env(args)
+    args.mooncake_config_path = env_vars.get("MOONCAKE_CONFIG_PATH")
+    served_model_name = os.path.basename(os.path.expanduser(args.model_path).rstrip("/"))
+    config = init_config(args, served_model_name=served_model_name)
+    mooncake_metadata = _mooncake_metadata(config, args.mooncake_config_path)
+    _init_ray(env_vars)
 
     TaskConfigResolver.from_file(args.task_config)
-    served_model_name = os.path.basename(os.path.expanduser(args.model_path).rstrip("/"))
 
     dataset = load_dataset("parquet", data_files=args.data_path, split="train")
     if args.shuffle:
@@ -568,8 +657,7 @@ def main() -> None:
     logger.info(f"loaded {len(samples)} prompts (x n={n} sessions each) from {args.data_path}")
 
     # 1. TransferQueue + verl inference engine with the KV-cache-aware router.
-    logger.info("initializing configuration, TransferQueue, and LLMServerManager (kvcaware router)...")
-    config = init_config(args, served_model_name=served_model_name)
+    logger.info("initializing TransferQueue and LLMServerManager (kvcaware router)...")
     tq.init(config.transfer_queue)
     llm_server_manager = LLMServerManager.create(config=config)
 
@@ -589,7 +677,15 @@ def main() -> None:
 
     # 4. Read rm_scores back from TQ and report.
     read = _read_rm_scores(uids, partition_id=PARTITION_ID)
-    _report(read, wall=wall, num_prompts=len(samples), n=n, args=args, served_model_name=served_model_name)
+    _report(
+        read,
+        wall=wall,
+        num_prompts=len(samples),
+        n=n,
+        args=args,
+        served_model_name=served_model_name,
+        mooncake_metadata=mooncake_metadata,
+    )
 
 
 if __name__ == "__main__":
