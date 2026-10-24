@@ -113,6 +113,91 @@ def test_shared_inference_preserves_defaults_and_accepts_recipe_overrides(monkey
 
 @pytest.mark.cpu
 @pytest.mark.level0
+@pytest.mark.parametrize("value", ["{", "[]", "null", "true", '"text"', "3"])
+def test_native_engine_options_require_a_json_object(monkeypatch, capsys, value):
+    with pytest.raises(SystemExit) as exc:
+        _parse_inference_args(monkeypatch, "--engine-kwargs", value)
+    assert exc.value.code == 2
+    assert "--engine-kwargs must be a JSON object" in capsys.readouterr().err
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize(
+    "engine,device,options",
+    [
+        (
+            "vllm",
+            "cuda",
+            {"compilation_config": {"mode": 0, "cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1]}},
+        ),
+        (
+            "vllm",
+            "npu",
+            {
+                "compilation_config": {
+                    "mode": 3,
+                    "cudagraph_mode": "FULL_DECODE_ONLY",
+                    "cudagraph_capture_sizes": [1],
+                    "pass_config": {"enable_sp": False},
+                }
+            },
+        ),
+        (
+            "sglang",
+            "cuda",
+            {
+                "cuda_graph_config": {
+                    "decode": {"backend": "full", "bs": [1], "max_bs": 1},
+                    "prefill": {"backend": "disabled"},
+                },
+                "enable_torch_compile": False,
+            },
+        ),
+        (
+            "sglang",
+            "npu",
+            {
+                "cuda_graph_config": {
+                    "decode": {"backend": "full", "bs": [1], "max_bs": 1},
+                    "prefill": {"backend": "disabled"},
+                },
+                "enable_torch_compile": False,
+            },
+        ),
+    ],
+)
+def test_native_engine_options_merge_without_losing_backend_defaults(monkeypatch, engine, device, options):
+    from verl.plugin import platform
+
+    monkeypatch.setattr(platform, "get_platform", lambda: SimpleNamespace(device_name=device))
+    with monkeypatch.context() as context:
+        args = _parse_inference_args(context, "--engine", engine)
+    baseline = init_config(args, served_model_name="policy")
+    args.engine_kwargs = options
+    config = init_config(args, served_model_name="policy")
+    actual = OmegaConf.to_container(config.actor_rollout_ref.rollout.engine_kwargs, resolve=True)
+    expected = OmegaConf.to_container(baseline.actor_rollout_ref.rollout.engine_kwargs, resolve=True)
+    expected[engine].update(options)
+    assert actual == expected
+    assert config.actor_rollout_ref.rollout.enforce_eager is False
+    with monkeypatch.context() as context:
+        parsed = _parse_inference_args(context, "--engine", engine, "--engine-kwargs", json.dumps(options))
+    assert parsed.engine_kwargs == options
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_empty_native_options_preserve_the_default_configuration(monkeypatch):
+    args = _parse_inference_args(monkeypatch)
+    baseline = init_config(args, served_model_name="policy")
+    args.engine_kwargs = {}
+    actual = init_config(args, served_model_name="policy")
+    assert OmegaConf.to_container(actual, resolve=True) == OmegaConf.to_container(baseline, resolve=True)
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.parametrize("configured", [None, False, True])
 @pytest.mark.parametrize("enabled", [False, True])
 def test_language_model_only_is_opt_in_and_preserves_config(monkeypatch, configured, enabled):
