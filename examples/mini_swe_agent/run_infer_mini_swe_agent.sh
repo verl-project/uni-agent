@@ -33,6 +33,7 @@ RESULT_PATH="${RESULT_PATH:-/tmp/mini_swe_agent_infer_result.json}"
 ENGINE="${ENGINE:-vllm}"
 LANGUAGE_MODEL_ONLY="${LANGUAGE_MODEL_ONLY:-0}"
 ENFORCE_EAGER="${ENFORCE_EAGER:-0}"
+ENGINE_KWARGS_JSON="${ENGINE_KWARGS_JSON:-}"
 GATEWAY_COUNT="${GATEWAY_COUNT:-4}"
 case "${ENGINE}" in
     vllm|sglang) ;;
@@ -52,6 +53,9 @@ for option in LANGUAGE_MODEL_ONLY ENFORCE_EAGER; do
         *) echo "${option} must be 0, 1, false, or true" >&2; exit 2 ;;
     esac
 done
+if [[ -n "${ENGINE_KWARGS_JSON}" ]]; then
+    EXTRA_ARGS+=(--engine-kwargs "${ENGINE_KWARGS_JSON}")
+fi
 RUNTIME_ENV_JSON="$(python3 - <<'PY'
 import json
 import os

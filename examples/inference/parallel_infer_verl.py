@@ -74,6 +74,17 @@ def _rule(text: str = "", width: int = 50, ch: str = "-") -> str:
     return f"{ch * (pad // 2)} {text} {ch * (pad - pad // 2)}"
 
 
+def _engine_kwargs_json(value: str) -> dict:
+    """Parse the selected engine's native options without changing their values."""
+    try:
+        options = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise argparse.ArgumentTypeError("--engine-kwargs must be a JSON object") from exc
+    if not isinstance(options, dict):
+        raise argparse.ArgumentTypeError("--engine-kwargs must be a JSON object")
+    return options
+
+
 def init_config(args: argparse.Namespace, *, served_model_name: str):
     """Compose verl's ``ppo_trainer`` config and override the engine + framework knobs."""
     from hydra import compose, initialize_config_dir
@@ -158,6 +169,16 @@ def init_config(args: argparse.Namespace, *, served_model_name: str):
             raise ValueError("--language-model-only is supported only with --engine vllm or sglang")
     if getattr(args, "disable_thinking", False):
         OmegaConf.update(config, "data.apply_chat_template_kwargs.enable_thinking", False, force_add=True)
+
+    engine_kwargs = getattr(args, "engine_kwargs", None)
+    if engine_kwargs:
+        OmegaConf.update(
+            config,
+            f"actor_rollout_ref.rollout.engine_kwargs.{args.engine}",
+            engine_kwargs,
+            merge=True,
+            force_add=True,
+        )
 
     # Gateway tool-call parser: the gateway decodes tool calls from raw tokens, so
     # this must match the model's chat template (the analog of vLLM's
@@ -415,6 +436,12 @@ def main() -> None:
         "--enforce-eager",
         action="store_true",
         help="Disable CUDA graph capture in the selected engine.",
+    )
+    parser.add_argument(
+        "--engine-kwargs",
+        type=_engine_kwargs_json,
+        default=None,
+        help="JSON object of native options for the selected engine, merged after backend-specific defaults.",
     )
     parser.add_argument(
         "--disable-thinking",
