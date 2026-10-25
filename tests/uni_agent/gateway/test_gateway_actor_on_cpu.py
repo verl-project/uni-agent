@@ -394,7 +394,7 @@ def test_prefix_canonicalization_ignores_provider_ids_without_mutating_message()
 async def test_config_chat_template_kwargs_forwarded():
     """Codec-level chat-template kwargs are copied and forwarded."""
     from uni_agent.gateway.config import GatewayActorConfig
-    from uni_agent.gateway.gateway import _GatewayActor
+    from uni_agent.gateway.gateway import SINGLE_POLICY_NAME, _GatewayActor
 
     template_kwargs = {"enable_thinking": False, "default_only": "kept"}
     actor = _GatewayActor(
@@ -415,7 +415,9 @@ async def test_config_chat_template_kwargs_forwarded():
             },
         )
 
-        assert actor._codec._continuous_token_builder.chat_template_kwargs == {
+        assert actor._policy_codecs[
+            SINGLE_POLICY_NAME
+        ]._continuous_token_builder.chat_template_kwargs == {
             "enable_thinking": False,
             "default_only": "kept",
         }
