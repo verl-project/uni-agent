@@ -126,10 +126,12 @@ async def run_task(
     sample_config["prompt"] = raw_prompt
 
     resolver = TaskConfigResolver.from_file(task_config_path) if task_config_path else TaskConfigResolver()
+    base_url = getattr(session, "base_url", None)
+
     task = resolver.resolve(
         sample_config,
         runtime_model={
-            "base_url": session.base_url,
+            "base_url": base_url,
             "api_key": api_key,
             "model_name": model_name,
         },
@@ -141,8 +143,8 @@ async def run_task(
     # here when a tunnel is configured. The provider check lives inside
     # _inject_gateway_tunnel (rejected loudly for non-Yuanrong sandboxes).
     tunnel_port = (task.get("sandbox") or {}).get("sandbox_kwargs", {}).get("proxy_port")
-    if tunnel_port and session.base_url:
-        task = _inject_gateway_tunnel(task, session.base_url)
+    if tunnel_port and base_url:
+        task = _inject_gateway_tunnel(task, base_url)
 
     task_name = task.get("name")
     logger.info("run_task start: task=%s sample_index=%s", task_name, sample_index)

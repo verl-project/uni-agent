@@ -1,0 +1,410 @@
+# Three-policy blackbox training example. The shared PPO base is overridden per policy.
+# Supply model and data paths through Hydra overrides:
+#   policies.policy_1.ppo_trainer_overrides.actor_rollout_ref.model.path=/path/to/model_1
+#   policies.policy_2.ppo_trainer_overrides.actor_rollout_ref.model.path=/path/to/model_2
+#   policies.policy_3.ppo_trainer_overrides.actor_rollout_ref.model.path=/path/to/model_3
+#   data.train_files=/path/to/train.parquet data.val_files=/path/to/val.parquet
+
+# Applied before trainer construction.
+example_patch_fqn: examples.multi_policy.verl_patch
+
+# Hydra module containing verl trainer configs.
+ppo_trainer_config_source: verl.trainer.config
+# Shared verl config base; policies customize it through ppo_trainer_overrides.
+ppo_trainer_config_name: ppo_trainer
+
+data:
+  train_files: ???
+  val_files: ???
+  train_batch_size: 32
+  val_batch_size: 64
+  return_raw_chat: true
+  trust_remote_code: true
+  dataloader_num_workers: 4
+  # Required by verl's RL sampler.
+  shuffle: true
+  max_prompt_length: 16384
+  max_response_length: 1024
+
+algorithm:
+  adv_estimator: grpo
+  gamma: 1.0
+  lam: 1.0
+  use_kl_in_reward: false
+  # Enable only when reward_extra_info contains a non-sparse metric.
+  filter_groups: null
+
+# Set sync_refill_failed_groups=true to replace failed groups with fresh prompts.
+sampler:
+  max_off_policy_threshold: 8
+  max_off_policy_strategy: drop
+  sampler_kwargs: {}
+  sync_refill_failed_groups: false
+
+# Optional SkipManager settings (currently unused).
+skip:
+  rollout_tq:
+    enable: false
+
+reward:
+  # Eight workers per policy; 24 total across three policies.
+  num_workers: 8
+  custom_reward_function:
+    path: pkg://examples/multi_policy.reward
+    name: compute_score
+
+trainer:
+  project_name: uni_marl
+  experiment_name: uni_marl_blackbox_grpo
+  total_training_steps: 100
+  val_before_train: false
+  val_only: false
+  test_freq: 5
+  resume_mode: disable
+  default_local_dir: checkpoints/${trainer.project_name}/${trainer.experiment_name}
+  resume_from_path: null
+  default_hdfs_dir: null
+  del_local_ckpt_after_load: false
+  save_freq: -1
+  # Used by the outer trainer; per-policy trainers do not call fit().
+  logger: ["console"]
+  v1:
+    # Choose separate_async or sync.
+    trainer_mode: separate_async
+    separate_async:
+      # Warmup batches pre-filled into TQ.
+      num_warmup_batches: 8
+      # Must satisfy train_batch_size = parameter_sync_step * policy ppo_mini_batch_size.
+      parameter_sync_step: 1
+      # Pinned to False: per-policy trainers don't own the shared replay buffer,
+      # so enable_switch=True raises TypeError during construction.
+      # TODO: share the outer replay buffer with per-policy trainers to support GPU lending.
+      hybrid_rollout:
+        enable_switch: false
+
+# Required by separate_async; this recipe uses in-process SimpleStorage.
+transfer_queue:
+  enable: true
+  metrics:
+    enabled: false
+    port: 0
+  backend:
+    storage_backend: SimpleStorage
+    SimpleStorage:
+      total_storage_size: 100000
+      num_data_storage_units: 8
+    MooncakeStore:
+      auto_init: false
+      metadata_server: localhost:50123
+      master_server_address: localhost:50124
+      local_hostname: localhost
+      protocol: tcp
+      global_segment_size: 4294967296
+      local_buffer_size: 1073741824
+      device_name: ""
+
+ray_kwargs:
+  ray_init:
+    # null auto-detects; set a fixed count when using SLURM.
+    num_cpus: null
+    runtime_env:
+      # Apply the patch in every worker; it gives each policy unique Ray names.
+      worker_process_setup_hook: examples.multi_policy.verl_patch.apply_worker_patch
+  # Optional Ray timeline output.
+  timeline_json_file: null
+
+# Shared actor/rollout settings are projected into each policy config.
+# agent/custom settings are consumed by the outer trainer.
+actor_rollout_ref:
+  actor:
+    # Must satisfy train_batch_size = parameter_sync_step * ppo_mini_batch_size.
+    ppo_mini_batch_size: 32
+  rollout:
+    # Shared GRPO rollouts per prompt.
+    n: 4
+    # Complete MAS rollouts per validation prompt.
+    val_kwargs:
+      n: 1
+
+    agent:
+      # MAS rollout adapter.
+      agent_loop_manager_class: examples.multi_policy.framework.multi_agent_entry.MultiPolicyRolloutAdapter
+
+    custom:
+      agent_framework:
+        # Gateway actors serving LLM sessions.
+        gateway_count: 8
+        # Loss-mask policy for unfinished MAS tasks.
+        mask_unfinished_episode: false
+        # null disables logs; omitted uses UNI_AGENT_LOG_DIR or /tmp/uni_agent_logs.
+        log_dir: null
+        # Optional processor for role trajectories before reward scoring.
+        trajectory_postprocessor_fqn: null
+        trajectory_postprocessor_kwargs: {}
+        # Gateway defaults; policies may override these values locally.
+        enable_tool_parser_cache: true
+        enable_last_assistant_rollback: true
+        coalesce_reserved_exact_requests: true
+        allowed_request_sampling_param_keys: null
+        agent_runners:
+          multi_agent:
+            # Run the external MAS once per prompt/rollout.
+            runner_fqn: examples.multi_policy.external_mas.task_runner.run_multi_agent_task
+            # ray_task isolates the runner process; inline_async is also supported.
+            dispatch_mode: ray_task
+            # Runner timeout, excluding Gateway lifecycle and reward scoring.
+            session_timeout_seconds: 600
+            # Concurrent session-group limit.
+            max_concurrent_sessions: 32
+            # all keeps every trajectory; longest keeps only the longest.
+            trajectory_selection: all
+            runner_kwargs:
+              # Optional native Task YAML defaults.
+              task_config_path: null
+              execution:
+                backend: local_process
+              command:
+                argv:
+                  - python
+                  - scripts/run_search_mas.py
+                  - --config
+                  - "{config_path}"
+                  - --question
+                  - "{prompt}"
+                work_dir: examples/multi_policy/mas_apps/search
+                env: {}
+              config:
+                # MAS config template copied for each rollout.
+                template_path: examples/multi_policy/mas_apps/search/configs/inference.yaml
+                injection:
+                  # Dotted paths refer to the copied config; agent paths are role-local.
+                  # Root-level fallback URL.
+                  global_base_url_path: llm.base_url
+                  # Mapping of roles to agent configs.
+                  agents_path: agents
+                  # Each role's session URL.
+                  agent_base_url_path: llm.base_url
+                  # Agent model label; routing uses the session URL.
+                  agent_model_path: model
+                  # Inject each role URL instead of relying on the root fallback.
+                  inject_agent_base_url: true
+              timeout:
+                seconds: 600
+              result:
+                mode: stdout_json
+                field_mapping:
+                  final_result:
+                    fields:
+                      - final_answer
+                      - final_response
+                  reward_info:
+                    approved: approved
+              logs:
+                directory: null
+        # Map MAS roles to policies; the last role supplies the reward result.
+        role_policy_mapping:
+          agent_1: policy_1
+          agent_2: policy_2
+          agent_3: policy_3
+
+policies:
+  # Each policy has its own PPO config; top-level interpolations are shared.
+  # Keep algorithm settings consistent across policies.
+  # NCCL group names must be unique across policies.
+  # fsdp_size must divide nnodes * n_gpus_per_node.
+  # Keep rollout.temperature aligned with each policy's log-prob recompute.
+  policy_1:
+    ppo_trainer_overrides:
+      trainer:
+        nnodes: 1
+        n_gpus_per_node: 8
+        default_local_dir: checkpoints/multi_policy/policy_1
+        total_training_steps: ${trainer.total_training_steps}
+
+      data:
+        train_batch_size: ${data.train_batch_size}
+        apply_chat_template_kwargs: {}
+        mm_processor_kwargs: {}
+
+      actor_rollout_ref:
+        hybrid_engine: true
+        model:
+          path: ???
+          trust_remote_code: true
+
+        actor:
+          strategy: fsdp
+          use_dynamic_bsz: true
+          ppo_mini_batch_size: ${actor_rollout_ref.actor.ppo_mini_batch_size}
+          ppo_max_token_len_per_gpu: 40960
+          use_kl_loss: false
+          kl_loss_coef: 0.0
+          optim:
+            lr: 1e-6
+            weight_decay: 0.01
+          fsdp_config:
+            fsdp_size: 8
+            param_offload: true
+            optimizer_offload: true
+
+        rollout:
+          name: vllm
+          mode: async
+          checkpoint_engine:
+            backend: nccl
+            engine_kwargs:
+              nccl:
+                group_name: checkpoint_policy_1
+          n: ${actor_rollout_ref.rollout.n}
+          val_kwargs:
+            n: ${actor_rollout_ref.rollout.val_kwargs.n}
+            do_sample: false
+            temperature: 0.0
+            top_p: 1.0
+            top_k: -1
+          # 8 GPUs with TP=2 create four vLLM replicas for this policy.
+          nnodes: 1
+          n_gpus_per_node: 8
+          temperature: 1.0
+          top_p: 1.0
+          prompt_length: 16384
+          response_length: 1024
+          max_model_len: 17920
+          load_format: safetensors
+          tensor_model_parallel_size: 2
+          gpu_memory_utilization: 0.6
+          calculate_log_probs: true
+          enable_sleep_mode: true
+          free_cache_engine: true
+          multi_turn:
+            format: qwen3_coder
+
+  policy_2:
+    ppo_trainer_overrides:
+      trainer:
+        nnodes: 1
+        n_gpus_per_node: 8
+        default_local_dir: checkpoints/multi_policy/policy_2
+        total_training_steps: ${trainer.total_training_steps}
+
+      data:
+        train_batch_size: ${data.train_batch_size}
+        apply_chat_template_kwargs: {}
+        mm_processor_kwargs: {}
+
+      actor_rollout_ref:
+        hybrid_engine: true
+        model:
+          path: ???
+          trust_remote_code: true
+
+        actor:
+          strategy: fsdp
+          use_dynamic_bsz: true
+          ppo_mini_batch_size: ${actor_rollout_ref.actor.ppo_mini_batch_size}
+          ppo_max_token_len_per_gpu: 40960
+          use_kl_loss: false
+          kl_loss_coef: 0.0
+          optim:
+            lr: 1e-6
+            weight_decay: 0.01
+          fsdp_config:
+            fsdp_size: 8
+            param_offload: true
+            optimizer_offload: true
+
+        rollout:
+          name: vllm
+          mode: async
+          checkpoint_engine:
+            backend: nccl
+            engine_kwargs:
+              nccl:
+                group_name: checkpoint_policy_2
+          n: ${actor_rollout_ref.rollout.n}
+          val_kwargs:
+            n: ${actor_rollout_ref.rollout.val_kwargs.n}
+            do_sample: false
+            temperature: 0.0
+            top_p: 1.0
+            top_k: -1
+          nnodes: 1
+          n_gpus_per_node: 8
+          temperature: 1.0
+          top_p: 1.0
+          prompt_length: 16384
+          response_length: 1024
+          max_model_len: 17920
+          load_format: safetensors
+          tensor_model_parallel_size: 2
+          gpu_memory_utilization: 0.6
+          calculate_log_probs: true
+          enable_sleep_mode: true
+          free_cache_engine: true
+          multi_turn:
+            format: hermes
+
+  policy_3:
+    ppo_trainer_overrides:
+      trainer:
+        nnodes: 1
+        n_gpus_per_node: 8
+        default_local_dir: checkpoints/multi_policy/policy_3
+        total_training_steps: ${trainer.total_training_steps}
+
+      data:
+        train_batch_size: ${data.train_batch_size}
+        apply_chat_template_kwargs: {}
+        mm_processor_kwargs: {}
+
+      actor_rollout_ref:
+        hybrid_engine: true
+        model:
+          path: ???
+          trust_remote_code: true
+
+        actor:
+          strategy: fsdp
+          use_dynamic_bsz: true
+          ppo_mini_batch_size: ${actor_rollout_ref.actor.ppo_mini_batch_size}
+          ppo_max_token_len_per_gpu: 40960
+          use_kl_loss: false
+          kl_loss_coef: 0.0
+          optim:
+            lr: 1e-6
+            weight_decay: 0.01
+          fsdp_config:
+            fsdp_size: 8
+            param_offload: true
+            optimizer_offload: true
+
+        rollout:
+          name: vllm
+          mode: async
+          checkpoint_engine:
+            backend: nccl
+            engine_kwargs:
+              nccl:
+                group_name: checkpoint_policy_3
+          n: ${actor_rollout_ref.rollout.n}
+          val_kwargs:
+            n: ${actor_rollout_ref.rollout.val_kwargs.n}
+            do_sample: false
+            temperature: 0.0
+            top_p: 1.0
+            top_k: -1
+          nnodes: 1
+          n_gpus_per_node: 8
+          temperature: 1.0
+          top_p: 1.0
+          prompt_length: 16384
+          response_length: 1024
+          max_model_len: 17920
+          load_format: safetensors
+          tensor_model_parallel_size: 2
+          gpu_memory_utilization: 0.6
+          calculate_log_probs: true
+          enable_sleep_mode: true
+          free_cache_engine: true
+          multi_turn:
+            format: hermes

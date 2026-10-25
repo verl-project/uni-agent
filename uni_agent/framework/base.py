@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING, Protocol
 from tensordict import TensorDict
 
 if TYPE_CHECKING:
-    from uni_agent.gateway.session import SessionHandle
     from uni_agent.tasks import TaskResult
 
 
@@ -16,7 +15,7 @@ class AgentRunner(Protocol):
     async def __call__(
         self,
         *,
-        session: SessionHandle,
+        session: object,
         raw_prompt: object,
         sample_index: int,
         **sample_runner_kwargs: object,
