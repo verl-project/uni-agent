@@ -406,6 +406,7 @@ The trainer's ReplayBuffer consumes completed records independently of rollout t
 ## Failure Handling
 
 - A Runner exception aborts its Gateway session.
+- Aborting closes session admission, cancels active generation requests and coalesced waiters, and waits for their cleanup before the Gateway removes the session. Repeated aborts share that cleanup; cancelling the abort caller does not skip it. Aborted sessions discard their trajectories, while successful finalization and reward scoring retain their existing behavior.
 - One failed session does not discard successful sibling sessions.
 - A prompt is marked `finished` when any of its sessions succeeds.
 - A prompt is marked `failure` when all sessions fail.
