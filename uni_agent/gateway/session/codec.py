@@ -18,7 +18,7 @@ from uni_agent.gateway.utils import normalize_tool_arguments
 from verl.utils.tokenizer import normalize_token_ids
 from verl.utils.tokenizer.chat_template import apply_chat_template as _apply_chat_template
 from verl.utils.tokenizer.chat_template import initialize_turn_separator
-from verl.utils.tokenizer.continuous_token import VLContinuousTokenMixin
+from verl.utils.tokenizer.continuous_token import MergeResult, VLContinuousTokenMixin
 from verl.utils.tokenizer.continuous_token_wiring import create_continuous_token_builder
 
 # Map backend stop_reason values into the gateway's internal finish_reason vocabulary.
@@ -277,16 +277,18 @@ class MessageCodec:
         self,
         runtime_token_ids: list[int],
         assistant_token_ids: list[int],
-        response_mask: list[int],
+        response_mask: list[int] | None = None,
         response_logprobs: list[float] | None = None,
         *,
         assistant_logprobs: list[float] | None = None,
-    ) -> tuple[list[int], list[int], list[float] | None]:
+    ) -> tuple[list[int], list[int], list[float] | None] | MergeResult:
         """Merge model-generated tokens and align response metadata."""
         merge_result = self._continuous_token_builder.merge_assistant_tokens(
             runtime_token_ids,
             assistant_token_ids,
         )
+        if response_mask is None:
+            return merge_result
         response_mask, response_logprobs = self._continuous_token_builder.align_response_metadata(
             merge_result,
             response_mask,
@@ -321,13 +323,13 @@ class MessageCodec:
         previous_messages: list[dict[str, Any]],
         updated_messages: list[dict[str, Any]],
         runtime_token_ids: list[int],
-        response_mask: list[int],
+        response_mask: list[int] | None = None,
         response_logprobs: list[float] | None = None,
         *,
         tools: list[dict[str, Any]] | None = None,
         image_data: list[Any] | None = None,
         video_data: list[Any] | None = None,
-    ) -> tuple[list[int], list[int], list[float] | None]:
+    ) -> tuple[list[int], list[int], list[float] | None] | MergeResult:
         """Merge prepared context and align response metadata.
 
         image_data covers all updated_messages, including history, in block order.
@@ -364,6 +366,8 @@ class MessageCodec:
                 runtime_token_ids,
                 tools=tools,
             )
+        if response_mask is None:
+            return merge_result
         response_mask, response_logprobs = self._continuous_token_builder.align_response_metadata(
             merge_result,
             response_mask,

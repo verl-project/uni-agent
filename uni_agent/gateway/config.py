@@ -44,6 +44,9 @@ class GatewayActorConfig:
             requests in the same session share an in-flight result, including
             first-turn and new-chain requests. Enabled by default; disable for
             independent concurrent sampling of identical requests.
+        use_tree_trajectory_manager: Select TreeGatewaySession for shared-prefix
+            trajectories when true. Defaults to false, using GatewaySession
+            to manage linear chains directly.
     """
 
     tokenizer: Any
@@ -61,8 +64,11 @@ class GatewayActorConfig:
     response_length: int | None = None
     enable_last_assistant_rollback: bool = True
     coalesce_reserved_exact_requests: bool = True
+    use_tree_trajectory_manager: bool = False
 
     def __post_init__(self) -> None:
+        if type(self.use_tree_trajectory_manager) is not bool:
+            raise ValueError("use_tree_trajectory_manager must be a bool")
         if type(self.enable_tool_parser_cache) is not bool:
             raise ValueError(
                 f"enable_tool_parser_cache must be a bool, got {type(self.enable_tool_parser_cache).__name__}"

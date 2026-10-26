@@ -43,6 +43,7 @@ from uni_agent.gateway.session import (
     SessionHandle,
     Trajectory,
 )
+from uni_agent.gateway.session.tree_session import TreeGatewaySession
 from uni_agent.gateway.session.types import UnsupportedMediaError
 from verl.utils.net_utils import is_valid_ipv6_address
 from verl.workers.rollout.utils import run_uvicorn
@@ -93,6 +94,7 @@ class _GatewayActor:
         self._response_length = config.response_length
         self._enable_last_assistant_rollback = config.enable_last_assistant_rollback
         self._coalesce_reserved_exact_requests = config.coalesce_reserved_exact_requests
+        self._use_tree_trajectory_manager = config.use_tree_trajectory_manager
         self._sessions: dict[str, GatewaySession] = {}
         self._app = FastAPI()
         self._server_port: int | None = None
@@ -336,7 +338,8 @@ class _GatewayActor:
             session_id=session_id,
             base_url=f"{self._server_base_url}/sessions/{session_id}/v1",
         )
-        self._sessions[session_id] = GatewaySession(
+        session_cls = TreeGatewaySession if self._use_tree_trajectory_manager else GatewaySession
+        self._sessions[session_id] = session_cls(
             handle=handle,
             codec=self._codec,
             prompt_length=self._prompt_length,
