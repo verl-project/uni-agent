@@ -12,7 +12,14 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
-  test-npu:
+  #  detect changes file
+  changes:
+    uses: ./.github/workflows/detect-changes.yml
+
+  # ============ Job: test in npu ============
+  run:
+    needs: changes
+    if: needs.changes.outputs.npu == 'true' || needs.changes.outputs.run_all == 'true'
     runs-on: linux-aarch64-a2-8
     container:
       image: ascendai/cann:latest
@@ -76,9 +83,22 @@ jobs:
           path: coverage.xml
           retention-days: 1
 
+  npu-gate:
+    runs-on: ubuntu-latest
+    needs: [changes, run]
+    if: always()
+    steps:
+      - name: Report result
+        run: |
+          if [[ "${{ needs.run.result }}" == "failure" ]]; then
+            echo "NPU CI FAILED"
+            exit 1
+          fi
+          echo "NPU CI SUCCESS"
+
   upload:
     # Call upload workflow, which is running in Ubuntu provided by GitHub
-    needs: test-npu
+    needs: [ run, npu-gate ]
     uses: ./.github/workflows/upload_npu_assister.yml
     with:
       coverage-file: coverage.xml

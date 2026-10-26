@@ -1,0 +1,27 @@
+name: Detect Changes
+on:
+  workflow_call:
+    outputs:
+      cpu:
+        value: ${{ jobs.detect.outputs.cpu }}
+      gpu:
+        value: ${{ jobs.detect.outputs.gpu }}
+      npu:
+        value: ${{ jobs.detect.outputs.npu }}
+      run_all:
+        value: ${{ jobs.detect.outputs.run_all }}
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      cpu: ${{ steps.filter.outputs.cpu }}
+      gpu: ${{ steps.filter.outputs.gpu }}
+      npu: ${{ steps.filter.outputs.npu }}
+      run_all: ${{ steps.filter.outputs.run_all }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: tests/uni_agent/filter-paths.yml

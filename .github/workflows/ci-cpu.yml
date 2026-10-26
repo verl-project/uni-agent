@@ -13,8 +13,14 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
+  #  detect changes file
+  changes:
+    uses: ./.github/workflows/detect-changes.yml
+
   # ============ Job: test in cpu ============
-  test-cpu:
+  run:
+    needs: changes
+    if: needs.changes.outputs.cpu == 'true' || needs.changes.outputs.run_all == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 60
 
@@ -60,3 +66,17 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           file: ./coverage.xml
           flags: cpu-tests
+          fail_ci_if_error: false
+
+  cpu-gate:
+    runs-on: ubuntu-latest
+    needs: [ changes, run ]
+    if: always()
+    steps:
+      - name: Report result
+        run: |
+          if [[ "${{ needs.run.result }}" == "failure" ]]; then
+            echo "CPU CI FAILED"
+            exit 1
+          fi
+          echo "CPU CI SUCCESS"

@@ -1,0 +1,22 @@
+# Set the relationship between files and backend ci
+# If the file is detected in certain backend fileter,
+# the change of file will only call ci in this backend;
+# while the one is not detected in any backend fileter,
+# the change of file will call ci in all backend.
+
+cpu:
+  - '.github/workflows/ci-cpu.yml'
+gpu:
+  - '.github/workflows/ci-gpu.yml'
+  - 'examples/agent_aware_router/multi-node.sh'
+  - 'examples/agent_aware_router/single-node.sh'
+npu:
+  - '.github/workflows/ci-npu.yml'
+  - '.github/workflows/upload_npu_assister.yml'
+run_all:
+  - '!.github/workflows/ci-cpu.yml'
+  - '!.github/workflows/ci-gpu.yml'
+  - '!.github/workflows/ci-npu.yml'
+  - '!.github/workflows/upload_npu_assister.yml'
+  - '!examples/agent_aware_router/multi-node.sh'
+  - '!examples/agent_aware_router/single-node.sh'
