@@ -14,8 +14,13 @@ yaml without authoring per-recipe glue:
 
 from __future__ import annotations
 
+import copy
+import logging
+from uuid import uuid4
+
 import ray
-from omegaconf import OmegaConf
+from omegaconf import OmegaConf, open_dict, read_write
+from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
 from uni_agent.framework.base import AgentFramework
 from uni_agent.gateway.config import GatewayActorConfig
@@ -27,6 +32,9 @@ from verl.utils.transferqueue_utils import tq
 from verl.workers.config import HFModelConfig, RolloutConfig
 
 _DEFAULT_FRAMEWORK_CLASS = "uni_agent.framework.framework.GatewayAgentFramework"
+_AGENT_RUNNERS_PATH = "actor_rollout_ref.rollout.custom.agent_framework.agent_runners"
+
+logger = logging.getLogger(__name__)
 
 
 def build_gateway_manager(*, config, llm_client) -> GatewayManager:
@@ -93,6 +101,44 @@ def build_agent_framework(
     )
 
 
+def split_session_caps(config, num_workers: int) -> list:
+    """Return one config per framework worker with each runner's session cap split across workers.
+
+    ``max_concurrent_sessions`` is enforced inside each framework process, so worker ``i`` gets
+    ``cap // n`` plus one slot of the remainder and the shares sum to the configured cap. A share
+    of 0 would mean "unlimited", so fewer workers are used when a cap is below ``num_workers``.
+    """
+    runners = OmegaConf.select(config, _AGENT_RUNNERS_PATH, default=None) or {}
+    caps = {}
+    for name, runner_cfg in runners.items():
+        cap = int(runner_cfg.get("max_concurrent_sessions", 0) or 0)
+        if cap > 0:
+            caps[name] = cap
+    if not caps:
+        return [config] * num_workers
+
+    smallest_cap = min(caps.values())
+    if smallest_cap < num_workers:
+        logger.warning(
+            "max_concurrent_sessions=%s is below agent.num_workers=%s; using %s framework workers",
+            smallest_cap,
+            num_workers,
+            smallest_cap,
+        )
+        num_workers = smallest_cap
+
+    worker_configs = []
+    for index in range(num_workers):
+        worker_config = copy.deepcopy(config)
+        worker_runners = OmegaConf.select(worker_config, _AGENT_RUNNERS_PATH)
+        with read_write(worker_runners), open_dict(worker_runners):
+            for name, cap in caps.items():
+                share = cap // num_workers + (1 if index < cap % num_workers else 0)
+                worker_runners[name]["max_concurrent_sessions"] = share
+        worker_configs.append(worker_config)
+    return worker_configs
+
+
 @ray.remote
 class AgentFrameworkWorker:
     """Ray actor host: initializes TQ in this process and owns one AgentFramework.
@@ -124,6 +170,9 @@ class AgentFrameworkRolloutAdapter:
 
     def __init__(self) -> None:
         self.framework_worker = None
+        self.framework_workers = []
+        # Streaming refills dispatch a few prompts at a time, so rotate the first worker across calls.
+        self._next_worker = 0
         # Driver-owned so the gateway actors outlive the framework worker; also
         # the handle through which teardown can be driven once a call site exists.
         self.gateway_manager = None
@@ -145,23 +194,57 @@ class AgentFrameworkRolloutAdapter:
             )
 
         gateway_manager = build_gateway_manager(config=config, llm_client=llm_client)
-        framework_worker = AgentFrameworkWorker.remote(
-            config=config,
-            gateway_manager=gateway_manager,
-            reward_loop_worker_handles=reward_loop_worker_handles,
-        )
+        configured_num_workers = OmegaConf.select(config, "actor_rollout_ref.rollout.agent.num_workers", default=1)
+        num_workers = 1 if configured_num_workers is None else int(configured_num_workers)
+        if num_workers <= 0:
+            raise ValueError(f"actor_rollout_ref.rollout.agent.num_workers must be positive, got {num_workers}")
+        node_ids = [
+            node["NodeID"] for node in ray.nodes() if node["Alive"] and float(node["Resources"].get("CPU", 0)) > 0
+        ]
+        if not node_ids:
+            raise RuntimeError("no alive Ray nodes with CPU resources for AgentFrameworkWorker")
+
+        framework_workers = []
+        for index, worker_config in enumerate(split_session_caps(config, num_workers)):
+            node_id = node_ids[index % len(node_ids)]
+            framework_workers.append(
+                AgentFrameworkWorker.options(
+                    name=f"agent_framework_worker_{index}_{uuid4().hex[:8]}",
+                    scheduling_strategy=NodeAffinitySchedulingStrategy(node_id=node_id, soft=True),
+                ).remote(
+                    config=worker_config,
+                    gateway_manager=gateway_manager,
+                    reward_loop_worker_handles=reward_loop_worker_handles,
+                )
+            )
 
         instance = cls()
-        instance.framework_worker = framework_worker
+        # Keep the singular handle for compatibility with external code that only
+        # inspects the adapter. Dispatch always uses the complete worker list.
+        instance.framework_worker = framework_workers[0]
+        instance.framework_workers = framework_workers
         instance.gateway_manager = gateway_manager
         return instance
 
+    def _dispatch(self, prompts):
+        if not self.framework_workers:
+            raise RuntimeError("framework must be initialized before generate_sequences")
+        if len(prompts) == 0:
+            return []
+        num_workers = len(self.framework_workers)
+        num_chunks = min(num_workers, len(prompts))
+        base, remainder = divmod(len(prompts), num_chunks)
+        chunks = prompts.split([base + (i < remainder) for i in range(num_chunks)])
+        start = self._next_worker
+        self._next_worker = (start + len(chunks)) % num_workers
+        return [
+            self.framework_workers[(start + i) % num_workers].generate_sequences.remote(chunk)
+            for i, chunk in enumerate(chunks)
+        ]
+
     def generate_sequences(self, prompts) -> None:
         """Submit a TQ batch generation task without waiting for rollout results."""
-        if self.framework_worker is None:
-            raise RuntimeError("framework must be initialized before generate_sequences")
-
-        self.framework_worker.generate_sequences.remote(prompts)
+        self._dispatch(prompts)
         return None
 
     def generate_sequences_and_wait(self, prompts) -> None:
@@ -171,8 +254,5 @@ class AgentFrameworkRolloutAdapter:
         via its ReplayBuffer); this awaits the framework worker so the caller knows every
         session's trajectory has landed in TQ, and re-raises any worker-side error.
         """
-        if self.framework_worker is None:
-            raise RuntimeError("framework must be initialized before generate_sequences")
-
-        ray.get(self.framework_worker.generate_sequences.remote(prompts))
+        ray.get(self._dispatch(prompts))
         return None
