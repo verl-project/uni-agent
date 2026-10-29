@@ -4,7 +4,7 @@ import json
 import logging
 import os
 import sys
-from argparse import ArgumentParser, Namespace
+from argparse import ArgumentParser, ArgumentTypeError, Namespace
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -17,7 +17,7 @@ pytest.importorskip("ray")
 from examples.agent_aware_router import run_infer
 from examples.agent_aware_router.run_infer import init_config as init_router_config
 from examples.inference import parallel_infer_verl
-from examples.inference.parallel_infer_verl import init_config
+from examples.inference.parallel_infer_verl import _parse_json_object, init_config
 
 
 def _parse_inference_args(monkeypatch, *argv):
@@ -146,6 +146,11 @@ def router_args():
         temperature=0.4,
         top_p=0.85,
         top_k=20,
+        apply_chat_template_kwargs={
+            "enable_thinking": True,
+            "reasoning_effort": "max",
+            "drop_thinking": False,
+        },
         allowed_request_sampling_param_keys=["temperature", "top_p", "top_k"],
         n=2,
         nnodes=1,
@@ -204,6 +209,11 @@ def test_inference_sampling_uses_run_options_and_preserves_length_configuration(
     assert rollout.response_length == config.data.max_response_length == expected_response_length
     if entrypoint is init_config:
         assert rollout.max_model_len == expected_prompt_length + expected_response_length
+        assert dict(config.data.apply_chat_template_kwargs) == {
+            "enable_thinking": True,
+            "reasoning_effort": "max",
+            "drop_thinking": False,
+        }
     assert rollout.custom.agent_framework.allowed_request_sampling_param_keys == ["temperature", "top_p", "top_k"]
     task_runner = rollout.custom.agent_framework.agent_runners.task
     if simulated_runner:
@@ -211,6 +221,17 @@ def test_inference_sampling_uses_run_options_and_preserves_length_configuration(
         assert not task_runner.runner_kwargs
     else:
         assert task_runner.runner_kwargs.task_config_path == args.task_config
+
+
+def test_parse_apply_chat_template_kwargs_requires_json_object():
+    assert _parse_json_object('{"enable_thinking":true,"thinking_budget":4096}') == {
+        "enable_thinking": True,
+        "thinking_budget": 4096,
+    }
+    with pytest.raises(ArgumentTypeError, match="expected a JSON object"):
+        _parse_json_object('["not", "an", "object"]')
+    with pytest.raises(ArgumentTypeError, match="invalid JSON object"):
+        _parse_json_object("{")
 
 
 @pytest.mark.cpu

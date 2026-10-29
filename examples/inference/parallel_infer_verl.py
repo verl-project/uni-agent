@@ -74,6 +74,17 @@ def _rule(text: str = "", width: int = 50, ch: str = "-") -> str:
     return f"{ch * (pad // 2)} {text} {ch * (pad - pad // 2)}"
 
 
+def _parse_json_object(value: str) -> dict[str, object]:
+    """Parse one CLI JSON object."""
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise argparse.ArgumentTypeError(f"invalid JSON object: {exc.msg}") from exc
+    if not isinstance(parsed, dict):
+        raise argparse.ArgumentTypeError("expected a JSON object")
+    return parsed
+
+
 def init_config(args: argparse.Namespace, *, served_model_name: str):
     """Compose verl's ``ppo_trainer`` config and override the engine + framework knobs."""
     from hydra import compose, initialize_config_dir
@@ -156,6 +167,13 @@ def init_config(args: argparse.Namespace, *, served_model_name: str):
             )
         else:
             raise ValueError("--language-model-only is supported only with --engine vllm or sglang")
+    if (apply_chat_template_kwargs := getattr(args, "apply_chat_template_kwargs", None)) is not None:
+        OmegaConf.update(
+            config,
+            "data.apply_chat_template_kwargs",
+            dict(apply_chat_template_kwargs),
+            force_add=True,
+        )
     if getattr(args, "disable_thinking", False):
         OmegaConf.update(config, "data.apply_chat_template_kwargs.enable_thinking", False, force_add=True)
 
@@ -369,6 +387,13 @@ def main() -> None:
     parser.add_argument("--temperature", type=float, default=DEFAULT_TEMPERATURE, help="Default sampling temperature.")
     parser.add_argument("--top-p", type=float, default=DEFAULT_TOP_P, help="Default nucleus sampling probability.")
     parser.add_argument("--top-k", type=int, default=-1, help="Default top-k sampling (-1 disables).")
+    parser.add_argument(
+        "--apply-chat-template-kwargs",
+        type=_parse_json_object,
+        default=None,
+        metavar="JSON",
+        help="JSON object assigned to data.apply_chat_template_kwargs for model-specific prompt rendering.",
+    )
     parser.add_argument(
         "--allowed-request-sampling-param-keys",
         nargs="+",

@@ -141,6 +141,8 @@ Supported fields are:
 - `agent.kwargs`: agent-specific parameters passed as repeated Harbor `--agent-kwarg` options.
 - `agent.timeout_sec`: an optional Harbor agent timeout in seconds.
 - `harbor_env`: the Harbor environment backend, such as `docker`, `modal`, or `e2b`.
+- `add_model_host_to_allowlist`: whether to add the model endpoint host to the agent-phase network allowlist.
+  Set this to `false` when the task environment does not connect to the model endpoint directly.
 - `timeout_multiplier`: a positive multiplier applied to Harbor's task timeouts; the default is `1.0`.
 - `override_cpus` / `override_memory_mb`: optional environment resource overrides.
 - `agent.model`: the model endpoint, API key, and model name injected by the inference runner at runtime.
