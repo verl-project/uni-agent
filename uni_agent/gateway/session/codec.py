@@ -188,12 +188,8 @@ class MessageCodec:
         self._vision_info_extractor_kwargs = dict(vision_info_extractor_kwargs or {})
         processing_class = processor if processor is not None else tokenizer
         if normalized_model_type == "deepseek_v4":
-            generation_prompt = "<｜Assistant｜>" + (
-                "<think>" if deepseek_v4_thinking else "</think>"
-            )
-            self._generation_prompt = normalize_token_ids(
-                tokenizer.encode(generation_prompt, add_special_tokens=False)
-            )
+            generation_prompt = "<｜Assistant｜>" + ("<think>" if deepseek_v4_thinking else "</think>")
+            self._generation_prompt = normalize_token_ids(tokenizer.encode(generation_prompt, add_special_tokens=False))
             self._turn_separator = []
         elif hasattr(processing_class, "chat_template") and processing_class.chat_template is None:
             self._generation_prompt = []

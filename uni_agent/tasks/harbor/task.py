@@ -107,9 +107,7 @@ def _model_endpoint_host(config: HarborTaskConfig) -> str | None:
         return None
     host = urlsplit(config.agent.model.base_url).hostname
     if host is None:
-        raise ValueError(
-            f"Harbor agent.model.base_url must be an absolute URL, got {config.agent.model.base_url!r}"
-        )
+        raise ValueError(f"Harbor agent.model.base_url must be an absolute URL, got {config.agent.model.base_url!r}")
     if host.lower() == "localhost" or host in {"127.0.0.1", "::1"}:
         return None
     return host
