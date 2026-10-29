@@ -67,6 +67,8 @@ nav:
       - Logging: concepts/logging.md
       - RL-Insight Integration: concepts/rl-insight-integration.md
       - Agent Aware Router: concepts/agent-aware-router.md
+  - Advanced:
+      - Inference Engine Options: advanced/inference-engine-options.md
   - Benchmark:
       - Overview: benchmark/index.md
       - Inference and Verification: benchmark/inference.md
