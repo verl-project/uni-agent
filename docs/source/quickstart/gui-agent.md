@@ -29,7 +29,11 @@ task = get_task({
                  + [{"name": "finish"}],
         "max_steps": 8,
     },
-    "setup_command": "nohup python3 /opt/gui/button_app.py >/tmp/app.log 2>&1 </dev/null & sleep 3",
+    "setup_command": (
+        "nohup /opt/gui/start_desktop.sh sleep infinity >/tmp/xvfb.log 2>&1 & "
+        'until xdpyinfo -display "$DISPLAY" >/dev/null 2>&1; do sleep 0.2; done; '
+        "nohup python3 /opt/gui/button_app.py >/tmp/app.log 2>&1 </dev/null & sleep 3"
+    ),
     "verify_command": "test -f /tmp/gui_button_clicked",
     "prompt": [
         {"role": "system", "content": "You control a Linux desktop with tools. Your first action must be screenshot. "

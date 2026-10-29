@@ -69,6 +69,8 @@ class GuiTask(Task):
             agent_result = await self.build_agent().run(sandbox=sandbox, messages=messages)
 
             verify = await sandbox.exec_shell(cfg.verify_command, timeout=cfg.verify_timeout, env=env)
+            if verify.timed_out:
+                raise TimeoutError(f"gui verify_command exceeded {cfg.verify_timeout}s")
 
         solved = verify.exit_code == 0
         logger.info(f"gui task done: solved={solved} verify_exit_code={verify.exit_code}")

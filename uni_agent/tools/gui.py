@@ -20,11 +20,10 @@ from typing import Any, ClassVar, Literal
 
 from pydantic import BaseModel, Field
 
+from ..sandbox.base import ExecResult
 from .base import Tool, ToolError, ToolResult, register_tool
 
 _SCREENSHOT_PATH = "/tmp/uni_agent_gui_screenshot.png"
-#: ``Sandbox.exec`` reports a command that hit its timeout with this exit code.
-_TIMEOUT_EXIT_CODE = -1
 _PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 
 
@@ -67,14 +66,14 @@ class _GuiTool(Tool):
             )
         return schema
 
-    async def _pixels(self, x: int, y: int) -> tuple[int, int]:
+    async def _pixels(self, x: int, y: int, *, timeout: float | None = None) -> tuple[int, int]:
         """Convert a model coordinate to screen pixels per ``coordinate_space``."""
         if self._cfg.coordinate_space == "pixel":
             return x, y
         if x > 1000 or y > 1000:
             raise ToolError(f"coordinates must be within 0-1000, got ({x}, {y})")
         if self._screen_size is None:
-            result = await self.sandbox.exec(["xdotool", "getdisplaygeometry"], env={"DISPLAY": self._cfg.display})
+            result = await self._x(["xdotool", "getdisplaygeometry"], timeout=timeout, check=False)
             try:
                 width, height = (int(v) for v in result.stdout.split())
             except ValueError:
@@ -93,13 +92,14 @@ class _GuiTool(Tool):
     @abc.abstractmethod
     async def _run(self, args: dict[str, Any], *, timeout: float | None = None) -> ToolResult: ...
 
-    async def _x(self, argv: list[str], *, timeout: float | None = None) -> None:
+    async def _x(self, argv: list[str], *, timeout: float | None = None, check: bool = True) -> ExecResult:
         result = await self.sandbox.exec(argv, timeout=timeout, env={"DISPLAY": self._cfg.display})
-        if result.exit_code == _TIMEOUT_EXIT_CODE:
+        if result.timed_out:
             raise _CommandTimeout(f"`{argv[0]}` did not finish within {timeout}s")
-        if result.exit_code != 0:
+        if check and result.exit_code != 0:
             detail = (result.stderr or result.stdout).strip()[:500]
             raise ToolError(f"`{argv[0]}` failed (exit {result.exit_code}): {detail}")
+        return result
 
     async def _screenshot(self, *, timeout: float | None = None) -> str:
         await self._x(["import", "-window", "root", _SCREENSHOT_PATH], timeout=timeout)
@@ -146,7 +146,7 @@ class ClickTool(_GuiTool):
     args_model = ClickArguments
 
     async def _run(self, args: dict[str, Any], *, timeout: float | None = None) -> ToolResult:
-        x, y = await self._pixels(int(args["x"]), int(args["y"]))
+        x, y = await self._pixels(int(args["x"]), int(args["y"]), timeout=timeout)
         button = args.get("button", "left")
         repeat = "2" if args.get("double") else "1"
         await self._x(
@@ -210,7 +210,7 @@ class ScrollTool(_GuiTool):
     args_model = ScrollArguments
 
     async def _run(self, args: dict[str, Any], *, timeout: float | None = None) -> ToolResult:
-        x, y = await self._pixels(int(args["x"]), int(args["y"]))
+        x, y = await self._pixels(int(args["x"]), int(args["y"]), timeout=timeout)
         direction, amount = args["direction"], int(args.get("amount", 3))
         await self._x(
             ["xdotool", "mousemove", str(x), str(y), "click", "--repeat", str(amount), _WHEEL[direction]],

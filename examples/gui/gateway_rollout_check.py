@@ -68,61 +68,76 @@ class VllmBackend:
 
 
 async def main():
-    xvfb = subprocess.Popen(
-        ["Xvfb", ":0", "-screen", "0", "1024x768x24"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-    )
-    for _ in range(50):
-        if subprocess.run(["xdpyinfo", "-display", ":0"], capture_output=True).returncode == 0:
-            break
-        time.sleep(0.2)
+    xvfb = engine = actor = None
+    session_open = False
+    try:
+        xvfb = subprocess.Popen(
+            ["Xvfb", ":0", "-screen", "0", "1024x768x24"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
+        for _ in range(50):
+            if subprocess.run(["xdpyinfo", "-display", ":0"], capture_output=True).returncode == 0:
+                break
+            time.sleep(0.2)
 
-    tok = AutoTokenizer.from_pretrained(NAME)
-    proc = AutoProcessor.from_pretrained(NAME)
-    engine = AsyncLLM.from_engine_args(
-        AsyncEngineArgs(model=NAME, max_model_len=16384, gpu_memory_utilization=0.85, limit_mm_per_prompt={"image": 12})
-    )
-    backend = VllmBackend(engine)
-    actor = _GatewayActor(
-        GatewayActorConfig(
-            tokenizer=tok,
-            processor=proc,
-            tool_parser_name="hermes",
-            rollout_backend="vllm",
-            hf_model_type="qwen3_vl",
-            allowed_request_sampling_param_keys={"temperature", "top_p", "top_k"},
-        ),
-        backend,
-    )
-    await actor.start()
-    handle = await actor.create_session("gui-rollout-0", sampling_params={"logprobs": True})
-
-    task = get_task(
-        {
-            "name": "gui",
-            "sandbox": {"provider": "local"},
-            "agent": {
-                "name": "react",
-                "model": {"base_url": handle.base_url, "model_name": "policy"},
-                "tools": [{"name": n, "display": ":0", "coordinate_space": "relative_1000"} for n in TOOLS]
-                + [{"name": "finish"}],
-                "max_steps": 8,
-                "sampling_params_override": {"temperature": 0.0, "max_tokens_per_turn": 512},
-            },
-            "setup_command": (
-                "rm -f /tmp/gui_button_clicked; "
-                "nohup /usr/bin/python3 /app/button_app.py >/tmp/app.log 2>&1 </dev/null & sleep 3"
+        tok = AutoTokenizer.from_pretrained(NAME)
+        proc = AutoProcessor.from_pretrained(NAME)
+        engine = AsyncLLM.from_engine_args(
+            AsyncEngineArgs(
+                model=NAME, max_model_len=16384, gpu_memory_utilization=0.85, limit_mm_per_prompt={"image": 12}
+            )
+        )
+        backend = VllmBackend(engine)
+        actor = _GatewayActor(
+            GatewayActorConfig(
+                tokenizer=tok,
+                processor=proc,
+                tool_parser_name="hermes",
+                rollout_backend="vllm",
+                hf_model_type="qwen3_vl",
+                allowed_request_sampling_param_keys={"temperature", "top_p", "top_k"},
             ),
-            "verify_command": "test -f /tmp/gui_button_clicked",
-            "prompt": [
-                {"role": "system", "content": SYSTEM},
-                {"role": "user", "content": "Click the SUBMIT button on screen."},
-            ],
-        }
-    )
-    result = await task.run()
-    trajectories = await actor.finalize_session("gui-rollout-0")
-    await actor.shutdown()
-    xvfb.terminate()
+            backend,
+        )
+        await actor.start()
+        handle = await actor.create_session("gui-rollout-0", sampling_params={"logprobs": True})
+        session_open = True
+
+        task = get_task(
+            {
+                "name": "gui",
+                "sandbox": {"provider": "local"},
+                "agent": {
+                    "name": "react",
+                    "model": {"base_url": handle.base_url, "model_name": "policy"},
+                    "tools": [{"name": n, "display": ":0", "coordinate_space": "relative_1000"} for n in TOOLS]
+                    + [{"name": "finish"}],
+                    "max_steps": 8,
+                    "sampling_params_override": {"temperature": 0.0, "max_tokens_per_turn": 512},
+                },
+                "setup_command": (
+                    "rm -f /tmp/gui_button_clicked; "
+                    "nohup /usr/bin/python3 /app/button_app.py >/tmp/app.log 2>&1 </dev/null & sleep 3"
+                ),
+                "verify_command": "test -f /tmp/gui_button_clicked",
+                "prompt": [
+                    {"role": "system", "content": SYSTEM},
+                    {"role": "user", "content": "Click the SUBMIT button on screen."},
+                ],
+            }
+        )
+        result = await task.run()
+        trajectories = await actor.finalize_session("gui-rollout-0")
+        session_open = False
+    finally:
+        if actor is not None:
+            if session_open:
+                await actor.abort_session("gui-rollout-0")
+            await actor.shutdown()
+        if engine is not None:
+            engine.shutdown()
+        if xvfb is not None:
+            xvfb.terminate()
+            xvfb.wait()
 
     print("RESULT", result)
     print("BACKEND CALLS", backend.calls)
@@ -155,7 +170,6 @@ async def main():
     for i, seg in enumerate(segs):
         print(f"MODEL TURN {i}: {tok.decode(seg)[:230]!r}")
     print("GATEWAY ROLLOUT PASS")
-    engine.shutdown()
 
 
 asyncio.run(main())

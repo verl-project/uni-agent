@@ -39,6 +39,13 @@ def build_task_config(args: argparse.Namespace) -> dict:
     if args.provider == "modal":
         sandbox["sandbox_kwargs"] = {"startup_command": ["/opt/gui/start_desktop.sh", "sleep", "infinity"]}
     button_app = "/usr/bin/python3 /app/button_app.py" if args.provider == "local" else "python3 /opt/gui/button_app.py"
+    desktop_setup = ""
+    if args.provider == "docker":
+        # DockerSandbox overrides the image entrypoint, so start Xvfb ourselves.
+        desktop_setup = (
+            "nohup /opt/gui/start_desktop.sh sleep infinity >/tmp/xvfb.log 2>&1 & "
+            'until xdpyinfo -display "$DISPLAY" >/dev/null 2>&1; do sleep 0.2; done; '
+        )
     return {
         "name": "gui",
         "sandbox": sandbox,
@@ -53,7 +60,10 @@ def build_task_config(args: argparse.Namespace) -> dict:
             "sampling_params_override": {"temperature": 0.0, "max_tokens_per_turn": 512},
         },
         "display": args.display,
-        "setup_command": f"rm -f /tmp/gui_button_clicked; nohup {button_app} >/tmp/app.log 2>&1 </dev/null & sleep 3",
+        "setup_command": (
+            f"{desktop_setup}rm -f /tmp/gui_button_clicked; "
+            f"nohup {button_app} >/tmp/app.log 2>&1 </dev/null & sleep 3"
+        ),
         "verify_command": "test -f /tmp/gui_button_clicked",
         "prompt": [
             {"role": "system", "content": SYSTEM_PROMPT},

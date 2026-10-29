@@ -16,7 +16,11 @@ Task sample (`gui` task, ReAct agent, docker sandbox with the image above):
     "sandbox": {"provider": "docker", "image": "uni-agent-gui"},
     "agent": {"name": "react", "tools": [{"name": n, "coordinate_space": "relative_1000"} for n in
               ("gui_screenshot", "gui_click", "gui_type", "gui_key", "gui_scroll")] + [{"name": "finish"}]},
-    "setup_command": "nohup python3 /opt/gui/button_app.py >/tmp/app.log 2>&1 </dev/null & sleep 3",
+    "setup_command": (
+        "nohup /opt/gui/start_desktop.sh sleep infinity >/tmp/xvfb.log 2>&1 & "
+        'until xdpyinfo -display "$DISPLAY" >/dev/null 2>&1; do sleep 0.2; done; '
+        "nohup python3 /opt/gui/button_app.py >/tmp/app.log 2>&1 </dev/null & sleep 3"
+    ),
     "verify_command": "test -f /tmp/gui_button_clicked",
     "metadata": {"instruction": "Click the SUBMIT button."},
 }

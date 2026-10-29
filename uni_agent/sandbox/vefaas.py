@@ -391,7 +391,7 @@ class VefaasSandbox(Sandbox):
                 Command(command=list(argv), shell=False, cwd=workdir, env=env or None, timeout=timeout)
             )
         except CommandTimeoutError as e:
-            return ExecResult(exit_code=-1, stdout="", stderr=str(e))
+            return ExecResult(exit_code=-1, stdout="", stderr=str(e), timed_out=True)
         except SwerexException as e:
             return ExecResult(exit_code=1, stdout="", stderr=str(e))
         return ExecResult(
