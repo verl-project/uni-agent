@@ -136,6 +136,8 @@ def test_launch_endpoint_prompt_and_no_secret_in_argv():
         "uni-agent/org/policy",
         "--agent",
         "build",
+        "--dir",
+        "/workspace with spaces",
         "--title",
         "Uni-Agent rollout",
         "--",

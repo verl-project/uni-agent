@@ -47,7 +47,9 @@ result = await agent.run(
 )
 ```
 
-`workdir` must be absolute and defaults to `/testbed`. System prompts, chat
+`workdir` must be absolute and defaults to `/testbed`. The adapter passes it both
+to `Sandbox.exec` and explicitly to OpenCode's `--dir`, so an inherited `PWD`
+cannot select a different repository. System prompts, chat
 histories, and multimodal messages are rejected before sandbox operations rather
 than silently dropped. OpenCode supplies its normal build-agent system prompt.
 
@@ -59,7 +61,7 @@ and `options.apiKey` references a dedicated environment variable. Thus the CLI
 posts streaming requests to `<baseURL>/chat/completions`, rather than Responses
 or Anthropic Messages. Model names containing a slash remain intact.
 
-The launch uses `run --pure --format json --model uni-agent/<model> --agent build`
+The launch uses `run --pure --format json --model uni-agent/<model> --agent build --dir <workdir>`
 and passes the user text as one argument after `--`. It uses `Sandbox.exec(argv)`
 without a shell. Only the configured provider is enabled. Title/summary agents,
 automatic compaction, sharing, update checks, model-catalog downloads, project
@@ -100,6 +102,51 @@ and Docker backends is outside this adapter change (see upstream PRs
 [#199](https://github.com/verl-project/uni-agent/pull/199)). Do not treat the
 prototype as validated cancellation containment or a production RL recipe.
 
+## Minimal Task lifecycle demo
+
+For a complete, small local example, run [smoke_task.py](smoke_task.py) from the
+repository root. It uses the real pinned CLI with a local **scripted** Chat
+Completions server. No provider account, real model, Gateway, GPU, Ray, or RL
+training is involved. The fixed tool response is a test fixture, not evidence
+of model problem-solving ability.
+
+In a Python 3.10–3.12 virtual environment, install the minimal Python dependencies
+and explicitly select a provisioned OpenCode 1.19.3 executable:
+
+```bash
+python -m pip install -e . pydantic PyYAML
+python -m examples.opencode.smoke_task \
+  --opencode-bin /opt/opencode/node_modules/.bin/opencode
+```
+
+`PatchSmokeTask` prepares a temporary `calculator.py` whose `add` function is
+incorrect, builds the Agent and LocalSandbox from a TaskConfig, and invokes the
+CLI. The scripted response requests a relative-path edit. An independent Python
+process checks two additions; TaskResult reports the score separately from
+Agent completion. The Task then removes its workspace and private CLI state,
+and the example closes its local HTTP server. This is a direct Task invocation;
+it does not exercise the Framework runner or Gateway trajectory finalization.
+
+The normal run exits 0 and prints `reward: 1.0`, `finished: true`,
+`verifier_exit_code: 0`, `requests: 2`, and `workspace_removed: true`.
+The negative control deliberately returns a final answer without editing:
+
+```bash
+python -m examples.opencode.smoke_task \
+  --opencode-bin /opt/opencode/node_modules/.bin/opencode --scenario no-edit
+```
+
+This run **intentionally exits 1**, with `reward: 0.0`, `finished: true`,
+`verifier_exit_code: 1`, `requests: 1`, and `workspace_removed: true`. A missing
+or incompatible CLI also fails the example, rather than producing a passing
+score. Unfinished Agent runs are not verified.
+
+LocalSandbox executes on the host and does not provide container isolation.
+The example serves only a fixed, short file-writing command and is intended for
+this synthetic fixture. It does not fix or validate subprocess termination on
+timeout/cancellation; the provider limitations above still apply. Linux image
+deployment and real-model task success require separate validation.
+
 ## Validation and compatibility
 
 CPU tests use a FakeSandbox and require no CLI, GPU, provider account, or model:
@@ -126,15 +173,16 @@ tokenizer/parser stack, or real model inference. AgentResult.finished reflects
 OpenCode harness completion; trajectory completion is owned by the Task or
 Framework.
 
-Both optional black-box tests are disabled unless OPENCODE_BIN is explicitly
-set. To run them against a provisioned OpenCode 1.19.3 executable (as a command
+The CLI/Gateway probes and real-CLI Task cases are disabled unless OPENCODE_BIN
+is explicitly set. To run them against a provisioned OpenCode 1.19.3 executable (as a command
 on PATH or an executable path):
 
 ```bash
 OPENCODE_BIN=/opt/opencode/node_modules/.bin/opencode \
   python -m pytest \
   tests/uni_agent/agents/test_opencode_cli_probe.py \
-  tests/uni_agent/agents/test_opencode_gateway_integration.py -q
+  tests/uni_agent/agents/test_opencode_gateway_integration.py \
+  tests/uni_agent/agents/test_opencode_task_smoke.py -q
 ```
 
 The synthetic endpoints use no account, credential, GPU, or external model.
@@ -146,6 +194,13 @@ Sandbox execution, long-context behavior, GPU inference, and RL training remain
 unverified. No public API migration is required. Other OpenCode versions
 deliberately fail preflight until their command/config/event contracts are
 verified and the adapter's pinned version is updated.
+
+The CLI probe deliberately inherits a `PWD` different from its workspace and
+uses a relative tool write, including a workspace path containing spaces and a
+quote. Task cases check positive and no-edit scores, workspace removal, and
+missing-CLI cleanup. The missing-CLI case needs no OpenCode installation; it
+still opens a temporary loopback server. Default CI does not provision the
+native CLI, so a green CPU job alone does not establish black-box compatibility.
 
 ## Sources
 

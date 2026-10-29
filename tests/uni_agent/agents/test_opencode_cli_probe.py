@@ -91,6 +91,12 @@ def _configured_cli() -> str:
 async def test_real_cli_synthetic_sse_and_process_boundary_probes(tmp_path, monkeypatch):
     cli = _configured_cli()
 
+    # OpenCode otherwise prefers inherited PWD over the subprocess cwd. Use a
+    # different, test-owned directory and a relative tool write to catch this.
+    inherited_directory = tmp_path / "inherited-directory"
+    inherited_directory.mkdir()
+    monkeypatch.setenv("PWD", str(inherited_directory))
+
     state = {"scenario": "text", "requests": [], "tool_command": "", "sleep_seconds": 0.0}
 
     class Handler(BaseHTTPRequestHandler):
@@ -201,15 +207,16 @@ async def test_real_cli_synthetic_sse_and_process_boundary_probes(tmp_path, monk
         assert text_result.finished is True
         assert len(state["requests"]) == 1
 
-        edit_workspace = tmp_path / "edit-workspace"
+        edit_workspace = tmp_path / "edit workspace with 'quote"
         edit_workspace.mkdir()
         edited_file = edit_workspace / "safe-marker.txt"
-        state["tool_command"] = f"printf 'safe-probe\\n' > {shlex.quote(str(edited_file))}"
+        state["tool_command"] = "printf 'safe-probe\\n' > safe-marker.txt"
         edit_result = await run_scenario("tool-edit", edit_workspace)
         results.append({"scenario": "tool-edit", "finished": edit_result.finished, "requests": len(state["requests"])})
         assert edit_result.finished is True
         assert len(state["requests"]) == 2
         assert edited_file.read_text(encoding="utf-8") == "safe-probe\n"
+        assert not (inherited_directory / "safe-marker.txt").exists()
 
         state["scenario"] = "error"
         error_result = await run_scenario("error", tmp_path)

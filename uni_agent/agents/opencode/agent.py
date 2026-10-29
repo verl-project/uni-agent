@@ -236,6 +236,9 @@ class OpenCodeAgent(Agent):
                             f"{_PROVIDER}/{cfg.model.model_name}",
                             "--agent",
                             "build",
+                            # OpenCode prefers inherited PWD over cwd without --dir.
+                            "--dir",
+                            workspace,
                             "--title",
                             "Uni-Agent rollout",
                             "--",
