@@ -29,6 +29,7 @@ TASK_MODULES: dict[str, str] = {
     "deepeyes": "uni_agent.tasks.deepeyes.task",
     "terminal_bench": "uni_agent.tasks.terminal_bench.task",
     "npu_triton_kernel": "uni_agent.tasks.kernel_bench.task",
+    "gui": "uni_agent.tasks.gui.task",
 }
 
 
