@@ -168,6 +168,9 @@ python examples/inference/parallel_infer_verl.py \
 Important controls:
 
 - `--engine`: rollout backend, either `vllm` or `sglang`.
+- `--engine-kwargs`: optional native backend settings as JSON, such as
+  `--engine sglang --engine-kwargs '{"enable_torch_compile": false}'`.
+  See [advanced engine options](../advanced/inference-engine-options.md) for graph and compilation settings.
 - `--tool-parser`: parser matching the model's chat template.
 - `--tensor-parallel-size`: tensor parallel size of the rollout engine.
 - `--nnodes` and `--n-gpus-per-node`: hardware allocated to the engine.

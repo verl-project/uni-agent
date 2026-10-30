@@ -57,6 +57,7 @@ nav:
       - Harbor Integration: quickstart/harbor-integration.md
       - Run Agent RL Training: quickstart/rl-training.md
       - Run Training on NPU: quickstart/npu-training.md
+      - Run Training on AMD GPUs: quickstart/amd-training.md
   - Concepts:
       - Overview: concepts/index.md
       - Sandbox: concepts/sandbox.md
@@ -67,6 +68,8 @@ nav:
       - Logging: concepts/logging.md
       - RL-Insight Integration: concepts/rl-insight-integration.md
       - Agent Aware Router: concepts/agent-aware-router.md
+  - Advanced:
+      - Inference Engine Options: advanced/inference-engine-options.md
   - Benchmark:
       - Overview: benchmark/index.md
       - Inference and Verification: benchmark/inference.md
