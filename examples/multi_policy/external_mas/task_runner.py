@@ -8,13 +8,13 @@ from typing import Any
 
 from pydantic import Field, field_validator
 
-from uni_agent.framework.task_runner import run_task
 from examples.multi_policy.framework import SessionGroupHandle
+from uni_agent.agents import AgentConfig
+from uni_agent.framework.task_runner import run_task
+from uni_agent.sandbox import SandboxConfig
 from uni_agent.tasks import Task, TaskConfig, TaskResult
 from uni_agent.tasks.config import _deep_merge
 from uni_agent.tasks.registry import register_task
-from uni_agent.agents import AgentConfig
-from uni_agent.sandbox import SandboxConfig
 
 from .external_mas_runner import (
     ExternalMASRequest,
@@ -63,11 +63,7 @@ class ExternalMASTask(Task):
         if raw_result.get("final_result") is not None:
             info.setdefault("final_result", raw_result["final_result"])
         reward = next(
-            (
-                info[key]
-                for key in ("reward_score", "score", "reward")
-                if info.get(key) is not None
-            ),
+            (info[key] for key in ("reward_score", "score", "reward") if info.get(key) is not None),
             None,
         )
         return TaskResult(
@@ -96,9 +92,7 @@ async def run_multi_agent_task(
     if tools_kwargs is not None and not isinstance(tools_kwargs, dict):
         raise ValueError("tools_kwargs must be a dictionary or None")
     if not isinstance(session, SessionGroupHandle) or not session.role_base_urls:
-        raise ValueError(
-            "multi-agent runner requires a session handle with role_base_urls"
-        )
+        raise ValueError("multi-agent runner requires a session handle with role_base_urls")
     copied = copy.deepcopy(tools_kwargs) if tools_kwargs is not None else {}
     sample_task = copied.get("task", {})
     if not isinstance(sample_task, dict):
@@ -107,9 +101,7 @@ async def run_multi_agent_task(
     if sample_task["name"] != TASK_NAME:
         raise ValueError(f"External MAS runner requires task name {TASK_NAME!r}")
     if launcher_kwargs:
-        sample_task["launcher_kwargs"] = _deep_merge(
-            launcher_kwargs, sample_task.get("launcher_kwargs", {})
-        )
+        sample_task["launcher_kwargs"] = _deep_merge(launcher_kwargs, sample_task.get("launcher_kwargs", {}))
     sample_task.update(
         session_group_id=session.session_group_id,
         role_urls=dict(session.role_base_urls),

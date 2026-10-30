@@ -1,8 +1,8 @@
 from pathlib import Path
 from types import SimpleNamespace
 
-from omegaconf import OmegaConf
 import pytest
+from omegaconf import OmegaConf
 
 from examples.multi_policy.framework import multi_agent_entry as entry_module
 from examples.multi_policy.framework.multi_agent_entry import (
@@ -15,36 +15,24 @@ from examples.multi_policy.trainer.multi_policy_trainer import MultiPolicyTraine
 @pytest.mark.cpu
 @pytest.mark.level0
 def test_recipe_composes_shared_counts_and_policy_validation_sampling():
-    recipe_config = (
-        Path(__file__).parents[3]
-        / "examples"
-        / "multi_policy"
-        / "config"
-        / "multi_policy.yaml"
-    )
+    recipe_config = Path(__file__).parents[3] / "examples" / "multi_policy" / "config" / "multi_policy.yaml"
     outer_config = OmegaConf.load(recipe_config)
     outer_config.actor_rollout_ref.rollout.n = 6
     outer_config.actor_rollout_ref.rollout.val_kwargs.n = 2
-    policy_2_validation = (
-        outer_config.policies.policy_2.ppo_trainer_overrides.actor_rollout_ref.rollout.val_kwargs
-    )
+    policy_2_validation = outer_config.policies.policy_2.ppo_trainer_overrides.actor_rollout_ref.rollout.val_kwargs
     policy_2_validation.do_sample = True
     policy_2_validation.temperature = 0.4
     trainer = MultiPolicyTrainer.__new__(MultiPolicyTrainer)
     trainer.config = outer_config
     trainer.total_training_steps = int(outer_config.trainer.total_training_steps)
-    trainer.parameter_sync_step = int(
-        outer_config.trainer.v1.separate_async.parameter_sync_step
-    )
+    trainer.parameter_sync_step = int(outer_config.trainer.v1.separate_async.parameter_sync_step)
     policy_configs = trainer._compose_policy_configs()
     for policy_name, policy_config in policy_configs.items():
         rollout = policy_config.actor_rollout_ref.rollout
         assert rollout.n == 6
         assert rollout.val_kwargs.n == 2
         assert rollout.val_kwargs.do_sample == (policy_name == "policy_2")
-        assert rollout.val_kwargs.temperature == (
-            0.4 if policy_name == "policy_2" else 0.0
-        )
+        assert rollout.val_kwargs.temperature == (0.4 if policy_name == "policy_2" else 0.0)
     assert set(outer_config.actor_rollout_ref.rollout.val_kwargs) == {"n"}
 
 
@@ -158,9 +146,7 @@ def test_policy_configs_use_per_policy_runtime_and_input_processing_kwargs():
 @pytest.mark.level0
 def test_invalid_sampling_keys_fail():
     cfg = config()
-    cfg.actor_rollout_ref.rollout.custom.agent_framework.allowed_request_sampling_param_keys = (
-        "temperature"
-    )
+    cfg.actor_rollout_ref.rollout.custom.agent_framework.allowed_request_sampling_param_keys = "temperature"
     with pytest.raises(ValueError, match="allowed_request_sampling_param_keys"):
         build_policy_gateway_configs(cfg, {"alpha": policy_config("qwen")})
 
@@ -210,10 +196,7 @@ def test_adapter_passes_full_policy_gateway_configs_to_shared_manager(monkeypatc
     assert set(captured["llm_client"]) == {"alpha"}
     assert captured["gateway_actor_config"]["alpha"].prompt_length == 321
     assert captured["gateway_actor_config"]["alpha"].hf_model_type == "qwen"
-    assert (
-        worker_kwargs["policy_rollout_configs"]["alpha"]
-        is composed_config.actor_rollout_ref.rollout
-    )
+    assert worker_kwargs["policy_rollout_configs"]["alpha"] is composed_config.actor_rollout_ref.rollout
 
 
 @pytest.mark.cpu

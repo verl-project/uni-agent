@@ -31,7 +31,7 @@ def _answer_candidates(value: Any) -> list[str]:
             if key in value:
                 candidates.extend(_answer_candidates(value[key]))
         return candidates
-    if isinstance(value, (list, tuple, set)):
+    if isinstance(value, list | tuple | set):
         candidates = []
         for item in value:
             candidates.extend(_answer_candidates(item))
@@ -44,7 +44,7 @@ def _answer_candidates(value: Any) -> list[str]:
             except (SyntaxError, ValueError):
                 pass
             else:
-                if isinstance(parsed, (list, tuple, set)):
+                if isinstance(parsed, list | tuple | set):
                     return _answer_candidates(parsed)
         return [stripped] if stripped else []
     return [str(value).strip()]
@@ -69,23 +69,12 @@ def compute_score(
     final_result = context.get("final_result", solution_str)
     agent_outputs = context.get("agent_outputs") or {}
 
-    expected_candidates = list(
-        dict.fromkeys(
-            candidate for candidate in _answer_candidates(ground_truth) if candidate
-        )
-    )
+    expected_candidates = list(dict.fromkeys(candidate for candidate in _answer_candidates(ground_truth) if candidate))
 
     final_text = _text(final_result).strip()
     if expected_candidates:
         final_text_lower = final_text.lower()
-        score = (
-            1.0
-            if any(
-                candidate.lower() in final_text_lower
-                for candidate in expected_candidates
-            )
-            else 0.0
-        )
+        score = 1.0 if any(candidate.lower() in final_text_lower for candidate in expected_candidates) else 0.0
     else:
         # No usable ground truth: never reward arbitrary output. Returning 0.0
         # keeps GRPO from treating every non-empty answer as correct.

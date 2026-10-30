@@ -20,9 +20,7 @@ class LocalProcessResult:
 
 class LocalProcessError(RuntimeError):
     def __init__(self, returncode: int, stdout: str, stderr: str):
-        super().__init__(
-            f"External MAS process exited with exit code {returncode}: {stderr.strip()}"
-        )
+        super().__init__(f"External MAS process exited with exit code {returncode}: {stderr.strip()}")
         self.returncode = returncode
         self.stdout = stdout
         self.stderr = stderr
@@ -50,9 +48,7 @@ def _process_group_alive(pgid: int) -> bool:
         return True
 
 
-async def _terminate_process_group(
-    pgid: int, grace_seconds: float = _TERMINATE_GRACE_SECONDS
-) -> None:
+async def _terminate_process_group(pgid: int, grace_seconds: float = _TERMINATE_GRACE_SECONDS) -> None:
     """Terminate every process in the group, even after its leader exited."""
     if not _process_group_alive(pgid):
         return
@@ -71,9 +67,7 @@ async def _terminate_process_group(
         return
 
 
-async def _wait_for_exit(
-    process: asyncio.subprocess.Process, timeout: float
-) -> None:
+async def _wait_for_exit(process: asyncio.subprocess.Process, timeout: float) -> None:
     try:
         await asyncio.wait_for(process.wait(), timeout=timeout)
     except asyncio.TimeoutError:
@@ -98,9 +92,7 @@ async def _drain_communicate(
         return await asyncio.wait_for(communicate_task, timeout=timeout)
     except asyncio.TimeoutError:
         communicate_task.cancel()
-        with contextlib.suppress(
-            asyncio.CancelledError, BrokenPipeError, ConnectionResetError
-        ):
+        with contextlib.suppress(asyncio.CancelledError, BrokenPipeError, ConnectionResetError):
             await communicate_task
         _close_subprocess_pipes(process)
         return b"", b""
@@ -146,9 +138,7 @@ async def run_local_process(
     else:
         if isinstance(command, str):
             raise TypeError("non-shell commands must be an argv sequence")
-        process = await asyncio.create_subprocess_exec(
-            *[str(part) for part in command], **process_kwargs
-        )
+        process = await asyncio.create_subprocess_exec(*[str(part) for part in command], **process_kwargs)
 
     communicate_task = asyncio.create_task(process.communicate())
     try:
@@ -162,9 +152,7 @@ async def run_local_process(
     except asyncio.TimeoutError as exc:
         await _terminate_process(process)
         await _drain_communicate(process, communicate_task)
-        raise LocalProcessTimeout(
-            f"External MAS process timed out after {timeout_seconds} seconds"
-        ) from exc
+        raise LocalProcessTimeout(f"External MAS process timed out after {timeout_seconds} seconds") from exc
     except asyncio.CancelledError:
         await _terminate_process(process)
         await _drain_communicate(process, communicate_task)
@@ -172,9 +160,7 @@ async def run_local_process(
 
     stdout = stdout_bytes.decode("utf-8", errors="replace")
     stderr = stderr_bytes.decode("utf-8", errors="replace")
-    result = LocalProcessResult(
-        returncode=int(process.returncode or 0), stdout=stdout, stderr=stderr
-    )
+    result = LocalProcessResult(returncode=int(process.returncode or 0), stdout=stdout, stderr=stderr)
     if result.returncode != 0:
         raise LocalProcessError(result.returncode, result.stdout, result.stderr)
     return result

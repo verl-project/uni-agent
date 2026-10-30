@@ -30,10 +30,7 @@ def make_actor() -> tuple[_GatewayActor, dict[str, Backend]]:
     backends = {"p1": Backend("plan"), "p2": Backend("answer")}
     actor = _GatewayActor(
         config={
-            p: GatewayActorConfig(
-                tokenizer=FakeTokenizer(), prompt_length=1000, response_length=100
-            )
-            for p in backends
+            p: GatewayActorConfig(tokenizer=FakeTokenizer(), prompt_length=1000, response_length=100) for p in backends
         },
         backend=backends,
     )
@@ -61,9 +58,7 @@ async def test_each_role_session_has_its_own_url_and_policy_backend():
     assert planner.base_url != answerer.base_url
     assert all(isinstance(s, GatewaySession) for s in actor._sessions.values())
 
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=actor._app), base_url="http://test"
-    ) as client:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=actor._app), base_url="http://test") as client:
         for handle, role in ((planner, "planner"), (answerer, "answerer")):
             response = await client.post(
                 f"{handle.base_url}/chat/completions",
@@ -92,9 +87,7 @@ async def test_roles_may_share_a_policy_with_independent_sessions():
     first = await actor.create_session("r:agent_1", policy_name="p1")
     second = await actor.create_session("r:agent_2", policy_name="p1")
     assert first.base_url != second.base_url
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=actor._app), base_url="http://test"
-    ) as client:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=actor._app), base_url="http://test") as client:
         for handle in (first, second):
             response = await client.post(
                 f"{handle.base_url}/chat/completions",
@@ -137,10 +130,7 @@ def test_allowed_sampling_keys_are_precomputed_per_policy():
         "p1": {"max_tokens", "stop", "temperature"},
         "p2": {"max_tokens", "stop", "top_p"},
     }
-    assert all(
-        isinstance(keys, frozenset)
-        for keys in actor._policy_allowed_request_sampling_param_keys.values()
-    )
+    assert all(isinstance(keys, frozenset) for keys in actor._policy_allowed_request_sampling_param_keys.values())
 
 
 @pytest.mark.cpu
@@ -186,9 +176,7 @@ async def test_unhandled_route_errors_use_openai_error_shape(monkeypatch, caplog
 async def test_openai_stream_and_http_errors():
     actor, _ = make_actor()
     handle = await actor.create_session("r:planner", policy_name="p1")
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=actor._app), base_url="http://test"
-    ) as client:
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=actor._app), base_url="http://test") as client:
         response = await client.post(
             f"{handle.base_url}/chat/completions",
             json={
@@ -206,10 +194,7 @@ async def test_openai_stream_and_http_errors():
             if line.startswith("data: ") and line != "data: [DONE]"
         ]
         assert all(chunk["model"] == "planner" for chunk in chunks)
-        assert (
-            "".join(chunk["choices"][0]["delta"].get("content", "") for chunk in chunks)
-            == "plan"
-        )
+        assert "".join(chunk["choices"][0]["delta"].get("content", "") for chunk in chunks) == "plan"
         invalid = await client.post(
             f"{handle.base_url}/chat/completions",
             content="{",
@@ -219,9 +204,7 @@ async def test_openai_stream_and_http_errors():
         assert invalid.json()["error"]["message"] == "Invalid JSON body"
         # Anthropic Messages is served by the shared core; an empty payload
         # is rejected as a malformed request.
-        unsupported = await client.post(
-            f"{handle.base_url}/messages", json={"model": "planner", "messages": []}
-        )
+        unsupported = await client.post(f"{handle.base_url}/messages", json={"model": "planner", "messages": []})
         assert unsupported.status_code == 400
     await actor.abort_session("r:planner")
 
@@ -262,11 +245,7 @@ async def test_ignored_sampling_parameter_warning_is_emitted_once(caplog):
         ("p2", "temperature"),
         ("p2", "top_p"),
     }
-    warnings = [
-        record
-        for record in caplog.records
-        if "Ignoring request sampling parameters" in record.message
-    ]
+    warnings = [record for record in caplog.records if "Ignoring request sampling parameters" in record.message]
     assert len(warnings) == 2
     assert all("temperature, top_p" in record.message for record in warnings)
     assert "policy p1" in warnings[0].message
@@ -285,9 +264,7 @@ async def test_invalid_json_shapes_return_bad_request():
         transport=httpx.ASGITransport(app=actor._app, raise_app_exceptions=False),
         base_url="http://test",
     ) as client:
-        non_object = await client.post(
-            f"{handle.base_url}/chat/completions", json=["not", "an", "object"]
-        )
+        non_object = await client.post(f"{handle.base_url}/chat/completions", json=["not", "an", "object"])
         unhashable_role = await client.post(
             f"{handle.base_url}/chat/completions",
             json={"model": ["planner"], "messages": []},
@@ -310,9 +287,7 @@ async def test_invalid_json_shapes_return_bad_request():
 @pytest.mark.cpu
 @pytest.mark.level0
 @pytest.mark.asyncio
-async def test_failed_finalize_leaves_session_retryable_then_abortable(
-    monkeypatch, caplog
-):
+async def test_failed_finalize_leaves_session_retryable_then_abortable(monkeypatch, caplog):
     actor, _ = make_actor()
     await actor.create_session("r:planner", policy_name="p1")
     failing_session = actor._sessions["r:planner"]
@@ -348,6 +323,4 @@ async def test_invalid_max_tokens_returns_openai_bad_request(max_tokens):
             },
         )
     assert response.status_code == 400
-    assert response.json()["error"]["message"] == (
-        "max_tokens must be a positive integer"
-    )
+    assert response.json()["error"]["message"] == ("max_tokens must be a positive integer")

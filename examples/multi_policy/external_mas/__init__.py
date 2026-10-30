@@ -1,1 +1,1 @@
-﻿"""External MAS execution adapter for the multi-policy recipe."""
+"""External MAS execution adapter for the multi-policy recipe."""

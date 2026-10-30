@@ -1,9 +1,9 @@
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-from omegaconf import OmegaConf
 import pytest
 import torch
+from omegaconf import OmegaConf
 
 from examples.multi_policy.framework import MultiAgentGatewayFramework
 from uni_agent.framework import framework as generic_module
@@ -228,9 +228,7 @@ def test_trajectory_without_policy_name_is_rejected():
 @pytest.mark.level0
 def test_unknown_policy_processor_is_rejected():
     trajectory = Trajectory([1], [2], [1], extra_fields={"policy_name": "missing"})
-    with pytest.raises(
-        ValueError, match="No processor configured for policy 'missing'"
-    ):
+    with pytest.raises(ValueError, match="No processor configured for policy 'missing'"):
         convert_trajectory(trajectory)
 
 
@@ -253,18 +251,14 @@ def test_invalid_multimodal_kwargs_are_rejected(kwargs):
 @pytest.mark.parametrize("setting", [None, False, True, "false", 1])
 def test_mask_config_is_shared_and_requires_boolean(setting):
     af_config = {
-        "agent_runners": {
-            "multi_agent": {"runner_fqn": "unused", "dispatch_mode": "ray_task"}
-        },
+        "agent_runners": {"multi_agent": {"runner_fqn": "unused", "dispatch_mode": "ray_task"}},
         "role_policy_mapping": {"answer": "policy-1"},
     }
     if setting is not None:
         af_config["mask_unfinished_episode"] = setting
     config = OmegaConf.create(
         {
-            "actor_rollout_ref": {
-                "rollout": {"custom": {"agent_framework": af_config}}
-            },
+            "actor_rollout_ref": {"rollout": {"custom": {"agent_framework": af_config}}},
         }
     )
     kwargs = dict(

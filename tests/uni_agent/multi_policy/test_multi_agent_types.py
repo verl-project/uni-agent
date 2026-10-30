@@ -11,9 +11,7 @@ from uni_agent.gateway.session import SessionHandle
 @pytest.mark.cpu
 @pytest.mark.level0
 def test_group_handle_round_trip_preserves_role_addresses():
-    handle = SessionGroupHandle(
-        "group", {"planner": "http://gateway/sessions/group:planner/v1"}
-    )
+    handle = SessionGroupHandle("group", {"planner": "http://gateway/sessions/group:planner/v1"})
     restored = pickle.loads(pickle.dumps(handle))
     assert restored == handle
     assert not hasattr(restored, "base_url")

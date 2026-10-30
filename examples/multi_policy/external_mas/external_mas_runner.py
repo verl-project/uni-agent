@@ -1,4 +1,4 @@
-﻿"""Generic command-driven external MAS runner.
+"""Generic command-driven external MAS runner.
 
 Each invocation receives a rollout-scoped Gateway URL, injects it into a copy
 of the MAS configuration, and launches the configured command in the Ray
@@ -117,14 +117,10 @@ def inject_gateway_config(
 _COMMAND_PLACEHOLDERS = ("config_path", "prompt", "session_group_id")
 _UNSUPPORTED_PLACEHOLDERS = ("gateway_url",)
 _COMMAND_PLACEHOLDER_RE = re.compile(
-    r"(?<![$\{])\{(?P<key>"
-    + "|".join(re.escape(name) for name in _COMMAND_PLACEHOLDERS)
-    + r")\}"
+    r"(?<![$\{])\{(?P<key>" + "|".join(re.escape(name) for name in _COMMAND_PLACEHOLDERS) + r")\}"
 )
 _UNSUPPORTED_PLACEHOLDER_RE = re.compile(
-    r"(?<![$\{])\{(?P<key>"
-    + "|".join(re.escape(name) for name in _UNSUPPORTED_PLACEHOLDERS)
-    + r")\}"
+    r"(?<![$\{])\{(?P<key>" + "|".join(re.escape(name) for name in _UNSUPPORTED_PLACEHOLDERS) + r")\}"
 )
 
 
@@ -139,8 +135,7 @@ def _format_command_value(
     if unsupported is not None:
         placeholder = unsupported.group("key")
         raise ValueError(
-            f"Unsupported command placeholder {{{placeholder}}}; "
-            "use the role Gateway URLs in the MAS config."
+            f"Unsupported command placeholder {{{placeholder}}}; use the role Gateway URLs in the MAS config."
         )
 
     def replace(match: re.Match[str]) -> str:
@@ -150,29 +145,18 @@ def _format_command_value(
     return _COMMAND_PLACEHOLDER_RE.sub(replace, value)
 
 
-def _format_values(
-    values: Mapping[str, Any], context: Mapping[str, str]
-) -> dict[str, str]:
-    return {
-        str(key): _format_command_value(str(value), context)
-        for key, value in values.items()
-    }
+def _format_values(values: Mapping[str, Any], context: Mapping[str, str]) -> dict[str, str]:
+    return {str(key): _format_command_value(str(value), context) for key, value in values.items()}
 
 
-def _build_command(
-    command_config: Mapping[str, Any], context: Mapping[str, str]
-) -> tuple[str | list[str], bool]:
+def _build_command(command_config: Mapping[str, Any], context: Mapping[str, str]) -> tuple[str | list[str], bool]:
     shell = bool(command_config.get("shell", False))
     argv = command_config.get("argv")
     template = command_config.get("template")
     if argv is not None:
         if shell or not isinstance(argv, Sequence) or isinstance(argv, str | bytes):
-            raise ValueError(
-                "command.argv must be a sequence and cannot be combined with shell=true"
-            )
-        return [
-            _format_command_value(str(part), context) for part in argv
-        ], False
+            raise ValueError("command.argv must be a sequence and cannot be combined with shell=true")
+        return [_format_command_value(str(part), context) for part in argv], False
     if not isinstance(template, str) or not template:
         raise ValueError("command.argv or command.template is required")
     if shell:
@@ -273,7 +257,7 @@ def _normalize_result(
         )
     except ValueError as exc:
         raise ValueError(f"Configured final result field is missing: {exc}") from exc
-    if isinstance(final_result, (dict, list, tuple)):
+    if isinstance(final_result, dict | list | tuple):
         raise ValueError("Configured final result field must contain a scalar value")
 
     reward_info: dict[str, Any] = {"final_result": final_result}
@@ -291,9 +275,7 @@ def _normalize_result(
     }
 
 
-def _parse_result(
-    process_result: LocalProcessResult, result_config: Mapping[str, Any]
-) -> dict[str, Any]:
+def _parse_result(process_result: LocalProcessResult, result_config: Mapping[str, Any]) -> dict[str, Any]:
     mode = str(result_config.get("mode", "stdout_json"))
     if mode == "none":
         return {}
@@ -325,9 +307,7 @@ async def run_external_mas(
 
     backend = str(execution.get("backend", "local_process"))
     if backend != "local_process":
-        raise NotImplementedError(
-            f"External MAS execution backend {backend!r} is not implemented"
-        )
+        raise NotImplementedError(f"External MAS execution backend {backend!r} is not implemented")
 
     template_path = config.get("template_path")
     if not template_path:
@@ -363,17 +343,13 @@ async def run_external_mas(
         }
         process_command, shell = _build_command(command, context)
         process_env = _format_values(command.get("env", {}), context)
-        timeout_seconds = (
-            timeout.get("seconds") if isinstance(timeout, Mapping) else timeout
-        )
+        timeout_seconds = timeout.get("seconds") if isinstance(timeout, Mapping) else timeout
 
         process_result = await run_local_process(
             process_command,
             work_dir=str(command["work_dir"]) if command.get("work_dir") else None,
             env=process_env,
-            timeout_seconds=(
-                float(timeout_seconds) if timeout_seconds is not None else None
-            ),
+            timeout_seconds=(float(timeout_seconds) if timeout_seconds is not None else None),
             shell=shell,
         )
         log_dir = (logs or {}).get("directory")

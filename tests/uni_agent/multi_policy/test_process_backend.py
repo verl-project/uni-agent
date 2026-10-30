@@ -44,9 +44,7 @@ async def test_timeout_does_not_wait_for_inherited_pipe_holders(monkeypatch):
     async def fake_terminate(_process):
         return None
 
-    monkeypatch.setattr(
-        process_backend.asyncio, "create_subprocess_exec", fake_create
-    )
+    monkeypatch.setattr(process_backend.asyncio, "create_subprocess_exec", fake_create)
     monkeypatch.setattr(process_backend, "_terminate_process", fake_terminate)
     monkeypatch.setattr(
         process_backend,
@@ -72,9 +70,7 @@ async def test_terminate_process_group_kills_after_leader_exits(monkeypatch):
     alive = True
     sigkill = getattr(signal, "SIGKILL", 9)
 
-    monkeypatch.setattr(
-        process_backend.signal, "SIGKILL", sigkill, raising=False
-    )
+    monkeypatch.setattr(process_backend.signal, "SIGKILL", sigkill, raising=False)
 
     def fake_killpg(pgid, signum):
         nonlocal alive
@@ -88,9 +84,7 @@ async def test_terminate_process_group_kills_after_leader_exits(monkeypatch):
 
     monkeypatch.setattr(process_backend, "_killpg", fake_killpg)
 
-    await process_backend._terminate_process_group(
-        12345, grace_seconds=0.01
-    )
+    await process_backend._terminate_process_group(12345, grace_seconds=0.01)
 
     assert signal.SIGTERM in calls
     assert sigkill in calls
@@ -105,9 +99,7 @@ async def test_terminate_process_cleans_group_when_leader_already_exited(monkeyp
     async def fake_terminate_group(pgid, grace_seconds=2.0):
         calls.append(pgid)
 
-    monkeypatch.setattr(
-        process_backend, "_terminate_process_group", fake_terminate_group
-    )
+    monkeypatch.setattr(process_backend, "_terminate_process_group", fake_terminate_group)
 
     class FakeProcess:
         pid = 12345

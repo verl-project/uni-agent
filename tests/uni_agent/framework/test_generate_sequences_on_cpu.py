@@ -2149,9 +2149,7 @@ async def test_session_hooks_default_to_gateway_manager_lifecycle(fake_tq):
 @pytest.mark.cpu
 @pytest.mark.level0
 @pytest.mark.asyncio
-async def test_session_hooks_pass_sampling_params_as_per_rollout_copies(
-    fake_tq, monkeypatch
-):
+async def test_session_hooks_pass_sampling_params_as_per_rollout_copies(fake_tq, monkeypatch):
     """Each rollout's session receives its own copy of the sampling params."""
     params = {"temperature": 0.1, "top_p": 0.9}
     monkeypatch.setattr(
@@ -2173,9 +2171,7 @@ async def test_session_hooks_pass_sampling_params_as_per_rollout_copies(
 
     await framework.generate_sequences(_build_prompts(count=1))
 
-    sampling_params = [
-        kwargs["sampling_params"] for kwargs in runtime.created_session_kwargs
-    ]
+    sampling_params = [kwargs["sampling_params"] for kwargs in runtime.created_session_kwargs]
     assert sampling_params == [params, params]
     assert sampling_params[0] is not params
     assert sampling_params[0] is not sampling_params[1]

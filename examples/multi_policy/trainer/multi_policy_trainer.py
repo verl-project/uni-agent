@@ -1,10 +1,10 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import logging
 from collections import defaultdict
 from collections.abc import Mapping
 from concurrent.futures import Future, ThreadPoolExecutor, wait
-from functools import lru_cache
+from functools import cache
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -19,6 +19,10 @@ from tensordict.tensorclass import NonTensorData
 from torchdata.stateful_dataloader import StatefulDataLoader
 from transfer_queue import KVBatchMeta
 
+from examples.multi_policy.trainer.multi_policy_checkpoint_manager import (
+    MultiPolicyCheckpointManager,
+    supports_transfer_queue_checkpoint,
+)
 from verl.protocol import DataProto
 from verl.trainer.ppo.metric_utils import (
     compute_data_metrics,
@@ -35,14 +39,7 @@ from verl.utils.debug import marked_timer
 from verl.utils.skip import SkipManager
 from verl.utils.tracking import Tracking
 
-from examples.multi_policy.trainer.multi_policy_checkpoint_manager import (
-    MultiPolicyCheckpointManager,
-    supports_transfer_queue_checkpoint,
-)
-
 if TYPE_CHECKING:
-    from verl.workers.rollout.llm_server import LLMServerClient
-
     from examples.multi_policy.framework.multi_agent_entry import (
         MultiPolicyRolloutAdapter,
     )
@@ -50,6 +47,7 @@ if TYPE_CHECKING:
         SingleAsyncPPOTrainer,
     )
     from examples.multi_policy.trainer.single_policy_trainer import SinglePPOTrainer
+    from verl.workers.rollout.llm_server import LLMServerClient
 
     PolicyTrainer = SinglePPOTrainer | SingleAsyncPPOTrainer
 
@@ -73,14 +71,10 @@ class MultiPolicyTrainer:
         # trainer loop and helper methods read these instance attributes instead
         # of re-walking the config tree on every access.
         self.trainer_mode = self.config.trainer.v1.trainer_mode
-        self.parameter_sync_step = self.config.trainer.v1.get(
-            self.trainer_mode, {}
-        ).get("parameter_sync_step", 1)
+        self.parameter_sync_step = self.config.trainer.v1.get(self.trainer_mode, {}).get("parameter_sync_step", 1)
         self.train_batch_size = self.config.data.train_batch_size
         self.save_freq = self.config.trainer.save_freq
-        self.total_training_steps = self._require_total_training_steps(
-            self.config.trainer.total_training_steps
-        )
+        self.total_training_steps = self._require_total_training_steps(self.config.trainer.total_training_steps)
 
         self.policy_configs = self._compose_policy_configs()
         self.role_policy_mapping = self._resolve_role_policy_mapping()
@@ -100,9 +94,7 @@ class MultiPolicyTrainer:
         self._create_policy_trainers()
         # Different policies use disjoint GPU sets, so their training phases
         # run concurrently in this pool.
-        self._policy_pool = ThreadPoolExecutor(
-            max_workers=max(1, len(self.policy_trainers))
-        )
+        self._policy_pool = ThreadPoolExecutor(max_workers=max(1, len(self.policy_trainers)))
 
     @staticmethod
     def _require_total_training_steps(
@@ -131,14 +123,11 @@ class MultiPolicyTrainer:
         config_name = self.config.get("ppo_trainer_config_name")
         if not config_name:
             raise ValueError(
-                "config.ppo_trainer_config_name is required "
-                "(e.g. 'ppo_trainer' or 'ppo_megatron_trainer')"
+                "config.ppo_trainer_config_name is required (e.g. 'ppo_trainer' or 'ppo_megatron_trainer')"
             )
 
         resolved = {}
-        for policy_key, policy_entry in (
-            policies.items() if policies is not None else []
-        ):
+        for policy_key, policy_entry in policies.items() if policies is not None else []:
             policy_name = policy_key
             resolved[policy_name] = self._compose_policy_ppo_config(
                 policy_name=policy_name,
@@ -150,13 +139,9 @@ class MultiPolicyTrainer:
             raise ValueError("MultiPolicyTrainer requires config.policies")
 
         # Runtime schedule is applied after composition, before trainer construction.
-        optimizer_horizon_steps = (
-            self.total_training_steps * self.parameter_sync_step
-        )
+        optimizer_horizon_steps = self.total_training_steps * self.parameter_sync_step
         for policy_config in resolved.values():
-            self._set_policy_optimizer_horizon(
-                policy_config, optimizer_horizon_steps
-            )
+            self._set_policy_optimizer_horizon(policy_config, optimizer_horizon_steps)
         return resolved
 
     def _compose_policy_ppo_config(
@@ -192,42 +177,30 @@ class MultiPolicyTrainer:
         for section_name in ("algorithm", "reward"):
             section = OmegaConf.select(self.config, section_name, default=None)
             if section is not None:
-                outer_owned_sections[section_name] = OmegaConf.to_container(
-                    section, resolve=True
-                )
+                outer_owned_sections[section_name] = OmegaConf.to_container(section, resolve=True)
         outer_v1 = OmegaConf.select(self.config, "trainer.v1", default=None)
         if outer_v1 is not None:
             outer_owned_sections["trainer"] = {
                 "v1": OmegaConf.to_container(outer_v1, resolve=True),
             }
         if outer_owned_sections:
-            policy_config = OmegaConf.merge(
-                policy_config, OmegaConf.create(outer_owned_sections)
-            )
+            policy_config = OmegaConf.merge(policy_config, OmegaConf.create(outer_owned_sections))
 
         with open_dict(policy_config):
             policy_config.policy_name = policy_name
         return policy_config
 
     @staticmethod
-    def _set_policy_optimizer_horizon(
-        policy_config: DictConfig, optimizer_horizon_steps: int
-    ) -> None:
+    def _set_policy_optimizer_horizon(policy_config: DictConfig, optimizer_horizon_steps: int) -> None:
         """Set the scheduler horizon; the outer trainer owns the schedule."""
         with open_dict(policy_config):
             if OmegaConf.select(policy_config, "actor_rollout_ref.actor.optim"):
-                policy_config.actor_rollout_ref.actor.optim.total_training_steps = (
-                    optimizer_horizon_steps
-                )
+                policy_config.actor_rollout_ref.actor.optim.total_training_steps = optimizer_horizon_steps
             if OmegaConf.select(policy_config, "critic.optim"):
-                policy_config.critic.optim.total_training_steps = (
-                    optimizer_horizon_steps
-                )
+                policy_config.critic.optim.total_training_steps = optimizer_horizon_steps
 
     def _resolve_role_policy_mapping(self) -> dict[str, str]:
-        config_path = (
-            "actor_rollout_ref.rollout.custom.agent_framework.role_policy_mapping"
-        )
+        config_path = "actor_rollout_ref.rollout.custom.agent_framework.role_policy_mapping"
         mapping = OmegaConf.select(self.config, config_path, default=None)
         if mapping is None:
             raise ValueError(f"{config_path} is required")
@@ -241,9 +214,7 @@ class MultiPolicyTrainer:
             if not isinstance(role, str) or not role.strip():
                 raise ValueError(f"{config_path} contains an invalid role: {role!r}")
             if not isinstance(policy_name, str) or not policy_name.strip():
-                raise ValueError(
-                    f"{config_path}[{role!r}] must be a non-empty policy name"
-                )
+                raise ValueError(f"{config_path}[{role!r}] must be a non-empty policy name")
             resolved_mapping[role] = policy_name
         return resolved_mapping
 
@@ -287,9 +258,7 @@ class MultiPolicyTrainer:
 
                 trainer_cls = SingleAsyncPPOTrainer
             else:
-                raise ValueError(
-                    f"Unsupported trainer.v1.trainer_mode: {self.trainer_mode!r}"
-                )
+                raise ValueError(f"Unsupported trainer.v1.trainer_mode: {self.trainer_mode!r}")
             self.policy_trainers[policy_name] = trainer_cls(config=policy_config)
         return self.policy_trainers
 
@@ -325,17 +294,12 @@ class MultiPolicyTrainer:
             self._validate_stage_resources("rollout")
             for gpus_per_replica_node, policy_names in self._get_rollout_init_waves():
                 logger.info(
-                    "Initializing standalone rollout wave: "
-                    "gpus_per_replica_node=%d policies=%s",
+                    "Initializing standalone rollout wave: gpus_per_replica_node=%d policies=%s",
                     gpus_per_replica_node,
                     policy_names,
                 )
                 futures = [
-                    self._policy_pool.submit(
-                        self.policy_trainers[
-                            policy_name
-                        ].init_standalone_rollout_runtime
-                    )
+                    self._policy_pool.submit(self.policy_trainers[policy_name].init_standalone_rollout_runtime)
                     for policy_name in policy_names
                 ]
                 wait(futures)
@@ -343,8 +307,7 @@ class MultiPolicyTrainer:
                     future.result()
 
         futures = [
-            self._policy_pool.submit(policy_trainer.on_init_end)
-            for policy_trainer in self.policy_trainers.values()
+            self._policy_pool.submit(policy_trainer.on_init_end) for policy_trainer in self.policy_trainers.values()
         ]
         wait(futures)
         for future in futures:
@@ -357,9 +320,7 @@ class MultiPolicyTrainer:
 
         requests: list[tuple[str, str, int]] = []
 
-        def add_requests(
-            policy_name: str, pool_name: str, nnodes: Any, gpus_per_node: Any
-        ) -> None:
+        def add_requests(policy_name: str, pool_name: str, nnodes: Any, gpus_per_node: Any) -> None:
             nnodes = int(nnodes)
             gpus_per_node = int(gpus_per_node)
             if nnodes <= 0 or gpus_per_node <= 0:
@@ -367,9 +328,7 @@ class MultiPolicyTrainer:
                     f"Invalid {stage} resource request for {policy_name}/{pool_name}: "
                     f"nnodes={nnodes}, n_gpus_per_node={gpus_per_node}"
                 )
-            requests.extend(
-                (policy_name, pool_name, gpus_per_node) for _ in range(nnodes)
-            )
+            requests.extend((policy_name, pool_name, gpus_per_node) for _ in range(nnodes))
 
         for policy_name, policy_config in self.policy_configs.items():
             if stage == "training":
@@ -389,14 +348,10 @@ class MultiPolicyTrainer:
                         policy_name,
                         "reward_pool",
                         OmegaConf.select(policy_config, "reward.reward_model.nnodes"),
-                        OmegaConf.select(
-                            policy_config, "reward.reward_model.n_gpus_per_node"
-                        ),
+                        OmegaConf.select(policy_config, "reward.reward_model.n_gpus_per_node"),
                     )
 
-                if OmegaConf.select(
-                    policy_config, "distillation.enabled", default=False
-                ):
+                if OmegaConf.select(policy_config, "distillation.enabled", default=False):
                     add_requests(
                         policy_name,
                         "teacher_pool",
@@ -405,31 +360,15 @@ class MultiPolicyTrainer:
                     )
                 continue
 
-            rollout_config = OmegaConf.select(
-                policy_config, "actor_rollout_ref.rollout"
-            )
+            rollout_config = OmegaConf.select(policy_config, "actor_rollout_ref.rollout")
             rollout_nnodes = int(OmegaConf.select(rollout_config, "nnodes"))
-            rollout_gpus_per_node = int(
-                OmegaConf.select(rollout_config, "n_gpus_per_node")
-            )
+            rollout_gpus_per_node = int(OmegaConf.select(rollout_config, "n_gpus_per_node"))
             total_gpus = rollout_nnodes * rollout_gpus_per_node
-            tensor_parallel_size = int(
-                OmegaConf.select(
-                    rollout_config, "tensor_model_parallel_size", default=1
-                )
-            )
-            data_parallel_size = int(
-                OmegaConf.select(rollout_config, "data_parallel_size", default=1)
-            )
-            pipeline_parallel_size = int(
-                OmegaConf.select(
-                    rollout_config, "pipeline_model_parallel_size", default=1
-                )
-            )
+            tensor_parallel_size = int(OmegaConf.select(rollout_config, "tensor_model_parallel_size", default=1))
+            data_parallel_size = int(OmegaConf.select(rollout_config, "data_parallel_size", default=1))
+            pipeline_parallel_size = int(OmegaConf.select(rollout_config, "pipeline_model_parallel_size", default=1))
 
-            if OmegaConf.select(
-                rollout_config, "disaggregation.enabled", default=False
-            ):
+            if OmegaConf.select(rollout_config, "disaggregation.enabled", default=False):
                 decode_parallel_size = OmegaConf.select(
                     rollout_config,
                     "disaggregation.decode_tensor_model_parallel_size",
@@ -439,26 +378,15 @@ class MultiPolicyTrainer:
                     decode_parallel_size = tensor_parallel_size
                 rollout_world_size = (
                     (
-                        tensor_parallel_size
-                        * int(
-                            OmegaConf.select(
-                                rollout_config, "disaggregation.prefill_replicas"
-                            )
-                        )
+                        tensor_parallel_size * int(OmegaConf.select(rollout_config, "disaggregation.prefill_replicas"))
                         + int(decode_parallel_size)
-                        * int(
-                            OmegaConf.select(
-                                rollout_config, "disaggregation.decode_replicas"
-                            )
-                        )
+                        * int(OmegaConf.select(rollout_config, "disaggregation.decode_replicas"))
                     )
                     * data_parallel_size
                     * pipeline_parallel_size
                 )
             else:
-                rollout_world_size = (
-                    tensor_parallel_size * data_parallel_size * pipeline_parallel_size
-                )
+                rollout_world_size = tensor_parallel_size * data_parallel_size * pipeline_parallel_size
 
             if rollout_world_size <= 0 or total_gpus % rollout_world_size != 0:
                 raise ValueError(
@@ -476,8 +404,7 @@ class MultiPolicyTrainer:
                 )
             replica_nnodes = rollout_world_size // gpus_per_replica_node
             requests.extend(
-                (policy_name, "standalone_rollout", gpus_per_replica_node)
-                for _ in range(num_replicas * replica_nnodes)
+                (policy_name, "standalone_rollout", gpus_per_replica_node) for _ in range(num_replicas * replica_nnodes)
             )
 
         return requests
@@ -485,9 +412,7 @@ class MultiPolicyTrainer:
     def _get_rollout_init_waves(self) -> list[tuple[int, list[str]]]:
         """Group policies by replica-node footprint, largest footprint first."""
         policy_footprints: dict[str, int] = {}
-        for policy_name, pool_name, gpus_per_node in self._get_stage_resource_requests(
-            "rollout"
-        ):
+        for policy_name, pool_name, gpus_per_node in self._get_stage_resource_requests("rollout"):
             if pool_name != "standalone_rollout":
                 continue
             policy_footprints[policy_name] = max(
@@ -497,18 +422,14 @@ class MultiPolicyTrainer:
 
         missing_policies = set(self.policy_trainers) - set(policy_footprints)
         if missing_policies:
-            raise ValueError(
-                "Missing standalone rollout resource requests for policies: "
-                f"{sorted(missing_policies)}"
-            )
+            raise ValueError(f"Missing standalone rollout resource requests for policies: {sorted(missing_policies)}")
 
         policies_by_footprint: dict[int, list[str]] = defaultdict(list)
         for policy_name in self.policy_trainers:
             policies_by_footprint[policy_footprints[policy_name]].append(policy_name)
 
         return [
-            (footprint, policies_by_footprint[footprint])
-            for footprint in sorted(policies_by_footprint, reverse=True)
+            (footprint, policies_by_footprint[footprint]) for footprint in sorted(policies_by_footprint, reverse=True)
         ]
 
     def _validate_stage_resources(self, stage: str) -> None:
@@ -520,8 +441,7 @@ class MultiPolicyTrainer:
         requests = self._get_stage_resource_requests(stage)
         node_resources = ray._private.state.available_resources_per_node()
         node_capacities = {
-            node_id: int(resources.get("GPU", resources.get("NPU", 0)))
-            for node_id, resources in node_resources.items()
+            node_id: int(resources.get("GPU", resources.get("NPU", 0))) for node_id, resources in node_resources.items()
         }
         required_gpus = sum(gpus for _, _, gpus in requests)
         available_gpus = sum(node_capacities.values())
@@ -533,9 +453,7 @@ class MultiPolicyTrainer:
             f"{policy_name}/{pool_name}={count}x{gpus}GPU"
             for (policy_name, pool_name, gpus), count in sorted(request_counts.items())
         )
-        node_summary = ", ".join(
-            f"{node_id}={gpus}GPU" for node_id, gpus in sorted(node_capacities.items())
-        )
+        node_summary = ", ".join(f"{node_id}={gpus}GPU" for node_id, gpus in sorted(node_capacities.items()))
 
         if available_gpus < required_gpus:
             raise ValueError(
@@ -547,7 +465,7 @@ class MultiPolicyTrainer:
         demands = tuple(sorted((gpus for _, _, gpus in requests), reverse=True))
         capacities = tuple(sorted(node_capacities.values(), reverse=True))
 
-        @lru_cache(maxsize=None)
+        @cache
         def can_strict_pack(request_index: int, remaining: tuple[int, ...]) -> bool:
             if request_index == len(demands):
                 return True
@@ -573,10 +491,7 @@ class MultiPolicyTrainer:
 
     def get_policy_clients(self) -> dict[str, LLMServerClient]:
         """Return the LLM client for each policy."""
-        return {
-            policy_name: trainer.get_llm_client()
-            for policy_name, trainer in self.policy_trainers.items()
-        }
+        return {policy_name: trainer.get_llm_client() for policy_name, trainer in self.policy_trainers.items()}
 
     def get_policy_configs(self) -> dict[str, DictConfig]:
         """Return the composed PPO config for each policy."""
@@ -640,9 +555,7 @@ class MultiPolicyTrainer:
                 step_metrics = self.train_step()
                 is_last_step = self.global_steps >= self.total_training_steps
                 test_freq = self.config.trainer.get("test_freq", -1)
-                if test_freq > 0 and (
-                    is_last_step or self.global_steps % test_freq == 0
-                ):
+                if test_freq > 0 and (is_last_step or self.global_steps % test_freq == 0):
                     self.on_validate_begin()
                     try:
                         step_metrics.update(self._validate())
@@ -651,9 +564,7 @@ class MultiPolicyTrainer:
                 # Mirror verl v1 trainer.fit(): record per-step metrics
                 # (loss/adv/grad_norm, prefixed per policy) to the configured
                 # backend. Sorting keeps the two policies' metrics grouped.
-                self.logger.log(
-                    data=dict(sorted(step_metrics.items())), step=self.global_steps
-                )
+                self.logger.log(data=dict(sorted(step_metrics.items())), step=self.global_steps)
                 self.global_steps += 1
                 self._sync_policy_runtime_context()
             succeeded = True
@@ -727,9 +638,7 @@ class MultiPolicyTrainer:
         # Decoupled PPO uses a stable pi_old within one parameter-sync cycle.
         # A local MAS batch may not contain trajectories for every policy, so
         # each policy advances its trigger step only when it participates.
-        policy_local_trigger_steps = {
-            policy_name: 0 for policy_name in self.policy_trainers
-        }
+        policy_local_trigger_steps = {policy_name: 0 for policy_name in self.policy_trainers}
         if parameter_sync_step == 1:
             if self.trainer_mode == "separate_async":
                 for policy_name, trainer in self.policy_trainers.items():
@@ -737,9 +646,7 @@ class MultiPolicyTrainer:
             return self._step_once(metrics, timing_raw, sample_batch_size)
 
         metrics_aggregator = MetricsAggregator()
-        policy_metrics_aggregators = {
-            policy_name: MetricsAggregator() for policy_name in self.policy_trainers
-        }
+        policy_metrics_aggregators = {policy_name: MetricsAggregator() for policy_name in self.policy_trainers}
         step_batches = []
         for _ in range(parameter_sync_step):
             if self.trainer_mode == "separate_async":
@@ -757,33 +664,22 @@ class MultiPolicyTrainer:
                 {
                     key: value
                     for key, value in iter_metrics.items()
-                    if not any(
-                        key.startswith(f"{policy_name}/")
-                        for policy_name in self.policy_trainers
-                    )
+                    if not any(key.startswith(f"{policy_name}/") for policy_name in self.policy_trainers)
                 },
                 sample_count=int(non_padding_mask.sum()),
             )
             for policy_name, aggregator in policy_metrics_aggregators.items():
                 prefix = f"{policy_name}/"
                 policy_metrics = {
-                    key.removeprefix(prefix): value
-                    for key, value in iter_metrics.items()
-                    if key.startswith(prefix)
+                    key.removeprefix(prefix): value for key, value in iter_metrics.items() if key.startswith(prefix)
                 }
                 policy_sample_count = sum(
-                    not tag.get("is_padding", False)
-                    and tag.get("policy_name") == policy_name
-                    for tag in batch.tags
+                    not tag.get("is_padding", False) and tag.get("policy_name") == policy_name for tag in batch.tags
                 )
-                aggregator.add_step_metrics(
-                    policy_metrics, sample_count=policy_sample_count
-                )
+                aggregator.add_step_metrics(policy_metrics, sample_count=policy_sample_count)
 
             updated_policy_names = {
-                tag.get("policy_name")
-                for tag in batch.tags
-                if tag.get("policy_name") in policy_local_trigger_steps
+                tag.get("policy_name") for tag in batch.tags if tag.get("policy_name") in policy_local_trigger_steps
             }
             for policy_name in updated_policy_names:
                 policy_local_trigger_steps[policy_name] += 1
@@ -812,9 +708,7 @@ class MultiPolicyTrainer:
                 metrics=metrics,
             )
         per_policy_batches = self.build_per_policy_batches(multi_agent_batch)
-        per_policy_batches = self.prepare_policy_batches_for_ppo_update(
-            per_policy_batches, metrics
-        )
+        per_policy_batches = self.prepare_policy_batches_for_ppo_update(per_policy_batches, metrics)
         with marked_timer("adv", timing_raw, color="brown"):
             multi_agent_batch = self.compute_multi_agent_advantage_from_policy_batches(
                 per_policy_batches,
@@ -837,11 +731,7 @@ class MultiPolicyTrainer:
         result = self.replay_buffer.sample(
             global_steps=self.global_steps,
             partition_id="train",
-            batch_size=(
-                sample_batch_size
-                if sample_batch_size is not None
-                else self.train_batch_size
-            ),
+            batch_size=(sample_batch_size if sample_batch_size is not None else self.train_batch_size),
         )
         self.on_sample_end()
 
@@ -859,30 +749,18 @@ class MultiPolicyTrainer:
         self,
         multi_agent_batch: KVBatchMeta,
     ) -> dict[str, KVBatchMeta]:
-        if not hasattr(multi_agent_batch, "keys") or not hasattr(
-            multi_agent_batch, "tags"
-        ):
-            raise TypeError(
-                "multi_agent_batch must be a KVBatchMeta-like object with keys and tags"
-            )
+        if not hasattr(multi_agent_batch, "keys") or not hasattr(multi_agent_batch, "tags"):
+            raise TypeError("multi_agent_batch must be a KVBatchMeta-like object with keys and tags")
         if len(multi_agent_batch.keys) != len(multi_agent_batch.tags):
-            raise ValueError(
-                "multi_agent_batch keys and tags must have the same length"
-            )
+            raise ValueError("multi_agent_batch keys and tags must have the same length")
 
         grouped: dict[str, dict[str, list[Any]]] = {}
-        for key, tag in zip(
-            multi_agent_batch.keys, multi_agent_batch.tags, strict=True
-        ):
+        for key, tag in zip(multi_agent_batch.keys, multi_agent_batch.tags, strict=True):
             policy_name = tag.get("policy_name")
             if not policy_name:
-                raise ValueError(
-                    f"Multi-agent trajectory tag for key {key!r} is missing policy_name"
-                )
+                raise ValueError(f"Multi-agent trajectory tag for key {key!r} is missing policy_name")
             if policy_name not in self.policy_trainers:
-                raise ValueError(
-                    f"Unknown policy_name in multi-agent trajectory tag: {policy_name}"
-                )
+                raise ValueError(f"Unknown policy_name in multi-agent trajectory tag: {policy_name}")
             group = grouped.setdefault(str(policy_name), {"keys": [], "tags": []})
             group["keys"].append(key)
             group["tags"].append(tag)
@@ -904,9 +782,7 @@ class MultiPolicyTrainer:
     ) -> dict[str, KVBatchMeta]:
         """Run per-policy balance/log-prob stages concurrently on disjoint GPUs."""
         futures = [
-            self._policy_pool.submit(
-                self._prepare_policy_batch_for_update, policy_name, batch
-            )
+            self._policy_pool.submit(self._prepare_policy_batch_for_update, policy_name, batch)
             for policy_name, batch in per_policy_batches.items()
         ]
         prepared = {}
@@ -965,15 +841,11 @@ class MultiPolicyTrainer:
         metrics: dict[str, Any],
     ) -> KVBatchMeta:
         advantage_trainer = next(iter(self.policy_trainers.values()))
-        multi_agent_batch = advantage_trainer._compute_advantage(
-            multi_agent_batch, metrics=metrics
-        )
+        multi_agent_batch = advantage_trainer._compute_advantage(multi_agent_batch, metrics=metrics)
         self._add_advantage_metrics(multi_agent_batch, metrics)
         return multi_agent_batch
 
-    def _add_advantage_metrics(
-        self, batch: KVBatchMeta, metrics: dict[str, Any]
-    ) -> None:
+    def _add_advantage_metrics(self, batch: KVBatchMeta, metrics: dict[str, Any]) -> None:
         """Log per-policy advantage distribution stats from the TransferQueue.
 
         verl's per-policy ``_compute_advantage`` writes token-level
@@ -982,11 +854,7 @@ class MultiPolicyTrainer:
         extra TQ fetch per step) and aggregates masked distribution stats per
         policy, so GRPO group-normalized advantages become observable.
         """
-        if (
-            batch is None
-            or not getattr(batch, "keys", None)
-            or not getattr(batch, "tags", None)
-        ):
+        if batch is None or not getattr(batch, "keys", None) or not getattr(batch, "tags", None):
             return
         try:
             data = tq.kv_batch_get(
@@ -1001,9 +869,7 @@ class MultiPolicyTrainer:
             logger.warning("failed to compute advantage metrics: %s", exc)
             return
 
-        per_policy: dict[str, list[torch.Tensor]] = {
-            policy: [] for policy in self.policy_trainers
-        }
+        per_policy: dict[str, list[torch.Tensor]] = {policy: [] for policy in self.policy_trainers}
         for i, tag in enumerate(batch.tags):
             policy_name = tag.get("policy_name")
             if policy_name not in per_policy:
@@ -1047,11 +913,7 @@ class MultiPolicyTrainer:
         Trajectory version-span and staleness metrics use the corresponding
         records' tags, matching verl v1's separate_async definitions.
         """
-        if (
-            batch is None
-            or not getattr(batch, "keys", None)
-            or not getattr(batch, "tags", None)
-        ):
+        if batch is None or not getattr(batch, "keys", None) or not getattr(batch, "tags", None):
             return
 
         non_padding_mask = np.array(
@@ -1067,8 +929,7 @@ class MultiPolicyTrainer:
             policy_masks[policy_name] = mask
 
         if all(
-            tag.get("is_padding", False)
-            or ("min_global_steps" in tag and "max_global_steps" in tag)
+            tag.get("is_padding", False) or ("min_global_steps" in tag and "max_global_steps" in tag)
             for tag in batch.tags
         ):
             min_global_steps = np.asarray(
@@ -1095,15 +956,9 @@ class MultiPolicyTrainer:
                     continue
                 for metric_name, values in staleness_metric_values:
                     selected = values[mask]
-                    metrics[f"{metric_prefix}/off_policy/{metric_name}/mean"] = (
-                        selected.mean().item()
-                    )
-                    metrics[f"{metric_prefix}/off_policy/{metric_name}/max"] = (
-                        selected.max().item()
-                    )
-                    metrics[f"{metric_prefix}/off_policy/{metric_name}/min"] = (
-                        selected.min().item()
-                    )
+                    metrics[f"{metric_prefix}/off_policy/{metric_name}/mean"] = selected.mean().item()
+                    metrics[f"{metric_prefix}/off_policy/{metric_name}/max"] = selected.max().item()
+                    metrics[f"{metric_prefix}/off_policy/{metric_name}/min"] = selected.min().item()
 
         try:
             data = tq.kv_batch_get(
@@ -1160,19 +1015,11 @@ class MultiPolicyTrainer:
                     metrics[f"{policy_name}/{key}"] = value
                 policy_num_turns = num_turns[mask]
                 if policy_num_turns.size > 0:
-                    metrics[f"{policy_name}/num_turns/mean"] = (
-                        policy_num_turns.mean().item()
-                    )
-                    metrics[f"{policy_name}/num_turns/max"] = (
-                        policy_num_turns.max().item()
-                    )
-                    metrics[f"{policy_name}/num_turns/min"] = (
-                        policy_num_turns.min().item()
-                    )
+                    metrics[f"{policy_name}/num_turns/mean"] = policy_num_turns.mean().item()
+                    metrics[f"{policy_name}/num_turns/max"] = policy_num_turns.max().item()
+                    metrics[f"{policy_name}/num_turns/min"] = policy_num_turns.min().item()
             except Exception as exc:
-                logger.warning(
-                    "failed to compute data metrics for %s: %s", policy_name, exc
-                )
+                logger.warning("failed to compute data metrics for %s: %s", policy_name, exc)
 
     def update_policy_trainers(
         self,
@@ -1183,9 +1030,7 @@ class MultiPolicyTrainer:
         metrics = metrics if metrics is not None else {}
         critic_warmup = self.config.trainer.get("critic_warmup", 0)
         futures = [
-            self._policy_pool.submit(
-                self._update_one_policy, policy_name, batch, critic_warmup
-            )
+            self._policy_pool.submit(self._update_one_policy, policy_name, batch, critic_warmup)
             for policy_name, batch in per_policy_batches.items()
         ]
         updated = {}
@@ -1200,10 +1045,7 @@ class MultiPolicyTrainer:
 
     def _get_n_gpus_for_throughput(self) -> int:
         """Return the total GPU count represented by all policy trainers."""
-        return sum(
-            trainer._get_n_gpus_for_throughput()
-            for trainer in self.policy_trainers.values()
-        )
+        return sum(trainer._get_n_gpus_for_throughput() for trainer in self.policy_trainers.values())
 
     def _update_one_policy(
         self,
@@ -1253,26 +1095,18 @@ class MultiPolicyTrainer:
             is_train=False,
             max_samples=self.config.data.get("val_max_samples", -1),
         )
-        self.steps_per_epoch = (
-            len(self.train_dataset) // self.config.data.train_batch_size
-        )
+        self.steps_per_epoch = len(self.train_dataset) // self.config.data.train_batch_size
 
         # Mirror verl: exact refill counts require single-prompt dataloader fetches.
         filter_groups = self.config.algorithm.get("filter_groups")
-        dapo_enabled = bool(
-            filter_groups is not None and filter_groups.get("enable", False)
-        )
+        dapo_enabled = bool(filter_groups is not None and filter_groups.get("enable", False))
         sync_refill_failed_groups = bool(self.config.sampler.sync_refill_failed_groups)
         trainer_mode = self.trainer_mode
-        requires_exact_refill = (
-            dapo_enabled or sync_refill_failed_groups or trainer_mode != "sync"
-        )
+        requires_exact_refill = dapo_enabled or sync_refill_failed_groups or trainer_mode != "sync"
         if requires_exact_refill:
             user_gen_batch_size = self.config.data.get("gen_batch_size")
             if user_gen_batch_size not in (None, 1):
-                logger.warning(
-                    f"data.gen_batch_size={user_gen_batch_size} is overridden to 1."
-                )
+                logger.warning(f"data.gen_batch_size={user_gen_batch_size} is overridden to 1.")
             elif user_gen_batch_size is None:
                 logger.info("data.gen_batch_size defaulted to 1.")
             with open_dict(self.config.data):
@@ -1324,9 +1158,7 @@ class MultiPolicyTrainer:
         train_batch_size = self.train_batch_size
         gen_batch_size = (
             1
-            if filter_groups_metric is not None
-            or sync_refill_failed_groups
-            or trainer_mode != "sync"
+            if filter_groups_metric is not None or sync_refill_failed_groups or trainer_mode != "sync"
             else self.config.data.get("gen_batch_size") or train_batch_size
         )
         max_inflight_gen_batches = 1
@@ -1356,22 +1188,17 @@ class MultiPolicyTrainer:
         outer config.algorithm.filter_groups (inherited by every policy).
         """
         filter_groups = self.config.algorithm.get("filter_groups")
-        filter_enabled = bool(
-            filter_groups is not None and filter_groups.get("enable", False)
-        )
+        filter_enabled = bool(filter_groups is not None and filter_groups.get("enable", False))
         if not filter_enabled:
             return None
 
         filter_metric = filter_groups.get("metric")
         if not filter_metric:
-            raise ValueError(
-                "algorithm.filter_groups.metric must be set when group filtering is enabled"
-            )
+            raise ValueError("algorithm.filter_groups.metric must be set when group filtering is enabled")
 
         reward_model = self.config.reward.get("reward_model")
         streaming_reward_path = reward_model is None or (
-            not reward_model.get("enable", False)
-            or reward_model.get("enable_resource_pool", False)
+            not reward_model.get("enable", False) or reward_model.get("enable_resource_pool", False)
         )
         assert streaming_reward_path, (
             "algorithm.filter_groups requires the reward metric at sampling time: use rule-based reward or "
@@ -1410,26 +1237,20 @@ class MultiPolicyTrainer:
         inflight_uids = [
             key
             for key, tag in items.items()
-            if tag.get("is_prompt", False)
-            and tag.get("status") in ("pending", "running")
+            if tag.get("is_prompt", False) and tag.get("status") in ("pending", "running")
         ]
         if not inflight_uids:
             return 0
         batch = tq.kv_batch_get(keys=inflight_uids, partition_id=partition_id)
         trajectory_prefixes = tuple(f"{uid}_" for uid in inflight_uids)
         old_trajectory_keys = [
-            key
-            for key, tag in items.items()
-            if not tag.get("is_prompt", False) and key.startswith(trajectory_prefixes)
+            key for key, tag in items.items() if not tag.get("is_prompt", False) and key.startswith(trajectory_prefixes)
         ]
         if old_trajectory_keys:
             tq.kv_clear(keys=old_trajectory_keys, partition_id=partition_id)
 
         tu.assign_non_tensor_data(batch, "global_steps", self.global_steps)
-        tags = [
-            {"is_prompt": True, "status": "pending", "global_steps": self.global_steps}
-            for _ in inflight_uids
-        ]
+        tags = [{"is_prompt": True, "status": "pending", "global_steps": self.global_steps} for _ in inflight_uids]
         tq.kv_batch_put(keys=inflight_uids, partition_id=partition_id, tags=tags)
         self.agent_loop_manager.generate_sequences(batch)
         logger.info(
@@ -1452,10 +1273,7 @@ class MultiPolicyTrainer:
         save_freq = self.save_freq
         if save_freq <= 0:
             return False
-        return (
-            self.global_steps >= self.total_training_steps
-            or self.global_steps % save_freq == 0
-        )
+        return self.global_steps >= self.total_training_steps or self.global_steps % save_freq == 0
 
     def _fetch_one_gen_batch(self) -> TensorDict:
         try:
@@ -1466,9 +1284,7 @@ class MultiPolicyTrainer:
             self.train_dataloader_it = iter(self.train_dataloader)
             batch_dict = next(self.train_dataloader_it)
 
-        batch_dict["uid"] = np.array(
-            [str(uuid4()) for _ in range(len(batch_dict["raw_prompt"]))], dtype=object
-        )
+        batch_dict["uid"] = np.array([str(uuid4()) for _ in range(len(batch_dict["raw_prompt"]))], dtype=object)
         return tu.get_tensordict(batch_dict)
 
     def _next_train_batch(self, num_prompts: int | None = None) -> TensorDict:
@@ -1486,18 +1302,14 @@ class MultiPolicyTrainer:
         # DAPO group filtering / sync_refill_failed_groups is enabled, so the
         # outer fetch loop must use the same granularity as the shared
         # dataloader (1 sample per fetch) rather than train_batch_size.
-        gen_batch_size = int(
-            getattr(self.train_dataloader, "batch_size", None) or train_batch_size
-        )
+        gen_batch_size = int(getattr(self.train_dataloader, "batch_size", None) or train_batch_size)
         if num_prompts <= 0 or num_prompts % gen_batch_size != 0:
             raise ValueError(
                 f"num_prompts ({num_prompts}) must be a positive multiple of gen_batch_size "
                 f"({gen_batch_size}); it is submitted in whole gen_batch_size dataloader fetches."
             )
 
-        chunks = [
-            self._fetch_one_gen_batch() for _ in range(num_prompts // gen_batch_size)
-        ]
+        chunks = [self._fetch_one_gen_batch() for _ in range(num_prompts // gen_batch_size)]
         batch = chunks[0] if len(chunks) == 1 else tu.concat_tensordict(chunks)
         tu.assign_non_tensor_data(batch, "global_steps", self.global_steps)
         return batch
@@ -1531,12 +1343,8 @@ class MultiPolicyTrainer:
 
         uid_values = tu.get(batch, "uid")
         if uid_values is None:
-            raise ValueError(
-                "MultiPolicyTrainer requires batch['uid'] before rollout submission"
-            )
-        uid_values = (
-            uid_values.tolist() if hasattr(uid_values, "tolist") else list(uid_values)
-        )
+            raise ValueError("MultiPolicyTrainer requires batch['uid'] before rollout submission")
+        uid_values = uid_values.tolist() if hasattr(uid_values, "tolist") else list(uid_values)
         if not uid_values:
             return 0
 
@@ -1557,13 +1365,7 @@ class MultiPolicyTrainer:
         # prompts can be re-issued after a checkpoint resume.
         trainer_mode = self.trainer_mode
         if trainer_mode != "sync":
-            fields = batch.select(
-                *[
-                    key
-                    for key in batch.keys()
-                    if not isinstance(batch.get(key), NonTensorData)
-                ]
-            )
+            fields = batch.select(*[key for key in batch.keys() if not isinstance(batch.get(key), NonTensorData)])
             put_kwargs["fields"] = fields
         tq.kv_batch_put(**put_kwargs)
         self.agent_loop_manager.generate_sequences(batch)
@@ -1584,16 +1386,12 @@ class MultiPolicyTrainer:
             uid = str(tag.get("uid") or key_parts[0])
             try:
                 sample_value = tag.get("sample_idx")
-                sample_idx = int(
-                    sample_value if sample_value is not None else key_parts[1]
-                )
+                sample_idx = int(sample_value if sample_value is not None else key_parts[1])
             except (IndexError, TypeError, ValueError):
                 sample_idx = 0
             try:
                 record_value = tag.get("record_idx")
-                record_idx = int(
-                    record_value if record_value is not None else key_parts[2]
-                )
+                record_idx = int(record_value if record_value is not None else key_parts[2])
             except (IndexError, TypeError, ValueError):
                 record_idx = position
             group_key = (uid, sample_idx)
@@ -1611,10 +1409,8 @@ class MultiPolicyTrainer:
             return [value.data]
         if hasattr(value, "tolist"):
             value = value.tolist()
-        if isinstance(value, (list, tuple)):
-            return [
-                item.data if isinstance(item, NonTensorData) else item for item in value
-            ]
+        if isinstance(value, list | tuple):
+            return [item.data if isinstance(item, NonTensorData) else item for item in value]
         return [value]
 
     def _validate(self) -> dict[str, Any]:
@@ -1635,9 +1431,7 @@ class MultiPolicyTrainer:
             raw_prompts = batch_dict.get("raw_prompt")
             if raw_prompts is None:
                 raise ValueError("Validation batch must contain raw_prompt")
-            batch_dict["uid"] = np.array(
-                [str(uuid4()) for _ in range(len(raw_prompts))], dtype=object
-            )
+            batch_dict["uid"] = np.array([str(uuid4()) for _ in range(len(raw_prompts))], dtype=object)
             batch = tu.get_tensordict(batch_dict)
             tu.assign_non_tensor_data(batch, "global_steps", self.global_steps)
             tu.assign_non_tensor_data(batch, "validate", True)
@@ -1686,30 +1480,14 @@ class MultiPolicyTrainer:
                 for index, score in enumerate(score_values):
                     reward = float(score)
                     reward_values.append(reward)
-                    sample_uids.append(
-                        str(uid_values[index])
-                        if index < len(uid_values)
-                        else final_keys[index]
-                    )
-                    sample_turns.append(
-                        float(turn_values[index]) if index < len(turn_values) else 0.0
-                    )
-                    data_sources.append(
-                        str(source_values[index])
-                        if index < len(source_values)
-                        else "unknown"
-                    )
+                    sample_uids.append(str(uid_values[index]) if index < len(uid_values) else final_keys[index])
+                    sample_turns.append(float(turn_values[index]) if index < len(turn_values) else 0.0)
+                    data_sources.append(str(source_values[index]) if index < len(source_values) else "unknown")
                     extra = extra_values[index] if index < len(extra_values) else {}
                     extra = getattr(extra, "data", extra)
-                    current_extra = (
-                        extra.get("reward_extra_info", {})
-                        if isinstance(extra, dict)
-                        else {}
-                    )
+                    current_extra = extra.get("reward_extra_info", {}) if isinstance(extra, dict) else {}
                     sample_position = len(reward_extra_infos["reward"])
-                    for key in (
-                        reward_extra_infos.keys() - {"reward"} - current_extra.keys()
-                    ):
+                    for key in reward_extra_infos.keys() - {"reward"} - current_extra.keys():
                         reward_extra_infos[key].append(None)
                     for key, value in current_extra.items():
                         if key not in reward_extra_infos:
@@ -1723,11 +1501,7 @@ class MultiPolicyTrainer:
             return {}
         metrics = {}
         try:
-            metrics.update(
-                self._format_validation_metrics(
-                    data_sources, sample_uids, reward_extra_infos, sample_turns
-                )
-            )
+            metrics.update(self._format_validation_metrics(data_sources, sample_uids, reward_extra_infos, sample_turns))
         except (ImportError, AttributeError):
             metrics = {}
         if not metrics:
@@ -1740,12 +1514,8 @@ class MultiPolicyTrainer:
         return metrics
 
     @staticmethod
-    def _format_validation_metrics(
-        data_sources, sample_uids, reward_extra_infos, sample_turns
-    ):
-        structured = process_validation_metrics(
-            data_sources, sample_uids, reward_extra_infos
-        )
+    def _format_validation_metrics(data_sources, sample_uids, reward_extra_infos, sample_turns):
+        structured = process_validation_metrics(data_sources, sample_uids, reward_extra_infos)
         metrics = {}
         for data_source, variables in structured.items():
             for variable, values in variables.items():
@@ -1753,9 +1523,7 @@ class MultiPolicyTrainer:
                 n_max = max(int(name.split("@")[-1].split("/")[0]) for name in values)
                 for name, value in values.items():
                     is_core = (
-                        variable == core_variable
-                        and name.startswith(("mean", "maj", "best"))
-                        and f"@{n_max}" in name
+                        variable == core_variable and name.startswith(("mean", "maj", "best")) and f"@{n_max}" in name
                     )
                     section = "val-core" if is_core else "val-aux"
                     metrics[f"{section}/{data_source}/{variable}/{name}"] = value
@@ -1809,8 +1577,7 @@ class MultiPolicyTrainer:
     def on_validate_end(self) -> None:
         """Finish every policy's native validation lifecycle."""
         futures = [
-            self._policy_pool.submit(policy_trainer.on_validate_end)
-            for policy_trainer in self.policy_trainers.values()
+            self._policy_pool.submit(policy_trainer.on_validate_end) for policy_trainer in self.policy_trainers.values()
         ]
         for future in futures:
             future.result()
@@ -1854,9 +1621,7 @@ class MultiPolicyTrainer:
             finally:
                 setattr(self, attr, None)
 
-    def _dispatch_policy_hook(
-        self, hook_name: str, *, collect_timing: bool = False
-    ) -> None:
+    def _dispatch_policy_hook(self, hook_name: str, *, collect_timing: bool = False) -> None:
         """Run one lifecycle hook on every policy trainer concurrently.
 
         Args:
@@ -1912,9 +1677,7 @@ class MultiPolicyTrainer:
         # checkpoint manager; update_weights contains abort/resume internally).
         self._dispatch_policy_hook("on_step_end", collect_timing=True)
 
-    def _update_weights_one_policy(
-        self, policy_name: str
-    ) -> tuple[None, dict[str, Any]]:
+    def _update_weights_one_policy(self, policy_name: str) -> tuple[None, dict[str, Any]]:
         """Wake one policy's vLLM replicas with the current weights."""
         timing_raw: dict[str, Any] = {}
         trainer = self.policy_trainers[policy_name]
@@ -1933,9 +1696,7 @@ class MultiPolicyTrainer:
         self._sync_policy_runtime_context()
         if self.trainer_mode == "sync":
             for policy_name, trainer in self.policy_trainers.items():
-                with marked_timer(
-                    f"{policy_name}/sleep_replicas", self.timing_raw, color="red"
-                ):
+                with marked_timer(f"{policy_name}/sleep_replicas", self.timing_raw, color="red"):
                     trainer.checkpoint_manager.sleep_replicas()
             return
         # separate_async: delegate to verl's per-policy on_sample_end. The
@@ -1944,9 +1705,7 @@ class MultiPolicyTrainer:
         self._dispatch_policy_hook("on_sample_end")
 
     @staticmethod
-    def _prefix_metrics(
-        metrics: dict[str, Any], policy_name: str, policy_metrics: dict[str, Any]
-    ) -> None:
+    def _prefix_metrics(metrics: dict[str, Any], policy_name: str, policy_metrics: dict[str, Any]) -> None:
         for key, value in policy_metrics.items():
             metrics[f"{policy_name}/{key}"] = value
 
@@ -1984,5 +1743,6 @@ class MultiPolicyTrainer:
         if template is None:
             raise ValueError("Cannot merge an empty per-policy batch mapping")
         return self._make_batch_like(template, keys=merged_keys, tags=merged_tags)
+
 
 __all__ = ["MultiPolicyTrainer"]

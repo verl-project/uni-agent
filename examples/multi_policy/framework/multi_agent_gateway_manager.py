@@ -108,9 +108,7 @@ class MultiAgentGatewayManager(GatewayManager):
             if not isinstance(role_name, str) or not role_name:
                 raise ValueError(f"Invalid role: {role_name!r}")
             if not isinstance(policy_name, str) or not policy_name:
-                raise ValueError(
-                    f"Invalid policy name for role {role_name}: {policy_name!r}"
-                )
+                raise ValueError(f"Invalid policy name for role {role_name}: {policy_name!r}")
             role_sessions[role_name] = _RoleSession(
                 role_session_id=f"{session_group_id}:{role_name}",
                 policy_name=policy_name,
@@ -136,9 +134,7 @@ class MultiAgentGatewayManager(GatewayManager):
                         "policy_name": role_session.policy_name,
                         "session_group_id": session_group_id,
                     },
-                    sampling_params=dict(
-                        policy_sampling_params.get(role_session.policy_name, {})
-                    ),
+                    sampling_params=dict(policy_sampling_params.get(role_session.policy_name, {})),
                     policy_name=role_session.policy_name,
                 )
                 role_base_urls[role_name] = handle.base_url
@@ -171,9 +167,7 @@ class MultiAgentGatewayManager(GatewayManager):
         trajectories: list[Trajectory] = []
         try:
             for role_name, role_session in role_sessions.items():
-                for trajectory in await gateway.finalize_session.remote(
-                    session_id=role_session.role_session_id
-                ):
+                for trajectory in await gateway.finalize_session.remote(session_id=role_session.role_session_id):
                     trajectories.append(
                         replace(
                             trajectory,
@@ -228,10 +222,7 @@ class MultiAgentGatewayManager(GatewayManager):
 
         try:
             await asyncio.gather(
-                *(
-                    self._abort_group_sessions(gateway, role_sessions)
-                    for gateway, role_sessions in active_groups
-                )
+                *(self._abort_group_sessions(gateway, role_sessions) for gateway, role_sessions in active_groups)
             )
         finally:
             try:
@@ -248,13 +239,9 @@ class MultiAgentGatewayManager(GatewayManager):
         """Best-effort abort for the role sessions already created in a group."""
         for role_session in role_sessions.values():
             try:
-                await gateway.abort_session.remote(
-                    session_id=role_session.role_session_id
-                )
+                await gateway.abort_session.remote(session_id=role_session.role_session_id)
             except Exception:
-                logger.exception(
-                    "Failed to abort session %s", role_session.role_session_id
-                )
+                logger.exception("Failed to abort session %s", role_session.role_session_id)
 
     def _drop_group_state(self, session_group_id: str) -> None:
         """Remove one group reservation and release its scheduling slot."""

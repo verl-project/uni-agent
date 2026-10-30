@@ -19,6 +19,7 @@ from omegaconf import DictConfig, OmegaConf
 from uni_agent.framework.framework import GatewayAgentFramework, TrajectoryPostprocessor
 from uni_agent.gateway.session import Trajectory
 from uni_agent.tasks import TaskResult
+
 from .multi_agent_types import SessionGroupHandle
 
 logger = logging.getLogger(__name__)
@@ -106,9 +107,7 @@ class MultiAgentGatewayFramework(GatewayAgentFramework):
                 processor,
             )
         framework_kwargs = cls._parse_framework_config(config)
-        af_cfg = OmegaConf.select(
-            config, "actor_rollout_ref.rollout.custom.agent_framework"
-        )
+        af_cfg = OmegaConf.select(config, "actor_rollout_ref.rollout.custom.agent_framework")
         return cls(
             gateway_manager=gateway_manager,
             role_policy_mapping=dict(af_cfg.role_policy_mapping),
@@ -127,12 +126,10 @@ class MultiAgentGatewayFramework(GatewayAgentFramework):
         """Build session defaults from each policy's composed rollout config."""
         policy_sampling_params: dict[str, dict[str, object]] = {}
         for policy_name, rollout_config in self._policy_rollout_configs.items():
-            policy_sampling_params[policy_name] = (
-                self._build_sampling_params_from_config(
-                    config=rollout_config,
-                    partition_id=partition_id,
-                    sample_fields=sample_fields,
-                )
+            policy_sampling_params[policy_name] = self._build_sampling_params_from_config(
+                config=rollout_config,
+                partition_id=partition_id,
+                sample_fields=sample_fields,
             )
         return policy_sampling_params
 
@@ -145,9 +142,7 @@ class MultiAgentGatewayFramework(GatewayAgentFramework):
         """Prefer the runner's team reward, including zero, over worker scoring."""
         runner_reward_info = {
             "reward": task_result.reward,
-            "metrics": (
-                {} if task_result.accuracy is None else {"acc": task_result.accuracy}
-            ),
+            "metrics": ({} if task_result.accuracy is None else {"acc": task_result.accuracy}),
             "reward_context": copy.deepcopy(task_result.extra_info),
         }
         for index, trajectory in enumerate(session_trajectories):
@@ -188,9 +183,7 @@ class MultiAgentGatewayFramework(GatewayAgentFramework):
         try:
             return self._policy_processors[policy_name]
         except KeyError as exc:
-            raise ValueError(
-                f"No processor configured for policy {policy_name!r}"
-            ) from exc
+            raise ValueError(f"No processor configured for policy {policy_name!r}") from exc
 
     def _extra_tags(self, trajectory: Trajectory) -> dict[str, object]:
         """Add role, policy, and session_group_id to TransferQueue tags."""

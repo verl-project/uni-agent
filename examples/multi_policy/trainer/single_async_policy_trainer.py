@@ -1,4 +1,4 @@
-﻿"""Minimal separate-async single-policy v1 PPO trainer for multi-agent orchestration.
+"""Minimal separate-async single-policy v1 PPO trainer for multi-agent orchestration.
 
 Mirrors SinglePPOTrainer (sync): the outer MultiPolicyTrainer owns the shared
 dataloader and the shared ReplayBufferAsync. Inheriting PPOTrainerSeparateAsync
@@ -43,9 +43,7 @@ class SingleAsyncPPOTrainer(PPOTrainerSeparateAsync):
             start_rank=hybrid_num_replicas,
         )
 
-        checkpoint_engine_config = omega_conf_to_dataclass(
-            self.config.actor_rollout_ref.rollout.checkpoint_engine
-        )
+        checkpoint_engine_config = omega_conf_to_dataclass(self.config.actor_rollout_ref.rollout.checkpoint_engine)
         self.standalone_checkpoint_manager = CheckpointEngineManager(
             config=checkpoint_engine_config,
             actor_wg=self.actor_rollout_wg,

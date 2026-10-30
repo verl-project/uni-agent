@@ -18,8 +18,8 @@ def test_multi_agent_module_exports():
 @pytest.mark.cpu
 @pytest.mark.level0
 def test_manager_inherits_from_gateway_manager():
-    from uni_agent.gateway.manager import GatewayManager
     from examples.multi_policy.framework import MultiAgentGatewayManager
+    from uni_agent.gateway.manager import GatewayManager
 
     assert issubclass(MultiAgentGatewayManager, GatewayManager)
 
@@ -27,7 +27,7 @@ def test_manager_inherits_from_gateway_manager():
 @pytest.mark.cpu
 @pytest.mark.level0
 def test_framework_inherits_from_gateway_agent_framework():
-    from uni_agent.framework.framework import GatewayAgentFramework
     from examples.multi_policy.framework import MultiAgentGatewayFramework
+    from uni_agent.framework.framework import GatewayAgentFramework
 
     assert issubclass(MultiAgentGatewayFramework, GatewayAgentFramework)

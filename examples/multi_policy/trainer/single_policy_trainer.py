@@ -1,4 +1,4 @@
-﻿"""Minimal single-policy v1 PPO trainer for multi-agent orchestration.
+"""Minimal single-policy v1 PPO trainer for multi-agent orchestration.
 
 ``MultiPolicyTrainer`` owns one shared dataloader + one shared replay
 buffer at the outer level, so per-policy trainers do not need to build their

@@ -25,15 +25,9 @@ def _make_actor(*, sessions=None, allowed_keys=ALLOWED_SAMPLING_KEYS, client=Non
 
     actor = object.__new__(_GatewayActor)
     actor._sessions = dict(sessions or {})
-    actor._session_policies = {
-        session_id: SINGLE_POLICY_NAME for session_id in actor._sessions
-    }
-    actor._policy_allowed_request_sampling_param_keys = {
-        SINGLE_POLICY_NAME: frozenset(allowed_keys)
-    }
-    actor._policy_clients = {
-        SINGLE_POLICY_NAME: client if client is not None else object()
-    }
+    actor._session_policies = {session_id: SINGLE_POLICY_NAME for session_id in actor._sessions}
+    actor._policy_allowed_request_sampling_param_keys = {SINGLE_POLICY_NAME: frozenset(allowed_keys)}
+    actor._policy_clients = {SINGLE_POLICY_NAME: client if client is not None else object()}
     actor._warned_discarded_request_sampling_param_keys = set()
     return actor
 
@@ -221,9 +215,7 @@ async def test_responses_deferred_tool_name_errors_precede_generation(stream, ki
     from fastapi import HTTPException
 
     generate = AsyncMock(return_value=_outcome(content="done", finish_reason="stop"))
-    actor = _make_actor(
-        sessions={"s1": SimpleNamespace(sampling_params={}, run_generation=generate)}
-    )
+    actor = _make_actor(sessions={"s1": SimpleNamespace(sampling_params={}, run_generation=generate)})
     tool = _namespace_tool({"type": kind, "defer_loading": True}, namespaces)
     with pytest.raises(HTTPException) as error:
         await actor._handle_openai_responses("s1", _request(stream=stream, tools=[tool]))
@@ -283,9 +275,7 @@ async def test_responses_ambiguous_flat_tool_names_precede_generation(
         _namespace_tool({"type": "custom", "name": right_name, "defer_loading": right_deferred}, right_namespaces),
     ]
     generate = AsyncMock(return_value=_outcome(content="done", finish_reason="stop"))
-    actor = _make_actor(
-        sessions={"s1": SimpleNamespace(sampling_params={}, run_generation=generate)}
-    )
+    actor = _make_actor(sessions={"s1": SimpleNamespace(sampling_params={}, run_generation=generate)})
     with pytest.raises(HTTPException) as error:
         await actor._handle_openai_responses("s1", _request(stream=stream, tools=tools))
     assert error.value.status_code == 400
@@ -369,9 +359,7 @@ async def test_responses_image_source_errors_precede_generation(stream, source):
     from fastapi import HTTPException
 
     generate = AsyncMock(return_value=_outcome(content="done", finish_reason="stop"))
-    actor = _make_actor(
-        sessions={"s1": SimpleNamespace(sampling_params={}, run_generation=generate)}
-    )
+    actor = _make_actor(sessions={"s1": SimpleNamespace(sampling_params={}, run_generation=generate)})
     with pytest.raises(HTTPException) as error:
         await actor._handle_openai_responses(
             "s1", _request(stream=stream, input=[{"role": "user", "content": [{"type": "input_image", **source}]}])
@@ -601,9 +589,7 @@ async def test_responses_handler_waits_for_generation_before_returning(stream):
         return _outcome(content="done", finish_reason="stop")
 
     generate_mock = AsyncMock(side_effect=generate)
-    actor = _make_actor(
-        sessions={"s1": SimpleNamespace(sampling_params={}, run_generation=generate_mock)}
-    )
+    actor = _make_actor(sessions={"s1": SimpleNamespace(sampling_params={}, run_generation=generate_mock)})
     task = asyncio.create_task(actor._handle_openai_responses("s1", _request(stream=stream)))
     try:
         await asyncio.wait_for(started.wait(), timeout=1)
@@ -618,9 +604,7 @@ async def test_responses_handler_waits_for_generation_before_returning(stream):
 @pytest.mark.asyncio
 async def test_responses_generation_errors_precede_stream_headers(stream):
     generate = AsyncMock(side_effect=RuntimeError("backend unavailable"))
-    actor = _make_actor(
-        sessions={"s1": SimpleNamespace(sampling_params={}, run_generation=generate)}
-    )
+    actor = _make_actor(sessions={"s1": SimpleNamespace(sampling_params={}, run_generation=generate)})
     with pytest.raises(RuntimeError, match="backend unavailable"):
         await actor._handle_openai_responses("s1", _request(stream=stream))
     generate.assert_awaited_once()
@@ -812,9 +796,7 @@ async def test_responses_capability_errors_precede_generation(stream, overrides)
     from fastapi import HTTPException
 
     generate = AsyncMock(return_value=_outcome(content="done", finish_reason="stop"))
-    actor = _make_actor(
-        sessions={"s1": SimpleNamespace(sampling_params={}, run_generation=generate)}
-    )
+    actor = _make_actor(sessions={"s1": SimpleNamespace(sampling_params={}, run_generation=generate)})
     with pytest.raises(HTTPException) as error:
         await actor._handle_openai_responses("s1", _request(stream=stream, **overrides))
     assert error.value.status_code == 400
@@ -924,9 +906,7 @@ async def _assert_responses_request_fails_before_generation(payload):
     from httpx import ASGITransport, AsyncClient
 
     generate = AsyncMock(return_value=_outcome(content="done", finish_reason="stop"))
-    actor = _make_actor(
-        sessions={"s1": SimpleNamespace(sampling_params={}, run_generation=generate)}
-    )
+    actor = _make_actor(sessions={"s1": SimpleNamespace(sampling_params={}, run_generation=generate)})
     actor._app = FastAPI()
     actor._register_routes()
     async with AsyncClient(transport=ASGITransport(app=actor._app), base_url="http://test") as client:

@@ -3,8 +3,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from examples.multi_policy.framework import SessionGroupHandle
 from examples.multi_policy.external_mas import task_runner as mod
+from examples.multi_policy.framework import SessionGroupHandle
 from uni_agent.gateway.session import SessionHandle
 from uni_agent.tasks import TaskResult
 
@@ -12,10 +12,7 @@ from uni_agent.tasks import TaskResult
 def _handle(roles=("a",), session_group_id="r1"):
     return SessionGroupHandle(
         session_group_id,
-        {
-            role: f"http://gateway/sessions/{session_group_id}:{role}/v1"
-            for role in roles
-        },
+        {role: f"http://gateway/sessions/{session_group_id}:{role}/v1" for role in roles},
     )
 
 
@@ -30,9 +27,7 @@ async def test_runner_uses_native_task_resolution(monkeypatch):
         }
     )
     monkeypatch.setattr(mod, "run_external_mas", launcher)
-    tools = {
-        "task": {"name": "multi_policy_external_mas", "metadata": {"dataset": "test"}}
-    }
+    tools = {"task": {"name": "multi_policy_external_mas", "metadata": {"dataset": "test"}}}
     original = deepcopy(tools)
     messages = [
         {"role": "system", "content": "rules"},
@@ -93,14 +88,10 @@ async def test_runner_requires_role_urls(monkeypatch):
 
 @pytest.mark.cpu
 @pytest.mark.level0
-@pytest.mark.parametrize(
-    "reward_info", [{"reward": float("nan")}, {"finished": "false"}]
-)
+@pytest.mark.parametrize("reward_info", [{"reward": float("nan")}, {"finished": "false"}])
 @pytest.mark.asyncio
 async def test_invalid_task_result_is_rejected(monkeypatch, reward_info):
-    monkeypatch.setattr(
-        mod, "run_external_mas", AsyncMock(return_value={"reward_info": reward_info})
-    )
+    monkeypatch.setattr(mod, "run_external_mas", AsyncMock(return_value={"reward_info": reward_info}))
     with pytest.raises(ValueError):
         await mod.run_multi_agent_task(
             session=_handle(),
@@ -120,9 +111,7 @@ async def test_runner_rejects_non_dictionary_tools_kwargs(monkeypatch, tools):
     run_task = AsyncMock()
     monkeypatch.setattr(mod, "run_task", run_task)
     with pytest.raises(ValueError, match="tools_kwargs must be a dictionary or None"):
-        await mod.run_multi_agent_task(
-            session=_handle(), raw_prompt="q", sample_index=0, tools_kwargs=tools
-        )
+        await mod.run_multi_agent_task(session=_handle(), raw_prompt="q", sample_index=0, tools_kwargs=tools)
     run_task.assert_not_awaited()
 
 
@@ -144,9 +133,7 @@ async def test_runner_supplies_missing_task(monkeypatch, tools):
     forwarded = run_task.call_args.kwargs["tools_kwargs"]
     assert forwarded["task"]["name"] == mod.TASK_NAME
     assert forwarded["task"]["role_urls"] == _handle().role_base_urls
-    assert (
-        forwarded["task"]["launcher_kwargs"]["execution"]["backend"] == "local_process"
-    )
+    assert forwarded["task"]["launcher_kwargs"]["execution"]["backend"] == "local_process"
     assert tools == original
     if tools:
         assert forwarded["metadata"] == tools["metadata"]

@@ -2,8 +2,8 @@ import copy
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-from omegaconf import OmegaConf
 import pytest
+from omegaconf import OmegaConf
 
 from examples.multi_policy.framework import MultiAgentGatewayFramework
 from examples.multi_policy.reward import compute_score
@@ -40,9 +40,7 @@ async def test_reward_precedence_and_runner_context(runner_reward):
     task_result = TaskResult(reward=runner_reward, accuracy=0.5, extra_info=context)
     trajectories = _trajectories()
 
-    annotations, source = await framework._select_reward_source(
-        trajectories, {"uid": "u"}, task_result
-    )
+    annotations, source = await framework._select_reward_source(trajectories, {"uid": "u"}, task_result)
 
     runner_info = {
         "reward": runner_reward,
@@ -60,15 +58,8 @@ async def test_reward_precedence_and_runner_context(runner_reward):
         assert annotations == [(float(runner_reward), {})] * 2
         framework._score_trajectories.assert_not_awaited()
     # Context copies are independent per trajectory and from the TaskResult.
-    trajectories[0].extra_fields["runner_reward_info"]["reward_context"][
-        "agent_outputs"
-    ]["answerer"] = "changed"
-    assert (
-        trajectories[1].extra_fields["runner_reward_info"]["reward_context"][
-            "agent_outputs"
-        ]["answerer"]
-        == "Paris"
-    )
+    trajectories[0].extra_fields["runner_reward_info"]["reward_context"]["agent_outputs"]["answerer"] = "changed"
+    assert trajectories[1].extra_fields["runner_reward_info"]["reward_context"]["agent_outputs"]["answerer"] == "Paris"
     assert task_result.extra_info["agent_outputs"]["answerer"] == "Paris"
 
 
@@ -78,9 +69,7 @@ async def test_reward_precedence_and_runner_context(runner_reward):
 async def test_custom_reward_worker_overrides_runner_reward():
     framework = _framework(workers=[SimpleNamespace()])
     framework._custom_reward_function_configured = True
-    framework._score_trajectories = AsyncMock(
-        return_value=[(0.25, {"source": "custom"})] * 2
-    )
+    framework._score_trajectories = AsyncMock(return_value=[(0.25, {"source": "custom"})] * 2)
     trajectories = _trajectories()
 
     annotations, source = await framework._select_reward_source(
@@ -99,9 +88,7 @@ async def test_custom_reward_worker_overrides_runner_reward():
 @pytest.mark.asyncio
 async def test_missing_reward_without_workers_stays_unscored():
     framework = _framework(workers=None)
-    annotations, source = await framework._select_reward_source(
-        _trajectories(), {"uid": "u"}, TaskResult()
-    )
+    annotations, source = await framework._select_reward_source(_trajectories(), {"uid": "u"}, TaskResult())
     assert annotations is None
     assert source is None
 
@@ -122,9 +109,7 @@ async def test_reward_context_survives_tq_without_entering_validation_metrics(
         worker_inputs.append(copy.deepcopy(data.non_tensor_batch["extra_info"][0]))
         return await manager.run_single(data)
 
-    framework = _framework(
-        workers=[SimpleNamespace(compute_score=SimpleNamespace(remote=score))]
-    )
+    framework = _framework(workers=[SimpleNamespace(compute_score=SimpleNamespace(remote=score))])
     context = {
         "final_result": "Paris",
         "agent_outputs": {"searcher": "evidence", "answerer": "Paris"},
@@ -163,7 +148,7 @@ async def test_reward_context_survives_tq_without_entering_validation_metrics(
                 "reward_metrics": extra,
             }
         )
-        for trajectory, (score, extra) in zip(trajectories, annotations)
+        for trajectory, (score, extra) in zip(trajectories, annotations, strict=False)
     ]
     assert all(t.reward_score == expected_score for t in annotated)
     session = {"uid": "prompt-1", "raw_prompt": "Capital of France?"}
@@ -195,9 +180,7 @@ async def test_reward_context_survives_tq_without_entering_validation_metrics(
         ("answer", {"answers": ["Paris"]}, 0.0),
     ],
 )
-def test_scorer_without_runner_context_uses_solution_and_flat_metrics(
-    solution, ground_truth, score
-):
+def test_scorer_without_runner_context_uses_solution_and_flat_metrics(solution, ground_truth, score):
     assert compute_score("qa", solution, ground_truth) == {
         "score": score,
         "acc": score,

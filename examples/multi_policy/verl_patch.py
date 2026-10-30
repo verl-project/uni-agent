@@ -161,11 +161,7 @@ def _patched_init_reward_loop_workers(self):
 
     self.reward_loop_workers = []
     num_workers = self.config.reward.num_workers
-    node_ids = [
-        node["NodeID"]
-        for node in ray.nodes()
-        if node["Alive"] and node["Resources"].get("CPU", 0) > 0
-    ]
+    node_ids = [node["NodeID"] for node in ray.nodes() if node["Alive"] and node["Resources"].get("CPU", 0) > 0]
 
     for i in range(num_workers):
         node_id = node_ids[i % len(node_ids)]
@@ -262,13 +258,9 @@ def _make_patched_server_adapter_update_weights(orig):
     race-free hook for the sender-side label.
     """
 
-    async def _patched(
-        self, weights, global_steps=None, wire_format="named_tensors", **kwargs
-    ):
+    async def _patched(self, weights, global_steps=None, wire_format="named_tensors", **kwargs):
         _policy_suffixed_zmq_handle(self)
-        return await orig(
-            self, weights, global_steps=global_steps, wire_format=wire_format, **kwargs
-        )
+        return await orig(self, weights, global_steps=global_steps, wire_format=wire_format, **kwargs)
 
     return _patched
 
@@ -286,11 +278,7 @@ def _policy_suffixed_zmq_handle(self) -> None:
     ``_{policy}`` suffix to the sender's job-id component so both ends agree.
     """
     label = _policy_label_from_rollout_config(getattr(self, "config", None))
-    if (
-        label
-        and hasattr(self, "zmq_handle")
-        and f"_{label}-replica-" not in self.zmq_handle
-    ):
+    if label and hasattr(self, "zmq_handle") and f"_{label}-replica-" not in self.zmq_handle:
         self.zmq_handle = self.zmq_handle.replace("-replica-", f"_{label}-replica-", 1)
 
 
@@ -328,26 +316,18 @@ def _patch_server_adapter_in_module(module) -> None:
     if server_adapter is None:
         return
     if _ORIG_SERVER_ADAPTER_NAME_PREFIX is None:
-        _ORIG_SERVER_ADAPTER_NAME_PREFIX = getattr(
-            server_adapter, "_get_server_name_prefix", None
-        )
-    server_adapter._get_server_name_prefix = (
-        _patched_server_adapter_get_server_name_prefix
-    )
+        _ORIG_SERVER_ADAPTER_NAME_PREFIX = getattr(server_adapter, "_get_server_name_prefix", None)
+    server_adapter._get_server_name_prefix = _patched_server_adapter_get_server_name_prefix
     # Worker-side sender patch: ServerAdapter.__init__ appends the policy label
     # to the ZMQ weight-transfer socket path. This process (a Ray worker) never
     # ran apply_patch(), so the closure factory captures the original locally.
     global _ORIG_SERVER_ADAPTER_INIT
     if _ORIG_SERVER_ADAPTER_INIT is None:
         _ORIG_SERVER_ADAPTER_INIT = server_adapter.__init__
-        server_adapter.__init__ = _make_patched_server_adapter_init(
-            server_adapter.__init__
-        )
+        server_adapter.__init__ = _make_patched_server_adapter_init(server_adapter.__init__)
     if _ORIG_SERVER_ADAPTER_UPDATE_WEIGHTS is None:
         _ORIG_SERVER_ADAPTER_UPDATE_WEIGHTS = server_adapter.update_weights
-        server_adapter.update_weights = _make_patched_server_adapter_update_weights(
-            server_adapter.update_weights
-        )
+        server_adapter.update_weights = _make_patched_server_adapter_update_weights(server_adapter.update_weights)
     _LOOKUP_PATCHED = True
 
 
@@ -366,18 +346,13 @@ def _apply_worker_lookup_patch_now() -> None:
         from verl.workers.rollout.vllm_rollout.vllm_rollout import ServerAdapter
     except Exception as exc:
         logger.warning(
-            "multi_policy.verl_patch: worker lookup patch skipped, "
-            "cannot import ServerAdapter (%s)",
+            "multi_policy.verl_patch: worker lookup patch skipped, cannot import ServerAdapter (%s)",
             exc,
         )
         return
     if _ORIG_SERVER_ADAPTER_NAME_PREFIX is None:
-        _ORIG_SERVER_ADAPTER_NAME_PREFIX = getattr(
-            ServerAdapter, "_get_server_name_prefix", None
-        )
-    ServerAdapter._get_server_name_prefix = (
-        _patched_server_adapter_get_server_name_prefix
-    )
+        _ORIG_SERVER_ADAPTER_NAME_PREFIX = getattr(ServerAdapter, "_get_server_name_prefix", None)
+    ServerAdapter._get_server_name_prefix = _patched_server_adapter_get_server_name_prefix
     _LOOKUP_PATCHED = True
     logger.info("multi_policy.verl_patch: worker lookup patch enabled")
 
@@ -417,20 +392,29 @@ def apply_worker_patch() -> None:
         except Exception:
             pass
 
-    threading.Thread(
-        target=_wait_and_patch, daemon=True, name="ma-lookup-patch"
-    ).start()
+    threading.Thread(target=_wait_and_patch, daemon=True, name="ma-lookup-patch").start()
     _WORKER_PATCHED = True
 
 
 def apply_patch() -> None:
     """Install the multi-policy uniqueness patches (idempotent)."""
-    global _PATCHED, _ORIG_INIT, _ORIG_CREATE, _ORIG_INIT_RESOURCE_POOL_MGR, _ORIG_INIT_REWARD_LOOP_WORKERS, _ORIG_VLLM_REPLICA_NAME_PREFIX, _ORIG_REPLICA_INIT_COLOCATED, _ORIG_REPLICA_INIT_STANDALONE, _ORIG_VLLM_REPLICA_LAUNCH_SERVERS, _ORIG_SERVER_ADAPTER_INIT, _ORIG_SERVER_ADAPTER_UPDATE_WEIGHTS, _ORIG_VLLM_HTTP_SERVER_INIT
+    global \
+        _PATCHED, \
+        _ORIG_INIT, \
+        _ORIG_CREATE, \
+        _ORIG_INIT_RESOURCE_POOL_MGR, \
+        _ORIG_INIT_REWARD_LOOP_WORKERS, \
+        _ORIG_VLLM_REPLICA_NAME_PREFIX, \
+        _ORIG_REPLICA_INIT_COLOCATED, \
+        _ORIG_REPLICA_INIT_STANDALONE, \
+        _ORIG_VLLM_REPLICA_LAUNCH_SERVERS, \
+        _ORIG_SERVER_ADAPTER_INIT, \
+        _ORIG_SERVER_ADAPTER_UPDATE_WEIGHTS, \
+        _ORIG_VLLM_HTTP_SERVER_INIT
     if _PATCHED:
         return
 
-    from verl.single_controller.ray.base import RayResourcePool
-    from verl.single_controller.ray.base import ResourcePoolManager
+    from verl.single_controller.ray.base import RayResourcePool, ResourcePoolManager
 
     try:
         from verl.trainer.ppo.v1.trainer_base import PPOTrainer
@@ -486,24 +470,18 @@ def apply_patch() -> None:
         RewardLoopManager._init_reward_loop_workers = _patched_init_reward_loop_workers
     if vLLMReplica is not None:
         _ORIG_VLLM_REPLICA_NAME_PREFIX = vLLMReplica._get_server_name_prefix
-        vLLMReplica._get_server_name_prefix = (
-            _patched_vllm_replica_get_server_name_prefix
-        )
+        vLLMReplica._get_server_name_prefix = _patched_vllm_replica_get_server_name_prefix
         _ORIG_VLLM_REPLICA_LAUNCH_SERVERS = vLLMReplica.launch_servers
         vLLMReplica.launch_servers = _patched_vllm_replica_launch_servers
     if ServerAdapter is not None:
         apply_worker_patch()
         _ORIG_SERVER_ADAPTER_INIT = ServerAdapter.__init__
-        ServerAdapter.__init__ = _make_patched_server_adapter_init(
-            ServerAdapter.__init__
-        )
+        ServerAdapter.__init__ = _make_patched_server_adapter_init(ServerAdapter.__init__)
     if vLLMReplica is not None:
         from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer
 
         _ORIG_VLLM_HTTP_SERVER_INIT = vLLMHttpServer.__init__
-        vLLMHttpServer.__init__ = _make_patched_vllm_http_server_init(
-            vLLMHttpServer.__init__
-        )
+        vLLMHttpServer.__init__ = _make_patched_vllm_http_server_init(vLLMHttpServer.__init__)
     if RolloutReplica is not None:
         _ORIG_REPLICA_INIT_COLOCATED = RolloutReplica.init_colocated
         _ORIG_REPLICA_INIT_STANDALONE = RolloutReplica.init_standalone
@@ -519,10 +497,24 @@ def apply_patch() -> None:
 
 def restore() -> None:
     """Restore verl's original methods (idempotent)."""
-    global _PATCHED, _WORKER_PATCHED, _LOOKUP_PATCHED, _ORIG_INIT, _ORIG_CREATE, _ORIG_INIT_RESOURCE_POOL_MGR, _ORIG_INIT_REWARD_LOOP_WORKERS, _ORIG_VLLM_REPLICA_NAME_PREFIX, _ORIG_SERVER_ADAPTER_NAME_PREFIX, _ORIG_REPLICA_INIT_COLOCATED, _ORIG_REPLICA_INIT_STANDALONE, _ORIG_VLLM_REPLICA_LAUNCH_SERVERS, _ORIG_SERVER_ADAPTER_INIT, _ORIG_SERVER_ADAPTER_UPDATE_WEIGHTS, _ORIG_VLLM_HTTP_SERVER_INIT
+    global \
+        _PATCHED, \
+        _WORKER_PATCHED, \
+        _LOOKUP_PATCHED, \
+        _ORIG_INIT, \
+        _ORIG_CREATE, \
+        _ORIG_INIT_RESOURCE_POOL_MGR, \
+        _ORIG_INIT_REWARD_LOOP_WORKERS, \
+        _ORIG_VLLM_REPLICA_NAME_PREFIX, \
+        _ORIG_SERVER_ADAPTER_NAME_PREFIX, \
+        _ORIG_REPLICA_INIT_COLOCATED, \
+        _ORIG_REPLICA_INIT_STANDALONE, \
+        _ORIG_VLLM_REPLICA_LAUNCH_SERVERS, \
+        _ORIG_SERVER_ADAPTER_INIT, \
+        _ORIG_SERVER_ADAPTER_UPDATE_WEIGHTS, \
+        _ORIG_VLLM_HTTP_SERVER_INIT
     if _PATCHED:
-        from verl.single_controller.ray.base import RayResourcePool
-        from verl.single_controller.ray.base import ResourcePoolManager
+        from verl.single_controller.ray.base import RayResourcePool, ResourcePoolManager
 
         RayResourcePool.__init__ = _ORIG_INIT
         ResourcePoolManager.create_resource_pool = _ORIG_CREATE
@@ -546,10 +538,7 @@ def restore() -> None:
             if _ORIG_VLLM_REPLICA_LAUNCH_SERVERS is not None:
                 vLLMReplica.launch_servers = _ORIG_VLLM_REPLICA_LAUNCH_SERVERS
                 _ORIG_VLLM_REPLICA_LAUNCH_SERVERS = None
-        if (
-            _ORIG_REPLICA_INIT_COLOCATED is not None
-            or _ORIG_REPLICA_INIT_STANDALONE is not None
-        ):
+        if _ORIG_REPLICA_INIT_COLOCATED is not None or _ORIG_REPLICA_INIT_STANDALONE is not None:
             from verl.workers.rollout.replica import RolloutReplica
 
             if _ORIG_REPLICA_INIT_COLOCATED is not None:

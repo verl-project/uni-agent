@@ -72,9 +72,7 @@ def _normalize_gateway_inputs(
     configs_are_mapped = isinstance(config, Mapping)
     backends_are_mapped = isinstance(backend, Mapping)
     if configs_are_mapped != backends_are_mapped:
-        raise ValueError(
-            "config and backend must both be policy mappings or both single values"
-        )
+        raise ValueError("config and backend must both be policy mappings or both single values")
     if not configs_are_mapped:
         config = {SINGLE_POLICY_NAME: config}
         backend = {SINGLE_POLICY_NAME: backend}
@@ -131,12 +129,9 @@ class _GatewayActor:
         ``SINGLE_POLICY_NAME``; mappings must contain identical policy names.
         The normalized mappings are retained as actor configuration.
         """
-        self._policy_configs, self._policy_clients = _normalize_gateway_inputs(
-            config, backend
-        )
+        self._policy_configs, self._policy_clients = _normalize_gateway_inputs(config, backend)
         self._policy_codecs: dict[str, MessageCodec] = {
-            policy_name: _build_codec(policy_config)
-            for policy_name, policy_config in self._policy_configs.items()
+            policy_name: _build_codec(policy_config) for policy_name, policy_config in self._policy_configs.items()
         }
         self._policy_allowed_request_sampling_param_keys: dict[str, frozenset[str]] = {
             policy_name: frozenset(DEFAULT_ALLOWED_REQUEST_SAMPLING_KEYS).union(
@@ -266,16 +261,9 @@ class _GatewayActor:
                 allowed_sampling_keys=allowed_sampling_keys,
             )
             _validate_sampling_params(internal["sampling_params"])
-            discarded_keys = (
-                session.sampling_params.keys()
-                & payload.keys()
-                - allowed_sampling_keys
-                - {
-                    key
-                    for policy, key in self._warned_discarded_request_sampling_param_keys
-                    if policy == policy_name
-                }
-            )
+            discarded_keys = session.sampling_params.keys() & payload.keys() - allowed_sampling_keys - {
+                key for policy, key in self._warned_discarded_request_sampling_param_keys if policy == policy_name
+            }
             if discarded_keys:
                 logger.warning(
                     "Ignoring request sampling parameters not enabled by "
@@ -283,9 +271,7 @@ class _GatewayActor:
                     policy_name,
                     ", ".join(sorted(discarded_keys)),
                 )
-                self._warned_discarded_request_sampling_param_keys.update(
-                    (policy_name, key) for key in discarded_keys
-                )
+                self._warned_discarded_request_sampling_param_keys.update((policy_name, key) for key in discarded_keys)
         except MalformedRequestError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -349,16 +335,9 @@ class _GatewayActor:
                 allowed_sampling_keys=allowed_sampling_keys,
             )
             _validate_sampling_params(internal["sampling_params"])
-            discarded_keys = (
-                session.sampling_params.keys()
-                & payload.keys()
-                - allowed_sampling_keys
-                - {
-                    key
-                    for policy, key in self._warned_discarded_request_sampling_param_keys
-                    if policy == policy_name
-                }
-            )
+            discarded_keys = session.sampling_params.keys() & payload.keys() - allowed_sampling_keys - {
+                key for policy, key in self._warned_discarded_request_sampling_param_keys if policy == policy_name
+            }
             if discarded_keys:
                 logger.warning(
                     "Ignoring request sampling parameters not enabled by "
@@ -366,9 +345,7 @@ class _GatewayActor:
                     policy_name,
                     ", ".join(sorted(discarded_keys)),
                 )
-                self._warned_discarded_request_sampling_param_keys.update(
-                    (policy_name, key) for key in discarded_keys
-                )
+                self._warned_discarded_request_sampling_param_keys.update((policy_name, key) for key in discarded_keys)
         except MalformedRequestError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 

@@ -2,8 +2,8 @@ import inspect
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
-from omegaconf import OmegaConf
 import pytest
+from omegaconf import OmegaConf
 
 from examples.multi_policy.framework import SessionGroupHandle
 from examples.multi_policy.framework import multi_agent_entry as entry_module
@@ -70,9 +70,7 @@ def _from_config_config():
 @pytest.mark.parametrize("do_sample", [None, True, False])
 def test_sampling_defaults_are_built_per_policy(partition, do_sample):
     policy_rollout_configs = {
-        "p1": OmegaConf.create(
-            {"temperature": 0.7, "top_p": 0.9, "top_k": 20, "calculate_log_probs": True}
-        ),
+        "p1": OmegaConf.create({"temperature": 0.7, "top_p": 0.9, "top_k": 20, "calculate_log_probs": True}),
         "p2": OmegaConf.create(
             {
                 "temperature": 1.2,
@@ -93,9 +91,7 @@ def test_sampling_defaults_are_built_per_policy(partition, do_sample):
     sample = {"raw_prompt": "q"}
     if do_sample is not None:
         sample["__do_sample__"] = do_sample
-    sampling = framework._build_session_sampling_params(
-        partition_id=partition, sample_fields=sample
-    )
+    sampling = framework._build_session_sampling_params(partition_id=partition, sample_fields=sample)
     for policy_name, config in policy_rollout_configs.items():
         expected = {
             "temperature": config.temperature,
@@ -117,9 +113,7 @@ def test_sampling_defaults_are_built_per_policy(partition, do_sample):
 @pytest.mark.level0
 def test_sampling_dicts_are_independent_per_policy():
     framework = _framework()
-    sampling = framework._build_session_sampling_params(
-        partition_id="train", sample_fields={}
-    )
+    sampling = framework._build_session_sampling_params(partition_id="train", sample_fields={})
     sampling["p1"]["temperature"] = 9
     assert sampling["p2"]["temperature"] == 1.0
 
@@ -194,9 +188,7 @@ def test_from_config_uses_shared_runner_config():
                             "agent_runners": {
                                 "multi_agent": {
                                     "runner_fqn": "example.runner",
-                                    "runner_kwargs": {
-                                        "execution": {"backend": "local_process"}
-                                    },
+                                    "runner_kwargs": {"execution": {"backend": "local_process"}},
                                     "max_concurrent_sessions": 3,
                                     "dispatch_mode": "ray_task",
                                     "trajectory_selection": "all",
@@ -295,9 +287,7 @@ def test_from_config_rejects_unknown_runner_dispatch_mode():
 @pytest.mark.level0
 @pytest.mark.parametrize("af_cfg", [{}, {"agent_runners": None}, {"agent_runners": {}}])
 def test_from_config_requires_runner_node(af_cfg):
-    config = OmegaConf.create(
-        {"actor_rollout_ref": {"rollout": {"custom": {"agent_framework": af_cfg}}}}
-    )
+    config = OmegaConf.create({"actor_rollout_ref": {"rollout": {"custom": {"agent_framework": af_cfg}}}})
     with pytest.raises(ValueError) as exc_info:
         mod.MultiAgentGatewayFramework.from_config(
             config=config,
@@ -318,9 +308,7 @@ def test_from_config_requires_runner_fqn(runner_fqn):
                 "rollout": {
                     "custom": {
                         "agent_framework": {
-                            "agent_runners": {
-                                "multi_agent": {"runner_fqn": runner_fqn}
-                            },
+                            "agent_runners": {"multi_agent": {"runner_fqn": runner_fqn}},
                             "role_policy_mapping": {"a": "p1"},
                         }
                     }
@@ -386,11 +374,7 @@ def test_multi_agent_framework_does_not_override_manager_lifecycle_hooks():
 @pytest.mark.asyncio
 async def test_session_group_sampling_is_forwarded_to_manager():
     gateway = SimpleNamespace(
-        create_session=AsyncMock(
-            return_value=SessionGroupHandle(
-                "r", {"a": "http://gateway/sessions/r:a/v1"}
-            )
-        )
+        create_session=AsyncMock(return_value=SessionGroupHandle("r", {"a": "http://gateway/sessions/r:a/v1"}))
     )
     framework = _framework(gateway_manager=gateway)
     sampling = {"p1": {"temperature": 0.1}}
@@ -402,9 +386,7 @@ async def test_session_group_sampling_is_forwarded_to_manager():
 @pytest.mark.level0
 def test_extra_tags_expose_routing_metadata():
     framework = _framework()
-    trajectory = SimpleNamespace(
-        extra_fields={"role": "answerer", "policy_name": "p1", "session_group_id": "r"}
-    )
+    trajectory = SimpleNamespace(extra_fields={"role": "answerer", "policy_name": "p1", "session_group_id": "r"})
     assert framework._extra_tags(trajectory) == {
         "role": "answerer",
         "policy_name": "p1",
@@ -425,9 +407,7 @@ async def test_worker_initializes_tq_and_delegates_generate(monkeypatch):
 
     monkeypatch.setattr(entry_module, "build_agent_framework", build_framework)
     monkeypatch.setattr(entry_module, "tq", SimpleNamespace(init=lambda: None))
-    worker_class = (
-        entry_module.MultiAgentFrameworkWorker.__ray_metadata__.modified_class
-    )
+    worker_class = entry_module.MultiAgentFrameworkWorker.__ray_metadata__.modified_class
     policy_rollout_configs = {"p1": OmegaConf.create({"temperature": 0.7})}
     worker = worker_class(
         config=None,
@@ -446,9 +426,7 @@ async def test_worker_initializes_tq_and_delegates_generate(monkeypatch):
 def test_adapter_submits_and_waits():
     submitted = []
     worker = SimpleNamespace(
-        generate_sequences=SimpleNamespace(
-            remote=lambda prompts: submitted.append(prompts) or "ref"
-        )
+        generate_sequences=SimpleNamespace(remote=lambda prompts: submitted.append(prompts) or "ref")
     )
     adapter = MultiPolicyRolloutAdapter(
         framework_worker=worker,
@@ -468,9 +446,7 @@ def test_adapter_submits_and_waits():
     ],
 )
 @pytest.mark.asyncio
-async def test_constructor_uses_parent_runner_selection(
-    runner_names, agent_name, expected_runner
-):
+async def test_constructor_uses_parent_runner_selection(runner_names, agent_name, expected_runner):
     runner_registry = {
         name: _RunnerConfig(
             runner_fqn="unused",
@@ -495,10 +471,5 @@ async def test_constructor_uses_parent_runner_selection(
         global_steps=1,
         sampling_params={},
     )
-    assert (
-        framework._run_agent_episode.await_args.kwargs["runner_name"] == expected_runner
-    )
-    assert (
-        framework._run_agent_episode.await_args.kwargs["runner_config"]
-        is runner_registry[expected_runner]
-    )
+    assert framework._run_agent_episode.await_args.kwargs["runner_name"] == expected_runner
+    assert framework._run_agent_episode.await_args.kwargs["runner_config"] is runner_registry[expected_runner]

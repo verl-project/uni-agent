@@ -17,15 +17,9 @@ def _install_fakes(monkeypatch):
     def fake_suffix(self):
         calls.append(("suffix", self))
 
-    monkeypatch.setattr(
-        verl_patch, "_ORIG_REPLICA_INIT_COLOCATED", fake_orig
-    )
-    monkeypatch.setattr(
-        verl_patch, "_ORIG_REPLICA_INIT_STANDALONE", fake_orig
-    )
-    monkeypatch.setattr(
-        verl_patch, "_policy_suffixed_replica", fake_suffix
-    )
+    monkeypatch.setattr(verl_patch, "_ORIG_REPLICA_INIT_COLOCATED", fake_orig)
+    monkeypatch.setattr(verl_patch, "_ORIG_REPLICA_INIT_STANDALONE", fake_orig)
+    monkeypatch.setattr(verl_patch, "_policy_suffixed_replica", fake_suffix)
     return calls
 
 
@@ -52,9 +46,7 @@ def test_patched_init_colocated_forwards_keyword_resource_pool(monkeypatch):
     replica = object()
     resource_pool = object()
 
-    result = verl_patch._patched_replica_init_colocated(
-        replica, resource_pool=resource_pool
-    )
+    result = verl_patch._patched_replica_init_colocated(replica, resource_pool=resource_pool)
 
     assert result == "original-result"
     assert calls == [

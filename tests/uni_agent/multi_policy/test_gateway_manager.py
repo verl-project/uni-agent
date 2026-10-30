@@ -36,9 +36,7 @@ class _FakeActor:
                 base_url=f"http://gateway/sessions/{session_id}/v1",
             )
         )
-        self.finalize_session = _RemoteMethod(
-            lambda session_id, **kwargs: [Trajectory([1], [2], [1])]
-        )
+        self.finalize_session = _RemoteMethod(lambda session_id, **kwargs: [Trajectory([1], [2], [1])])
         self.abort_session = _RemoteMethod()
 
     @classmethod
@@ -105,9 +103,7 @@ async def test_constructor_owns_actor_creation_and_shutdown_clears_state(fake_ra
     ("llm_client", "gateway_actor_config"),
     [({"p1": object()}, object()), (object(), {"p1": object()})],
 )
-def test_constructor_rejects_mixed_single_and_policy_mapping(
-    fake_ray, llm_client, gateway_actor_config
-):
+def test_constructor_rejects_mixed_single_and_policy_mapping(fake_ray, llm_client, gateway_actor_config):
     with pytest.raises(ValueError, match="both be policy mappings"):
         MultiAgentGatewayManager(
             llm_client=llm_client,
@@ -176,14 +172,13 @@ async def test_create_group_failure_aborts_created_sessions_and_releases_slot(fa
 @pytest.mark.asyncio
 async def test_finalize_group_aggregates_and_annotates_each_role(fake_ray):
     manager = _manager(gateway_count=1)
-    await manager.create_session(
-        "r", role_policy_mapping={"planner": "p1", "answerer": "p2"}
-    )
+    await manager.create_session("r", role_policy_mapping={"planner": "p1", "answerer": "p2"})
     trajectories = await manager.finalize_session("r")
     assert len(trajectories) == 2
-    assert {
-        (t.extra_fields["role"], t.extra_fields["policy_name"]) for t in trajectories
-    } == {("planner", "p1"), ("answerer", "p2")}
+    assert {(t.extra_fields["role"], t.extra_fields["policy_name"]) for t in trajectories} == {
+        ("planner", "p1"),
+        ("answerer", "p2"),
+    }
     assert all(t.extra_fields["session_group_id"] == "r" for t in trajectories)
     assert manager.active_sessions_per_gateway == [0]
     assert "r" not in manager._group_sessions
@@ -195,9 +190,7 @@ async def test_finalize_group_aggregates_and_annotates_each_role(fake_ray):
 @pytest.mark.asyncio
 async def test_finalize_failure_aborts_remaining_sessions_and_drops_state(fake_ray):
     manager = _manager(gateway_count=1)
-    await manager.create_session(
-        "r", role_policy_mapping={"planner": "p1", "answerer": "p2"}
-    )
+    await manager.create_session("r", role_policy_mapping={"planner": "p1", "answerer": "p2"})
     actor = manager.gateways[0]
     calls = {"count": 0}
 

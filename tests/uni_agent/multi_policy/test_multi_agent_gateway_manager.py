@@ -32,13 +32,9 @@ class _FakeActor:
 
     def __init__(self):
         self.create_session = _RemoteMethod(
-            lambda session_id, **kwargs: SessionHandle(
-                session_id=session_id, base_url=f"http://fake/{session_id}/v1"
-            )
+            lambda session_id, **kwargs: SessionHandle(session_id=session_id, base_url=f"http://fake/{session_id}/v1")
         )
-        self.finalize_session = _RemoteMethod(
-            lambda session_id, **kwargs: [Trajectory([1], [2], [1], extra_fields={})]
-        )
+        self.finalize_session = _RemoteMethod(lambda session_id, **kwargs: [Trajectory([1], [2], [1], extra_fields={})])
         self.abort_session = _RemoteMethod()
 
 
@@ -53,9 +49,7 @@ def fake_gateway_pool(monkeypatch):
 @pytest.mark.cpu
 @pytest.mark.level0
 @pytest.mark.asyncio
-async def test_create_session_returns_handle_with_role_base_urls(
-    fake_gateway_pool, monkeypatch
-):
+async def test_create_session_returns_handle_with_role_base_urls(fake_gateway_pool, monkeypatch):
     manager = MultiAgentGatewayManager.__new__(MultiAgentGatewayManager)
     manager.gateways = fake_gateway_pool
     manager.active_sessions_per_gateway = [0, 0]
@@ -91,10 +85,7 @@ async def test_create_session_returns_handle_with_role_base_urls(
     assert planner_call[1]["metadata"]["team"] == "alpha"
     assert planner_call[1]["sampling_params"] == {"temperature": 0.7}
     assert manager._group_sessions["group-1"]["planner"].policy_name == "policy_a"
-    assert (
-        manager._group_sessions["group-1"]["planner"].role_session_id
-        == "group-1:planner"
-    )
+    assert manager._group_sessions["group-1"]["planner"].role_session_id == "group-1:planner"
 
 
 @pytest.mark.cpu
@@ -123,14 +114,10 @@ async def test_duplicate_group_is_rejected_while_first_creation_is_in_flight(
             if create_count == 1:
                 create_started.set()
                 await allow_create_to_finish.wait()
-            return SessionHandle(
-                session_id=session_id, base_url=f"http://fake/{session_id}/v1"
-            )
+            return SessionHandle(session_id=session_id, base_url=f"http://fake/{session_id}/v1")
 
     fake_gateway_pool[0].create_session = DelayedCreate()
-    first_create = asyncio.create_task(
-        manager.create_session("group-in-flight", role_policy_mapping={"planner": "p1"})
-    )
+    first_create = asyncio.create_task(manager.create_session("group-in-flight", role_policy_mapping={"planner": "p1"}))
     await create_started.wait()
 
     duplicate_create = asyncio.create_task(
@@ -194,9 +181,7 @@ async def test_cancelled_creation_aborts_in_flight_and_pending_roles(fake_gatewa
     with pytest.raises(asyncio.CancelledError):
         await creation
 
-    aborted_ids = {
-        call[1]["session_id"] for call in fake_gateway_pool[0].abort_session.calls
-    }
+    aborted_ids = {call[1]["session_id"] for call in fake_gateway_pool[0].abort_session.calls}
     assert aborted_ids == {
         "cancelled-group:planner",
         "cancelled-group:actor",
@@ -272,13 +257,8 @@ async def test_groups_spread_across_gateway_pool(fake_gateway_pool):
     await manager.create_session("g2", role_policy_mapping={"r": "p"})
 
     # Groups should spread across the two gateways
-    assert (
-        fake_gateway_pool[0].create_session.calls
-        or fake_gateway_pool[1].create_session.calls
-    )
-    total_creates = len(fake_gateway_pool[0].create_session.calls) + len(
-        fake_gateway_pool[1].create_session.calls
-    )
+    assert fake_gateway_pool[0].create_session.calls or fake_gateway_pool[1].create_session.calls
+    total_creates = len(fake_gateway_pool[0].create_session.calls) + len(fake_gateway_pool[1].create_session.calls)
     assert total_creates == 2
 
 
@@ -307,9 +287,7 @@ async def test_shutdown_clears_group_state_after_parent_shutdown(monkeypatch):
         self.gateways = []
         self.active_sessions_per_gateway = []
 
-    monkeypatch.setattr(
-        gateway_manager_module.GatewayManager, "shutdown", fake_parent_shutdown
-    )
+    monkeypatch.setattr(gateway_manager_module.GatewayManager, "shutdown", fake_parent_shutdown)
 
     await manager.shutdown()
 

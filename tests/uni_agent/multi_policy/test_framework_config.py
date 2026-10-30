@@ -3,8 +3,8 @@
 from dataclasses import replace
 from types import SimpleNamespace
 
-from omegaconf import OmegaConf
 import pytest
+from omegaconf import OmegaConf
 
 from examples.multi_policy.framework.multi_agent_framework import (
     MultiAgentGatewayFramework,
@@ -56,9 +56,7 @@ def _build_framework(settings, *, reward_config=None):
         ({}, None, "/tmp/uni_agent_logs"),
     ],
 )
-def test_log_directory_matches_parent_precedence(
-    monkeypatch, settings, environment, expected
-):
+def test_log_directory_matches_parent_precedence(monkeypatch, settings, environment, expected):
     if environment is None:
         monkeypatch.delenv("UNI_AGENT_LOG_DIR", raising=False)
     else:
@@ -81,9 +79,7 @@ async def _reverse_trajectories_async(trajectories, *, task_result, options):
 
 @pytest.mark.cpu
 @pytest.mark.level0
-@pytest.mark.parametrize(
-    "function_name", ["_reverse_trajectories", "_reverse_trajectories_async"]
-)
+@pytest.mark.parametrize("function_name", ["_reverse_trajectories", "_reverse_trajectories_async"])
 @pytest.mark.asyncio
 async def test_yaml_postprocessor_runs_and_preserves_policy_routing(function_name):
     framework = _build_framework(
@@ -130,9 +126,7 @@ async def test_yaml_postprocessor_runs_and_preserves_policy_routing(function_nam
             assert tags[key] == trajectory.extra_fields[key]
         assert trajectory.reward_score == 1.0
         assert trajectory.reward_metrics == {"acc": 1.0}
-    assert all(
-        "processed" not in trajectory.extra_fields for trajectory in trajectories
-    )
+    assert all("processed" not in trajectory.extra_fields for trajectory in trajectories)
 
 
 @pytest.mark.cpu
@@ -162,9 +156,7 @@ async def test_yaml_postprocessor_runs_and_preserves_policy_routing(function_nam
         ),
     ],
 )
-def test_invalid_postprocessor_config_fails_during_construction(
-    settings, error_type, message
-):
+def test_invalid_postprocessor_config_fails_during_construction(settings, error_type, message):
     with pytest.raises(error_type, match=message):
         _build_framework(settings)
 
@@ -184,10 +176,7 @@ def test_absent_postprocessor_keeps_default_behavior():
 @pytest.mark.level0
 @pytest.mark.parametrize("runner_names", [["search_mas"], ["search_mas", "coding_mas"]])
 def test_from_config_accepts_parent_runner_registry(runner_names):
-    runners = {
-        runner_name: {"runner_fqn": "unused", "dispatch_mode": "ray_task"}
-        for runner_name in runner_names
-    }
+    runners = {runner_name: {"runner_fqn": "unused", "dispatch_mode": "ray_task"} for runner_name in runner_names}
     framework = _build_framework({"agent_runners": runners})
     assert set(framework.runner_registry) == set(runner_names)
 
@@ -264,12 +253,8 @@ def test_selection_is_over_the_whole_session_group():
     from uni_agent.framework.framework import _select_session_trajectories
 
     trajectories = [
-        Trajectory(
-            [1], [2], [1], extra_fields={"policy_name": "p1", "role": "planner"}
-        ),
-        Trajectory(
-            [1], [2, 3], [1, 1], extra_fields={"policy_name": "p2", "role": "answerer"}
-        ),
+        Trajectory([1], [2], [1], extra_fields={"policy_name": "p1", "role": "planner"}),
+        Trajectory([1], [2, 3], [1, 1], extra_fields={"policy_name": "p2", "role": "answerer"}),
     ]
     assert _select_session_trajectories("group-1", trajectories, "all") == trajectories
     selected = _select_session_trajectories("group-1", trajectories, "longest")
@@ -314,17 +299,13 @@ def test_selection_is_over_the_whole_session_group():
         ({"reward_model": {"enable": True, "enable_resource_pool": False}}, False),
     ],
 )
-def test_reward_model_configuration_warning_matches_parent(
-    caplog, reward_config, expect_warning
-):
+def test_reward_model_configuration_warning_matches_parent(caplog, reward_config, expect_warning):
     logger_name = "uni_agent.framework.framework"
     with caplog.at_level("WARNING", logger=logger_name):
         framework = _build_framework({"log_dir": None}, reward_config=reward_config)
 
     warnings = [
-        record.getMessage()
-        for record in caplog.records
-        if record.name == logger_name and record.levelname == "WARNING"
+        record.getMessage() for record in caplog.records if record.name == logger_name and record.levelname == "WARNING"
     ]
     if expect_warning:
         assert len(warnings) == 1
@@ -363,9 +344,7 @@ def test_shared_framework_parser_matches_parent_and_mas_factories(selection):
                             "log_dir": None,
                             "mask_unfinished_episode": True,
                             "trajectory_postprocessor_fqn": f"{__name__}._reverse_trajectories",
-                            "trajectory_postprocessor_kwargs": {
-                                "options": {"enabled": True}
-                            },
+                            "trajectory_postprocessor_kwargs": {"options": {"enabled": True}},
                         }
                     }
                 }
@@ -374,9 +353,7 @@ def test_shared_framework_parser_matches_parent_and_mas_factories(selection):
         }
     )
     parsed = GatewayAgentFramework._parse_framework_config(config)
-    parent = GatewayAgentFramework.from_config(
-        config=config, gateway_manager=SimpleNamespace()
-    )
+    parent = GatewayAgentFramework.from_config(config=config, gateway_manager=SimpleNamespace())
     mas = MultiAgentGatewayFramework.from_config(
         config=config,
         gateway_manager=SimpleNamespace(),
@@ -389,6 +366,4 @@ def test_shared_framework_parser_matches_parent_and_mas_factories(selection):
         assert framework._mask_unfinished_episode is True
         assert framework._custom_reward_function_configured is True
         assert framework._trajectory_postprocessor is _reverse_trajectories
-        assert framework._trajectory_postprocessor_kwargs == {
-            "options": {"enabled": True}
-        }
+        assert framework._trajectory_postprocessor_kwargs == {"options": {"enabled": True}}

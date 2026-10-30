@@ -12,8 +12,8 @@ from __future__ import annotations
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-from omegaconf import OmegaConf
 import pytest
+from omegaconf import OmegaConf
 
 from examples.multi_policy.trainer.multi_policy_trainer import MultiPolicyTrainer
 

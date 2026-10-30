@@ -43,9 +43,7 @@ def test_external_stdout_json_parser_accepts_log_prefix():
 @pytest.mark.cpu
 @pytest.mark.level0
 @pytest.mark.asyncio
-async def test_external_runner_does_not_expose_single_gateway_url_placeholder(
-    monkeypatch, tmp_path
-):
+async def test_external_runner_does_not_expose_single_gateway_url_placeholder(monkeypatch, tmp_path):
     template_path = tmp_path / "mas.yaml"
     template_path.write_text("llm: {}\nagents: {}\n", encoding="utf-8")
     process = AsyncMock()

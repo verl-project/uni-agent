@@ -415,9 +415,7 @@ async def test_config_chat_template_kwargs_forwarded():
             },
         )
 
-        assert actor._policy_codecs[
-            SINGLE_POLICY_NAME
-        ]._continuous_token_builder.chat_template_kwargs == {
+        assert actor._policy_codecs[SINGLE_POLICY_NAME]._continuous_token_builder.chat_template_kwargs == {
             "enable_thinking": False,
             "default_only": "kept",
         }

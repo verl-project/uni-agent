@@ -1,7 +1,7 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
-import logging
 import importlib
+import logging
 import os
 from pprint import pprint
 
@@ -45,10 +45,7 @@ def run_multi_policy(config, task_runner_class) -> None:
         # Hydra composes configs as OmegaConf structs, which reject adding keys
         # (e.g. env_vars) that the YAML does not declare. Convert to a plain
         # mutable container before injecting TRANSFER_QUEUE_ENABLE / PYTHONPATH.
-        runtime_env_kwargs = (
-            OmegaConf.to_container(ray_init_kwargs.get("runtime_env", {}), resolve=True)
-            or {}
-        )
+        runtime_env_kwargs = OmegaConf.to_container(ray_init_kwargs.get("runtime_env", {}), resolve=True) or {}
 
         if config.transfer_queue.enable:
             runtime_env_vars = runtime_env_kwargs.get("env_vars", {})
@@ -61,26 +58,18 @@ def run_multi_policy(config, task_runner_class) -> None:
         # verl_patch lacks apply_worker_patch, which would break the hook.
         repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
         runtime_env_vars = runtime_env_kwargs.setdefault("env_vars", {})
-        existing_pythonpath = runtime_env_vars.get("PYTHONPATH") or os.environ.get(
-            "PYTHONPATH", ""
-        )
-        runtime_env_vars["PYTHONPATH"] = repo_root + (
-            ":" + existing_pythonpath if existing_pythonpath else ""
-        )
+        existing_pythonpath = runtime_env_vars.get("PYTHONPATH") or os.environ.get("PYTHONPATH", "")
+        runtime_env_vars["PYTHONPATH"] = repo_root + (":" + existing_pythonpath if existing_pythonpath else "")
 
         runtime_env = OmegaConf.merge(default_runtime_env, runtime_env_kwargs)
-        ray_init_kwargs = OmegaConf.create(
-            {**ray_init_kwargs, "runtime_env": runtime_env}
-        )
+        ray_init_kwargs = OmegaConf.create({**ray_init_kwargs, "runtime_env": runtime_env})
         logger.info("ray init kwargs: %s", ray_init_kwargs)
         ray.init(**OmegaConf.to_container(ray_init_kwargs))
 
     runner = task_runner_class.remote()
     ray.get(runner.run.remote(config))
 
-    timeline_json_file = (getattr(config, "ray_kwargs", {}) or {}).get(
-        "timeline_json_file", None
-    )
+    timeline_json_file = (getattr(config, "ray_kwargs", {}) or {}).get("timeline_json_file", None)
     if timeline_json_file:
         ray.timeline(filename=timeline_json_file)
 
@@ -95,9 +84,7 @@ class MultiPolicyTaskRunner:
     def init_agent_loop_manager(self):
         """Initialize the agent loop manager to generate multi-agent rollouts."""
         if self.config is None or self.trainer is None:
-            raise RuntimeError(
-                "trainer and config must be initialized before agent_loop_manager"
-            )
+            raise RuntimeError("trainer and config must be initialized before agent_loop_manager")
 
         from examples.multi_policy.framework.multi_agent_entry import (
             MultiPolicyRolloutAdapter,

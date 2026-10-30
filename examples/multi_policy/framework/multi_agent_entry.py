@@ -6,12 +6,6 @@ from typing import TYPE_CHECKING, Any
 
 import ray
 from omegaconf import DictConfig, OmegaConf
-from verl.utils.transferqueue_utils import tq
-
-from uni_agent.gateway.config import GatewayActorConfig
-from uni_agent.rl_insight.adapter import init_rollout_trace_config
-from verl.utils.config import omega_conf_to_dataclass
-from verl.workers.config import HFModelConfig, RolloutConfig
 
 from examples.multi_policy.framework.multi_agent_framework import (
     MultiAgentGatewayFramework,
@@ -19,6 +13,11 @@ from examples.multi_policy.framework.multi_agent_framework import (
 from examples.multi_policy.framework.multi_agent_gateway_manager import (
     MultiAgentGatewayManager,
 )
+from uni_agent.gateway.config import GatewayActorConfig
+from uni_agent.rl_insight.adapter import init_rollout_trace_config
+from verl.utils.config import omega_conf_to_dataclass
+from verl.utils.transferqueue_utils import tq
+from verl.workers.config import HFModelConfig, RolloutConfig
 
 if TYPE_CHECKING:
     from verl.workers.rollout.llm_server import LLMServerClient
@@ -38,34 +37,20 @@ def build_policy_gateway_configs(
         raise ValueError("policy_configs must not be empty")
 
     agent_framework_config = config.actor_rollout_ref.rollout.custom.agent_framework
-    allowed_sampling_keys = agent_framework_config.get(
-        "allowed_request_sampling_param_keys"
-    )
+    allowed_sampling_keys = agent_framework_config.get("allowed_request_sampling_param_keys")
     if allowed_sampling_keys is not None:
-        if not isinstance(
-            allowed_sampling_keys, (list, tuple)
-        ) and not OmegaConf.is_list(allowed_sampling_keys):
-            raise ValueError(
-                "allowed_request_sampling_param_keys must be a list of strings or null"
-            )
+        if not isinstance(allowed_sampling_keys, list | tuple) and not OmegaConf.is_list(allowed_sampling_keys):
+            raise ValueError("allowed_request_sampling_param_keys must be a list of strings or null")
         if any(not isinstance(key, str) for key in allowed_sampling_keys):
-            raise ValueError(
-                "allowed_request_sampling_param_keys must be a list of strings or null"
-            )
+            raise ValueError("allowed_request_sampling_param_keys must be a list of strings or null")
         allowed_sampling_keys = set(allowed_sampling_keys)
 
     policy_gateway_configs: dict[str, GatewayActorConfig] = {}
     for policy_name, policy_config in policy_configs.items():
         data_config = policy_config.data
-        model_config: HFModelConfig = omega_conf_to_dataclass(
-            policy_config.actor_rollout_ref.model
-        )
-        rollout_config: RolloutConfig = omega_conf_to_dataclass(
-            policy_config.actor_rollout_ref.rollout
-        )
-        apply_chat_template_kwargs = dict(
-            data_config.get("apply_chat_template_kwargs", {})
-        )
+        model_config: HFModelConfig = omega_conf_to_dataclass(policy_config.actor_rollout_ref.model)
+        rollout_config: RolloutConfig = omega_conf_to_dataclass(policy_config.actor_rollout_ref.rollout)
+        apply_chat_template_kwargs = dict(data_config.get("apply_chat_template_kwargs", {}))
         mm_processor_kwargs = dict(data_config.get("mm_processor_kwargs", {}))
         tokenizer = model_config.tokenizer
         if tokenizer is None:
@@ -76,21 +61,15 @@ def build_policy_gateway_configs(
             processor=model_config.processor,
             tool_parser_name=rollout_config.multi_turn.format,
             rollout_backend=rollout_config.name,
-            enable_tool_parser_cache=agent_framework_config.get(
-                "enable_tool_parser_cache", True
-            ),
+            enable_tool_parser_cache=agent_framework_config.get("enable_tool_parser_cache", True),
             hf_model_type=getattr(model_config.hf_config, "model_type", None),
             apply_chat_template_kwargs=apply_chat_template_kwargs,
             mm_processor_kwargs=mm_processor_kwargs,
             prompt_length=rollout_config.prompt_length,
             response_length=rollout_config.response_length,
-            enable_last_assistant_rollback=agent_framework_config.get(
-                "enable_last_assistant_rollback", True
-            ),
+            enable_last_assistant_rollback=agent_framework_config.get("enable_last_assistant_rollback", True),
             allowed_request_sampling_param_keys=allowed_sampling_keys,
-            coalesce_reserved_exact_requests=agent_framework_config.get(
-                "coalesce_reserved_exact_requests", True
-            ),
+            coalesce_reserved_exact_requests=agent_framework_config.get("coalesce_reserved_exact_requests", True),
         )
     return policy_gateway_configs
 
@@ -105,9 +84,7 @@ def build_gateway_manager(
     if not policy_gateway_configs:
         raise ValueError("policy_gateway_configs must not be empty")
     if set(policy_clients) != set(policy_gateway_configs):
-        raise ValueError(
-            "policy_clients and policy_gateway_configs must have identical policy names"
-        )
+        raise ValueError("policy_clients and policy_gateway_configs must have identical policy names")
 
     agent_framework_config = config.actor_rollout_ref.rollout.custom.agent_framework
     return MultiAgentGatewayManager(
@@ -127,8 +104,7 @@ def build_agent_framework(
 ) -> MultiAgentGatewayFramework:
     """Build the multi-agent framework over an injected Gateway manager."""
     policy_processors = {
-        policy_name: gateway_config.processor
-        for policy_name, gateway_config in policy_gateway_configs.items()
+        policy_name: gateway_config.processor for policy_name, gateway_config in policy_gateway_configs.items()
     }
     return MultiAgentGatewayFramework.from_config(
         config=config,

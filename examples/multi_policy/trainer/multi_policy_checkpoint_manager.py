@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import logging
@@ -69,9 +69,7 @@ class MultiPolicyCheckpointManager:
             for component, async_path, strategy_path in checkpoint_configs:
                 if not OmegaConf.select(policy_config, async_path, default=False):
                     continue
-                strategy = str(
-                    OmegaConf.select(policy_config, strategy_path, default="unknown")
-                ).lower()
+                strategy = str(OmegaConf.select(policy_config, strategy_path, default="unknown")).lower()
                 if strategy != "megatron":
                     backend = "FSDP" if strategy == "fsdp" else strategy
                     raise ValueError(
@@ -101,9 +99,7 @@ class MultiPolicyCheckpointManager:
 
         policy_paths = {}
         for policy_name, trainer in policy_trainers.items():
-            policy_checkpoint_dir = os.path.join(
-                checkpoint_dir, "policies", policy_name
-            )
+            policy_checkpoint_dir = os.path.join(checkpoint_dir, "policies", policy_name)
             actor_path = os.path.join(policy_checkpoint_dir, "actor")
             if not os.path.isdir(actor_path):
                 raise FileNotFoundError(
@@ -134,9 +130,7 @@ class MultiPolicyCheckpointManager:
 
         dataloader_path = os.path.join(checkpoint_dir, "data.pt")
         if os.path.exists(dataloader_path):
-            train_dataloader.load_state_dict(
-                torch.load(dataloader_path, weights_only=False)
-            )
+            train_dataloader.load_state_dict(torch.load(dataloader_path, weights_only=False))
         else:
             logger.warning(
                 "No dataloader state found at %s; starting its state from scratch",
@@ -157,14 +151,10 @@ class MultiPolicyCheckpointManager:
         if resume_mode == "resume_path":
             checkpoint_dir = self.config.trainer.resume_from_path
             if not checkpoint_dir:
-                raise ValueError(
-                    "trainer.resume_from_path is required when trainer.resume_mode='resume_path'"
-                )
+                raise ValueError("trainer.resume_from_path is required when trainer.resume_mode='resume_path'")
             checkpoint_dir = os.path.abspath(os.path.normpath(str(checkpoint_dir)))
             if not os.path.isdir(checkpoint_dir):
-                raise FileNotFoundError(
-                    f"Checkpoint directory does not exist: {checkpoint_dir}"
-                )
+                raise FileNotFoundError(f"Checkpoint directory does not exist: {checkpoint_dir}")
             return checkpoint_dir
         if resume_mode == "auto":
             checkpoint_root = self.config.trainer.default_local_dir
@@ -173,9 +163,7 @@ class MultiPolicyCheckpointManager:
             checkpoint_root = os.path.abspath(str(checkpoint_root))
             if not os.path.isdir(checkpoint_root):
                 return None
-            tracker_path = os.path.join(
-                checkpoint_root, "latest_checkpointed_iteration.txt"
-            )
+            tracker_path = os.path.join(checkpoint_root, "latest_checkpointed_iteration.txt")
             if not os.path.isfile(tracker_path):
                 logger.info(
                     "No checkpoint tracker found at %s; training from scratch",
@@ -185,14 +173,10 @@ class MultiPolicyCheckpointManager:
             with open(tracker_path, encoding="utf-8") as file:
                 step_text = file.read().strip()
             if not step_text.isdigit():
-                raise ValueError(
-                    f"Invalid checkpoint step in {tracker_path}: {step_text!r}"
-                )
+                raise ValueError(f"Invalid checkpoint step in {tracker_path}: {step_text!r}")
             checkpoint_dir = os.path.join(checkpoint_root, f"global_step_{step_text}")
             if not os.path.isdir(checkpoint_dir):
-                raise FileNotFoundError(
-                    f"Checkpoint tracker points to a missing directory: {checkpoint_dir}"
-                )
+                raise FileNotFoundError(f"Checkpoint tracker points to a missing directory: {checkpoint_dir}")
             return checkpoint_dir
         raise ValueError(f"Unknown trainer.resume_mode: {resume_mode}")
 
@@ -207,12 +191,8 @@ class MultiPolicyCheckpointManager:
         self.validate_save_config()
         checkpoint_root = self.config.trainer.default_local_dir
         if not checkpoint_root:
-            raise ValueError(
-                "trainer.default_local_dir is required to save a multi-agent checkpoint"
-            )
-        checkpoint_dir = os.path.join(
-            str(checkpoint_root), f"global_step_{global_step}"
-        )
+            raise ValueError("trainer.default_local_dir is required to save a multi-agent checkpoint")
+        checkpoint_dir = os.path.join(str(checkpoint_root), f"global_step_{global_step}")
         policies_dir = os.path.join(checkpoint_dir, "policies")
         os.makedirs(policies_dir, exist_ok=True)
 
@@ -223,25 +203,13 @@ class MultiPolicyCheckpointManager:
                 "remove_previous_ckpt_in_save is deprecated; use max_actor_ckpt_to_keep=1 "
                 "and max_critic_ckpt_to_keep=1 instead"
             )
-        max_actor_ckpt_to_keep = (
-            1
-            if remove_previous
-            else self.config.trainer.get("max_actor_ckpt_to_keep", None)
-        )
-        max_critic_ckpt_to_keep = (
-            1
-            if remove_previous
-            else self.config.trainer.get("max_critic_ckpt_to_keep", None)
-        )
+        max_actor_ckpt_to_keep = 1 if remove_previous else self.config.trainer.get("max_actor_ckpt_to_keep", None)
+        max_critic_ckpt_to_keep = 1 if remove_previous else self.config.trainer.get("max_critic_ckpt_to_keep", None)
         retention_limits = [
             limit
             for limit in (
                 max_actor_ckpt_to_keep,
-                (
-                    max_critic_ckpt_to_keep
-                    if any(trainer.use_critic for trainer in policy_trainers.values())
-                    else None
-                ),
+                (max_critic_ckpt_to_keep if any(trainer.use_critic for trainer in policy_trainers.values()) else None),
             )
             if isinstance(limit, int) and limit > 0
         ]
@@ -261,13 +229,9 @@ class MultiPolicyCheckpointManager:
         for future in futures:
             future.result()
 
-        torch.save(
-            train_dataloader.state_dict(), os.path.join(checkpoint_dir, "data.pt")
-        )
+        torch.save(train_dataloader.state_dict(), os.path.join(checkpoint_dir, "data.pt"))
 
-        transfer_queue_saved = (
-            self.trainer_mode != "sync" and supports_transfer_queue_checkpoint()
-        )
+        transfer_queue_saved = self.trainer_mode != "sync" and supports_transfer_queue_checkpoint()
         if transfer_queue_saved:
             tq.save_checkpoint(
                 os.path.join(checkpoint_dir, "transfer_queue"),
@@ -285,9 +249,7 @@ class MultiPolicyCheckpointManager:
         )
         self._publish_tracker(str(checkpoint_root), global_step)
         try:
-            self._prune_committed_checkpoints(
-                str(checkpoint_root), outer_retention_limit
-            )
+            self._prune_committed_checkpoints(str(checkpoint_root), outer_retention_limit)
         except OSError as exc:
             logger.warning("Failed to prune old committed checkpoints: %s", exc)
 
@@ -352,11 +314,7 @@ class MultiPolicyCheckpointManager:
             policy_path = f"policies/{policy_name}"
             policies[policy_name] = {
                 "actor": {"path": f"{policy_path}/actor", "status": "complete"},
-                "critic": (
-                    {"path": f"{policy_path}/Critic", "status": "complete"}
-                    if trainer.use_critic
-                    else None
-                ),
+                "critic": ({"path": f"{policy_path}/Critic", "status": "complete"} if trainer.use_critic else None),
             }
         return {
             "schema_version": 1,
@@ -365,11 +323,7 @@ class MultiPolicyCheckpointManager:
             "status": "complete",
             "policies": policies,
             "dataloader": {"path": "data.pt", "status": "complete"},
-            "transfer_queue": (
-                {"path": "transfer_queue", "status": "complete"}
-                if transfer_queue_saved
-                else None
-            ),
+            "transfer_queue": ({"path": "transfer_queue", "status": "complete"} if transfer_queue_saved else None),
         }
 
     @staticmethod
@@ -397,18 +351,14 @@ class MultiPolicyCheckpointManager:
         )
 
     @staticmethod
-    def _prune_committed_checkpoints(
-        checkpoint_root: str, max_ckpt_to_keep: int | None
-    ) -> None:
+    def _prune_committed_checkpoints(checkpoint_root: str, max_ckpt_to_keep: int | None) -> None:
         if max_ckpt_to_keep is None:
             return
 
         checkpoint_root = os.path.realpath(checkpoint_root)
         committed_checkpoints: list[tuple[int, str]] = []
         for entry in os.scandir(checkpoint_root):
-            if not entry.is_dir(follow_symlinks=False) or not entry.name.startswith(
-                "global_step_"
-            ):
+            if not entry.is_dir(follow_symlinks=False) or not entry.name.startswith("global_step_"):
                 continue
             step_text = entry.name.removeprefix("global_step_")
             if not step_text.isdigit():
@@ -420,19 +370,14 @@ class MultiPolicyCheckpointManager:
             except (FileNotFoundError, json.JSONDecodeError):
                 continue
             step = int(step_text)
-            if (
-                manifest.get("status") == "complete"
-                and manifest.get("global_step") == step
-            ):
+            if manifest.get("status") == "complete" and manifest.get("global_step") == step:
                 committed_checkpoints.append((step, entry.path))
 
         committed_checkpoints.sort()
         for _, checkpoint_path in committed_checkpoints[:-max_ckpt_to_keep]:
             resolved_path = os.path.realpath(checkpoint_path)
             if os.path.dirname(resolved_path) != checkpoint_root:
-                raise RuntimeError(
-                    f"Refusing to prune checkpoint outside root: {resolved_path}"
-                )
+                raise RuntimeError(f"Refusing to prune checkpoint outside root: {resolved_path}")
             shutil.rmtree(resolved_path)
 
     def _validate_manifest(
@@ -452,16 +397,13 @@ class MultiPolicyCheckpointManager:
             with open(manifest_path, encoding="utf-8") as file:
                 manifest = json.load(file)
         except (OSError, json.JSONDecodeError) as exc:
-            raise RuntimeError(
-                f"Invalid checkpoint manifest at {manifest_path}: {exc}"
-            ) from exc
+            raise RuntimeError(f"Invalid checkpoint manifest at {manifest_path}: {exc}") from exc
 
         checkpoint_name = os.path.basename(os.path.normpath(checkpoint_dir))
         expected_step = int(checkpoint_name.removeprefix("global_step_"))
         if manifest.get("schema_version") != 1:
             raise RuntimeError(
-                f"Unsupported checkpoint manifest schema at {manifest_path}: "
-                f"{manifest.get('schema_version')!r}"
+                f"Unsupported checkpoint manifest schema at {manifest_path}: {manifest.get('schema_version')!r}"
             )
         if manifest.get("status") != "complete":
             raise RuntimeError(
@@ -480,9 +422,7 @@ class MultiPolicyCheckpointManager:
 
         manifest_policies = manifest.get("policies")
         if not isinstance(manifest_policies, dict):
-            raise RuntimeError(
-                f"Checkpoint manifest has no policies mapping: {manifest_path}"
-            )
+            raise RuntimeError(f"Checkpoint manifest has no policies mapping: {manifest_path}")
         expected_policy_names = set(policy_trainers)
         if set(manifest_policies) != expected_policy_names:
             raise RuntimeError(
@@ -492,21 +432,14 @@ class MultiPolicyCheckpointManager:
         for policy_name, trainer in policy_trainers.items():
             policy_manifest = manifest_policies.get(policy_name)
             if not isinstance(policy_manifest, dict):
-                raise RuntimeError(
-                    f"Checkpoint manifest is missing policy {policy_name!r}"
-                )
+                raise RuntimeError(f"Checkpoint manifest is missing policy {policy_name!r}")
             expected_components = {"actor": f"policies/{policy_name}/actor"}
             if trainer.use_critic:
                 expected_components["critic"] = f"policies/{policy_name}/Critic"
             for component, relative_path in expected_components.items():
                 component_manifest = policy_manifest.get(component)
-                if (
-                    not isinstance(component_manifest, dict)
-                    or component_manifest.get("status") != "complete"
-                ):
-                    raise RuntimeError(
-                        f"Checkpoint manifest has incomplete {component} for policy {policy_name!r}"
-                    )
+                if not isinstance(component_manifest, dict) or component_manifest.get("status") != "complete":
+                    raise RuntimeError(f"Checkpoint manifest has incomplete {component} for policy {policy_name!r}")
                 if component_manifest.get("path") != relative_path:
                     raise RuntimeError(
                         f"Checkpoint manifest has invalid {component} path for policy {policy_name!r}: "
@@ -515,8 +448,7 @@ class MultiPolicyCheckpointManager:
                 component_path = os.path.join(checkpoint_dir, *relative_path.split("/"))
                 if not os.path.isdir(component_path):
                     raise FileNotFoundError(
-                        f"Checkpoint for policy {policy_name!r} is missing {component} directory: "
-                        f"{component_path}"
+                        f"Checkpoint for policy {policy_name!r} is missing {component} directory: {component_path}"
                     )
             if not trainer.use_critic and policy_manifest.get("critic") is not None:
                 raise RuntimeError(
@@ -525,40 +457,23 @@ class MultiPolicyCheckpointManager:
                 )
 
         dataloader_manifest = manifest.get("dataloader")
-        if (
-            not isinstance(dataloader_manifest, dict)
-            or dataloader_manifest.get("status") != "complete"
-        ):
+        if not isinstance(dataloader_manifest, dict) or dataloader_manifest.get("status") != "complete":
             raise RuntimeError("Checkpoint manifest has incomplete dataloader state")
         if dataloader_manifest.get("path") != "data.pt":
-            raise RuntimeError(
-                f"Checkpoint manifest has invalid dataloader path: {dataloader_manifest.get('path')!r}"
-            )
+            raise RuntimeError(f"Checkpoint manifest has invalid dataloader path: {dataloader_manifest.get('path')!r}")
         dataloader_path = os.path.join(checkpoint_dir, "data.pt")
         if not os.path.isfile(dataloader_path):
-            raise FileNotFoundError(
-                f"Checkpoint manifest references missing dataloader state: {dataloader_path}"
-            )
+            raise FileNotFoundError(f"Checkpoint manifest references missing dataloader state: {dataloader_path}")
 
         transfer_queue_manifest = manifest.get("transfer_queue")
-        if (
-            self.trainer_mode != "sync"
-            and supports_transfer_queue_checkpoint()
-            and transfer_queue_manifest is None
-        ):
+        if self.trainer_mode != "sync" and supports_transfer_queue_checkpoint() and transfer_queue_manifest is None:
             raise RuntimeError("Checkpoint manifest is missing TransferQueue state")
         if self.trainer_mode != "sync" and transfer_queue_manifest is not None:
-            if (
-                not isinstance(transfer_queue_manifest, dict)
-                or transfer_queue_manifest.get("status") != "complete"
-            ):
-                raise RuntimeError(
-                    "Checkpoint manifest has incomplete TransferQueue state"
-                )
+            if not isinstance(transfer_queue_manifest, dict) or transfer_queue_manifest.get("status") != "complete":
+                raise RuntimeError("Checkpoint manifest has incomplete TransferQueue state")
             if transfer_queue_manifest.get("path") != "transfer_queue":
                 raise RuntimeError(
-                    "Checkpoint manifest has invalid TransferQueue path: "
-                    f"{transfer_queue_manifest.get('path')!r}"
+                    f"Checkpoint manifest has invalid TransferQueue path: {transfer_queue_manifest.get('path')!r}"
                 )
             transfer_queue_path = os.path.join(checkpoint_dir, "transfer_queue")
             if not os.path.exists(transfer_queue_path):

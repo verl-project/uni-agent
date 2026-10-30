@@ -5,21 +5,15 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
-from omegaconf import OmegaConf
 import pytest
+from omegaconf import OmegaConf
 
 import examples.multi_policy.trainer.multi_policy_trainer as trainer_module
 from examples.multi_policy.trainer.multi_policy_trainer import MultiPolicyTrainer
 
 
 def _recipe_config():
-    return OmegaConf.load(
-        Path(__file__).parents[3]
-        / "examples"
-        / "multi_policy"
-        / "config"
-        / "multi_policy.yaml"
-    )
+    return OmegaConf.load(Path(__file__).parents[3] / "examples" / "multi_policy" / "config" / "multi_policy.yaml")
 
 
 @pytest.mark.cpu
@@ -37,10 +31,7 @@ def test_policy_configs_receive_optimizer_horizon(parameter_sync_step):
 
     expected = int(config.trainer.total_training_steps) * parameter_sync_step
     for policy_config in policy_configs.values():
-        assert (
-            policy_config.actor_rollout_ref.actor.optim.total_training_steps
-            == expected
-        )
+        assert policy_config.actor_rollout_ref.actor.optim.total_training_steps == expected
         assert policy_config.critic.optim.total_training_steps == expected
 
 
@@ -71,12 +62,8 @@ def test_build_dataloader_sets_steps_per_epoch_and_shuffles_validation(monkeypat
         def __init__(self, **kwargs):
             self.kwargs = kwargs
 
-    monkeypatch.setattr(
-        trainer_module, "create_rl_dataset", lambda *args, **kwargs: FakeDataset()
-    )
-    monkeypatch.setattr(
-        trainer_module, "create_rl_sampler", lambda *args, **kwargs: None
-    )
+    monkeypatch.setattr(trainer_module, "create_rl_dataset", lambda *args, **kwargs: FakeDataset())
+    monkeypatch.setattr(trainer_module, "create_rl_sampler", lambda *args, **kwargs: None)
     monkeypatch.setattr(trainer_module, "StatefulDataLoader", FakeLoader)
 
     trainer = MultiPolicyTrainer.__new__(MultiPolicyTrainer)
