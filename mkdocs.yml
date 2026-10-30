@@ -50,6 +50,7 @@ nav:
   - Uni-Agent: index.md
   - Quickstart:
       - Installation: quickstart/installation.md
+      - uv environment: quickstart/uv.md
       - Launch a Sandbox: quickstart/launch-sandbox.md
       - Verify Oracle Solutions: quickstart/oracle-verification.md
       - Run Agent Inference: quickstart/agent-inference.md
