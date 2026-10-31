@@ -133,7 +133,7 @@ class TestKVEventSourceDiscovery:
         assert requests[0].url == httpx.URL("http://10.0.0.1:8000/kv_event_sources")
 
     def test_provider_discovers_sources_in_parallel_and_tolerates_unavailable_servers(self, monkeypatch):
-        monkeypatch.setattr(balancer_module.ray, "get", lambda value: value)
+        monkeypatch.setattr(balancer_module.ray, "get", lambda value, timeout=None: value)
         concurrent_fetches = Barrier(3, timeout=5)
 
         def fetch(_cls, address):
@@ -181,7 +181,7 @@ class TestConstruction:
             KVCAwareBalancer({"s0": "h0"}, OmegaConf.create({}))
 
     def test_fetches_rollout_config_once(self, monkeypatch):
-        monkeypatch.setattr(balancer_module.ray, "get", lambda value: value)
+        monkeypatch.setattr(balancer_module.ray, "get", lambda value, timeout=None: value)
         monkeypatch.setattr(KVCAwareBalancer, "_fetch_kv_event_endpoints", classmethod(lambda _cls, _addr: None))
         server = _RolloutServerHandle(_rollout_config())
 
@@ -194,7 +194,7 @@ class TestConstruction:
         assert balancer._strategy._max_num_batched_tokens == 4096
 
     def test_uses_next_server_when_rollout_config_rpc_fails(self, monkeypatch):
-        monkeypatch.setattr(balancer_module.ray, "get", lambda value: value)
+        monkeypatch.setattr(balancer_module.ray, "get", lambda value, timeout=None: value)
         monkeypatch.setattr(KVCAwareBalancer, "_fetch_kv_event_endpoints", classmethod(lambda _cls, _addr: None))
         failed = _RolloutServerHandle(RuntimeError("actor unavailable"), ("10.0.0.1", 8000))
         healthy = _RolloutServerHandle(_rollout_config(max_num_seqs=32), ("10.0.0.1", 8001))
@@ -210,7 +210,7 @@ class TestConstruction:
         assert balancer._strategy._max_num_seqs == 32
 
     def test_invalid_capacity_values_use_defaults(self, monkeypatch):
-        monkeypatch.setattr(balancer_module.ray, "get", lambda value: value)
+        monkeypatch.setattr(balancer_module.ray, "get", lambda value, timeout=None: value)
         monkeypatch.setattr(KVCAwareBalancer, "_fetch_kv_event_endpoints", classmethod(lambda _cls, _addr: None))
         server = _RolloutServerHandle(_rollout_config(max_num_seqs=0, max_num_batched_tokens="invalid"))
 
@@ -262,6 +262,7 @@ class TestBalancerProtocol:
             "route_calls": 0,
             "sticky_size": 0,
             "total_inflight": 0,
+            "cache_lifecycles": {},
         }
 
     def test_acquire_delegates_and_maps_selected_handle(self, monkeypatch):

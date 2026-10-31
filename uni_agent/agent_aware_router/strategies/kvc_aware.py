@@ -304,10 +304,13 @@ class KVCacheAwareStrategy:
                 return [-store.get_metric(r.replica_id, MetricKey.INFLIGHT_COUNT) for r in replicas]
             # Hash-resolving slow_cuts share one resolution across all replicas.
             gpu_hash_strs = resolve_prefix_hashes(prompt_ids or [], request_id, store)
+            estimates = store.estimate_prefixes([r.replica_id for r in replicas], gpu_hash_strs, len(prompt_ids or []))
             if self.slow_cut == SlowCut.PREFIX_LOAD_AWARE:
-                return self._prefix_load_aware(store, replicas, gpu_hash_strs)
+                return self._prefix_load_aware(store, replicas, gpu_hash_strs, estimates)
             if self.slow_cut == SlowCut.CAPACITY_TOKEN_AWARE:
-                return self._capacity_token_scores(store, replicas, request_id, prompt_ids or [], gpu_hash_strs)
+                return self._capacity_token_scores(
+                    store, replicas, request_id, prompt_ids or [], gpu_hash_strs, estimates
+                )
             raise ValueError(f"Unknow slowcut type {self.slow_cut}")
         finally:
             emitter.on_route(time.perf_counter() - t0)
@@ -317,6 +320,7 @@ class KVCacheAwareStrategy:
         store: DataStore,
         replicas: list[ReplicaInfo],
         gpu_hash_strs: list[str],
+        estimates=None,
     ) -> list[float]:
         """Prefix-cache + blended-load combined score (``slow_cut=prefix-load-aware``).
 
@@ -338,7 +342,7 @@ class KVCacheAwareStrategy:
             load = self._compute_load(kv_usage, running, waiting, inflight)
             loads[replica.replica_id] = load
             s_load = 1.0 - load
-            s_cache, gpu_hit = self._cache_score(store, replica, gpu_hash_strs)
+            s_cache, gpu_hit = self._cache_score(store, replica, gpu_hash_strs, estimates)
             emitter.on_score(replica.replica_id, {"load": load, "s_cache": s_cache})
             score = self.alpha * s_cache + (1 - self.alpha) * s_load
             result.append(score)
@@ -361,6 +365,7 @@ class KVCacheAwareStrategy:
         store: DataStore,
         replica: ReplicaInfo,
         hash_strs: list[str],
+        estimates=None,
     ) -> tuple[float, float]:
         """Three-layer weighted prefix-cache hit score ∈ [0, 1].
 
@@ -369,8 +374,15 @@ class KVCacheAwareStrategy:
         ``hash_strs`` is the caller-computed prefix-hash chain (shared across
         replicas, per-request cached) so the per-replica cost is just the index
         walk. CPU/SSD return 0.0 today (see ``KVCacheStore.get_layer_prefix_hit_rate``).
+        Hybrid scores discount any replayed tail from the hit benefit.
         Returns ``(s_cache, gpu_hit)`` so the caller logs gpu_hit without re-querying.
         """
+        if estimates is not None:
+            estimate = estimates.get(replica.replica_id)
+            # Native hit statistics include a bounded-replay tail; routing
+            # compares the prefill work saved after rebuilding that tail.
+            gpu_hit = estimate.saved_token_rate if estimate else 0.0
+            return self.layer_weights[Layer.GPU] * gpu_hit, gpu_hit
         gpu_hit = store.get_layer_prefix_hit_rate(replica.replica_id, hash_strs, Layer.GPU)
         cpu_hit = store.get_layer_prefix_hit_rate(replica.replica_id, hash_strs, Layer.CPU)
         ssd_hit = store.get_layer_prefix_hit_rate(replica.replica_id, hash_strs, Layer.SSD)
@@ -391,13 +403,17 @@ class KVCacheAwareStrategy:
         return picked
 
     def _total_token_capacity(self, store: DataStore) -> int:
-        """Per-replica KV-cache token capacity = ``num_gpu_blocks × block_size``.
+        """Read physical token capacity independently of local hash granularity.
 
-        ``num_gpu_blocks`` is a per-replica gauge (constant across replicas in
-        practice); ``block_size`` is learned from the first KV event (defaults
-        to 16 if not yet seen). Returns 0 when unavailable, in which case the
-        caller falls back to least-inflight.
+        Hybrid reads engine-reported token capacity from startup metadata.
+        Legacy keeps ``num_gpu_blocks × event block_size``.
+        Missing capacity returns zero and the existing capacity scoring still runs.
         """
+        if store.group_cache_enabled:
+            registry = store.cache_registry_state.registry
+            if registry is not None and registry.kv_cache_capacity_tokens is not None:
+                return registry.kv_cache_capacity_tokens
+            return 0
         for node_id in store.get_metric_node_ids():
             nblk = store.get_metric(node_id, MetricKey.NUM_GPU_BLOCKS)
             if nblk and nblk > 0:
@@ -412,6 +428,7 @@ class KVCacheAwareStrategy:
         request_id: str | None,
         prompt_ids: list[int],
         gpu_hash_strs: list[str],
+        estimates=None,
     ) -> list[float]:
         """Capacity-gated token routing (discrete: winner=STICKY_TOP_SCORE, rest 0).
 
@@ -437,9 +454,13 @@ class KVCacheAwareStrategy:
             kv_perc = store.get_metric(replica.replica_id, MetricKey.KV_CACHE_USAGE_PERC) or 0.0
             inflight = store.get_metric(replica.replica_id, MetricKey.INFLIGHT_COUNT) or 0
             inflight_tokens = store.get_metric(replica.replica_id, MetricKey.INFLIGHT_TOKENS) or 0
-            s_cache, gpu_hit = self._cache_score(store, replica, gpu_hash_strs)
+            s_cache, gpu_hit = self._cache_score(store, replica, gpu_hash_strs, estimates)
             avail = cap * (1.0 - kv_perc)
-            need = plen * (1.0 - gpu_hit)
+            if estimates is not None:
+                estimate = estimates.get(replica.replica_id)
+                need = plen - (estimate.estimated_saved_tokens if estimate else 0)
+            else:
+                need = plen * (1.0 - gpu_hit)
             remaining = avail - need
             # Emit as fractions of capacity (default-bucket friendly); skip when cap unknown.
             if cap > 0:

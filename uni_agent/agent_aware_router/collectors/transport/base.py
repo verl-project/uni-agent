@@ -21,7 +21,7 @@ and delivers it to a handler callback.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Callable
+from typing import Any, Callable
 
 
 class Transport(ABC):
@@ -42,13 +42,13 @@ class Transport(ABC):
     is_async: bool = True
 
     @abstractmethod
-    async def subscribe(self, handler: Callable[[bytes | str, str], None]) -> None:
+    async def subscribe(self, handler: Callable[[Any, str], None]) -> None:
         """Start data acquisition and deliver each item to handler.
 
         Args:
             handler: Callback that receives (raw_data, node_id).
-                raw_data is ``bytes`` (ZMQ) / ``str`` (HTTP response text),
-                or a ``StatisticEvent`` (callback transport).
+                raw_data is ``bytes`` or ``KVEventFrame`` (ZMQ), ``str``
+                (HTTP response text), or ``StatisticEvent`` (callback transport).
                 node_id identifies the source endpoint/node (empty for the
                 callback transport — the event carries its own ids).
         """

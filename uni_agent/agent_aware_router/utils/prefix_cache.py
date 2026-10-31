@@ -32,28 +32,30 @@ def resolve_prefix_hashes(
 
     With a ``request_id``, the ``(parent_hash, len(hash_strs))`` checkpoint is
     memoized in the per-request store so only appended blocks are re-hashed on
-    later turns. Assumes multi-turn prompts are append-only; a shrunk prompt
-    triggers a full recompute. Returns ``[]`` when ``block_size`` is unknown.
+    later turns. As in the original router, prompts are assumed append-only;
+    fewer complete blocks or a changed hash schema trigger a full recompute.
+    Returns ``[]`` when ``block_size`` is unknown.
     """
-    block_size = store.get_block_size()
+    schema = store.hash_schema()
+    block_size = schema[1]
     if not block_size or block_size <= 0:
         return []
-
     cached = store.get_per_request(request_id, _PREFIX_HASH_KEY) if request_id else None
-    if cached and len(prompt_ids) // block_size >= len(cached["hash_strs"]):
-        # cached is the live store row (get returns a reference, not a copy):
-        # the in-place extend + parent update persist, and get() already touched
-        # LRU recency — no write-back needed.
+    if cached and cached.get("schema") == schema and len(prompt_ids) // block_size >= len(cached["hash_strs"]):
+        # The per-request store returns the live row; extend it in place.
         tail, new_parent = get_prefix_hashes_incremental(
             prompt_ids, block_size, cached["parent_hash"], len(cached["hash_strs"])
         )
-        cached["hash_strs"].extend([str(h) for h in tail])
+        cached["hash_strs"].extend(str(h) for h in tail)
         cached["parent_hash"] = new_parent
         return cached["hash_strs"]
 
-    # full recompute (miss / shrink)
     hashes, parent = get_prefix_hashes_incremental(prompt_ids, block_size, 0, 0)
     hash_strs = [str(h) for h in hashes]
     if request_id:
-        store.set_per_request(request_id, _PREFIX_HASH_KEY, {"hash_strs": hash_strs, "parent_hash": parent})
+        store.set_per_request(
+            request_id,
+            _PREFIX_HASH_KEY,
+            {"schema": schema, "hash_strs": hash_strs, "parent_hash": parent},
+        )
     return hash_strs

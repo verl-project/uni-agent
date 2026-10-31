@@ -19,6 +19,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..types import Layer, MetricKey
+from .cache_registry import CacheRegistryState
 from .kv_cache_store import KVCacheStore
 from .per_replica_store import PerReplicaStore
 from .per_request_store import PerRequestStore
@@ -95,6 +96,36 @@ class DataStore:
         return self._metrics.refresh(new_data)
 
     # ── KVCacheStore operations ─────────────────────────────────────────
+
+    @property
+    def cache_registry_state(self) -> CacheRegistryState:
+        """Shared cache layout used by group-aware indexing and matching."""
+        return self._kv.registry_state
+
+    def configure_cache_registry(self, metadata) -> CacheRegistryState:
+        return self._kv.configure_registry(metadata)
+
+    @property
+    def group_cache_enabled(self) -> bool:
+        return self._kv.registry_configured
+
+    def hash_schema(self) -> tuple[int, int | None]:
+        registry = self.cache_registry_state.registry
+        unit = registry.local_hash_unit if registry else self.get_block_size()
+        return self._kv.registry_generation, unit
+
+    def cache_lifecycle_state(self, node_id):
+        with self._kv._lock:
+            return self._kv.lifecycle_states.get(node_id)
+
+    def update_cache_lifecycle(self, node_id, state):
+        return self._kv.update_lifecycle(node_id, state)
+
+    def apply_kv_update(self, update):
+        return self._kv.apply_update(update)
+
+    def estimate_prefixes(self, node_ids, hashes, query_tokens):
+        return self._kv.estimate_prefixes(node_ids, hashes, query_tokens)
 
     def get_block_size(self) -> int | None:
         """Get learned block size.
@@ -181,12 +212,11 @@ class DataStore:
     # ── KV-cache load (load signal) ─────────────────────────────────────
 
     def kv_cache_load(self, node_id: str) -> float:
-        """KV-cache load = ``retained_blocks / num_gpu_blocks`` (∈ [0,1]).
+        """Estimate retention pressure from event counts / GPU pool blocks.
 
-        Retained blocks (free-pool blocks hash-marked for reuse) over the GPU
-        block pool — rises as distinct prefixes accumulate and signals impending
-        LRU eviction. Returns 0.0 when retained blocks or ``num_gpu_blocks`` is
-        unavailable (e.g. mc-off groups emit no kv-events).
+        This differs from native in-use occupancy: unreferenced blocks can still
+        retain reusable cache. Hybrid partial aliases are not physical-block
+        deduplicated. Missing pool capacity keeps the original zero default.
         """
         retained = self._kv.per_replica_block_counts().get(node_id, 0)
         if retained <= 0:
@@ -197,7 +227,7 @@ class DataStore:
         return min(1.0, retained / float(total))
 
     def per_replica_block_counts(self) -> dict[str, int]:
-        """Return ``{replica_id: number of distinct prefix blocks it retains}``.
+        """Return per-replica GPU cache retention estimates from events.
 
         Thin pass-through to ``KVCacheStore``; used by the periodic kv-events
         tally log to surface retained-block counts per replica.

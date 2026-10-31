@@ -21,8 +21,13 @@ not from the manager.
 
 from __future__ import annotations
 
+import logging
+
 from ..config.collector import CollectorConfig
-from .collector import Collector, get_collector
+from .collector import Collector, KVCollectorState, get_collector
+from .parse import KVCacheUpdate
+
+logger = logging.getLogger(__name__)
 
 
 class CollectorManager:
@@ -48,6 +53,11 @@ class CollectorManager:
         kv_event_endpoints: dict[str, list[str]] | None = None,
         balancer_handler=None,
     ) -> None:
+        self._collectors_config = collectors_config
+        self._collection_names = tuple(collection_names)
+        self._kv_nodes = set(kv_event_endpoints or {})
+        self._failed_collectors: dict[int, Collector] = {}
+        self._reset_kv_state = False
         self._collectors: list[Collector] = [
             get_collector(
                 name,
@@ -61,6 +71,77 @@ class CollectorManager:
 
     # ── Lifecycle ───────────────────────────────────────────────────────
 
+    def update_sources(self, server_addresses, kv_event_endpoints) -> None:
+        """Refresh network sources while preserving request callback collectors."""
+        network_indices = [
+            i for i, collector in enumerate(self._collectors) if getattr(collector._transport, "is_async", True)
+        ]
+        stopped = []
+        replacements = {}
+        stopping = None
+        try:
+            for i, collector in list(self._failed_collectors.items()):
+                collector.stop(timeout=0.5)
+                del self._failed_collectors[i]
+            for i in network_indices:
+                stopping = i
+                self._collectors[i].stop()
+                stopped.append(i)
+                stopping = None
+            kv_state = None if self._reset_kv_state else self.get_kv_state()
+            for i in network_indices:
+                replacements[i] = get_collector(
+                    self._collection_names[i],
+                    self._collectors_config,
+                    server_addresses=server_addresses,
+                    kv_event_endpoints=kv_event_endpoints,
+                    kv_state=kv_state,
+                )
+            for collector in replacements.values():
+                collector.start()
+        except Exception as error:
+            failed = set(self._failed_collectors)
+            if stopping is not None:
+                failed.add(stopping)
+            for i, collector in replacements.items():
+                try:
+                    collector.stop()
+                except Exception:
+                    self._failed_collectors[i] = collector
+                    failed.add(i)
+                    logger.exception("Could not stop a replacement collector")
+            for i in stopped:
+                if i in failed:
+                    continue
+                try:
+                    self._collectors[i].start()
+                except Exception:
+                    failed.add(i)
+                    logger.exception("Could not resume an original collector")
+            if any(self._collection_names[i] == "vllm_zmq" for i in failed):
+                self._invalidate_kv(self._kv_nodes | set(kv_event_endpoints), "collector_refresh_recovery_failed")
+                self._reset_kv_state = True
+            if failed:
+                raise RuntimeError("collector refresh failed and recovery was incomplete") from error
+            raise
+        for i, collector in replacements.items():
+            self._collectors[i] = collector
+        self._kv_nodes = set(kv_event_endpoints)
+        self._reset_kv_state = False
+
+    def _invalidate_kv(self, nodes, reason):
+        for name, collector in zip(self._collection_names, self._collectors, strict=True):
+            if name == "vllm_zmq":
+                for node in nodes:
+                    collector._write_kv_update(KVCacheUpdate(node_id=node, stream_error=reason))
+
+    def get_kv_state(self) -> KVCollectorState | None:
+        for collector in self._collectors:
+            state = collector.get_kv_state()
+            if state is not None:
+                return state
+        return None
+
     def start(self) -> None:
         """Start all collectors."""
         for collector in self._collectors:
@@ -68,5 +149,12 @@ class CollectorManager:
 
     def stop(self) -> None:
         """Stop all collectors."""
-        for collector in self._collectors:
-            collector.stop()
+        error = None
+        for collector in [*self._collectors, *self._failed_collectors.values()]:
+            try:
+                collector.stop()
+            except Exception as exc:
+                error = error or exc
+        if error is not None:
+            raise error
+        self._failed_collectors.clear()

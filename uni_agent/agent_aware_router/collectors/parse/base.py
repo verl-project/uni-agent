@@ -25,9 +25,13 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ...types import Layer
+from ...types.cache_lifecycle import CacheLifecycleState
+
+if TYPE_CHECKING:
+    from .vllm.kv_event import KVCacheEvent
 
 
 @dataclass
@@ -51,6 +55,11 @@ class KVCacheUpdate:
     remove_blocks: dict[Layer, list[str]] = field(default_factory=dict)
     clear_all: bool = False
     block_size: int | None = None
+    group_events: list[KVCacheEvent] | None = None
+    lifecycle: CacheLifecycleState | None = None
+    sequence: int | None = None
+    stream_error: str | None = None
+    reset_stream: bool = False
 
     def add(self, layer: Layer, block_hashes: list[str]) -> None:
         """Fold stored blocks into ``add_blocks`` under ``layer``."""
@@ -63,6 +72,8 @@ class KVCacheUpdate:
     def clear(self) -> None:
         """Mark the replica for a full block clear."""
         self.clear_all = True
+        self.add_blocks.clear()
+        self.remove_blocks.clear()
 
     def set_block_size(self, size: int) -> None:
         """Set the learned block size (first BlockStored wins; set by the parser)."""

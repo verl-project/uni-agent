@@ -47,8 +47,8 @@ LONG_IDS = list(range(2 * BLOCK_SIZE))
 SHORT_IDS = LONG_IDS[:BLOCK_SIZE]
 
 
-def _make_collector(payloads):
-    return Collector(FakeZMQTransport(payloads, interval=0.05), VLLMKVParser())
+def _make_collector(payloads, *, group_aware=False):
+    return Collector(FakeZMQTransport(payloads, interval=0.05), VLLMKVParser(group_aware=group_aware))
 
 
 def _inject_long_prompt(store: DataStore):
@@ -121,11 +121,20 @@ class TestGpuPrefixHitRate:
 
 
 @pytest.mark.parametrize("removed_hash, expected_hit", [(102, 0.5), (101, 0.0)])
-def test_wire_events_change_prefix_hit_rate(removed_hash, expected_hit):
-    """Removing the first or last full block reduces the contiguous prefix."""
+@pytest.mark.parametrize("group_aware", [False, True], ids=["legacy", "group-aware"])
+def test_wire_events_change_prefix_hit_rate(removed_hash, expected_hit, group_aware, layout):
+    """Both event paths stop the Full prefix at its first removed block."""
     store = DataStore()
-    collector = _make_collector([])
+    if group_aware:
+        store.configure_cache_registry(layout((("full_attention", BLOCK_SIZE),), unit=None))
+    collector = _make_collector([], group_aware=group_aware)
     chain = _hash_chain(LONG_IDS)
+
+    def hit_tokens():
+        if group_aware:
+            # A continuation can reuse every cached full block.
+            return store.estimate_prefixes([NODE_ID], chain, len(LONG_IDS) + 1)[NODE_ID].estimated_hit_tokens
+        return store.get_layer_prefix_hit_rate(NODE_ID, chain, Layer.GPU) * len(LONG_IDS)
 
     def apply(event):
         update = collector._parser.parse(kv_payload(mapping_event(event)), NODE_ID)
@@ -133,12 +142,14 @@ def test_wire_events_change_prefix_hit_rate(removed_hash, expected_hit):
         collector._write_kv_update(update)
 
     try:
-        apply(["BlockStored", [101], None, SHORT_IDS, BLOCK_SIZE, None, "GPU"])
-        apply(["BlockStored", [102], 101, LONG_IDS[BLOCK_SIZE:], BLOCK_SIZE, None, "GPU"])
-        assert store.get_layer_prefix_hit_rate(NODE_ID, chain, Layer.GPU) == 1.0
+        apply(["BlockStored", [101], None, SHORT_IDS, BLOCK_SIZE, None, "GPU", None, None, 0, "full_attention"])
+        apply(
+            ["BlockStored", [102], 101, LONG_IDS[BLOCK_SIZE:], BLOCK_SIZE, None, "GPU", None, None, 0, "full_attention"]
+        )
+        assert hit_tokens() == len(LONG_IDS)
         apply(["BlockRemoved", [removed_hash], "GPU", 0])
-        assert store.get_layer_prefix_hit_rate(NODE_ID, chain, Layer.GPU) == expected_hit
+        assert hit_tokens() == expected_hit * len(LONG_IDS)
         apply(["AllBlocksCleared"])
-        assert store.get_layer_prefix_hit_rate(NODE_ID, chain, Layer.GPU) == 0.0
+        assert hit_tokens() == 0
     finally:
         collector.stop()

@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable
@@ -26,6 +27,7 @@ import ray
 from omegaconf import DictConfig, OmegaConf
 
 from .collectors import CollectorManager
+from .collectors.transport.lifecycle import LifecycleControlReceiver
 from .config import KVCAwareConfig
 from .store import DataStore
 from .strategies import (
@@ -33,6 +35,7 @@ from .strategies import (
     StrategyRegistry,
     route,
 )
+from .types.cache_lifecycle import CacheLifecycleState
 
 logger = logging.getLogger(__name__)
 
@@ -84,8 +87,98 @@ class KVCAwareBalancer:
             "on_release": [],
             "on_servers_removed": [],
         }
+        self._lifecycle_lock = threading.RLock()
+        self._provider_lock = threading.RLock()
+        self._lifecycle_states = {}
+        self._lifecycle_sources = {}
+        self._pending_servers = set()
+        self._lifecycle_receiver = None
         self._store = DataStore()
+        self._init_cache_registry()
+        self._register_cache_lifecycles(self._servers)
         self._init_provider()
+
+    def update_cache_lifecycle(self, server_id, value):
+        state = CacheLifecycleState.from_dict(value)
+        with self._lifecycle_lock:
+            if server_id not in self._servers:
+                return {"applied": False, "reason": "server_removed"}
+            accepted = self._store.update_cache_lifecycle(server_id, state)
+            current = self._store.cache_lifecycle_state(server_id)
+            if current is not None:
+                # Re-adding an unchanged server is still a registration: the
+                # per-pool eligibility mirror must survive an equal revision.
+                self._lifecycle_states[server_id] = current
+            return {"applied": accepted, "revision": self._lifecycle_states.get(server_id, state).revision}
+
+    def _register_cache_lifecycles(self, servers):
+        handles = {sid: handle for sid, handle in servers.items() if hasattr(handle, "register_cache_lifecycle_sink")}
+        if not handles:
+            return
+        created = self._lifecycle_receiver is None
+        if created:
+            self._lifecycle_receiver = LifecycleControlReceiver(
+                self.update_cache_lifecycle, ray.util.get_node_ip_address()
+            )
+        try:
+            for sid, handle in handles.items():
+                response = ray.get(
+                    handle.register_cache_lifecycle_sink.remote(self._lifecycle_receiver.descriptor(sid)),
+                    timeout=self._DISCOVERY_TIMEOUT_SECONDS,
+                )
+                self.update_cache_lifecycle(sid, response["state"])
+                source = self._parse_kv_event_sources(response["sources"])
+                with self._lifecycle_lock:
+                    self._lifecycle_sources[sid] = source
+        except Exception:
+            # A failed constructor/registration must not leave dead control
+            # targets attached to servers that registered successfully.
+            cleanups = [
+                handle.unregister_cache_lifecycle_sink.remote(self._lifecycle_receiver.token)
+                for handle in handles.values()
+                if hasattr(handle, "unregister_cache_lifecycle_sink")
+            ]
+            if cleanups:
+                try:
+                    ray.get(cleanups, timeout=self._DISCOVERY_TIMEOUT_SECONDS)
+                except Exception:
+                    logger.warning("Could not detach failed cache lifecycle registration", exc_info=True)
+            if created:
+                self._lifecycle_receiver.close()
+                self._lifecycle_receiver = None
+            raise  # Never silently route with an unacknowledged lifecycle handshake.
+
+    def close(self):
+        with self._provider_lock:
+            self._provider.stop()
+            if self._lifecycle_receiver is not None:
+                with self._lifecycle_lock:
+                    servers = dict(self._servers)
+                futures = [
+                    handle.unregister_cache_lifecycle_sink.remote(self._lifecycle_receiver.token)
+                    for handle in servers.values()
+                    if hasattr(handle, "unregister_cache_lifecycle_sink")
+                ]
+                try:
+                    if futures:
+                        ray.get(futures, timeout=self._DISCOVERY_TIMEOUT_SECONDS)
+                finally:
+                    self._lifecycle_receiver.close()
+                    self._lifecycle_receiver = None
+
+    def _init_cache_registry(self) -> None:
+        """Install one shared layout from one replica before event collection."""
+        replica_id, handle = next(iter(self._servers.items()))
+        if not hasattr(handle, "get_kv_cache_metadata"):
+            metadata = {"status": "unsupported", "reason": "metadata_method_unavailable"}
+        else:
+            try:
+                metadata = ray.get(handle.get_kv_cache_metadata.remote(), timeout=self._DISCOVERY_TIMEOUT_SECONDS)
+            except Exception as exc:
+                metadata = {"status": "error", "reason": f"metadata_query_failed:{type(exc).__name__}"}
+        state = self._store.configure_cache_registry(metadata)
+        if state.status not in {"registered", "disabled"}:
+            logger.warning("Cache registry unavailable (source replica %s): %s", replica_id, state.reason)
 
     def _fetch_rollout_config(self) -> Any | None:
         """Return the first available rollout config."""
@@ -140,17 +233,20 @@ class KVCAwareBalancer:
         _config.apply_override(self._router_override(rollout_config))
         return _config
 
-    def _init_provider(self) -> None:
+    def _init_provider(self, *, refresh=False) -> None:
         """Resolve per-server endpoints from vLLM HTTP servers, then start collectors.
 
         Non-actor handles (plain strings in unit tests) have no
         ``get_server_address``; discovery is skipped and collectors fall back
         to configured/default endpoints.
         """
+        with self._lifecycle_lock:
+            servers = dict(self._servers)
+            lifecycle_sources = dict(self._lifecycle_sources)
         collection_names = sorted(self._strategy.collection_names)
         address_futures = []
         replica_ids = []
-        for replica_id, handle in self._servers.items():
+        for replica_id, handle in servers.items():
             if not hasattr(handle, "get_server_address"):
                 logger.warning(
                     "server '%s' handle has no get_server_address remote (type=%s); "
@@ -164,11 +260,16 @@ class KVCAwareBalancer:
 
         server_addresses: dict[str, str] = {}
         if replica_ids:
-            addresses = ray.get(address_futures)
+            addresses = ray.get(address_futures, timeout=self._DISCOVERY_TIMEOUT_SECONDS)
             server_addresses = {
                 replica_id: f"{ip}:{port}" for replica_id, (ip, port) in zip(replica_ids, addresses, strict=True)
             }
-        kv_event_endpoints = self._discover_kv_event_endpoints(server_addresses)
+        native_addresses = {sid: address for sid, address in server_addresses.items() if sid not in lifecycle_sources}
+        kv_event_endpoints = self._discover_kv_event_endpoints(native_addresses)
+        kv_event_endpoints.update({sid: source for sid, source in lifecycle_sources.items() if source})
+        if refresh:
+            self._provider.update_sources(server_addresses, kv_event_endpoints)
+            return
         self._provider = self._provider_factory(
             self._config.collector,
             collection_names,
@@ -277,17 +378,28 @@ class KVCAwareBalancer:
             "route_calls": self._route_calls,
             "sticky_size": self._store.sticky_status()["size"],
             "total_inflight": self.get_total_inflight(),
+            "cache_lifecycles": {sid: state.to_dict() for sid, state in self._lifecycle_states.items()},
         }
 
     def release_server(self, server_id: str, request_id: str | None = None) -> None:
         """Release a server and notify statistic collectors."""
-        if self._inflight.get(server_id, 0) > 0:
-            self._inflight[server_id] -= 1
-        self._fire("on_release", server_id, request_id)
+        with self._lifecycle_lock:
+            if self._inflight.get(server_id, 0) > 0:
+                self._inflight[server_id] -= 1
+            self._fire("on_release", server_id, request_id)
 
     def acquire_server(self, request_id: str, prompt_ids: list[int] | None = None) -> tuple[str, Any]:
         """Return the highest-ranked server id and handle."""
-        replicas = [ReplicaInfo(replica_id=sid) for sid in self._servers]
+        with self._lifecycle_lock:
+            return self._acquire_server_locked(request_id, prompt_ids)
+
+    def _acquire_server_locked(self, request_id, prompt_ids):
+        replicas = [
+            ReplicaInfo(replica_id=sid)
+            for sid in self._servers
+            if sid not in self._pending_servers
+            and (sid not in self._lifecycle_states or self._lifecycle_states[sid].serving)
+        ]
         self._route_calls += 1
         t0 = time.perf_counter()
         ranking = route(
@@ -345,15 +457,33 @@ class KVCAwareBalancer:
         return sum(self._inflight.values())
 
     def add_servers(self, servers: dict[str, Any]) -> None:
-        """Bulk-add servers to the pool (provider is keyed by init-time addresses, untouched here)."""
-        for sid, handle in servers.items():
-            self._servers[sid] = handle
-            self._inflight.setdefault(sid, 0)
+        """Add servers and refresh network collectors while routing stays available."""
+        with self._provider_lock:
+            with self._lifecycle_lock:
+                self._pending_servers.update(servers)
+                for sid, handle in servers.items():
+                    self._servers[sid] = handle
+                    self._inflight.setdefault(sid, 0)
+            self._register_cache_lifecycles(servers)
+            if any(hasattr(handle, "get_server_address") for handle in servers.values()):
+                self._init_provider(refresh=True)
+            with self._lifecycle_lock:
+                self._pending_servers.difference_update(servers)
 
     def remove_servers(self, server_ids: list[str]) -> None:
         """Bulk-remove servers; fires ``on_servers_removed`` to invalidate sticky bindings."""
-        for sid in server_ids:
-            self._servers.pop(sid, None)
-            self._inflight.pop(sid, None)
-        if server_ids:
-            self._fire("on_servers_removed", server_ids)
+        with self._provider_lock, self._lifecycle_lock:
+            for sid in server_ids:
+                handle = self._servers.pop(sid, None)
+                if (
+                    handle is not None
+                    and self._lifecycle_receiver is not None
+                    and hasattr(handle, "unregister_cache_lifecycle_sink")
+                ):
+                    handle.unregister_cache_lifecycle_sink.remote(self._lifecycle_receiver.token)
+                self._inflight.pop(sid, None)
+                self._lifecycle_states.pop(sid, None)
+                self._lifecycle_sources.pop(sid, None)
+                self._pending_servers.discard(sid)
+            if server_ids:
+                self._fire("on_servers_removed", server_ids)

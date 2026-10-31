@@ -25,13 +25,17 @@ No real vLLM service is required.
 
 from __future__ import annotations
 
+import asyncio
 import time
+from threading import Event, Thread, Timer
+from unittest.mock import Mock
 
 import pytest
 from conftest import BLOCK_SIZE, NODE_ID, FakeZMQTransport, kv_payload, make_stored_event, mapping_event
 
 from uni_agent.agent_aware_router.collectors.collector import Collector
 from uni_agent.agent_aware_router.collectors.parse.vllm.kv import VLLMKVParser
+from uni_agent.agent_aware_router.collectors.parse.vllm.kv_event import _convert_token_ids
 from uni_agent.agent_aware_router.store.data_store import DataStore
 from uni_agent.agent_aware_router.types import Layer
 from uni_agent.agent_aware_router.utils.hash import get_prefix_hashes_incremental
@@ -39,8 +43,93 @@ from uni_agent.agent_aware_router.utils.hash import get_prefix_hashes_incrementa
 WAIT = 0.3
 
 
-def _make_collector(payloads):
-    return Collector(FakeZMQTransport(payloads, interval=0.05), VLLMKVParser())
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_stop_timeout_keeps_thread_reference_and_prevents_restart(monkeypatch):
+    from uni_agent.agent_aware_router.collectors import collector as module
+
+    collector = _make_collector([])
+    collector.start()
+    thread = collector._loop_thread
+    join = thread.join
+    entered, release = Event(), Event()
+
+    def block():
+        entered.set()
+        release.wait(3)
+
+    collector._loop.call_soon_threadsafe(block)
+    assert entered.wait(1)
+    submit = asyncio.run_coroutine_threadsafe
+
+    def short_wait(coroutine, loop):
+        future = submit(coroutine, loop)
+        result = future.result
+        patch.setattr(future, "result", lambda timeout: result(0.01))
+        return future
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(module.asyncio, "run_coroutine_threadsafe", short_wait)
+            patch.setattr(thread, "join", lambda timeout: join(0.01))
+            with pytest.raises(TimeoutError, match="cleanup timed out"):
+                collector.stop()
+            assert collector._loop_thread is thread and thread.is_alive()
+            assert collector._loop.is_running() and collector._stop_future is not None
+            with pytest.raises(RuntimeError, match="stop the collector"):
+                collector.start()
+    finally:
+        release.set()
+        try:
+            collector.stop()
+        finally:
+            if thread.is_alive():
+                collector._loop.call_soon_threadsafe(collector._loop.stop)
+            join(3)
+            if not collector._loop.is_closed():
+                pending = asyncio.all_tasks(collector._loop)
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    collector._loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                collector._loop.close()
+        assert not thread.is_alive() and collector._loop.is_closed()
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_stop_waits_for_a_thread_whose_event_loop_has_not_started(monkeypatch):
+    collector = _make_collector([])
+    entered, release = Event(), Event()
+
+    def delayed_loop():
+        entered.set()
+        release.wait(3)
+        collector._loop.run_forever()
+
+    thread = Thread(target=delayed_loop, daemon=True)
+    collector._loop_thread = thread
+    thread.start()
+    assert entered.wait(1)
+    join = thread.join
+    monkeypatch.setattr(thread, "join", lambda timeout: join(1))
+    resume = Timer(0.02, release.set)
+    resume.start()
+    try:
+        collector.stop()
+        assert not thread.is_alive()
+        assert collector._loop.is_closed()
+    finally:
+        release.set()
+        if not collector._loop.is_closed():
+            collector._loop.call_soon_threadsafe(collector._loop.stop)
+        join(3)
+        resume.join()
+        collector.stop()
+
+
+def _make_collector(payloads, *, group_aware=False):
+    return Collector(FakeZMQTransport(payloads, interval=0.05), VLLMKVParser(group_aware=group_aware))
 
 
 def _block_ids(start: int = 0) -> list[int]:
@@ -48,10 +137,10 @@ def _block_ids(start: int = 0) -> list[int]:
     return list(range(start, start + BLOCK_SIZE))
 
 
-def _run(payloads):
+def _run(payloads, *, group_aware=False):
     """Start the collector over the given payloads, stop, return (store, collector)."""
     store = DataStore()
-    collector = _make_collector(payloads)
+    collector = _make_collector(payloads, group_aware=group_aware)
     collector.start()
     time.sleep(WAIT)
     collector.stop()
@@ -150,16 +239,40 @@ class TestVLLMKVEventCollector:
 
 @pytest.mark.cpu
 @pytest.mark.level0
-def test_wire_events_change_store():
-    """Mapping events store and remove blocks through the collector."""
+@pytest.mark.parametrize("group_aware", [False, True], ids=["legacy", "group-aware"])
+def test_wire_events_change_store(group_aware, layout, monkeypatch):
+    """Both paths preserve valid updates alongside a malformed event."""
+    conversion = Mock(wraps=_convert_token_ids)
+    monkeypatch.setattr("uni_agent.agent_aware_router.collectors.parse.vllm.kv_event._convert_token_ids", conversion)
+    store = DataStore()
+    if group_aware:
+        store.configure_cache_registry(layout((("full_attention", BLOCK_SIZE),), unit=None))
     events = [
-        ["BlockStored", [101, 102], None, list(range(2 * BLOCK_SIZE)), BLOCK_SIZE, None, "GPU"],
+        [
+            "BlockStored",
+            [101, 102],
+            None,
+            list(range(2 * BLOCK_SIZE)),
+            BLOCK_SIZE,
+            None,
+            "GPU",
+            None,
+            None,
+            0,
+            "full_attention",
+        ],
+        ["BlockStored", ["bad"], None, [1], 0, None, "GPU"],
         ["BlockRemoved", [102], "GPU", 0],
     ]
-    store, collector = _run([kv_payload(mapping_event(event)) for event in events])
-    assert store.get_block_size() == BLOCK_SIZE
-    assert store.get_kv_block_count() == 1
-    assert set(collector._parser.remote_to_local_block_hash) == {"101"}
+    payloads = [kv_payload(mapping_event(events[0])), kv_payload(*(mapping_event(event) for event in events[1:]))]
+    store, collector = _run(payloads, group_aware=group_aware)
+    assert conversion.call_count == (0 if group_aware else 1)
+    assert store.get_block_size() == (None if group_aware else BLOCK_SIZE)
+    if group_aware:
+        assert store.per_replica_block_counts() == {NODE_ID: 1}
+    else:
+        assert store.get_kv_block_count() == 1
+        assert set(collector._parser.remote_to_local_block_hash) == {"101"}
 
 
 @pytest.mark.cpu

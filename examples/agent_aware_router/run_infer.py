@@ -659,6 +659,10 @@ def main() -> None:
     # 1. TransferQueue + verl inference engine with the KV-cache-aware router.
     logger.info("initializing TransferQueue and LLMServerManager (kvcaware router)...")
     tq.init(config.transfer_queue)
+    if config.actor_rollout_ref.rollout.name == "vllm":
+        from uni_agent.agent_aware_router.server.bootstrap import register_vllm_metadata_replica
+
+        register_vllm_metadata_replica()
     llm_server_manager = LLMServerManager.create(config=config)
 
     # 2. Framework rollout adapter over the engine.

@@ -93,6 +93,8 @@ class FakeRouteDataProvider:
       tiers                – dict mapping tier name to hit rate (default {})
     """
 
+    group_cache_enabled = False
+
     def __init__(self, data: dict[str, dict], sticky: dict[str, str] | None = None):
         self._data = data
         self._sticky = sticky or {}
@@ -142,6 +144,12 @@ class FakeRouteDataProvider:
     def get_block_size(self) -> int | None:
         # Block size is learned from KV events; tests default to vLLM's 16.
         return 16
+
+    def hash_schema(self):
+        return 0, self.get_block_size()
+
+    def estimate_prefixes(self, node_ids, hashes, query_tokens):
+        return None
 
     def get_per_request(self, request_id: str, key: str, default=None):
         return self._per_request.get(request_id, {}).get(key, default)
@@ -707,7 +715,7 @@ class TestStickyShortCircuit:
         return FakeRouteDataProvider(per_replica, sticky=sticky)
 
     # ── score() sticky short-circuit ───────────────────────────────────────
-    def test_sticky_hit_not_overloaded_short_circuits(self):
+    def test_sticky_hit_not_overloaded_short_circuits(self, monkeypatch):
         """Feature: bound + present + not overloaded → sticky replica gets top score.
         Description: sticky binds r1→rep_b; rep_b light (load=0.12); rep_a has better
         combined score but must NOT win.
@@ -720,6 +728,12 @@ class TestStickyShortCircuit:
             rep_b={"kv_cache_usage_perc": 0.3, "num_requests_running": 0, "gpu_hit_pct": 0},
         )
         replicas = _replicas("rep_a", "rep_b")
+        monkeypatch.setattr(
+            provider,
+            "estimate_prefixes",
+            lambda *args: pytest.fail("sticky must bypass cache estimation"),
+            raising=False,
+        )
         scores = strat.score(PROMPT_IDS, provider, replicas, "r1")
         assert scores == [0.0, STICKY_TOP_SCORE]
         ranking = route(strat, PROMPT_IDS, provider, replicas, "r1")
@@ -819,11 +833,17 @@ class TestFallbackModes:
         ranking = route(strat, PROMPT_IDS, provider, _replicas("rep_a", "rep_b"), "r1")
         assert ranking[0] == "rep_a"  # sticky missed (kv_perc 0.95 > 0.9); rep_a wins on remaining
 
-    def test_miss_routes_to_least_inflight(self):
+    def test_miss_routes_to_least_inflight(self, monkeypatch):
         """slow_cut=least-inflight: pick the replica with the fewest in-flight requests."""
         strat = _strat(slow_cut=SlowCut.LEAST_INFLIGHT)
         provider = FakeRouteDataProvider(
             {"rep_a": {"inflight_count": 5}, "rep_b": {"inflight_count": 2}},
+        )
+        monkeypatch.setattr(
+            provider,
+            "estimate_prefixes",
+            lambda *args: pytest.fail("least-inflight must bypass cache estimation"),
+            raising=False,
         )
         ranking = route(strat, PROMPT_IDS, provider, _replicas("rep_a", "rep_b"), "r1")
         assert ranking[0] == "rep_b"

@@ -29,6 +29,7 @@ import zmq
 import zmq.asyncio
 
 from ...collectors.transport.base import Transport
+from ...types.cache_lifecycle import KVEventFrame
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +66,11 @@ class ZMQTransport(Transport):
         max_retry_delay: float = 30.0,
         max_retry_attempts: int = 5,
         retry_backoff_factor: float = 2.0,
+        deliver_frames: bool = False,
+        cursors: dict[str, tuple[str, str, str, int]] | None = None,
     ) -> None:
+        self._deliver_frames = deliver_frames
+        self._last_sequences: dict[str, int] = {}
         self._base_retry_delay = base_retry_delay
         self._max_retry_delay = max_retry_delay
         self._max_retry_attempts = max_retry_attempts
@@ -88,13 +93,29 @@ class ZMQTransport(Transport):
             self._replay_endpoints[node_id] = f"tcp://{addrs[1]}" if addrs[1] else ""
             self._topics[node_id] = addrs[3]
 
+        for node_id, (sub, replay, topic, sequence) in (cursors or {}).items():
+            if (
+                self._sub_endpoints.get(node_id) == sub
+                and self._replay_endpoints[node_id] == replay
+                and self._topics[node_id] == topic
+            ):
+                self._last_sequences[node_id] = sequence
+
         self._stopped = False
         self._endpoint_sockets: dict[str, _EndpointSocketSet] = {}
         self._retry_counts: dict[str, int] = {}
         self._sub_tasks: dict[str, asyncio.Task] = {}
 
-    async def subscribe(self, handler: Callable[[bytes | str, str], None]) -> None:
+    def get_cursors(self) -> dict[str, tuple[str, str, str, int]]:
+        """Snapshot progress together with the event source it belongs to."""
+        return {
+            node: (self._sub_endpoints[node], self._replay_endpoints[node], self._topics[node], sequence)
+            for node, sequence in self._last_sequences.items()
+        }
+
+    async def subscribe(self, handler: Callable[[bytes | str | KVEventFrame, str], None]) -> None:
         """Spawn per-endpoint subscription tasks, deliver payloads to handler."""
+        self._stopped = False
         sub_tasks = []
         for node_id in self._sub_endpoints:
             sub_addr = self._sub_endpoints[node_id]
@@ -134,7 +155,7 @@ class ZMQTransport(Transport):
     ) -> bool:
         """Create ZMQ context and replay + sub dual socket for a single endpoint.
 
-        If ``replay_addr`` is empty (sub-only mode), the replay REQ socket is
+        If ``replay_addr`` is empty (sub-only mode), the replay DEALER socket is
         skipped — used by the standalone collector which has no replay endpoint.
         """
         try:
@@ -146,7 +167,7 @@ class ZMQTransport(Transport):
 
             replay_socket = None
             if replay_addr:
-                replay_socket = ctx.socket(zmq.REQ)
+                replay_socket = ctx.socket(zmq.DEALER)
                 replay_socket.connect(replay_addr)
 
             self._endpoint_sockets[node_id] = _EndpointSocketSet(
@@ -155,7 +176,6 @@ class ZMQTransport(Transport):
                 sub_socket=sub_socket,
                 replay_socket=replay_socket,
             )
-            self._retry_counts[node_id] = 0
             return True
 
         except zmq.ZMQError as exc:
@@ -203,84 +223,102 @@ class ZMQTransport(Transport):
 
     # ── Per-endpoint subscription ────────────────────────────────────────
 
+    def _deliver(
+        self,
+        node_id: str,
+        sequence: int,
+        payload: bytes,
+        handler: Callable[[bytes | str | KVEventFrame, str], None],
+    ) -> None:
+        last = self._last_sequences.get(node_id)
+        if last is not None and sequence <= last:
+            return  # Live SUB and replay overlap; each batch applies once.
+        if last is not None and sequence != last + 1:
+            expected = last + 1
+            error = f"kv_sequence_gap:{expected}:{sequence}"
+            logger.warning("KV event gap for %s: expected=%s received=%s", node_id, expected, sequence)
+            if self._deliver_frames:
+                handler(KVEventFrame(b"", error=error), node_id)
+        self._last_sequences[node_id] = sequence
+        handler(KVEventFrame(payload, sequence) if self._deliver_frames else payload, node_id)
+
     async def _subscribe_for_endpoint(
         self,
         node_id: str,
         sub_addr: str,
         replay_addr: str,
-        handler: Callable[[bytes | str, str], None],
+        handler: Callable[[bytes | str | KVEventFrame, str], None],
     ) -> None:
-        """Per-endpoint subscription: connect → replay (if available) → subscribe loop."""
         try:
+            if self._deliver_frames and node_id not in self._last_sequences:
+                handler(KVEventFrame(b"", reset_stream=True), node_id)
             if not await self._connect_zmq_for(node_id, sub_addr, replay_addr):
                 if not await self._reconnect_with_backoff_for(node_id, sub_addr, replay_addr):
+                    if self._deliver_frames:
+                        handler(KVEventFrame(b"", error="kv_subscription_failed"), node_id)
                     return
-
-            # Replay historical events only when a replay socket is connected
-            # (sub-only mode skips this — standalone collector has no replay endpoint).
             if replay_addr:
                 await self._replay_historical_data_for(node_id, handler)
-
-            sockets = self._endpoint_sockets.get(node_id)
-            if sockets is None:
-                return
-
             while not self._stopped:
+                sockets = self._endpoint_sockets.get(node_id)
+                if sockets is None:
+                    return
                 try:
                     parts = await sockets.sub_socket.recv_multipart()
-                    payload = parts[-1]
-                    handler(payload, node_id)
-                except zmq.ZMQError:
+                    if len(parts) < 3 or len(parts[-2]) != 8:
+                        raise ValueError("invalid KV event sequence frame")
+                    sequence = int.from_bytes(parts[-2], "big")
+                    last = self._last_sequences.get(node_id)
+                    expected = 0 if last is None else last + 1
+                    if sequence > expected and replay_addr:
+                        await self._replay_historical_data_for(node_id, handler)
+                    self._deliver(node_id, sequence, parts[-1], handler)
+                    self._retry_counts[node_id] = 0
+                except (zmq.ZMQError, ValueError) as exc:
+                    logger.warning("KV subscription error for %s: %s", node_id, exc)
+                    if self._deliver_frames and not replay_addr:
+                        handler(KVEventFrame(b"", error="kv_subscription_failed"), node_id)
                     self._close_zmq_sockets_for(node_id)
                     if not await self._reconnect_with_backoff_for(node_id, sub_addr, replay_addr):
+                        if self._deliver_frames and replay_addr:
+                            handler(KVEventFrame(b"", error="kv_subscription_failed"), node_id)
                         break
                     if replay_addr:
                         await self._replay_historical_data_for(node_id, handler)
-
         except asyncio.CancelledError:
             pass
         finally:
             self._close_zmq_sockets_for(node_id)
 
-    # ── Replay ──────────────────────────────────────────────────────────
-
     async def _replay_historical_data_for(
         self,
         node_id: str,
-        handler: Callable[[bytes | str, str], None],
-    ) -> None:
-        """Request replay of historical data for a single endpoint.
-
-        vLLM's ROUTER replay socket expects the starting sequence number as an
-        8-byte big-endian integer — the REQ socket adds the empty delimiter frame
-        itself, so the publisher receives ``[client_id, "", start_seq]``. It then
-        streams each retained batch back as ``[seq_bytes, payload]`` frames,
-        terminated by an empty-payload ``END_SEQ`` marker. We start from seq 0 to
-        pull the whole retained buffer. Degrades to subscription-only on failure.
-        """
+        handler: Callable[[bytes | str | KVEventFrame, str], None],
+    ) -> bool:
+        """Read streamed ROUTER replies through END_SEQ using DEALER."""
         sockets = self._endpoint_sockets.get(node_id)
         if sockets is None or sockets.replay_socket is None:
-            return
-
+            return False
         try:
-            await sockets.replay_socket.send((0).to_bytes(8, "big"))
-
-            # Drain streamed replay frames until the empty-payload end marker
-            # (or a timeout / socket error) — then degrade to subscription-only.
-            while True:
-                try:
-                    frames = await asyncio.wait_for(
-                        sockets.replay_socket.recv_multipart(),
-                        timeout=5.0,
-                    )
-                except asyncio.TimeoutError:
-                    return  # no more frames → degrade to subscription-only
-
-                # REQ delivers each publisher send as [seq_bytes, payload];
-                # an empty payload marks end-of-replay (vLLM END_SEQ marker).
-                if len(frames) < 2 or not frames[-1]:
-                    return
-                handler(frames[-1], node_id)
-
-        except zmq.ZMQError as exc:
-            logger.warning(f"ZMQ replay error for node {node_id}: {exc}")
+            start = self._last_sequences.get(node_id, -1) + 1
+            await sockets.replay_socket.send_multipart([b"", start.to_bytes(8, "big")])
+            while not self._stopped:
+                frames = await asyncio.wait_for(sockets.replay_socket.recv_multipart(), timeout=5.0)
+                if len(frames) < 3 or len(frames[-2]) != 8:
+                    raise ValueError("invalid KV replay frame")
+                if frames[-2] == (-1).to_bytes(8, "big", signed=True) and not frames[-1]:
+                    return True
+                if not frames[-1]:
+                    raise ValueError("unexpected empty KV replay payload")
+                self._deliver(node_id, int.from_bytes(frames[-2], "big"), frames[-1], handler)
+        except (asyncio.TimeoutError, zmq.ZMQError, ValueError) as exc:
+            logger.warning("KV replay incomplete for %s: %s", node_id, exc)
+            if self._deliver_frames:
+                handler(KVEventFrame(b"", error="kv_replay_incomplete"), node_id)
+            # A timed-out streamed reply can arrive later. Retire the socket so
+            # it cannot be mistaken for the next replay request's response.
+            sockets.replay_socket.close(0)
+            replacement = sockets.context.socket(zmq.DEALER)
+            replacement.connect(self._replay_endpoints[node_id])
+            sockets.replay_socket = replacement
+        return False

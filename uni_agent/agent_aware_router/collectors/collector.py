@@ -22,7 +22,9 @@ import threading
 import time
 from collections import defaultdict
 from concurrent.futures import Future
-from typing import Any
+from concurrent.futures import TimeoutError as FutureTimeoutError
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 from ..config.collector import CollectorConfig
 from ..debug import get_debug_var, is_debug_enabled
@@ -34,6 +36,15 @@ from .parse import KVCacheUpdate, MetricsUpdate, Parser, StickyUpdate
 from .transport.base import Transport
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from .parse.vllm.kv import VLLMKVParser
+
+
+@dataclass
+class KVCollectorState:
+    parser: VLLMKVParser
+    cursors: dict[str, tuple[str, str, str, int]]
 
 
 DEFAULT_COLLECTOR_KNOBS: dict[str, float | int] = {
@@ -97,6 +108,7 @@ class Collector:
         self._parser = parser
         self._data_store = DataStore()
         self._future: Future | None = None
+        self._stop_future: Future | None = None
         self._loop: asyncio.AbstractEventLoop = asyncio.new_event_loop()
         self._loop_thread: threading.Thread | None = None
         # Periodic evidence-log state. The parser is stateless (returns
@@ -114,6 +126,16 @@ class Collector:
 
     # ── Lifecycle ───────────────────────────────────────────────────────
 
+    def get_kv_state(self) -> KVCollectorState | None:
+        """Read KV progress after the collector's event loop has stopped."""
+        from .transport.zmq import ZMQTransport
+
+        if not isinstance(self._transport, ZMQTransport):
+            return None
+        if self._loop.is_running():
+            raise RuntimeError("stop the KV collector before reading its progress")
+        return KVCollectorState(self._parser, self._transport.get_cursors())
+
     def start(self) -> None:
         """Start the collector — launch event-loop thread and subscribe."""
 
@@ -121,7 +143,7 @@ class Collector:
             asyncio.set_event_loop(self._loop)
             self._loop.run_forever()
 
-        def handler(raw_data: bytes | str, node_id: str) -> None:
+        def handler(raw_data: Any, node_id: str) -> None:
             """Handler: parse and dispatch to the right store write path."""
             result = self._parser.parse(raw_data, node_id)
             if isinstance(result, KVCacheUpdate):
@@ -136,11 +158,21 @@ class Collector:
                 logger.debug(f"parser.parse returned no update: {result}")
 
         if getattr(self._transport, "is_async", True):
+            if self._loop_thread is not None or self._loop.is_running():
+                raise RuntimeError("stop the collector before starting it again")
+            if not self._loop.is_closed() and any(not task.done() for task in asyncio.all_tasks(self._loop)):
+                raise RuntimeError("finish collector cleanup before starting it again")
+            if self._loop.is_closed():
+                self._loop = asyncio.new_event_loop()
+            ready = threading.Event()
+            self._loop.call_soon(ready.set)
             self._loop_thread = threading.Thread(
                 target=run_loop,
                 daemon=True,
             )
             self._loop_thread.start()
+            if not ready.wait(5):
+                raise TimeoutError("collector event loop startup timed out")
 
             self._future = asyncio.run_coroutine_threadsafe(
                 self._transport.subscribe(handler),
@@ -157,22 +189,19 @@ class Collector:
 
     def _write_kv_update(self, update: KVCacheUpdate) -> None:
         """Write KVCacheUpdate via DataStore, then emit a periodic kv-events tally."""
-        if update.block_size is not None:
-            self._data_store.set_block_size(update.block_size)
-        if update.clear_all:
-            self._data_store.clear_kv_node(update.node_id)
-        for layer, hashes in update.remove_blocks.items():
-            if hashes:
-                self._data_store.remove_kv_blocks(update.node_id, hashes, layer=layer)
-        for layer, hashes in update.add_blocks.items():
-            if hashes:
-                self._data_store.add_kv_blocks(update.node_id, hashes, layer=layer)
+        if not self._data_store.apply_kv_update(update):
+            return
+        if update.group_events is not None:
+            n_added = sum(len(e.block_hashes) for e in update.group_events if e.is_store)
+            n_removed = sum(len(e.block_hashes) for e in update.group_events if e.is_remove)
+            n_clear = sum(e.is_clear for e in update.group_events)
+        else:
+            n_added = sum(len(v) for v in update.add_blocks.values())
+            n_removed = sum(len(v) for v in update.remove_blocks.values())
+            n_clear = int(update.clear_all)
 
-        # Tally for periodic summary — observe BlockStored/BlockRemoved flow.
-        n_added = sum(len(v) for v in update.add_blocks.values())
-        n_removed = sum(len(v) for v in update.remove_blocks.values())
-        if update.clear_all:
-            self._kv_event_counts["clear"] += 1
+        # Count event hashes, never treat this tally as physical capacity.
+        self._kv_event_counts["clear"] += n_clear
         if n_added:
             self._kv_event_counts["stored"] += 1
             self._kv_block_counts["stored"] += n_added
@@ -189,10 +218,15 @@ class Collector:
         total = sum(self._kv_event_counts.values())
         if total - self._kv_last_logged_total >= _KV_EVENT_LOG_INTERVAL_S:
             self._kv_last_logged_total = total
+            detail = (
+                "group_aware=True"
+                if update.group_events is not None
+                else f"retained_blocks/replica={self._data_store.per_replica_block_counts()}"
+            )
             logger.debug(
                 f"kv-events tally: events={dict(self._kv_event_counts)} "
                 f"blocks={dict(self._kv_block_counts)} (total_events={total}) | "
-                f"retained_blocks/replica={self._data_store.per_replica_block_counts()}"
+                f"{detail}"
             )
 
     def _write_metrics_update(self, update: MetricsUpdate) -> None:
@@ -365,37 +399,54 @@ class Collector:
         # Snapshot current cumulative values for next window's delta.
         self._metrics_prev[node_id] = {k: float(snap.get(k, 0) or 0) for k in _CUMULATIVE_KEYS}
 
-    def stop(self) -> None:
+    def stop(self, timeout: float = 15.0) -> None:
         """
         Stop the collector — cancel tasks, drain cleanup, stop event-loop thread.
         """
-        # Transport closes protocol-level resources (sockets/clients);
-        # we own task cancellation and finally-block draining below.
-        self._transport.stop()
-
         if self._loop.is_running():
             # Cancel all tasks and wait for their finally blocks inside the loop
             # so that aclose() runs while the loop is still alive.
             async def _cancel_and_drain() -> None:
-                current = asyncio.current_task()
-                tasks = [t for t in asyncio.all_tasks() if not t.done() and t is not current]
-                for t in tasks:
-                    t.cancel()
-                await asyncio.gather(*tasks, return_exceptions=True)
+                try:
+                    self._transport.stop()
+                finally:
+                    current = asyncio.current_task()
+                    tasks = [t for t in asyncio.all_tasks() if not t.done() and t is not current]
+                    for t in tasks:
+                        t.cancel()
+                    await asyncio.gather(*tasks, return_exceptions=True)
 
-            drain = asyncio.run_coroutine_threadsafe(_cancel_and_drain(), self._loop)
+            if self._stop_future is None:
+                self._stop_future = asyncio.run_coroutine_threadsafe(_cancel_and_drain(), self._loop)
             try:
-                drain.result(timeout=15)
+                self._stop_future.result(timeout=timeout)
+            except FutureTimeoutError as exc:
+                if self._stop_future.done():
+                    self._stop_future = None
+                raise TimeoutError("collector cleanup timed out") from exc
             except Exception as exc:
-                logger.debug(f"Error draining tasks on stop: {exc}")
+                self._stop_future = None
+                raise RuntimeError("collector cleanup did not finish") from exc
 
             self._loop.call_soon_threadsafe(self._loop.stop)
+        else:
+            self._transport.stop()
+            if self._loop_thread is not None and not self._loop.is_closed():
+                self._loop.call_soon_threadsafe(self._loop.stop)
 
         if self._loop_thread is not None:
-            self._loop_thread.join(timeout=10)
+            self._loop_thread.join(timeout=min(10, timeout))
+            if self._loop_thread.is_alive():
+                raise TimeoutError("collector event loop did not stop")
             self._loop_thread = None
-
+        if self._loop.is_running():
+            raise TimeoutError("collector event loop is still running")
+        if not self._loop.is_closed():
+            if any(not task.done() for task in asyncio.all_tasks(self._loop)):
+                raise RuntimeError("collector event loop still has pending tasks")
+            self._loop.close()
         self._future = None
+        self._stop_future = None
 
 
 # ── Factory function ───────────────────────────────────────────────────
@@ -418,6 +469,7 @@ def get_collector(
     server_addresses: dict[str, str] | None = None,
     kv_event_endpoints: dict[str, list[str]] | None = None,
     balancer_handler=None,
+    kv_state: KVCollectorState | None = None,
 ) -> Collector:
     """Create a Collector by name — one place does both composition and config binding.
 
@@ -461,8 +513,22 @@ def get_collector(
             max_retry_delay=_debug_knob("max_retry_delay"),
             max_retry_attempts=_debug_knob("max_retry_attempts"),
             retry_backoff_factor=_debug_knob("retry_backoff_factor"),
+            deliver_frames=True,
+            cursors=kv_state.cursors if kv_state else None,
         )
-        return Collector(transport, VLLMKVParser())
+        parser = (
+            kv_state.parser.snapshot()
+            if kv_state
+            else VLLMKVParser(
+                group_aware=DataStore().group_cache_enabled, lifecycle_reader=DataStore().cache_lifecycle_state
+            )
+        )
+        if kv_state:
+            parser.retain_nodes(transport.get_cursors())
+        return Collector(
+            transport,
+            parser,
+        )
 
     if name == "sticky_stat":
         from .parse.basic.sticky import StickyParser
