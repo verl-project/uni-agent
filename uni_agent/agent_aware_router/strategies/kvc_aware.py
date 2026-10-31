@@ -204,18 +204,19 @@ class KVCacheAwareStrategy:
             avail = cap - inflight_blocks * block_size
             if avail >= thresh:
                 return False
-            # Sibling gate over the CURRENT pool only: metric rows outlive removed
-            # replicas (nothing purges them), and a ghost holding 0 blocks always
-            # passes — which would break sticky even with nowhere real to go.
-            for sibling in pool:
-                held = store.inflight_block_count(sibling.replica_id) * block_size
-                if cap - held >= thresh:
-                    return True
-            logger.info(
-                f"is-overload replica={replica.replica_id} avail={avail:.0f} under water, "
-                f"no replica passes the gate → keep sticky"
-            )
-            return False
+            return True
+            # # Sibling gate over the CURRENT pool only: metric rows outlive removed
+            # # replicas (nothing purges them), and a ghost holding 0 blocks always
+            # # passes — which would break sticky even with nowhere real to go.
+            # for sibling in pool:
+            #     held = store.inflight_block_count(sibling.replica_id) * block_size
+            #     if cap - held >= thresh:
+            #         return True
+            # logger.info(
+            #     f"is-overload replica={replica.replica_id} avail={avail:.0f} under water, "
+            #     f"no replica passes the gate → keep sticky"
+            # )
+            # return False
         raise ValueError(
             f"There is no {self.overload_mode}, please set overload_mode in "
             f"['None', 'kv_cache_usage_perc', 'remaining_cap']"
