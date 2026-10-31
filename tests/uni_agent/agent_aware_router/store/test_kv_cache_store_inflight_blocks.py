@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""CPU unit tests for the in-flight held-block ref-count table (``pin``/``unpin``)."""
+"""CPU unit tests for the in-flight held-block ref-count table (``incr``/``decr`` refs + markers)."""
 
 from __future__ import annotations
 
@@ -32,57 +32,71 @@ def _store() -> KVCacheStore:
 
 
 def test_held_set_ref_counts_shared_blocks() -> None:
-    """Shared blocks count once and leave only with their last holder's unpin; hits are held like misses."""
+    """Shared blocks count once and leave only with their last holder's decr; hits are held like misses."""
     store = _store()
     store.add_blocks("s0", PREFIX[:2], layer=Layer.GPU)  # h1/h2 already resident
 
-    store.pin_inflight_blocks("s0", PREFIX)  # r1
-    store.pin_inflight_blocks("s0", PREFIX[:3])  # r2 shares r1's prefix
+    store.incr_block_refs("s0", PREFIX)  # r1
+    store.incr_block_refs("s0", PREFIX[:3])  # r2 shares r1's prefix
     assert store.inflight_block_count("s0") == 5  # not 8: shared count once, hits held too
 
-    store.unpin_inflight_blocks("s0", PREFIX)  # r1 (superset) leaves
+    store.decr_block_refs("s0", PREFIX)  # r1 (superset) leaves
     assert store.inflight_block_count("s0") == 3  # r2 still holds its subset
 
-    store.unpin_inflight_blocks("s0", PREFIX[:3])  # r2 leaves
+    store.decr_block_refs("s0", PREFIX[:3])  # r2 leaves
     assert store.inflight_block_count("s0") == 0
 
 
-def test_pin_table_edges_and_cleanup() -> None:
-    """Pins are per replica; unknown hashes are ignored; clear_replica drops the replica's whole account."""
+def test_ref_table_edges_and_cleanup() -> None:
+    """Refs are per replica; unknown hashes are ignored; clear_replica drops the replica's whole account."""
     store = _store()
 
-    store.pin_inflight_blocks("s0", [])  # unresolvable prompt pins nothing
+    store.incr_block_refs("s0", [])  # unresolvable prompt refs nothing
     assert store.inflight_block_count("s0") == 0
 
-    store.pin_inflight_blocks("s0", PREFIX)
-    store.pin_inflight_blocks("s1", PREFIX)  # the same hash is still new on s1
+    store.incr_block_refs("s0", PREFIX)
+    store.incr_block_refs("s1", PREFIX)  # the same hash is still new on s1
     assert store.inflight_block_count("s0") == 5
     assert store.inflight_block_count("s1") == 5
 
-    store.unpin_inflight_blocks("s0", ["never-pinned", "h1", "h1"])  # unknown + doubled unpin
+    store.decr_block_refs("s0", ["never-pinned", "h1", "h1"])  # unknown + doubled decr
     assert store.inflight_block_count("s0") == 4  # h1 really released, never negative
 
-    store.unpin_inflight_blocks("ghost-replica", PREFIX)  # replica with no pin table
+    store.decr_block_refs("ghost-replica", PREFIX)  # replica with no ref table
     assert store.inflight_block_count("ghost-replica") == 0
 
-    store.set_inflight_pin("r0", "s0", PREFIX)  # a request flying on s0 at clear time
-    store.set_inflight_pin("r1", "s1", PREFIX)
+    store.put_marker("r0", "s0", PREFIX)  # a request flying on s0 at clear time
+    store.put_marker("r1", "s1", PREFIX)
     store.clear_replica("s0")
     assert store.inflight_block_count("s0") == 0  # held goes with the clear — no release will ever come
-    assert store.take_inflight_pin("r0") is None  # marker swept too: a late release cannot steal refs
+    assert store.pop_marker("r0") is None  # marker swept too: a late release cannot steal refs
     assert store.inflight_block_count("s1") == 5  # other replicas untouched
-    assert store.take_inflight_pin("r1") == {"replica": "s1", "hashes": PREFIX}
+    assert store.pop_marker("r1") == {"replica": "s1", "hashes": PREFIX}
 
 
-def test_pin_marker_take_semantics() -> None:
+def test_marker_take_semantics() -> None:
     """Markers read-and-clear atomically: take returns the exact pinned set once, then None."""
     store = _store()
 
-    assert store.take_inflight_pin("r1") is None  # nothing pinned — no error
+    assert store.pop_marker("r1") is None  # nothing pinned — no error
 
-    store.set_inflight_pin("r1", "s0", PREFIX)
-    assert store.take_inflight_pin("r1") == {"replica": "s0", "hashes": PREFIX}
+    store.put_marker("r1", "s0", PREFIX)
+    assert store.pop_marker("r1") == {"replica": "s0", "hashes": PREFIX}
 
-    store.set_inflight_pin("r1", "s1", PREFIX[:2])  # re-acquire overwrites the stale marker
-    assert store.take_inflight_pin("r1") == {"replica": "s1", "hashes": PREFIX[:2]}
-    assert store.take_inflight_pin("r1") is None  # a duplicated release finds nothing
+    store.put_marker("r1", "s1", PREFIX[:2])  # re-acquire overwrites the stale marker
+    assert store.pop_marker("r1") == {"replica": "s1", "hashes": PREFIX[:2]}
+    assert store.pop_marker("r1") is None  # a duplicated release finds nothing
+
+
+def test_marker_peek_does_not_clear() -> None:
+    """get_marker returns a copy and leaves the row in place for the later take."""
+    store = _store()
+
+    assert store.get_marker("r1") is None  # absent — no error
+
+    store.put_marker("r1", "s0", PREFIX)
+    peeked = store.get_marker("r1")
+    assert peeked == {"replica": "s0", "hashes": PREFIX}
+    peeked["hashes"].append("mutated")  # a copy — the stored row is untouched
+    assert store.get_marker("r1") == {"replica": "s0", "hashes": PREFIX}
+    assert store.pop_marker("r1") == {"replica": "s0", "hashes": PREFIX}  # peek did not consume it

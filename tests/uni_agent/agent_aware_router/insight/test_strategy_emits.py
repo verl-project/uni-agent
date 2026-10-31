@@ -29,6 +29,7 @@ import pytest
 
 from uni_agent import rl_insight as facade
 from uni_agent.agent_aware_router.store.data_store import DataStore
+from uni_agent.agent_aware_router.store.kv_cache_store import KVCacheStore
 from uni_agent.agent_aware_router.store.per_replica_store import PerReplicaStore
 from uni_agent.agent_aware_router.store.per_request_store import PerRequestStore
 from uni_agent.agent_aware_router.strategies.base import ReplicaInfo
@@ -72,6 +73,7 @@ def _strat(**kwargs) -> KVCacheAwareStrategy:
 def recording(monkeypatch: pytest.MonkeyPatch) -> _RecordingRLInsight:
     PerReplicaStore._instance = None
     PerRequestStore._instance = None
+    KVCacheStore._instance = None
     monkeypatch.setenv(facade.ENABLE_ENV, "1")
     monkeypatch.setattr(facade, "_enabled", True)  # pre-flip gate cache
     rl = _RecordingRLInsight()
@@ -79,6 +81,7 @@ def recording(monkeypatch: pytest.MonkeyPatch) -> _RecordingRLInsight:
     yield rl
     PerReplicaStore._instance = None
     PerRequestStore._instance = None
+    KVCacheStore._instance = None
 
 
 def _names(rl: _RecordingRLInsight, metric_type: str | None = None) -> set[str]:
@@ -94,10 +97,10 @@ def test_capacity_token_aware_emits_capacity_fractions(recording):
                 MetricKey.NUM_GPU_BLOCKS: 100,
                 MetricKey.KV_CACHE_USAGE_PERC: 0.2,
                 MetricKey.INFLIGHT_TOKENS: 320,
-                MetricKey.INFLIGHT_BLOCKS: 20,  # 20 held blocks × 16 = 320 tokens
             }
         }
     )
+    ds.incr_block_refs("s0", [f"b{i}" for i in range(20)])  # 20 held blocks × 16 = 320 tokens
     strat = _strat(slow_cut=SlowCut.CAPACITY_TOKEN_AWARE, do_shortcut=False)
 
     strat.score(PROMPT_IDS, ds, [ReplicaInfo(replica_id="s0")])
@@ -126,9 +129,8 @@ def test_capacity_token_aware_skips_emit_without_capacity(recording):
 def test_route_latency_fires_once_per_score_call_with_no_replica_label(recording):
     ds = DataStore()
     ds.set_block_size(16)
-    ds.refresh_metrics(
-        {"s0": {MetricKey.NUM_GPU_BLOCKS: 100, MetricKey.KV_CACHE_USAGE_PERC: 0.2, MetricKey.INFLIGHT_BLOCKS: 20}}
-    )
+    ds.refresh_metrics({"s0": {MetricKey.NUM_GPU_BLOCKS: 100, MetricKey.KV_CACHE_USAGE_PERC: 0.2}})
+    ds.incr_block_refs("s0", [f"b{i}" for i in range(20)])
     strat = _strat(slow_cut=SlowCut.CAPACITY_TOKEN_AWARE, do_shortcut=False)
 
     strat.score(PROMPT_IDS, ds, [ReplicaInfo(replica_id="s0")])

@@ -69,7 +69,8 @@ class TestStickyEndToEnd:
             _kv_metrics({"s0": {"kv": 1.0, "running": 64, "waiting": 1000, "inflight": 64}, "s1": {"kv": 0.3}})
         )
         balancer._store.add_kv_blocks("s0", [f"b{i}" for i in range(10)])
-        balancer._store.refresh_metrics({"s0": {MetricKey.NUM_GPU_BLOCKS: 10, MetricKey.INFLIGHT_BLOCKS: 10}})
+        balancer._store.refresh_metrics({"s0": {MetricKey.NUM_GPU_BLOCKS: 10}})
+        balancer._store.incr_block_refs("s0", [f"b{i}" for i in range(10)])  # 10 held blocks → avail=0 < thresh=16
         sid2, _ = balancer.acquire_server("r1", [1, 2])
         assert sid2 == "s1"
 

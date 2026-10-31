@@ -43,16 +43,18 @@ class KVCacheStore:
             Layer.CPU: {},
             Layer.SSD: {},
         }
-        # In-flight *held* blocks: replica_id → {block hash → ref count}. Unlike
-        # ``replicas_by_block`` (resident, evictable) these are pinned by in-flight
-        # requests, which only the router's own acquire/release can track — kv-events
-        # carry no request identity. Same lock as the reverse index.
+        # Per-replica block reference counts (multiset: block hash → ref count) —
+        # the router's own held-block occupancy book, written via
+        # ``incr_block_refs`` / ``decr_block_refs``. Unlike ``replicas_by_block``
+        # (resident, evictable) these are held by live requests, which only the
+        # router's own acquire/release can track — kv-events carry no request
+        # identity. Same lock as the reverse index.
         self._inflight_blocks: dict[str, dict[str, int]] = {}
-        # Per-request pin markers: request_id → {"replica", "hashes"} — the exact
-        # set each dispatch pinned, snapshotted at pin time so release/stale-unpin
-        # mirror it regardless of what the hash memo later does. Lives beside
-        # ``_inflight_blocks`` (it indexes into that table) and is never evicted:
-        # bounded by the true in-flight count, removed only by release/re-acquire.
+        # Per-request marker rows: request_id → arbitrary snapshot payload. Never
+        # evicted — bounded by the true in-flight count, removed only by
+        # ``pop_marker``/``clear_replica`` — because a dropped marker would leak
+        # the references it accounts for. Deliberately NOT in the LRU
+        # ``PerRequestStore`` for that reason.
         self._inflight_pins: dict[str, dict[str, Any]] = {}
         self._lock: threading.Lock = threading.Lock()
 
@@ -66,7 +68,7 @@ class KVCacheStore:
     # ── Replica management ──────────────────────────────────────────────
 
     def clear_replica(self, replica_id: str) -> None:
-        """Forget everything this replica accounts for: resident blocks, held pins, markers.
+        """Forget everything this replica accounts for: resident blocks, block refs, markers.
 
         O(n) in the number of unique blocks, but replica count is typically small (< 100).
         """
@@ -162,26 +164,25 @@ class KVCacheStore:
                     del self.replicas_by_block[bh]
             layer_counts[replica_id] = layer_counts.get(replica_id, 0) - 1
 
-    # ── In-flight block holding (pin / unpin) ───────────────────────────
+    # ── Block reference counts and per-request markers ───────────────────
 
-    def pin_inflight_blocks(self, replica_id: str, hash_strs: list[str]) -> None:
-        """Bump the ref count of every block an in-flight request holds.
+    def incr_block_refs(self, replica_id: str, hash_strs: list[str]) -> None:
+        """Add one reference to every hash on ``replica_id`` (multiset insert).
 
-        Deduplicated by hash; blocks already resident in the prefix cache are
-        pinned too (occupancy, not new allocations). Empty ``hash_strs`` pins
-        nothing.
+        Deduplicated by hash: a hash already referenced counts once more per
+        ``incr_block_refs`` call, not once per block. Blocks already resident in
+        the prefix cache are ref'd too. Empty ``hash_strs`` is a no-op.
         """
         with self._lock:
             held = self._inflight_blocks.setdefault(replica_id, {})
             for h in hash_strs:
                 held[h] = held.get(h, 0) + 1
 
-    def unpin_inflight_blocks(self, replica_id: str, hash_strs: list[str]) -> None:
-        """Drop one reference to every block a finishing request held.
+    def decr_block_refs(self, replica_id: str, hash_strs: list[str]) -> None:
+        """Drop one reference to every hash on ``replica_id`` (multiset remove).
 
-        A block leaves the held set only when its last holder releases it —
-        a shared prefix survives one of its requests completing. ``hash_strs``
-        must be the same list the request pinned at acquire.
+        A hash leaves the table when its last reference goes. ``hash_strs`` must
+        mirror the references previously added for them to reach zero.
         """
         with self._lock:
             held = self._inflight_blocks.get(replica_id)
@@ -195,24 +196,31 @@ class KVCacheStore:
                     held.pop(h, None)
 
     def inflight_block_count(self, replica_id: str) -> int:
-        """Number of distinct blocks currently held (pinned by in-flight requests) on ``replica_id``."""
+        """Number of distinct hashes currently referenced on ``replica_id``."""
         with self._lock:
             return len(self._inflight_blocks.get(replica_id, {}))
 
-    def set_inflight_pin(self, request_id: str, replica_id: str, hash_strs: list[str]) -> None:
-        """Snapshot the exact block set a dispatch pinned (release must mirror it).
+    def put_marker(self, request_id: str, replica_id: str, hash_strs: list[str]) -> None:
+        """Store a per-request snapshot row (overwrites any previous row).
 
-        Overwrites any marker left by a previous dispatch of the same request —
-        the acquire path unpins that stale set before calling this.
+        Caller-defined payload; the caller owns its semantics.
         """
         with self._lock:
             self._inflight_pins[request_id] = {"replica": replica_id, "hashes": list(hash_strs)}
 
-    def take_inflight_pin(self, request_id: str) -> dict[str, Any] | None:
-        """Remove and return ``request_id``'s pin marker (``None`` if nothing pinned).
+    def get_marker(self, request_id: str) -> dict[str, Any] | None:
+        """Return a copy of ``request_id``'s marker row without clearing it (``None`` if absent)."""
+        with self._lock:
+            marker = self._inflight_pins.get(request_id)
+            if marker is None:
+                return None
+            return {"replica": marker["replica"], "hashes": list(marker["hashes"])}
 
-        Read-and-clear is one locked step, so a duplicated release can never
-        double-unpin — the second one finds no marker.
+    def pop_marker(self, request_id: str) -> dict[str, Any] | None:
+        """Remove and return ``request_id``'s marker row (``None`` if absent).
+
+        Read-and-clear is one locked step, so a duplicated consumer can never
+        process the same row twice — the second one finds no row.
         """
         with self._lock:
             return self._inflight_pins.pop(request_id, None)

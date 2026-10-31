@@ -77,7 +77,8 @@ class FakeRouteDataProvider:
       num_requests_waiting – requests in the queue (default 0)
       inflight_count       – in-flight acquire/release counter (default 0)
       inflight_tokens      – raw in-flight prompt tokens, observation-only (default 0)
-      inflight_blocks      – held in-flight KV blocks, dedup + ref counted (default 0)
+      inflight_blocks      – held KV blocks read via inflight_block_count(),
+                             dedup + ref counted (default 0)
       gpu_hit_pct          – GPU prefix cache hit percent 0-100 (default 0)
       tiers                – dict mapping tier name to hit rate (default {})
     """
@@ -124,6 +125,9 @@ class FakeRouteDataProvider:
         # Unit tests key the load signal on kv_cache_usage_perc (no kv-events /
         # retained blocks simulated); mirror it so the load formula sees it.
         return self._data.get(replica_id, {}).get("kv_cache_usage_perc", 1.0)
+
+    def inflight_block_count(self, replica_id: str) -> int:
+        return int(self._data.get(replica_id, {}).get("inflight_blocks", 0))
 
     def get_metric_node_ids(self) -> list[str]:
         return list(self._data.keys())
@@ -725,8 +729,9 @@ class TestFallbackModes:
 @pytest.mark.cpu
 @pytest.mark.level0
 class TestCapacityTokenAware:
-    """``slow_cut=capacity-token-aware``: ``avail = cap - INFLIGHT_BLOCKS × block_size`` gates
-    and ranks (the router's own book — neither ``kv_perc`` nor ``INFLIGHT_TOKENS`` decides).
+    """``slow_cut=capacity-token-aware``: ``avail = cap - held_blocks × block_size`` gates
+    and ranks (the router's own ref-count book via ``inflight_block_count`` — neither
+    ``kv_perc`` nor ``INFLIGHT_TOKENS`` decides).
 
     Every strategy is built with ``SOFT_PICK_SEED`` (see ``_cap_strat``): soft-pick draws
     the winner from the tolerance band, so band cases are only reproducible with a seed.
@@ -771,7 +776,7 @@ class TestCapacityTokenAware:
         assert route(strat, PROMPT_IDS, provider, replicas, "r1")[0] == "rep_b"
 
     def test_avail_tracks_inflight_blocks_not_tokens_or_kv_perc(self):
-        """Free capacity = ``cap − INFLIGHT_BLOCKS × block_size``; kv_perc and INFLIGHT_TOKENS are observation-only.
+        """Free capacity = ``cap − held_blocks × block_size``; kv_perc and INFLIGHT_TOKENS are observation-only.
 
         rep_b's token ledger reads 0 (its prompts all hit prefix cache) yet its 94 held
         blocks are real occupancy: avail=96 < 160 → filtered; kv-rich rep_a wins.

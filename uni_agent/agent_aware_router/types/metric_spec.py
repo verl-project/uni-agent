@@ -66,12 +66,9 @@ class MetricKey:
     INFLIGHT_COUNT: str = "inflight_count"
     # In-flight prompt tokens (acquire +prompt_len / release -prompt_len, folded
     # from the acquire-time row since verl #7115 releases carry no token list).
-    # Observation-only (raw sizes, not occupancy): free capacity is INFLIGHT_BLOCKS.
+    # Observation-only (raw sizes, not occupancy): the free-capacity account is
+    # the router's own held-block book (``KVCacheStore`` ref counts), not a metric.
     INFLIGHT_TOKENS: str = "inflight_tokens"
-    # In-flight *held* KV blocks per replica (dedup by hash, ref-counted; absolute
-    # gauge maintained by the collector's pin/unpin) — the free-capacity account:
-    # ``avail = cap - inflight_blocks × block_size``. Prompt blocks only, no decode growth.
-    INFLIGHT_BLOCKS: str = "inflight_blocks"
     # In-flight turn sum (acquire += turn / release -= turn), per replica. The
     # numerator of inflight_avg_turn = in-flight turn sum / in-flight count — the
     # instantaneous "how many turns deep are the in-flight requests" level. acquire
@@ -192,11 +189,6 @@ METRIC_SPECS: dict[str, dict[str, Any]] = {
         "default": 0,
         "value_type": int,
         "describe": "In-flight prompt tokens (acquire +prompt_len / release -prompt_len) — token-weighted load",
-    },
-    MetricKey.INFLIGHT_BLOCKS: {
-        "default": 0,
-        "value_type": int,
-        "describe": "In-flight held KV blocks per replica (dedup, ref-counted; absolute gauge) — free-capacity account",
     },
     MetricKey.INFLIGHT_TURN_SUM: {
         "default": 0,

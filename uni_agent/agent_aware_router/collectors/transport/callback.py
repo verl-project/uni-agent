@@ -51,24 +51,17 @@ class StatisticEvent:
             (``on_release``) — unified under one field so one parser can treat
             both as "the replica this event is about".
         server_ids: Removed server ids (``on_servers_removed``).
-        prompt_len: Input prompt length (``len(prompt_ids)``; 0 when no prompt
-            was forwarded). Set on ``on_acquire`` only — verl #7115 releases
-            carry no token list, so the release-side token-gauge subtraction is
-            folded by the collector from acquire-time per-request bookkeeping,
-            not from this event.
         prompt_ids: The acquiring request's input token ids (empty when the
-            caller forwarded none). Kept alongside ``prompt_len`` because the
-            collector pins the request's prefix blocks on the chosen replica
-            (the held-block account behind ``INFLIGHT_BLOCKS``), and only the
-            collector — which owns the KV store — can resolve that block-hash
-            chain. Set on ``on_acquire`` only, same as ``prompt_len``.
+            caller forwarded none). The inflight parser derives the prompt
+            length from them and resolves the dispatch's block-hash chain to
+            pin its blocks on the chosen replica (the router's held-block
+            account). Set on ``on_acquire`` only.
     """
 
     event: str
     request_id: str | None = None
     replica_id: str | None = None
     server_ids: tuple[str, ...] = ()
-    prompt_len: int = 0
     prompt_ids: tuple[int, ...] = ()
 
 
@@ -98,13 +91,11 @@ class CallbackTransport(Transport):
         balancer = self._balancer
 
         def _on_acquire(request_id: str, chosen: str, prompt_ids: list[int] | None = None) -> None:
-            prompt_len = len(prompt_ids) if prompt_ids else 0
             handler(
                 StatisticEvent(
                     "on_acquire",
                     request_id=request_id,
                     replica_id=chosen,
-                    prompt_len=prompt_len,
                     prompt_ids=tuple(prompt_ids) if prompt_ids else (),
                 ),
                 "",

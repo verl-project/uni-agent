@@ -78,22 +78,49 @@ class MetricsUpdate:
         metrics: Dict of canonical_key → value.
         is_delta: When ``False`` (default, ``VLLMMetricsParser``) the values
             are absolute gauges applied via ``refresh`` (merge overwrite). When
-            ``True`` (``InflightParser``) the values are signed deltas applied
-            via ``incr`` — keeps the parser stateless (it emits only ±1; the
-            store owns the running counter).
+            ``True`` (``InflightParser``) the values are fully-netted signed
+            deltas applied via ``incr`` — the parser owns the netting (turn /
+            token folding, stale re-acquire recovery); the store owns the
+            running counters.
         request_id: Optional routing request id carried with the update
             (``None`` when the update isn't request-scoped).
-        prompt_ids: Input token ids of the acquiring request — the collector
-            needs the prompt to resolve and pin its block-hash chain on the
-            chosen replica. Empty when the source forwarded none; ignored by
-            non-acquire updates.
     """
 
     node_id: str
     metrics: dict[str, Any]
     is_delta: bool = False
     request_id: str | None = None
-    prompt_ids: tuple[int, ...] = ()
+
+
+@dataclass
+class InflightBlockUpdate:
+    """Structured command for the router's held-block book (``KVCacheStore``).
+
+    Emitted by ``InflightParser`` from the Balancer's ``on_acquire`` /
+    ``on_release`` callbacks. The parser owns the acquire/release protocol
+    decisions (when to pin, when a re-acquire must first unwind a stale pin);
+    the collector applies each command mechanically — pin/unpin sets for
+    ``unpin`` / ``stale_unpin`` come from the per-request marker row
+    (``KVCacheStore.pop_marker``), which is the ground truth of what the
+    dispatch pinned.
+
+    Attributes:
+        node_id: Replica the request landed on — the ``pin`` target;
+            informational for ``unpin`` / ``stale_unpin`` (whose replica comes
+            from the marker row and may be a previous one).
+        request_id: The routing request id the command is scoped to.
+        action: ``"pin"`` / ``"unpin"`` / ``"stale_unpin"``.
+        block_hashes: Resolved full-block prefix hash chain — ``pin`` only.
+        mark_resident: ``pin`` only — also record the blocks resident
+            (``KVCacheStore.record_dispatch_blocks``) so ``gpu_hit`` sees the
+            prefix immediately instead of trailing the kv-event stream.
+    """
+
+    node_id: str
+    request_id: str
+    action: str
+    block_hashes: list[str] = field(default_factory=list)
+    mark_resident: bool = False
 
 
 @dataclass
@@ -124,13 +151,17 @@ class Parser(ABC):
     """Abstract base for data parsers.
 
     Subclasses implement ``parse()`` with their backend-specific parsing logic,
-    returning a ``KVCacheUpdate`` / ``MetricsUpdate`` / ``StickyUpdate``
-    (or ``None`` on failure).
+    returning a structured update the ``Collector`` applies to the store — a
+    single ``KVCacheUpdate`` / ``MetricsUpdate`` / ``StickyUpdate``, a
+    ``list`` of them (mixed with ``InflightBlockUpdate``), or ``None`` on
+    failure/skip.
     """
 
     @abstractmethod
-    def parse(self, raw_data: bytes | str | Any, node_id: str) -> KVCacheUpdate | MetricsUpdate | StickyUpdate | None:
-        """Parse raw data and return a structured update.
+    def parse(
+        self, raw_data: bytes | str | Any, node_id: str
+    ) -> KVCacheUpdate | MetricsUpdate | StickyUpdate | InflightBlockUpdate | list | None:
+        """Parse raw data and return a structured update (or list of them).
 
         Args:
             raw_data: Raw payload — ``bytes`` (from ZMQ) / ``str`` (from HTTP
@@ -140,6 +171,6 @@ class Parser(ABC):
                 transport — the event carries its own request/replica ids).
 
         Returns:
-            A ``KVCacheUpdate`` / ``MetricsUpdate`` / ``StickyUpdate``, or
-            ``None`` if parsing fails or the payload type is not handled.
+            A single update, a list of updates (applied in order), or ``None``
+            if parsing fails or the payload type is not handled.
         """

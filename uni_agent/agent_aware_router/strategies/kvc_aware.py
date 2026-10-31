@@ -200,7 +200,7 @@ class KVCacheAwareStrategy:
                 return False
             thresh = cap * (1.0 - self.load_threshold)
             block_size = store.get_block_size() or 16
-            inflight_blocks = store.get_metric(replica.replica_id, MetricKey.INFLIGHT_BLOCKS) or 0
+            inflight_blocks = store.inflight_block_count(replica.replica_id)
             avail = cap - inflight_blocks * block_size
             if avail >= thresh:
                 return False
@@ -208,7 +208,7 @@ class KVCacheAwareStrategy:
             # replicas (nothing purges them), and a ghost holding 0 blocks always
             # passes — which would break sticky even with nowhere real to go.
             for sibling in pool:
-                held = (store.get_metric(sibling.replica_id, MetricKey.INFLIGHT_BLOCKS) or 0) * block_size
+                held = store.inflight_block_count(sibling.replica_id) * block_size
                 if cap - held >= thresh:
                     return True
             logger.info(
@@ -346,10 +346,11 @@ class KVCacheAwareStrategy:
     ) -> list[float]:
         """Capacity-gated token routing (discrete: winner=STICKY_TOP_SCORE, rest 0).
 
-        The load account is the router's own book — ``INFLIGHT_BLOCKS`` (blocks
-        pinned by in-flight requests, ref-counted by the collector), which is
-        occupancy, unlike the polled ``kv_perc`` or the raw ``INFLIGHT_TOKENS``
-        sum (both logged as cross-checks only)::
+        The load account is the router's own book — the held-block reference
+        counts (``DataStore.inflight_block_count``, written by the inflight
+        collector's pin/unpin commands), which is occupancy, unlike the polled
+        ``kv_perc`` or the raw ``INFLIGHT_TOKENS`` sum (both logged as
+        cross-checks only)::
 
             avail[i]     = cap - inflight_blocks[i] × block_size   # free capacity (tokens)
             need[i]      = len(prompt_ids) × (1 - gpu_hit[i])      # prefill this req adds
@@ -373,7 +374,7 @@ class KVCacheAwareStrategy:
             kv_perc = store.get_metric(replica.replica_id, MetricKey.KV_CACHE_USAGE_PERC) or 0.0
             inflight = store.get_metric(replica.replica_id, MetricKey.INFLIGHT_COUNT) or 0
             inflight_tokens = store.get_metric(replica.replica_id, MetricKey.INFLIGHT_TOKENS) or 0
-            inflight_blocks = store.get_metric(replica.replica_id, MetricKey.INFLIGHT_BLOCKS) or 0
+            inflight_blocks = store.inflight_block_count(replica.replica_id)
             s_cache, gpu_hit = self._cache_score(store, replica, gpu_hash_strs)
             avail = cap - inflight_blocks * block_size
             need = plen * (1.0 - gpu_hit)
