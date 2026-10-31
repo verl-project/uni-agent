@@ -32,10 +32,9 @@ KV-cache-aware knobs:
                         relative to the repo root)
   --kv-events           vLLM kv-events zmq publisher; the kvcaware collector's load signal
                         (retained-cache occupancy).
-  --load-threshold      KVCAware strategy knob: overload when load > threshold, (0,1).
-  --capacity-threshold  KVCAware strategy knob: is-overload waterline — eligible while free
-                        capacity >= total × (1 - threshold), (0,1); omitted → packaged
-                        router-YAML value.
+  --load-threshold      KVCAware strategy knob: saturation waterline on occupancy, (0,1) —
+                        overload when kv usage > threshold; a replica stays eligible while
+                        free capacity >= total × (1 - threshold).
   --max-num-seqs        engine max concurrent sequences.
 
 Debug mode — env overrides for the internalized strategy knobs (no CLI flags;
@@ -316,13 +315,10 @@ def init_config(args: argparse.Namespace, *, served_model_name: str):
         task_runner = agent_framework_cfg["agent_runners"]["task"]
         task_runner["runner_fqn"] = args.simulated_runner_fqn
         task_runner["runner_kwargs"] = {}
-    # KV-cache-aware router knobs — the balancer overrides the packaged router
+    # KV-cache-aware router knob — the balancer overrides the packaged router
     # YAML with this node at construction (``custom.agent_framework.router``).
-    # capacity_threshold stays None unless passed, so a custom router YAML's
-    # value survives (apply_override skips None).
     agent_framework_cfg["router"] = {
         "load_threshold": args.load_threshold,
-        "capacity_threshold": args.capacity_threshold,
     }
     agent_framework_cfg["log_dir"] = args.log_dir
     OmegaConf.update(config, "actor_rollout_ref.rollout.custom.agent_framework", agent_framework_cfg, force_add=True)
@@ -634,22 +630,16 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="Device backend (selects the mooncake connector class).",
     )
 
-    # KVCAware router knobs — carried on rollout.custom.agent_framework.router and
+    # KVCAware router knob — carried on rollout.custom.agent_framework.router and
     # applied by the balancer at construction (override the packaged router YAML).
     parser.add_argument(
         "--load-threshold",
         type=float,
-        default=0.9,
-        help="KVCAware load_threshold (overload when load > threshold, (0,1)); "
-        "read by the balancer from rollout.custom.agent_framework.router at construction.",
-    )
-    parser.add_argument(
-        "--capacity-threshold",
-        type=float,
-        default=None,
-        help="KVCAware capacity_threshold (is-overload waterline: eligible while free "
-        "capacity >= total × (1 - threshold), (0,1)); None falls back to the packaged "
-        "router-YAML value; read from rollout.custom.agent_framework.router at construction.",
+        default=0.5,
+        help="KVCAware load_threshold (saturation waterline on occupancy, (0,1): overload "
+        "when kv usage > threshold; a replica stays eligible while free capacity >= "
+        "total × (1 - threshold)); read by the balancer from "
+        "rollout.custom.agent_framework.router at construction.",
     )
 
     return parser.parse_args(argv)

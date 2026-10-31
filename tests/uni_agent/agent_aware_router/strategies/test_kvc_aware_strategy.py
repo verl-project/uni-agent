@@ -15,7 +15,7 @@
 """Unit tests for the LLM router strategy module (strategies/ package).
 
 Overload (used only by the sticky short-circuit): ``kv_cache_usage_perc >
-load_threshold`` (default 0.9). Fallback scoring never consults overload.
+load_threshold`` (default 0.5). Fallback scoring never consults overload.
 Default cache weights: {gpu:0.7, cpu:0.2, ssd:0.1}.
 """
 
@@ -336,17 +336,16 @@ class TestFromConfig:
         """
         from uni_agent.agent_aware_router.config.strategy import KVCAwareStrategyConfig
 
-        cfg = KVCAwareStrategyConfig(load_threshold=0.85, capacity_threshold=0.3)
-        # The config persists the user-tunable knobs (load_threshold,
-        # capacity_threshold); the remaining knobs fall back to
-        # DEFAULT_STRATEGY_KNOBS — mirror that here (with one override).
+        cfg = KVCAwareStrategyConfig(load_threshold=0.85)
+        # The config persists the user-tunable knob (load_threshold); the
+        # remaining knobs fall back to DEFAULT_STRATEGY_KNOBS — mirror that
+        # here (with one override).
         cfg.layer_weights = {"gpu": 0.6, "cpu": 0.3, "ssd": 0.1}
         cfg.seed = SOFT_PICK_SEED  # same tie-break stream as the direct build below
         strat_from_cfg = KVCacheAwareStrategy.from_config(cfg)
 
         # ── field mapping ──
         assert strat_from_cfg.load_threshold == pytest.approx(0.85)
-        assert strat_from_cfg.capacity_threshold == pytest.approx(0.3)
         assert strat_from_cfg.layer_weights == {"gpu": 0.6, "cpu": 0.3, "ssd": 0.1}
         assert strat_from_cfg._max_num_seqs is None  # not set until set_capacity()
 
@@ -354,7 +353,6 @@ class TestFromConfig:
         strat_from_cfg.set_capacity(64, 1024)
         strat_direct = _strat(
             load_threshold=0.85,
-            capacity_threshold=0.3,
             layer_weights={"gpu": 0.6, "cpu": 0.3, "ssd": 0.1},
             seed=SOFT_PICK_SEED,
         )
@@ -514,45 +512,6 @@ class TestFromConfigDebugEnv:
         with pytest.raises(ConfigError, match="seed"):
             KVCacheAwareStrategy.from_config(cfg)
 
-    def test_capacity_threshold_env_override_and_error_layering(self, monkeypatch):
-        """CAPACITY_THRESHOLD: an independent knob (default 0.5); the env override leaves
-        load_threshold untouched. Error layering: coercion first (ConfigError), then range (StrategyError)."""
-        from uni_agent.agent_aware_router.config.base import ConfigError
-        from uni_agent.agent_aware_router.config.strategy import KVCAwareStrategyConfig
-
-        cfg = KVCAwareStrategyConfig(load_threshold=0.85)
-        # Debug off, no env → capacity_threshold keeps its independent default.
-        monkeypatch.setattr(
-            "uni_agent.agent_aware_router.debug.os.environ",
-            self._env_with(None),
-        )
-        strat = KVCacheAwareStrategy.from_config(cfg)
-        assert strat.capacity_threshold == pytest.approx(0.5)  # independent of load_threshold
-        assert strat.load_threshold == pytest.approx(0.85)
-
-        # Debug on with CAPACITY_THRESHOLD → overrides the default; load_threshold untouched.
-        monkeypatch.setattr(
-            "uni_agent.agent_aware_router.debug.os.environ",
-            self._env_with("1", CAPACITY_THRESHOLD="0.7"),
-        )
-        strat = KVCacheAwareStrategy.from_config(cfg)
-        assert strat.capacity_threshold == pytest.approx(0.7)
-        assert strat.load_threshold == pytest.approx(0.85)  # load_threshold untouched
-
-        monkeypatch.setattr(
-            "uni_agent.agent_aware_router.debug.os.environ",
-            self._env_with("1", CAPACITY_THRESHOLD="high"),
-        )
-        with pytest.raises(ConfigError, match="capacity_threshold"):
-            KVCacheAwareStrategy.from_config(cfg)
-
-        monkeypatch.setattr(
-            "uni_agent.agent_aware_router.debug.os.environ",
-            self._env_with("1", CAPACITY_THRESHOLD="1.5"),
-        )
-        with pytest.raises(StrategyError, match="capacity_threshold"):
-            KVCacheAwareStrategy.from_config(cfg)
-
     @pytest.mark.parametrize(
         ("knob", "value", "match"),
         [
@@ -605,7 +564,7 @@ class TestStickyShortCircuit:
     """Sticky replica wins when bound + present + not overloaded; else fall through.
 
     With the default ``overload_mode=KV_CACHE_USAGE_PERC``, overload means
-    ``kv_cache_usage_perc > load_threshold`` (default 0.9) — the bound replica
+    ``kv_cache_usage_perc > load_threshold`` (default 0.5) — the bound replica
     is genuinely saturated. The "saturated" case below therefore feeds
     kv_cache_usage_perc=1.0.
     """
@@ -657,8 +616,9 @@ class TestStickyShortCircuit:
         assert ranking[0] == "rep_a"
 
     # ── REMAINING_CAP sibling gate ─────────────────────────────────────────
-    # cap = num_gpu_blocks(100) × block_size(16) = 1600; thresh = 1600 × (1-0.5) = 800.
-    # Under water: 60 held blocks → avail 640. Headroom: 10 held → avail 1440.
+    # cap = num_gpu_blocks(100) × block_size(16) = 1600; thresh = 1600 × (1-0.5) = 800
+    # (load_threshold pinned to 0.5 for this fixture). Under water: 60 held blocks →
+    # avail 640. Headroom: 10 held → avail 1440.
 
     def test_sibling_gate_ignores_removed_replicas(self):
         """Feature: REMAINING_CAP sibling gate weighs the current pool only
@@ -668,7 +628,7 @@ class TestStickyShortCircuit:
         Expectation: is_overloaded returns False (keep sticky) — the ghost must not
         count as an escape hatch
         """
-        strat = _strat(overload_mode=OverloadMode.REMAINING_CAP)
+        strat = _strat(overload_mode=OverloadMode.REMAINING_CAP, load_threshold=0.5)
         provider = self._provider(
             rep_a={"num_gpu_blocks": 100, "inflight_blocks": 60},
             rep_b={"num_gpu_blocks": 100, "inflight_blocks": 60},
@@ -681,7 +641,7 @@ class TestStickyShortCircuit:
         Description: bound rep under water; a pool sibling passes the gate
         Expectation: is_overloaded returns True → sticky falls through to combined scoring
         """
-        strat = _strat(overload_mode=OverloadMode.REMAINING_CAP)
+        strat = _strat(overload_mode=OverloadMode.REMAINING_CAP, load_threshold=0.5)
         provider = self._provider(
             rep_a={"num_gpu_blocks": 100, "inflight_blocks": 60},
             rep_b={"num_gpu_blocks": 100, "inflight_blocks": 10},
@@ -694,7 +654,7 @@ class TestStickyShortCircuit:
         passes the gate
         Expectation: sticky still short-circuits — scores = [STICKY_TOP_SCORE, 0.0]
         """
-        strat = _strat(overload_mode=OverloadMode.REMAINING_CAP)
+        strat = _strat(overload_mode=OverloadMode.REMAINING_CAP, load_threshold=0.5)
         provider = self._provider(
             sticky={"r1": "rep_a"},
             rep_a={"num_gpu_blocks": 100, "inflight_blocks": 60},
@@ -774,15 +734,15 @@ class TestCapacityTokenAware:
 
     def _cap_strat(self, **kwargs) -> KVCacheAwareStrategy:
         kwargs.setdefault("slow_cut", SlowCut.CAPACITY_TOKEN_AWARE)
-        # Fixed gate baseline (production default is 0.5): the fixtures below do
-        # arithmetic against thresh = cap·(1−0.9) = 160 at cap=1600; threshold
-        # sensitivity is covered by test_capacity_gate_threshold_via_capacity_threshold.
-        kwargs.setdefault("capacity_threshold", 0.9)
+        # Gate baseline pinned at 0.9: the fixtures below do arithmetic
+        # against thresh = cap·(1−0.9) = 160 at cap=1600; threshold
+        # sensitivity is covered by test_capacity_gate_threshold_via_load_threshold.
+        kwargs.setdefault("load_threshold", 0.9)
         kwargs.setdefault("seed", SOFT_PICK_SEED)
         return _strat(**kwargs)
 
     def test_gate_filters_booked_replicas_and_picks_max_remaining(self):
-        """Eligible = ``avail >= cap·(1-capacity_threshold)``; the largest ``remaining = avail - need`` wins.
+        """Eligible = ``avail >= cap·(1-load_threshold)``; the largest ``remaining = avail - need`` wins.
 
         rep_a cache-rich but full (avail=16 < 160) → filtered; rep_b (remaining=797)
         beats eligible rep_c (477) → argmax picks rep_b.
@@ -831,8 +791,8 @@ class TestCapacityTokenAware:
         scores = strat.score(PROMPT_IDS, provider, _replicas("rep_a", "rep_b"), request_id="r1")
         assert scores == [STICKY_TOP_SCORE, 0.0]
 
-    def test_capacity_gate_threshold_via_capacity_threshold(self):
-        """Gate threshold = ``cap·(1-capacity_threshold)``; capacity_threshold tunes it.
+    def test_capacity_gate_threshold_via_load_threshold(self):
+        """Gate threshold = ``cap·(1-load_threshold)``; load_threshold tunes it.
 
         cap=1600, do_shortcut=False so the binding can't short-circuit into the sticky
         branch: 0.99 (thresh=16) keeps both eligible; 0.85 (thresh=240) filters rep_a (avail=160).
@@ -842,13 +802,13 @@ class TestCapacityTokenAware:
             "rep_b": {"num_gpu_blocks": 100, "inflight_tokens": 800, "inflight_blocks": 50, "gpu_hit_pct": 0},
         }
         # Low threshold (thresh=1600·(1-0.99)=16): both eligible → rep_b wins on remaining.
-        low = self._cap_strat(do_shortcut=False, capacity_threshold=0.99)
+        low = self._cap_strat(do_shortcut=False, load_threshold=0.99)
         p_low = FakeRouteDataProvider(dict(data))
         p_low.put_sticky_binding("r1", "rep_b")
         s_low = low.score(PROMPT_IDS, p_low, _replicas("rep_a", "rep_b"), request_id="r1")
         assert s_low[1] == STICKY_TOP_SCORE
         # High threshold (thresh=1600·(1-0.85)=240): rep_a (avail=160) filtered, rep_b wins.
-        high = self._cap_strat(do_shortcut=False, capacity_threshold=0.85)
+        high = self._cap_strat(do_shortcut=False, load_threshold=0.85)
         p_high = FakeRouteDataProvider(dict(data))
         p_high.put_sticky_binding("r1", "rep_b")
         s_high = high.score(PROMPT_IDS, p_high, _replicas("rep_a", "rep_b"), request_id="r1")

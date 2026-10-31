@@ -69,7 +69,6 @@ class KVCacheAwareStrategy:
         self,
         *,
         load_threshold: float,
-        capacity_threshold: float = 0.5,
         layer_weights: dict[Layer, float],
         do_shortcut: bool = True,
         slow_cut: SlowCut | str = SlowCut.CAPACITY_TOKEN_AWARE,
@@ -79,8 +78,6 @@ class KVCacheAwareStrategy:
     ) -> None:
         if not 0 < load_threshold < 1:
             raise StrategyError(f"load_threshold must be in (0, 1), got {load_threshold}")
-        if not 0 < capacity_threshold < 1:
-            raise StrategyError(f"capacity_threshold must be in (0, 1), got {capacity_threshold}")
         _valid_layers = {Layer.GPU, Layer.CPU, Layer.SSD}
         if set(layer_weights.keys()) != _valid_layers:
             raise StrategyError(f"layer_weights keys must be {_valid_layers}, got {set(layer_weights.keys())}")
@@ -108,7 +105,6 @@ class KVCacheAwareStrategy:
             raise StrategyError(f"seed must be an int or None, got {seed!r}")
 
         self.load_threshold = float(load_threshold)
-        self.capacity_threshold = float(capacity_threshold)
         self.layer_weights = dict(layer_weights)
         self.do_shortcut = do_shortcut
         self.slow_cut = slow_cut
@@ -120,7 +116,7 @@ class KVCacheAwareStrategy:
         self._max_num_batched_tokens: int | None = None
         logger.info(
             f"KVCacheAwareStrategy created: "
-            f"load_threshold={self.load_threshold:.2f}, capacity_threshold={self.capacity_threshold:.2f}, "
+            f"load_threshold={self.load_threshold:.2f}, "
             f"do_shortcut={self.do_shortcut}, "
             f"slow_cut={self.slow_cut.value}, overload_mode={self.overload_mode.value}, "
             f"tie_tolerance={self.tie_tolerance:.3f}, seed={self._seed}"
@@ -129,7 +125,6 @@ class KVCacheAwareStrategy:
     def __repr__(self) -> str:
         return (
             f"KVCacheAwareStrategy(load_threshold={self.load_threshold}, "
-            f"capacity_threshold={self.capacity_threshold}, "
             f"do_shortcut={self.do_shortcut}, "
             f"slow_cut={self.slow_cut.value}, overload_mode={self.overload_mode.value}, "
             f"tie_tolerance={self.tie_tolerance}, seed={self._seed})"
@@ -153,30 +148,22 @@ class KVCacheAwareStrategy:
         """Construct from config. ``max_num_seqs`` is injected by the Balancer
         via ``set_capacity`` after fetching from the server handle.
 
-        ``KVCAwareStrategyConfig`` persists the user-tunable knobs
-        (``load_threshold``, ``capacity_threshold``); the other knobs fall back
+        ``KVCAwareStrategyConfig`` persists the user-tunable knob
+        (``load_threshold``); the other knobs fall back
         to ``DEFAULT_STRATEGY_KNOBS``. ``UNI_AGENT_ROUTER_*``
         debug overrides (when the debug master switch is on) are resolved on
         top — into local kwargs, never onto ``cfg`` — so reuse of a config
         object cannot leak overrides across constructions.
         """
         kwargs = {name: getattr(cfg, name, default) for name, default in DEFAULT_STRATEGY_KNOBS.items()}
-        capacity_threshold = cfg.capacity_threshold
         if is_debug_enabled():
             prototypes = {**DEFAULT_STRATEGY_KNOBS, "seed": 0}
             for name, default in DEFAULT_STRATEGY_KNOBS.items():
                 raw = get_debug_var(name)
                 if raw is not None:
                     kwargs[name] = coerce_knob_value(name, raw, prototypes[name])
-            # ``capacity_threshold`` is a persisted config field, not a knob —
-            # override it under the same debug mechanism so it stays tunable
-            # without touching the config.
-            raw = get_debug_var("capacity_threshold")
-            if raw is not None:
-                capacity_threshold = coerce_knob_value("capacity_threshold", raw, cfg.capacity_threshold)
         return cls(
             load_threshold=cfg.load_threshold,
-            capacity_threshold=capacity_threshold,
             layer_weights=kwargs["layer_weights"],
             do_shortcut=kwargs["do_shortcut"],
             slow_cut=kwargs["slow_cut"],
@@ -211,7 +198,7 @@ class KVCacheAwareStrategy:
                 # No capacity yardstick yet (first NUM_GPU_BLOCKS poll not in): no gate
                 # can be evaluated, so never break sticky on missing data.
                 return False
-            thresh = cap * (1.0 - self.capacity_threshold)
+            thresh = cap * (1.0 - self.load_threshold)
             block_size = store.get_block_size() or 16
             inflight_blocks = store.get_metric(replica.replica_id, MetricKey.INFLIGHT_BLOCKS) or 0
             avail = cap - inflight_blocks * block_size
@@ -367,7 +354,7 @@ class KVCacheAwareStrategy:
             avail[i]     = cap - inflight_blocks[i] × block_size   # free capacity (tokens)
             need[i]      = len(prompt_ids) × (1 - gpu_hit[i])      # prefill this req adds
             remaining[i] = avail[i] - need[i]                      # free capacity after assign
-            eligible[i]  = avail[i] >= cap × (1 - capacity_threshold)   # pure capacity gate
+            eligible[i]  = avail[i] >= cap × (1 - load_threshold)      # pure capacity gate
 
         ``need`` keeps the prefill-work estimate (not the held blocks) so the
         ranking still sees how much work each candidate adds. ``cap == 0``
@@ -421,7 +408,7 @@ class KVCacheAwareStrategy:
             top = self._soft_pick([rows[i]["inflight"] for i in range(n)], maximize=False, tolerance=0)
             logger.info("score(): CAPACITY_TOKEN_AWARE cap unknown → soft-pick min inflight")
         else:
-            thresh = cap * (1.0 - self.capacity_threshold)
+            thresh = cap * (1.0 - self.load_threshold)
             eligible = [i for i in range(n) if rows[i]["avail"] >= thresh]
             pool = eligible or list(range(n))
             top = pool[

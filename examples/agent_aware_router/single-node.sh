@@ -94,7 +94,7 @@ run_experiment() {
 
 concurrencys=(${CONCURRENCYS:-16 24 32 128})
 contexts=(${CONTEXTS:-16384 32768 64000 128000})
-cts=(${LTS:-0.7 0.9})
+lts=(${LTS:-0.7 0.9})
 
 for CONCURRENCY in "${concurrencys[@]}"; do
     for CONTEXT in "${contexts[@]}"; do
@@ -108,10 +108,10 @@ for CONCURRENCY in "${concurrencys[@]}"; do
             unset UNI_AGENT_ROUTER_DEBUG
         )
 
-        for ct in "${cts[@]}"; do
-            LOG_FILE="infer-${DEVICE}-kvcaware-ct${ct}-prompt${MAX_SAMPLES}x${N}-${CONCURRENCY}x${CONTEXT}.log"
-            echo "Running kvcaware-ct${ct} concurrency=${CONCURRENCY} context=${CONTEXT}"
-            run_experiment "$LOG_FILE" --capacity-threshold "$ct"
+        for lt in "${lts[@]}"; do
+            LOG_FILE="infer-${DEVICE}-kvcaware-lt${lt}-prompt${MAX_SAMPLES}x${N}-${CONCURRENCY}x${CONTEXT}.log"
+            echo "Running kvcaware-lt${lt} concurrency=${CONCURRENCY} context=${CONTEXT}"
+            run_experiment "$LOG_FILE" --load-threshold "$lt"
         done
     done
 done
