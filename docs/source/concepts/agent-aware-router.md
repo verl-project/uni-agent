@@ -1,6 +1,6 @@
 # Agent Aware Router
 
-The `kvcaware` router is a pluggable load balancer registered in `LoadBalancerRegistry` under the name `"kvcaware"` and wired in on the `LLMServerManager` side via `get_router_handle`. To run it, see [Run the Agent Aware Router](../quickstart/agent-aware-router.md).
+The agent-aware router is an external plugin load balancer: verl loads it from a router YAML via `rollout.router_config_path` and instantiates the `router_class` FQN declared in that YAML (`uni_agent.agent_aware_router.balancer.KVCAwareBalancer`) with the YAML as its config. Its user-tunable knob is `load_threshold` (YAML key `strategy.load_threshold`, overridable at runtime via `rollout.custom.agent_framework.router`). To run it, see [Run the Agent Aware Router](../quickstart/agent-aware-router.md).
 
 ## Motivation
 
@@ -25,15 +25,15 @@ The rollout phase of agentic RL differs substantially from traditional single-tu
 
 ```
 agent_aware_router/
-   ├── balancer.py                   ← pure shell: lifecycle + route() delegation
+   ├── balancer.py                   ← pure shell: lifecycle + routing delegation
    ├── strategies/                   ← scoring algorithms (core)
    │    ├── kvc_aware.py             ← KVCacheAwareStrategy (main strategy)
-   │    ├── routing.py               ← route() weighted ranking
+   │    ├── routing.py               ← weighted ranking over strategy scores
    │    ├── base.py                  ← ReplicaInfo
    │    └── registry.py              ← config-type → runtime-strategy-class registry
    ├── store/                        ← singleton store
    │    ├── data_store.py            ← metrics + sticky binding + active_sessions
-   │    ├── kv_cache_store.py        ← prefix-hash chain + three-layer hit rate
+   │    ├── kv_cache_store.py        ← prefix-hash chain + three-layer hit rate + in-flight pin book
    │    ├── per_replica_store.py / per_request_store.py
    ├── collectors/                   ← collect vLLM signals
    │    ├── collector.py/provider.py ← collector lifecycle
@@ -47,29 +47,49 @@ agent_aware_router/
 
 ## Routing decision flow
 
-On each `acquire_server(request_id, prompt_ids)`, the `Balancer` calls `route()`, which invokes each strategy's `score()` for a weighted ranking and takes `ranking[0]`. The decision tree of `KVCacheAwareStrategy.score()`:
+On each `acquire_server(request_id, prompt_ids)`, the balancer scores the candidate replicas and dispatches the request to the top-ranked one. The strategy's decision tree:
 
 ```
-1. STICKY short-circuit (do_shortcut=True)
-   ├── request_id present and a sticky-bound replica exists
-   │    └── not overloaded? → HIT, return [STICKY_TOP_SCORE, 0, ...] (preserve prefix locality)
-   │        overloaded? → fallback
-   └── else → enter slow-cut
-2. SLOW-CUT (fallback scoring after the short-circuit misses)
-   └── CAPACITY_TOKEN_AWARE  → capacity gate + token increment, pick max remaining
+1. Sticky short-circuit
+   ├── the request has a sticky-bound replica in the pool
+   │    └── bound replica not overloaded? → HIT: send the turn back to it (preserve prefix locality)
+   │        overloaded? → fall through to fallback scoring
+   └── new / unbound request → fallback scoring
+2. Fallback scoring (after the short-circuit misses)
+   └── capacity-token-aware → capacity gate + prefill increment, soft-pick max remaining
 ```
 
-### CAPACITY_TOKEN_AWARE scoring
+### Sticky short-circuit and rebind gating
 
-CAPACITY_TOKEN_AWARE "picks the replica with the highest prefill hit rate among those that still have spare capacity." The computation is:
+The sticky binding maps `request_id → replica_id` and is rewritten on every dispatch — the router records where each request actually landed, so a fallback re-pick also rebinds the session to the new winner. On a hit — a binding exists, the bound replica is in the pool, and it is not overloaded — the request is dispatched back to its bound replica: the turn prefills against the retained prefix (`need ≈ plen × (1 - gpu_hit)`) instead of recomputing it on another replica.
+
+The overload check is a relative gate against the whole pool, not an absolute load flag:
 
 ```
-avail[i]     = cap × (1 - kv_cache_usage_perc[i])                   # pure available tokens
-need[i]      = len(prompt_ids) × (1 - gpu_hit[i])                   # tokens to recompute at replica i
-remaining[i] = avail[i] - need[i]                                   # remaining after assignment
-eligible[i]  = avail[i] >= cap × (1 - capacity_reserve_threshold)   # pure capacity hard gate
-pick         = argmax(eligible, remaining)                          # among eligible, pick max remaining
+avail[i] = cap - inflight_blocks[i] × block_size
+gate[i]  = avail[i] >= cap × (1 - load_threshold)        # ≥ 50% headroom at the default 0.5
 ```
 
+- Bound replica passes the gate → not overloaded → keep sticky.
+- Bound replica under water but at least one sibling passes → overloaded → fall through to capacity-token-aware scoring. This is the only case that breaks locality, and it requires positive evidence that a sibling has real headroom.
+- No replica passes (all under water) → keep sticky.
+- `cap` unknown (first `num_gpu_blocks` poll not in yet) → keep sticky — no gate can be evaluated, so missing data never breaks sticky.
+
+### Capacity-token-aware scoring
+
+The fallback scoring "picks the replica with the most capacity left after this request's prefill, among those that still have spare capacity." The computation is:
+
+```
+cap          = num_gpu_blocks × block_size                   # first positive poll wins; block_size learned from the first KV event (default 16)
+avail[i]     = cap - inflight_blocks[i] × block_size         # free capacity, from the router's own pin book
+need[i]      = len(prompt_ids) × (1 - gpu_hit[i])            # tokens to recompute at replica i
+remaining[i] = avail[i] - need[i]                            # remaining after assignment
+eligible[i]  = avail[i] >= cap × (1 - load_threshold)        # pure capacity hard gate
+pick         = soft-pick(max remaining among eligible)       # random within a small tie tolerance
+```
+
+- `inflight_blocks[i]` is the router's own load account: a per-replica pin book of the KV blocks held by in-flight requests, ref-counted at acquire (pin the request's full-block prefix hashes) and at release (unpin the snapshotted set; a shared prefix block leaves the book when its last holder releases). kv-events carry no request identity, so engine-side residency alone cannot separate "cached and idle" from "held and about to grow" — the pin book is the occupancy signal the router owns synchronously on the acquire/release path. `avail` is deliberately not derived from the polled `kv_cache_usage_perc`: that is an async snapshot with cold-start blind spots, while the pin book is up to date at decision time.
+- `gpu_hit[i]` comes from the per-replica remote→local block-hash index built from kv-events (extended at dispatch time with the request's own prefix), so a returning session is ranked with its real hit rate.
 - Prefill hit rate participates via the `need` term: a replica with a higher hit rate needs fewer recomputed tokens, so `remaining` is larger and it wins among eligible replicas.
-- Load balancing first filters via the pure-capacity hard gate `eligible` — replicas that are full are filtered out and no longer assigned. Then ranking participates via the `avail` term: a replica with higher `avail` has lower load and thus larger `remaining`.
+- Load balancing first filters via the pure-capacity hard gate `eligible` — replicas that are full are filtered out and no longer assigned. If no replica is eligible, the gate is dropped (pool = all replicas) so the ranking still returns a winner. Then ranking participates via the `avail` term: a replica with higher `avail` has lower load and thus larger `remaining`.
+- The final pick goes through `soft-pick`: among candidates within a small tie tolerance of the best `remaining`, one is drawn at random, spreading new sessions over near-ties instead of stampeding a single replica.
