@@ -165,6 +165,16 @@ class MessageCodec:
     ):
         self._tokenizer = tokenizer
         self._apply_chat_template_kwargs = dict(apply_chat_template_kwargs or {})
+        normalized_model_type = (hf_model_type or "").strip().lower()
+        reasoning_effort = self._apply_chat_template_kwargs.get("reasoning_effort")
+        deepseek_v4_thinking = (
+            normalized_model_type == "deepseek_v4"
+            and bool(
+                self._apply_chat_template_kwargs.get("enable_thinking")
+                or self._apply_chat_template_kwargs.get("thinking")
+            )
+            and reasoning_effort != "none"
+        )
         self._mm_processor_kwargs = dict(mm_processor_kwargs or {})
         self._continuous_token_builder = create_continuous_token_builder(
             tokenizer,
@@ -177,7 +187,11 @@ class MessageCodec:
         self._vision_info_extractor = vision_info_extractor or self._default_vision_info_extractor
         self._vision_info_extractor_kwargs = dict(vision_info_extractor_kwargs or {})
         processing_class = processor if processor is not None else tokenizer
-        if hasattr(processing_class, "chat_template") and processing_class.chat_template is None:
+        if normalized_model_type == "deepseek_v4":
+            generation_prompt = "<｜Assistant｜>" + ("<think>" if deepseek_v4_thinking else "</think>")
+            self._generation_prompt = normalize_token_ids(tokenizer.encode(generation_prompt, add_special_tokens=False))
+            self._turn_separator = []
+        elif hasattr(processing_class, "chat_template") and processing_class.chat_template is None:
             self._generation_prompt = []
             self._turn_separator = []
         else:

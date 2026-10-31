@@ -4,7 +4,7 @@ import json
 import logging
 import os
 import sys
-from argparse import ArgumentParser, Namespace
+from argparse import ArgumentParser, ArgumentTypeError, Namespace
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -17,7 +17,7 @@ pytest.importorskip("ray")
 from examples.agent_aware_router import run_infer
 from examples.agent_aware_router.run_infer import init_config as init_router_config
 from examples.inference import parallel_infer_verl
-from examples.inference.parallel_infer_verl import init_config
+from examples.inference.parallel_infer_verl import _parse_json_object, init_config
 
 
 def _parse_inference_args(monkeypatch, *argv):
@@ -113,6 +113,91 @@ def test_shared_inference_preserves_defaults_and_accepts_recipe_overrides(monkey
 
 @pytest.mark.cpu
 @pytest.mark.level0
+@pytest.mark.parametrize("value", ["{", "[]", "null", "true", '"text"', "3"])
+def test_native_engine_options_require_a_json_object(monkeypatch, capsys, value):
+    with pytest.raises(SystemExit) as exc:
+        _parse_inference_args(monkeypatch, "--engine-kwargs", value)
+    assert exc.value.code == 2
+    assert "--engine-kwargs must be a JSON object" in capsys.readouterr().err
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize(
+    "engine,device,options",
+    [
+        (
+            "vllm",
+            "cuda",
+            {"compilation_config": {"mode": 0, "cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1]}},
+        ),
+        (
+            "vllm",
+            "npu",
+            {
+                "compilation_config": {
+                    "mode": 3,
+                    "cudagraph_mode": "FULL_DECODE_ONLY",
+                    "cudagraph_capture_sizes": [1],
+                    "pass_config": {"enable_sp": False},
+                }
+            },
+        ),
+        (
+            "sglang",
+            "cuda",
+            {
+                "cuda_graph_config": {
+                    "decode": {"backend": "full", "bs": [1], "max_bs": 1},
+                    "prefill": {"backend": "disabled"},
+                },
+                "enable_torch_compile": False,
+            },
+        ),
+        (
+            "sglang",
+            "npu",
+            {
+                "cuda_graph_config": {
+                    "decode": {"backend": "full", "bs": [1], "max_bs": 1},
+                    "prefill": {"backend": "disabled"},
+                },
+                "enable_torch_compile": False,
+            },
+        ),
+    ],
+)
+def test_native_engine_options_merge_without_losing_backend_defaults(monkeypatch, engine, device, options):
+    from verl.plugin import platform
+
+    monkeypatch.setattr(platform, "get_platform", lambda: SimpleNamespace(device_name=device))
+    with monkeypatch.context() as context:
+        args = _parse_inference_args(context, "--engine", engine)
+    baseline = init_config(args, served_model_name="policy")
+    args.engine_kwargs = options
+    config = init_config(args, served_model_name="policy")
+    actual = OmegaConf.to_container(config.actor_rollout_ref.rollout.engine_kwargs, resolve=True)
+    expected = OmegaConf.to_container(baseline.actor_rollout_ref.rollout.engine_kwargs, resolve=True)
+    expected[engine].update(options)
+    assert actual == expected
+    assert config.actor_rollout_ref.rollout.enforce_eager is False
+    with monkeypatch.context() as context:
+        parsed = _parse_inference_args(context, "--engine", engine, "--engine-kwargs", json.dumps(options))
+    assert parsed.engine_kwargs == options
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_empty_native_options_preserve_the_default_configuration(monkeypatch):
+    args = _parse_inference_args(monkeypatch)
+    baseline = init_config(args, served_model_name="policy")
+    args.engine_kwargs = {}
+    actual = init_config(args, served_model_name="policy")
+    assert OmegaConf.to_container(actual, resolve=True) == OmegaConf.to_container(baseline, resolve=True)
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.parametrize("configured", [None, False, True])
 @pytest.mark.parametrize("enabled", [False, True])
 def test_language_model_only_is_opt_in_and_preserves_config(monkeypatch, configured, enabled):
@@ -146,6 +231,11 @@ def router_args():
         temperature=0.4,
         top_p=0.85,
         top_k=20,
+        apply_chat_template_kwargs={
+            "enable_thinking": True,
+            "reasoning_effort": "max",
+            "drop_thinking": False,
+        },
         allowed_request_sampling_param_keys=["temperature", "top_p", "top_k"],
         n=2,
         nnodes=1,
@@ -204,6 +294,11 @@ def test_inference_sampling_uses_run_options_and_preserves_length_configuration(
     assert rollout.response_length == config.data.max_response_length == expected_response_length
     if entrypoint is init_config:
         assert rollout.max_model_len == expected_prompt_length + expected_response_length
+        assert dict(config.data.apply_chat_template_kwargs) == {
+            "enable_thinking": True,
+            "reasoning_effort": "max",
+            "drop_thinking": False,
+        }
     assert rollout.custom.agent_framework.allowed_request_sampling_param_keys == ["temperature", "top_p", "top_k"]
     task_runner = rollout.custom.agent_framework.agent_runners.task
     if simulated_runner:
@@ -211,6 +306,17 @@ def test_inference_sampling_uses_run_options_and_preserves_length_configuration(
         assert not task_runner.runner_kwargs
     else:
         assert task_runner.runner_kwargs.task_config_path == args.task_config
+
+
+def test_parse_apply_chat_template_kwargs_requires_json_object():
+    assert _parse_json_object('{"enable_thinking":true,"thinking_budget":4096}') == {
+        "enable_thinking": True,
+        "thinking_budget": 4096,
+    }
+    with pytest.raises(ArgumentTypeError, match="expected a JSON object"):
+        _parse_json_object('["not", "an", "object"]')
+    with pytest.raises(ArgumentTypeError, match="invalid JSON object"):
+        _parse_json_object("{")
 
 
 @pytest.mark.cpu

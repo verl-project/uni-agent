@@ -37,3 +37,4 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           file: ./coverage-artifact/${{ inputs.coverage-file }}
           flags: ${{ inputs.flags }}
+          fail_ci_if_error: false

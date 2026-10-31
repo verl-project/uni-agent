@@ -33,6 +33,7 @@ import logging
 import os
 import time
 from collections import defaultdict
+from functools import partial
 from pathlib import Path
 from uuid import uuid4
 
@@ -72,6 +73,17 @@ def _rule(text: str = "", width: int = 50, ch: str = "-") -> str:
         return ch * width
     pad = max(0, width - len(text) - 2)
     return f"{ch * (pad // 2)} {text} {ch * (pad - pad // 2)}"
+
+
+def _parse_json_object(value: str, *, error_message: str | None = None) -> dict[str, object]:
+    """Parse one CLI JSON object."""
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise argparse.ArgumentTypeError(error_message or f"invalid JSON object: {exc.msg}") from exc
+    if not isinstance(parsed, dict):
+        raise argparse.ArgumentTypeError(error_message or "expected a JSON object")
+    return parsed
 
 
 def init_config(args: argparse.Namespace, *, served_model_name: str):
@@ -156,8 +168,25 @@ def init_config(args: argparse.Namespace, *, served_model_name: str):
             )
         else:
             raise ValueError("--language-model-only is supported only with --engine vllm or sglang")
+    if (apply_chat_template_kwargs := getattr(args, "apply_chat_template_kwargs", None)) is not None:
+        OmegaConf.update(
+            config,
+            "data.apply_chat_template_kwargs",
+            dict(apply_chat_template_kwargs),
+            force_add=True,
+        )
     if getattr(args, "disable_thinking", False):
         OmegaConf.update(config, "data.apply_chat_template_kwargs.enable_thinking", False, force_add=True)
+
+    engine_kwargs = getattr(args, "engine_kwargs", None)
+    if engine_kwargs:
+        OmegaConf.update(
+            config,
+            f"actor_rollout_ref.rollout.engine_kwargs.{args.engine}",
+            engine_kwargs,
+            merge=True,
+            force_add=True,
+        )
 
     # Gateway tool-call parser: the gateway decodes tool calls from raw tokens, so
     # this must match the model's chat template (the analog of vLLM's
@@ -370,6 +399,13 @@ def main() -> None:
     parser.add_argument("--top-p", type=float, default=DEFAULT_TOP_P, help="Default nucleus sampling probability.")
     parser.add_argument("--top-k", type=int, default=-1, help="Default top-k sampling (-1 disables).")
     parser.add_argument(
+        "--apply-chat-template-kwargs",
+        type=_parse_json_object,
+        default=None,
+        metavar="JSON",
+        help="JSON object assigned to data.apply_chat_template_kwargs for model-specific prompt rendering.",
+    )
+    parser.add_argument(
         "--allowed-request-sampling-param-keys",
         nargs="+",
         default=[],
@@ -415,6 +451,12 @@ def main() -> None:
         "--enforce-eager",
         action="store_true",
         help="Disable CUDA graph capture in the selected engine.",
+    )
+    parser.add_argument(
+        "--engine-kwargs",
+        type=partial(_parse_json_object, error_message="--engine-kwargs must be a JSON object"),
+        default=None,
+        help="JSON object of native options for the selected engine, merged after backend-specific defaults.",
     )
     parser.add_argument(
         "--disable-thinking",

@@ -74,7 +74,8 @@ def test_backend_config(monkeypatch, engine, device, text_only):
 @pytest.mark.cpu
 @pytest.mark.level0
 @pytest.mark.parametrize("engine", [None, "sglang"], ids=["default-vllm", "explicit-sglang"])
-def test_mini_swe_launcher(tmp_path, monkeypatch, engine):
+@pytest.mark.parametrize("native_options", [False, True], ids=["defaults", "native-options"])
+def test_mini_swe_launcher(tmp_path, monkeypatch, engine, native_options):
     repo_root = Path(__file__).resolve().parents[3]
     ray = tmp_path / "ray"
     ray.write_text(f"#!{sys.executable}\nimport json,sys\nprint(json.dumps(sys.argv[1:]))\n", encoding="utf-8")
@@ -86,7 +87,16 @@ def test_mini_swe_launcher(tmp_path, monkeypatch, engine):
     for name in ("ENGINE", "CUDA_VISIBLE_DEVICES", "TENSOR_PARALLEL_SIZE", "N_GPUS_PER_NODE", "GATEWAY_COUNT"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("LANGUAGE_MODEL_ONLY", str(int(engine == "sglang")))
-    monkeypatch.setenv("ENFORCE_EAGER", str(int(engine == "sglang")))
+    monkeypatch.setenv("ENFORCE_EAGER", str(int(engine == "sglang" and not native_options)))
+    engine_kwargs = (
+        {"cuda_graph_config": {"decode": {"backend": "full", "bs": [1]}}, "enable_torch_compile": False}
+        if engine == "sglang"
+        else {"compilation_config": {"mode": 0, "cudagraph_mode": "FULL_DECODE_ONLY", "cudagraph_capture_sizes": [1]}}
+    )
+    if native_options:
+        monkeypatch.setenv("ENGINE_KWARGS_JSON", json.dumps(engine_kwargs))
+    else:
+        monkeypatch.delenv("ENGINE_KWARGS_JSON", raising=False)
 
     result = subprocess.run(
         ["bash", "examples/mini_swe_agent/run_infer_mini_swe_agent.sh"],
@@ -103,7 +113,11 @@ def test_mini_swe_launcher(tmp_path, monkeypatch, engine):
     assert argv[argv.index("--n-gpus-per-node") + 1] == "2"
     assert argv[argv.index("--gateway-count") + 1] == "4"
     assert ("--language-model-only" in argv) is (engine == "sglang")
-    assert ("--enforce-eager" in argv) is (engine == "sglang")
+    assert ("--enforce-eager" in argv) is (engine == "sglang" and not native_options)
+    if native_options:
+        assert json.loads(argv[argv.index("--engine-kwargs") + 1]) == engine_kwargs
+    else:
+        assert "--engine-kwargs" not in argv
     runtime = json.loads(argv[argv.index("--runtime-env-json") + 1])["env_vars"]
     assert runtime["CUDA_VISIBLE_DEVICES"] == "0,1"
     assert not any(key.startswith("UNI_AGENT_SGLANG_") for key in runtime)
