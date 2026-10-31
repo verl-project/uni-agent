@@ -10,7 +10,7 @@ import os
 import random
 from collections.abc import Awaitable, Callable
 from copy import deepcopy
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
 from uuid import uuid4
@@ -92,6 +92,15 @@ class _RunnerConfig:
             )
         except ValueError as exc:
             raise ValueError(f"agent_runners.{runner_name}: {exc}") from exc
+
+
+@dataclass
+class _ValidationRun:
+    global_steps: int | None
+    tasks: set[asyncio.Task] = field(default_factory=set)
+    stop_requested: bool = False
+    metrics: dict[str, float] | None = None
+    abort_errors: list[str] = field(default_factory=list)
 
 
 def _materialize_runner(runner_fqn: str, runner_kwargs: dict[str, object]):
@@ -361,6 +370,83 @@ class GatewayAgentFramework(AgentFramework):
         self._mask_unfinished_episode = mask_unfinished_episode
         self._trajectory_postprocessor = trajectory_postprocessor
         self._trajectory_postprocessor_kwargs = trajectory_postprocessor_kwargs or {}
+        self._validation_runs: dict[str, _ValidationRun] = {}
+
+    async def begin_validation(self, validation_id: str, *, global_steps: int | None = None) -> None:
+        """Register one validation invocation; its ID must not be reused by another invocation."""
+        allowed = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
+        if not validation_id or any(c not in allowed for c in validation_id):
+            raise ValueError("validation_id must contain only letters, digits, dot, underscore or hyphen")
+        if validation_id in self._validation_runs:
+            raise ValueError(f"Validation {validation_id} already exists")
+        self._validation_runs[validation_id] = _ValidationRun(global_steps=global_steps)
+
+    async def stop_validation(self, validation_id: str) -> dict[str, object]:
+        """Stop only pending episodes of this validation; the trainer still computes its metrics."""
+        run = self._validation_runs[validation_id]
+        if run.metrics is not None or run.stop_requested:
+            return self.validation_status(validation_id)
+        run.stop_requested = True
+        for task in tuple(run.tasks):
+            if not task.done():
+                task.cancel()
+        return self.validation_status(validation_id)
+
+    def validation_status(self, validation_id: str) -> dict[str, object]:
+        """Return the immutable score after the trainer publishes it, or current stop progress."""
+        run = self._validation_runs[validation_id]
+        phase = "running"
+        if run.metrics is not None:
+            phase = "unsafe" if run.abort_errors else "finished"
+        elif run.stop_requested:
+            phase = "stopping"
+        return {
+            "validation_id": validation_id,
+            "global_steps": run.global_steps,
+            "stop_requested": run.stop_requested,
+            "pending_sessions": sum(not task.done() for task in run.tasks),
+            "phase": phase,
+            "metrics": dict(run.metrics) if run.metrics is not None else None,
+            "cancellation_errors": list(run.abort_errors),
+        }
+
+    async def publish_validation_metrics(self, validation_id: str, metrics: dict[str, float]) -> dict[str, object]:
+        """Commit trainer-computed validation metrics before training can resume."""
+        run = self._validation_runs[validation_id]
+        metrics = {key: float(value) for key, value in metrics.items()}
+        # Validate before changing state, including runs with no file logger.
+        json.dumps(metrics, allow_nan=False)
+        if any(not task.done() for task in run.tasks):
+            raise RuntimeError(f"Validation {validation_id} still has active episodes")
+        if run.metrics is not None and run.metrics != metrics:
+            raise ValueError(f"Validation {validation_id} metrics are already committed")
+        record = self.validation_status(validation_id) | {
+            "phase": "unsafe" if run.abort_errors else "finished",
+            "metrics": dict(metrics),
+        }
+        if self._log_dir:
+            destination = Path(self._log_dir) / "validation" / f"{validation_id}.json"
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            temporary = destination.with_suffix(".json.tmp")
+            temporary.write_text(json.dumps(record, allow_nan=False), encoding="utf-8")
+            temporary.replace(destination)
+        run.metrics = dict(metrics)
+        logger.info("Validation metrics committed: %s", json.dumps(record, allow_nan=False))
+        if run.abort_errors:
+            raise RuntimeError(
+                f"Validation {validation_id} metrics were saved, but generation cleanup failed; "
+                "training must not resume"
+            )
+        return record
+
+    async def _abort_episode_session(self, session_id, sample_fields):
+        try:
+            await self.gateway_manager.abort_session(session_id)
+        except Exception as error:
+            validation = self._validation_runs.get(str(sample_fields.get("validation_id")))
+            if validation is not None:
+                validation.abort_errors.append(f"{session_id}:{type(error).__name__}")
+            raise
 
     @classmethod
     def from_config(
@@ -543,7 +629,7 @@ class GatewayAgentFramework(AgentFramework):
             stats["num_failed_uids"],
             stats["failure_reasons"][:3],
         )
-        if stats["num_success_outputs"] == 0:
+        if stats["num_success_outputs"] == 0 and not is_validate:
             raise RuntimeError(
                 f"All rollouts failed at global_steps={global_steps}. "
                 f"failures={stats['num_failed_uids']}/{stats['num_input_prompts']}"
@@ -629,16 +715,29 @@ class GatewayAgentFramework(AgentFramework):
         # Successful sessions are written to TQ; failed sessions only affect this uid's stats.
         await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "running"})
         tasks = [
-            self._run_agent_episode_with_concurrency_limit(
-                sample_fields=sample_fields,
-                sample_index=sample_index,
-                session_index=session_index,
-                global_steps=global_steps,
-                sampling_params=sampling_params,
+            asyncio.create_task(
+                self._run_agent_episode_with_concurrency_limit(
+                    sample_fields=sample_fields,
+                    sample_index=sample_index,
+                    session_index=session_index,
+                    global_steps=global_steps,
+                    sampling_params=sampling_params,
+                )
             )
             for session_index in range(num_sessions)
         ]
-        outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+        validation = None
+        if partition_id == "val" and sample_fields.get("validation_id"):
+            validation = self._validation_runs[str(sample_fields["validation_id"])]
+            validation.tasks.update(tasks)
+            if validation.stop_requested:
+                for task in tasks:
+                    task.cancel()
+        try:
+            outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+        finally:
+            if validation is not None:
+                validation.tasks.difference_update(tasks)
 
         success_sessions = 0
         failed_sessions = 0
@@ -646,6 +745,12 @@ class GatewayAgentFramework(AgentFramework):
         unfinished_episodes = 0
         failure_reasons: list[str] = []
         for session_index, outcome in enumerate(outcomes):
+            if partition_id == "val" and isinstance(outcome, asyncio.CancelledError):
+                # A cancelled child episode is a failed validation observation.
+                # Cancelling the batch itself still propagates from gather above.
+                failed_sessions += 1
+                failure_reasons.append(f"cancelled validation session for uid={uid} session_index={session_index}")
+                continue
             if isinstance(outcome, Exception):
                 failed_sessions += 1
                 failure_reasons.append(_short_failure_reason(outcome))
@@ -863,13 +968,18 @@ class GatewayAgentFramework(AgentFramework):
                 # Parent shutdown/cancellation must not leave the Gateway route
                 # and actor-owned session live after the runner task is gone.
                 try:
-                    await asyncio.shield(self.gateway_manager.abort_session(session_id))
+                    await asyncio.shield(self._abort_episode_session(session_id, sample_fields))
                 except Exception:
                     logger.exception("session %s: Gateway abort failed during parent cancellation", session_id)
+                session_trace.finish(
+                    runner_name=runner_name,
+                    status="failure",
+                    trajectories=[],
+                )
                 raise
             except Exception:
                 logger.exception("session %s failed (runner=%s); aborting session", session_id, runner_name)
-                await self.gateway_manager.abort_session(session_id)
+                await self._abort_episode_session(session_id, sample_fields)
                 session_trace.finish(
                     runner_name=runner_name,
                     status="failure",

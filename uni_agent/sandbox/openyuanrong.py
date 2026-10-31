@@ -14,7 +14,7 @@ import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .base import ExecResult, ImageMount, Sandbox, _to_str
+from .base import ExecResult, ImageMount, Sandbox
 from .registry import register_sandbox
 
 if TYPE_CHECKING:
@@ -132,6 +132,7 @@ class OpenyuanrongSandbox(Sandbox):
         upstream: str | None = None,
         proxy_port: int | None = None,
         port_forwardings: list[int] | None = None,
+        command_wait_interval: float = 2.0,
         **extra_kwargs: Any,
     ) -> None:
         self.image = image
@@ -155,6 +156,10 @@ class OpenyuanrongSandbox(Sandbox):
         self.upstream = upstream
         self.proxy_port = proxy_port
         self.port_forwardings = port_forwardings or []
+        if command_wait_interval <= 0:
+            raise ValueError("command_wait_interval must be positive")
+        self.command_wait_interval = command_wait_interval
+        self._connection: Any = None
         self.extra_kwargs = extra_kwargs
         self._sandbox: Any = None
 
@@ -202,6 +207,7 @@ class OpenyuanrongSandbox(Sandbox):
         # An explicit ``connection`` in sandbox_kwargs wins over the env-derived one.
         if "connection" not in sb_kwargs:
             sb_kwargs["connection"] = _connection_config(sdk)
+        self._connection = sb_kwargs["connection"]
         self._sandbox = await asyncio.to_thread(lambda: sdk.Sandbox(**sb_kwargs))
         await self._setup_executable_paths(self.executable_paths)
 
@@ -323,13 +329,15 @@ class OpenyuanrongSandbox(Sandbox):
         command = shlex.join(argv)
         if (path_setup := self._path_setup_command()) is not None:
             command = f"{path_setup}; {command}"
-        # commands.run is a blocking SDK poll; run it off the event loop.
-        result = await asyncio.to_thread(sb.commands.run, command, envs=env, cwd=workdir, timeout=timeout_i)
-        exit_code = int(result.exit_code)
-        stdout = _to_str(getattr(result, "stdout", ""))
-        stderr = _to_str(getattr(result, "stderr", ""))
-        # openyuanrong_sandbox surfaces command timeouts as a result (exit_code=-1), not
-        # an exception; re-raise so the shared exec() policy classifies it.
-        if exit_code == -1 and "timed out" in stderr:
-            raise TimeoutError(stderr)
-        return ExecResult(exit_code=exit_code, stdout=stdout, stderr=stderr)
+        from ._openyuanrong_command import execute_command
+
+        return await execute_command(
+            sb,
+            self._connection,
+            command,
+            env=env,
+            workdir=workdir,
+            timeout=timeout_i,
+            check_interval=self.command_wait_interval,
+            is_current=lambda: self._sandbox is sb,
+        )

@@ -113,6 +113,18 @@ class AgentFrameworkWorker:
     async def generate_sequences(self, prompts) -> None:
         await self.framework.generate_sequences(prompts)
 
+    async def begin_validation(self, validation_id: str, global_steps: int | None = None):
+        return await self.framework.begin_validation(validation_id, global_steps=global_steps)
+
+    async def stop_validation(self, validation_id: str):
+        return await self.framework.stop_validation(validation_id)
+
+    async def validation_status(self, validation_id: str):
+        return self.framework.validation_status(validation_id)
+
+    async def publish_validation_metrics(self, validation_id: str, metrics: dict[str, float]):
+        return await self.framework.publish_validation_metrics(validation_id, metrics)
+
 
 class AgentFrameworkRolloutAdapter:
     """Trainer-facing adapter satisfying the `agent_loop_manager_class` contract.
@@ -145,7 +157,11 @@ class AgentFrameworkRolloutAdapter:
             )
 
         gateway_manager = build_gateway_manager(config=config, llm_client=llm_client)
-        framework_worker = AgentFrameworkWorker.remote(
+        worker_class = AgentFrameworkWorker
+        control_name = OmegaConf.select(config, "actor_rollout_ref.rollout.custom.agent_framework.control_actor_name")
+        if control_name:
+            worker_class = worker_class.options(name=str(control_name))
+        framework_worker = worker_class.remote(
             config=config,
             gateway_manager=gateway_manager,
             reward_loop_worker_handles=reward_loop_worker_handles,
@@ -176,3 +192,15 @@ class AgentFrameworkRolloutAdapter:
 
         ray.get(self.framework_worker.generate_sequences.remote(prompts))
         return None
+
+    def begin_validation(self, validation_id: str, *, global_steps: int | None = None) -> None:
+        ray.get(self.framework_worker.begin_validation.remote(validation_id, global_steps))
+
+    def stop_validation(self, validation_id: str):
+        return ray.get(self.framework_worker.stop_validation.remote(validation_id))
+
+    def validation_status(self, validation_id: str):
+        return ray.get(self.framework_worker.validation_status.remote(validation_id))
+
+    def publish_validation_metrics(self, validation_id: str, metrics: dict[str, float]):
+        return ray.get(self.framework_worker.publish_validation_metrics.remote(validation_id, metrics))
