@@ -257,7 +257,7 @@ fi
 WORKING_DIR="${WORKING_DIR:-$(pwd)}"
 
 MAIN_CMD=(
-    python3 -m verl.trainer.main_ppo
+    python3 -m uni_agent.integrations.verl_v1.main
     --config-name=ppo_megatron_trainer
     hydra.searchpath=[pkg://verl.trainer.config]
     +ray_kwargs.ray_init.address="${RAY_INIT_ADDRESS}"
