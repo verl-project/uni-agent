@@ -70,6 +70,7 @@ nav:
       - Agent Aware Router: concepts/agent-aware-router.md
   - Advanced:
       - Inference Engine Options: advanced/inference-engine-options.md
+      - Validation Tail Stop: advanced/validation-tail-stop.md
   - Benchmark:
       - Overview: benchmark/index.md
       - Inference and Verification: benchmark/inference.md

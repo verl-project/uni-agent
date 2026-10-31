@@ -229,6 +229,7 @@ class GatewaySession:
             prompt_length + response_length if prompt_length is not None and response_length is not None else None
         )
         self._sampling_params = dict(sampling_params or {})
+        self._generation_tasks: set[asyncio.Task] = set()
         self._enable_last_assistant_rollback = enable_last_assistant_rollback
         self._coalesce_reserved_exact_requests = coalesce_reserved_exact_requests
         self._metadata = dict(metadata or {})
@@ -274,6 +275,8 @@ class GatewaySession:
         owner_request: InflightRequest | None = None
         joined_request: InflightRequest | None = None
         encoded: EncodedData | None = None
+        generation_task = asyncio.current_task()
+        self._generation_tasks.add(generation_task)
         generation_span = start_generation_span(self._trace_identity)
         try:
             async with self.request_lock:
@@ -487,8 +490,11 @@ class GatewaySession:
                     (False, exc, reserved_chain_id, None),
                 )
             generation_span.failure(exc)
+            if isinstance(exc, asyncio.CancelledError) and self.phase == SessionPhase.ABORTED:
+                raise HTTPException(status_code=409, detail=f"Session {self.handle.session_id} is aborted") from exc
             raise
         finally:
+            self._generation_tasks.discard(generation_task)
             generation_span.report()
             if reserved_chain_id is not None:
                 await asyncio.shield(self._release_chain_reservation(reserved_chain_id))
@@ -524,8 +530,6 @@ class GatewaySession:
     async def abort(self) -> None:
         """Abort the session and prevent further generation."""
         async with self.request_lock:
-            if self.phase == SessionPhase.ABORTED:
-                return
             if self.phase == SessionPhase.FINALIZED:
                 raise RuntimeError(f"Session {self.handle.session_id} is finalized")
             self.phase = SessionPhase.ABORTED
@@ -533,6 +537,20 @@ class GatewaySession:
             self.materialized_chains = []
             self.reserved_chain_ids.clear()
             self._touch()
+            pending = [task for task in self._generation_tasks if task is not asyncio.current_task()]
+            for task in pending:
+                task.cancel()
+        if pending:
+            outcomes = await asyncio.gather(*pending, return_exceptions=True)
+            failures = [
+                error
+                for error in outcomes
+                if isinstance(error, BaseException)
+                and not isinstance(error, asyncio.CancelledError)
+                and not (isinstance(error, HTTPException) and error.status_code == 409)
+            ]
+            if failures:
+                raise RuntimeError(f"Session {self.handle.session_id} generation cancellation failed") from failures[0]
 
     def snapshot_state(self) -> dict[str, Any]:
         """Return a JSON-serializable snapshot for actor state inspection."""

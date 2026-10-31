@@ -47,6 +47,14 @@ class ExecResult:
     stderr: str
 
 
+class SandboxExecutionError(RuntimeError):
+    """Sandbox infrastructure failed without a usable command result."""
+
+
+class SandboxTerminatedError(SandboxExecutionError):
+    """A command cannot complete because its sandbox is confirmed terminated."""
+
+
 def _name_tag(ref: str) -> tuple[str, str | None]:
     slash, colon = ref.rfind("/"), ref.rfind(":")
     return (ref[:colon], ref[colon + 1 :]) if colon > slash else (ref, None)
@@ -488,6 +496,8 @@ class Sandbox(abc.ABC):
         """Run ``argv`` once and return its captured result (no implicit shell)."""
         try:
             return await self._exec(argv, timeout=timeout, workdir=workdir, env=env)
+        except SandboxExecutionError:
+            raise
         except Exception as exc:
             if self._is_timeout_error(exc):
                 return ExecResult(exit_code=-1, stdout="", stderr=f"exec timed out after {timeout}s: {exc}")
