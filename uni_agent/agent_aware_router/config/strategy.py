@@ -32,8 +32,6 @@ class KVCAwareStrategyConfig(StrategyConfig):
     Persists the user-tunable knobs (``load_threshold``, ``capacity_threshold``);
     the remaining tuning knobs fall back to ``DEFAULT_STRATEGY_KNOBS`` inside
     ``KVCacheAwareStrategy.from_config``.
-
-    S = α × S_cache + (1-α) × S_load
     """
 
     load_threshold: float = 0.9

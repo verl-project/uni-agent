@@ -500,10 +500,8 @@ class TestInflightBlockPin:
             }
         )
         strat = KVCacheAwareStrategy(
-            alpha=0.7,
             load_threshold=0.9,
             layer_weights={"gpu": 0.7, "cpu": 0.2, "ssd": 0.1},
-            load_weights=(0.4, 0.2, 0.1, 0.3),
             slow_cut=SlowCut.CAPACITY_TOKEN_AWARE,
             do_shortcut=False,
             tie_tolerance=0.0,

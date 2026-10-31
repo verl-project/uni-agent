@@ -37,8 +37,6 @@ logger = logging.getLogger(__name__)
 
 STICKY_TOP_SCORE = 1e9
 
-DEFAULT_LOAD_WEIGHTS: tuple[float, float, float, float] = (0.5, 0.0, 0.0, 0.5)
-
 # Upper bound (exclusive) for a drawn tie-break seed.
 SEED_RANGE: int = 2**31
 
@@ -48,7 +46,6 @@ COLLECTOR_NAMES: list[str] = ["vllm_zmq", "vllm_metrics", "sticky_stat", "inflig
 
 
 DEFAULT_STRATEGY_KNOBS: dict[str, Any] = {
-    "alpha": 0.7,
     "layer_weights": {Layer.GPU: 0.7, Layer.CPU: 0.2, Layer.SSD: 0.1},
     "do_shortcut": True,
     "slow_cut": SlowCut.CAPACITY_TOKEN_AWARE,
@@ -71,19 +68,15 @@ class KVCacheAwareStrategy:
     def __init__(
         self,
         *,
-        alpha: float,
         load_threshold: float,
         capacity_threshold: float = 0.5,
         layer_weights: dict[Layer, float],
         do_shortcut: bool = True,
         slow_cut: SlowCut | str = SlowCut.CAPACITY_TOKEN_AWARE,
-        load_weights: tuple[float, float, float, float] = DEFAULT_LOAD_WEIGHTS,
         overload_mode: OverloadMode | str = OverloadMode.KV_CACHE_USAGE_PERC,
         tie_tolerance: float = 0.05,
         seed: int | None = None,
     ) -> None:
-        if not 0 <= alpha <= 1:
-            raise StrategyError(f"alpha must be in [0, 1], got {alpha}")
         if not 0 < load_threshold < 1:
             raise StrategyError(f"load_threshold must be in (0, 1), got {load_threshold}")
         if not 0 < capacity_threshold < 1:
@@ -109,22 +102,16 @@ class KVCacheAwareStrategy:
             raise StrategyError(
                 f"overload_mode must be one of {[m.value for m in OverloadMode]}, got {overload_mode!r}"
             ) from exc
-        if len(load_weights) != 4 or any(w < 0 for w in load_weights):
-            raise StrategyError(f"load_weights must be 4 non-negative values, got {load_weights}")
-        if abs(sum(load_weights) - 1.0) > 1e-6:
-            raise StrategyError(f"load_weights must sum to 1.0, got {sum(load_weights)}")
         if not 0 <= tie_tolerance <= 1:
             raise StrategyError(f"tie_tolerance must be in [0, 1], got {tie_tolerance}")
         if seed is not None and (isinstance(seed, bool) or not isinstance(seed, int)):
             raise StrategyError(f"seed must be an int or None, got {seed!r}")
 
-        self.alpha = float(alpha)
         self.load_threshold = float(load_threshold)
         self.capacity_threshold = float(capacity_threshold)
         self.layer_weights = dict(layer_weights)
         self.do_shortcut = do_shortcut
         self.slow_cut = slow_cut
-        self.load_weights = tuple(load_weights)
         self.overload_mode = overload_mode
         self.tie_tolerance = float(tie_tolerance)
         self._seed = int(seed) if seed is not None else random.SystemRandom().randrange(SEED_RANGE)
@@ -132,9 +119,8 @@ class KVCacheAwareStrategy:
         self._max_num_seqs: int | None = None
         self._max_num_batched_tokens: int | None = None
         logger.info(
-            f"KVCacheAwareStrategy created: alpha={self.alpha:.2f}, "
+            f"KVCacheAwareStrategy created: "
             f"load_threshold={self.load_threshold:.2f}, capacity_threshold={self.capacity_threshold:.2f}, "
-            f"load_weights={self.load_weights}, "
             f"do_shortcut={self.do_shortcut}, "
             f"slow_cut={self.slow_cut.value}, overload_mode={self.overload_mode.value}, "
             f"tie_tolerance={self.tie_tolerance:.3f}, seed={self._seed}"
@@ -142,7 +128,7 @@ class KVCacheAwareStrategy:
 
     def __repr__(self) -> str:
         return (
-            f"KVCacheAwareStrategy(alpha={self.alpha}, load_threshold={self.load_threshold}, "
+            f"KVCacheAwareStrategy(load_threshold={self.load_threshold}, "
             f"capacity_threshold={self.capacity_threshold}, "
             f"do_shortcut={self.do_shortcut}, "
             f"slow_cut={self.slow_cut.value}, overload_mode={self.overload_mode.value}, "
@@ -175,49 +161,28 @@ class KVCacheAwareStrategy:
         object cannot leak overrides across constructions.
         """
         kwargs = {name: getattr(cfg, name, default) for name, default in DEFAULT_STRATEGY_KNOBS.items()}
+        capacity_threshold = cfg.capacity_threshold
         if is_debug_enabled():
             prototypes = {**DEFAULT_STRATEGY_KNOBS, "seed": 0}
             for name, default in DEFAULT_STRATEGY_KNOBS.items():
                 raw = get_debug_var(name)
                 if raw is not None:
                     kwargs[name] = coerce_knob_value(name, raw, prototypes[name])
+            # ``capacity_threshold`` is a persisted config field, not a knob —
+            # override it under the same debug mechanism so it stays tunable
+            # without touching the config.
+            raw = get_debug_var("capacity_threshold")
+            if raw is not None:
+                capacity_threshold = coerce_knob_value("capacity_threshold", raw, cfg.capacity_threshold)
         return cls(
-            alpha=kwargs["alpha"],
             load_threshold=cfg.load_threshold,
-            capacity_threshold=cfg.capacity_threshold,
+            capacity_threshold=capacity_threshold,
             layer_weights=kwargs["layer_weights"],
             do_shortcut=kwargs["do_shortcut"],
             slow_cut=kwargs["slow_cut"],
             overload_mode=kwargs["overload_mode"],
             tie_tolerance=kwargs["tie_tolerance"],
             seed=kwargs["seed"],
-        )
-
-    def _compute_load(
-        self,
-        kv_usage: float,
-        running: int | float,
-        waiting: int | float,
-        inflight: int | float = 0,
-    ) -> float:
-        """load = a·kv_usage + b·running/max + c·waiting/max + d·inflight/max (∈ [0,1], bigger = more loaded).
-
-        Weights ``(a, b, c, d) = self.load_weights``; ``max = self._max_num_seqs``.
-        ``inflight`` (the Balancer's own acquire/release counter, maintained
-        synchronously) is the only term non-zero at cold start — the other three
-        come from async-polled vLLM metrics, still 0 before the first poll lands.
-        Its weight ``d`` keeps the first wave of requests from collapsing onto
-        ``pool[0]`` when the polled terms are tied at 0.
-        """
-        if self._max_num_seqs is None:
-            raise StrategyError("set_capacity() must be called before routing")
-        a, b, c, d = self.load_weights
-        max_num_seqs = self._max_num_seqs
-        return (
-            a * float(kv_usage)
-            + b * min(1.0, float(running) / max_num_seqs)
-            + c * min(1.0, float(waiting) / max_num_seqs)
-            + d * min(1.0, float(inflight) / max_num_seqs)
         )
 
     def is_overloaded(
@@ -240,16 +205,6 @@ class KVCacheAwareStrategy:
             kv_perc = store.get_metric(replica.replica_id, MetricKey.KV_CACHE_USAGE_PERC) or 0.0
             logger.info(f"is-overload replica={replica.replica_id} kv_perc={kv_perc:.4f}")
             return kv_perc > self.load_threshold
-        if self.overload_mode == OverloadMode.KV_LOAD:
-            m = store.get_metrics(replica.replica_id)
-            kv_usage = store.kv_cache_load(replica.replica_id)
-            running = m.get(MetricKey.NUM_REQUESTS_RUNNING, 0)
-            waiting = m.get(MetricKey.NUM_REQUESTS_WAITING, 0)
-            inflight = m.get(MetricKey.INFLIGHT_COUNT, 0)
-            load = self._compute_load(kv_usage, running, waiting, inflight)
-            # Emit the load the sticky check used (the bound replica).
-            logger.info(f"is-overload replica={replica.replica_id} kv_load={load:.4f}")
-            return load > self.load_threshold
         if self.overload_mode == OverloadMode.REMAINING_CAP:
             cap = self._total_token_capacity(store)
             if cap <= 0:
@@ -276,7 +231,7 @@ class KVCacheAwareStrategy:
             return False
         raise ValueError(
             f"There is no {self.overload_mode}, please set overload_mode in "
-            f"['None', 'kv_cache_usage_perc', 'kv_load', 'remaining_cap']"
+            f"['None', 'kv_cache_usage_perc', 'remaining_cap']"
         )
 
     def _sticky_shortcut(
@@ -321,8 +276,9 @@ class KVCacheAwareStrategy:
         """Score each replica. Larger is better.
 
         After the sticky short-circuit misses, the ``slow_cut`` mode selects the
-        fallback scoring: ``prefix-load-aware`` → ``S = α·S_cache + (1-α)·S_load``;
-        ``least-inflight`` → ``-INFLIGHT_COUNT`` (verl GlobalRequestLoadBalancer-style).
+        fallback scoring: ``capacity-token-aware`` → capacity-gated token routing
+        (:meth:`_capacity_token_scores`); ``least-inflight`` → ``-INFLIGHT_COUNT``
+        (verl GlobalRequestLoadBalancer-style).
         """
         if not isinstance(replicas, list):
             raise StrategyError(f"replicas must be a list, got {type(replicas).__name__}")
@@ -340,57 +296,11 @@ class KVCacheAwareStrategy:
                 return [-store.get_metric(r.replica_id, MetricKey.INFLIGHT_COUNT) for r in replicas]
             # Hash-resolving slow_cuts share one resolution across all replicas.
             gpu_hash_strs = resolve_prefix_hashes(prompt_ids or [], request_id, store)
-            if self.slow_cut == SlowCut.PREFIX_LOAD_AWARE:
-                return self._prefix_load_aware(store, replicas, gpu_hash_strs)
             if self.slow_cut == SlowCut.CAPACITY_TOKEN_AWARE:
                 return self._capacity_token_scores(store, replicas, prompt_ids or [], gpu_hash_strs)
             raise ValueError(f"Unknow slowcut type {self.slow_cut}")
         finally:
             emitter.on_route(time.perf_counter() - t0)
-
-    def _prefix_load_aware(
-        self,
-        store: DataStore,
-        replicas: list[ReplicaInfo],
-        gpu_hash_strs: list[str],
-    ) -> list[float]:
-        """Prefix-cache + blended-load combined score (``slow_cut=prefix-load-aware``).
-
-            S = α·S_cache + (1-α)·S_load
-
-        ``S_cache`` is the three-layer weighted prefix-hit score;
-        ``S_load = 1 - load`` where ``load`` blends kv_usage /
-        running / waiting / inflight via ``_compute_load``. Returns one score
-        per replica.
-        """
-        result: list[float] = []
-        loads: dict[str, float] = {}
-        for replica in replicas:
-            m = store.get_metrics(replica.replica_id)
-            kv_usage = store.kv_cache_load(replica.replica_id)
-            running = m.get(MetricKey.NUM_REQUESTS_RUNNING, 0)
-            waiting = m.get(MetricKey.NUM_REQUESTS_WAITING, 0)
-            inflight = m.get(MetricKey.INFLIGHT_COUNT, 0)
-            load = self._compute_load(kv_usage, running, waiting, inflight)
-            loads[replica.replica_id] = load
-            s_load = 1.0 - load
-            s_cache, gpu_hit = self._cache_score(store, replica, gpu_hash_strs)
-            emitter.on_score(replica.replica_id, {"load": load, "s_cache": s_cache})
-            score = self.alpha * s_cache + (1 - self.alpha) * s_load
-            result.append(score)
-            logger.info(
-                f"score(): replica={replica.replica_id} kv={kv_usage:.3f} running={running} waiting={waiting} "
-                f"inflight={inflight} → load={load:.4f} s_load={s_load:.4f} | gpu_hit={gpu_hit:.2f} "
-                f"s_cache={s_cache:.4f} ({self.alpha:.2f}·cache + {1 - self.alpha:.2f}·load) → score={score:.4f}"
-            )
-        scores_str = ", ".join(f"{r.replica_id}={result[i]:.4f}" for i, r in enumerate(replicas))
-        logger.info(f"score(): COMBINED scores: {scores_str}")
-        # Per-replica load that drove this combined-score dispatch (all replicas,
-        # reused from the loop above — no extra computation). The plot parses this
-        # into a per-replica load panel; sticky-win / least-inflight dispatches do
-        # not reach here, so they emit no line (panel omits those dispatches).
-        logger.info(f"route-load loads={loads}")
-        return result
 
     def _cache_score(
         self,
@@ -539,7 +449,7 @@ class KVCacheAwareStrategy:
             f"remaining={rows[top]['remaining']:.0f}, inflight_blocks={rows[top]['inflight_blocks']}, "
             f"inflight_tokens={rows[top]['inflight_tokens']}, kv_perc={rows[top]['kv_perc']:.3f})"
         )
-        # Per-replica capacity signal for the plot (mirrors route-load in prefix-load-aware).
+        # Per-replica capacity signal for the plot (mirrors route-load in least-inflight).
         cap_loads = {row["replica"].replica_id: row["remaining"] for row in rows}
         logger.info(f"route-capacity remaining={cap_loads}")
         scores = [0.0] * n

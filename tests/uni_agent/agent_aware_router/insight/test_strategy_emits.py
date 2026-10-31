@@ -15,9 +15,9 @@
 """A-class end-to-end: strategy ``score()`` → emitter ``on_score`` / ``on_route`` → rl_insight.
 
 With emit on, a recording rl_insight double captures the strategy-component
-histograms (load/s_cache or the capacity fractions) and the per-call
-route_latency sample — verifying the 6 A-class signals across both slow_cut
-modes and every ``score()`` return path (including the sticky short-circuit).
+histograms (the capacity fractions) and the per-call route_latency sample —
+verifying the 4 A-class signals across the slow_cut modes and every
+``score()`` return path (including the sticky short-circuit).
 """
 
 from __future__ import annotations
@@ -59,10 +59,8 @@ class _RecordingRLInsight:
 
 def _strat(**kwargs) -> KVCacheAwareStrategy:
     defaults = dict(
-        alpha=0.7,
         load_threshold=0.9,
         layer_weights={"gpu": 0.7, "cpu": 0.2, "ssd": 0.1},
-        load_weights=(0.4, 0.2, 0.1, 0.3),
     )
     defaults.update(kwargs)
     strat = KVCacheAwareStrategy(**defaults)
@@ -85,19 +83,6 @@ def recording(monkeypatch: pytest.MonkeyPatch) -> _RecordingRLInsight:
 
 def _names(rl: _RecordingRLInsight, metric_type: str | None = None) -> set[str]:
     return {c[1] for c in rl.calls if metric_type is None or c[0] == metric_type}
-
-
-def test_prefix_load_aware_emits_load_and_scache_per_replica(recording):
-    ds = DataStore()
-    ds.refresh_metrics({"s0": {MetricKey.NUM_REQUESTS_RUNNING: 1, MetricKey.NUM_GPU_BLOCKS: 10}})
-    strat = _strat(slow_cut=SlowCut.PREFIX_LOAD_AWARE, do_shortcut=False)
-
-    strat.score(PROMPT_IDS, ds, [ReplicaInfo(replica_id="s0")])
-
-    assert {"load", "s_cache"} <= _names(recording, "histogram")
-    # components carry the replica label
-    load_call = next(c for c in recording.calls if c[1] == "load")
-    assert load_call[3] == {"replica": "s0"}
 
 
 def test_capacity_token_aware_emits_capacity_fractions(recording):
@@ -140,8 +125,11 @@ def test_capacity_token_aware_skips_emit_without_capacity(recording):
 
 def test_route_latency_fires_once_per_score_call_with_no_replica_label(recording):
     ds = DataStore()
-    ds.refresh_metrics({"s0": {MetricKey.NUM_REQUESTS_RUNNING: 1, MetricKey.NUM_GPU_BLOCKS: 10}})
-    strat = _strat(slow_cut=SlowCut.PREFIX_LOAD_AWARE, do_shortcut=False)
+    ds.set_block_size(16)
+    ds.refresh_metrics(
+        {"s0": {MetricKey.NUM_GPU_BLOCKS: 100, MetricKey.KV_CACHE_USAGE_PERC: 0.2, MetricKey.INFLIGHT_BLOCKS: 20}}
+    )
+    strat = _strat(slow_cut=SlowCut.CAPACITY_TOKEN_AWARE, do_shortcut=False)
 
     strat.score(PROMPT_IDS, ds, [ReplicaInfo(replica_id="s0")])
 
@@ -155,11 +143,11 @@ def test_route_latency_fires_even_on_sticky_short_circuit(recording):
     ds = DataStore()
     ds.refresh_metrics({"s0": {MetricKey.NUM_REQUESTS_RUNNING: 0, MetricKey.NUM_GPU_BLOCKS: 10}})
     ds.put_sticky_binding("r1", "s0")
-    strat = _strat(slow_cut=SlowCut.PREFIX_LOAD_AWARE, do_shortcut=True)
+    strat = _strat(slow_cut=SlowCut.CAPACITY_TOKEN_AWARE, do_shortcut=True)
 
     strat.score(PROMPT_IDS, ds, [ReplicaInfo(replica_id="s0")], request_id="r1")
 
     # sticky short-circuit returns before component scoring, but the try/finally
     # still records one route_latency sample — and no score components.
     assert len([c for c in recording.calls if c[1] == "route_latency_seconds"]) == 1
-    assert "load" not in _names(recording)
+    assert "avail_ratio" not in _names(recording)
