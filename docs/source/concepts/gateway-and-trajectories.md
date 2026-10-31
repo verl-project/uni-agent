@@ -304,6 +304,55 @@ alignment without materializing a redundant trajectory. The behavior is enabled
 by default and can be disabled with
 `actor_rollout_ref.rollout.custom.agent_framework.enable_last_assistant_rollback=false`.
 
+## Multiple Turns and Trees
+
+`GatewaySession` directly manages Chain trajectories by default. The Gateway
+Actor selects `TreeGatewaySession` when `use_tree_trajectory_manager` is `true`
+(default: `false`). `TreeGatewaySession`, defined in
+`uni_agent/gateway/session/tree_session.py`, directly manages shared message
+prefixes as a tree instead of maintaining separate chain buffers:
+
+```yaml
+actor_rollout_ref:
+  rollout:
+    custom:
+      agent_framework:
+        use_tree_trajectory_manager: true
+```
+
+Each `MessageNode` holds one generation and the unmatched request context needed
+to reach it, including token deltas, optional log probabilities, and multimodal
+inputs. Requests reuse matching message prefixes and Tool schemas, then extend
+the current path or fork from a shared ancestor. Pending nodes become completed
+when generation commits; failed or cancelled generations remove their pending
+branch and restore any temporarily replaced node.
+
+Exact in-flight request coalescing also applies in Tree mode. Last-Assistant
+rewrites replace an eligible unbranched leaf when rollback is enabled; otherwise
+they create a branch so existing descendants remain intact.
+
+Capacity exhaustion closes the selected chain, applying any last-Assistant
+rollback before materialization, as in Chain mode. Closed chains cannot be
+continued or rewritten in place. Their history remains available as a shared
+prefix for new chains.
+
+At finalization, each committed chain tip is expanded into the same `Trajectory`
+record type used by Chain mode, ordered by its latest commit or capacity
+materialization. Each chain trains only its own generated tokens. Shared history
+from another chain becomes part of the initial prompt; subsequent continuation
+context receives mask `0`. Training
+ownership is fixed by chain ID and does not change when trajectories are filtered
+or reordered.
+The Framework then applies its existing trajectory selection, postprocessing,
+reward scoring, and TransferQueue flow.
+
+When `log_dir` is configured, finalization attempts to write `trajectory_tree.pkl`
+in the session log directory before releasing the in-memory tree. Abort attempts to
+write `trajectory_tree_abort.pkl`. These are end-of-session diagnostic snapshots,
+not per-turn checkpoints; without `log_dir`, no tree pickle is written.
+Snapshots store child links in a flat `node_children` table, without parent
+references, so serialization depth does not grow with conversation length.
+
 ## Reward Flow
 
 The built-in Agent Runner returns:
