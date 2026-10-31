@@ -1,5 +1,7 @@
 # Launch a Sandbox
 
+You can ask an AI assistant to build your sidecar image using the [instructions below](#build-a-tool-image-sidecar). Share the tool's name, version, and any custom scripts or dependencies.
+
 Uni-Agent provides an isolated and persistent execution environment for agents. Files, installed packages, and runtime state remain available across interactions within the same sandbox session.
 
 This guide focuses on the ReAct Agent Tool workflow. It uses [`examples/quickstart/sandbox/demo.py`](https://github.com/verl-project/uni-agent/blob/main/examples/quickstart/sandbox/demo.py) to install a package, create and edit a Python script, execute it, and verify that state persists across tool calls.
@@ -271,9 +273,55 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
     )
     ```
 
-`image_mounts` allows Uni-Agent to attach self-contained runtime images for black-box
-agent harnesses to task sandboxes while keeping harness dependencies isolated
-from task images; `executable_paths` exposes selected runtime commands.
+### Build a Tool Image (Sidecar)
+
+On Docker, Modal, or OpenYuanRong, use [`image_mounts`](../concepts/sandbox.md#runtime-images) to add a tool without rebuilding the task image.
+Copy a Dockerfile and `build_tool.sh` into `examples/my_tool_swe_task/` from one of these examples:
+
+| Runtime | Dockerfile | Build script |
+| --- | --- | --- |
+| Python | [Mini-SWE-Agent](https://github.com/verl-project/uni-agent/blob/main/examples/mini_swe_agent/Dockerfile.mini-swe-agent-tool) | [build_tool.sh](https://github.com/verl-project/uni-agent/blob/main/examples/mini_swe_agent/build_tool.sh) |
+| Node.js | [OpenClaw](https://github.com/verl-project/uni-agent/blob/main/examples/blackbox_recipes/openclaw_swe_task/Dockerfile.openclaw-tool) | [build_tool.sh](https://github.com/verl-project/uni-agent/blob/main/examples/blackbox_recipes/openclaw_swe_task/build_tool.sh) |
+
+Rename the Dockerfile to `Dockerfile.my-tool` and update its `-f` path in `build_tool.sh`.
+Pin the tool and runtime versions and install them under `/opt/my-tool`.
+You can also copy custom dependencies, configuration files, or agent startup scripts into this directory during the build.
+Note any dependencies provided by the task image in Dockerfile comments.
+Remove the example's launcher `COPY` line if you do not need it.
+
+The final image should contain the tool directory's contents at its root:
+
+```dockerfile
+FROM scratch
+COPY --from=builder /opt/my-tool/ /
+```
+
+Replace `builder` with your installation stage's name. `FROM scratch` is optional, but keep this root layout so `bin/...` mounts as `/opt/my-tool/bin/...`.
+Mounting does not apply the image's `ENV` settings or run its `ENTRYPOINT`.
+
+In `build_tool.sh`, keep the script directory as the build context and add `--platform linux/amd64` to `docker build`.
+If it uses `--target tool`, change `tool` to your final stage's name or remove the option.
+Build with Docker and Bash; on ARM machines, enable amd64 emulation first.
+If downloads are slow or fail, use an image or package mirror in China, or configure an HTTP/HTTPS proxy for Docker and the build tools.
+Run from the repository root:
+
+```bash
+# Build and check the platform and size.
+TOOL_IMAGE=my-tool TOOL_TAG=v1 bash examples/my_tool_swe_task/build_tool.sh
+docker image inspect my-tool:v1 --format '{{.Os}}/{{.Architecture}} {{.Size}} bytes'
+
+# Optional: build and push to a registry the sandbox can pull from.
+docker login registry.example.com
+TOOL_IMAGE=my-tool TOOL_TAG=v1 bash examples/my_tool_swe_task/build_tool.sh \
+  --registry registry.example.com/team
+```
+
+In the provider configuration above, set `image_mounts[].image` to the published image and `mount_path` to `/opt/my-tool`.
+Use `executable_paths` to expose the tool and any bundled interpreter, such as `node`, by name.
+
+Edits inside a sandbox do not automatically update the published sidecar image.
+For read-only mounts, such as [Docker image mounts](https://docs.docker.com/engine/storage/#image-mounts), copy files to a writable sandbox directory before editing.
+Rebuild from the edited files and push a new image to publish changes.
 
 ### Start and Stop the Sandbox
 
