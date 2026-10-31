@@ -8,6 +8,7 @@ forward to the right actor through Ray remote methods.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
 
 import ray
 
@@ -19,20 +20,24 @@ class GatewayManager:
     """Owns gateway actors and routes sessions to them.
 
     Spawns ``gateway_count`` actors over the injected ``LLMServerClient`` backend
-    and tracks which actor owns each session so lifecycle calls reach it.
+    and tracks which actor owns each session so lifecycle calls reach it. Passing
+    policy-name mappings for both ``llm_client`` and ``gateway_actor_config``
+    are normalized by the shared ``GatewayActor`` implementation.
     """
 
     def __init__(
         self,
-        llm_client: LLMServerClient,
+        llm_client: LLMServerClient | Mapping[str, LLMServerClient],
         *,
         gateway_count: int,
-        gateway_actor_config: GatewayActorConfig | None = None,
+        gateway_actor_config: GatewayActorConfig | Mapping[str, GatewayActorConfig] | None = None,
     ):
         if gateway_count <= 0:
             raise ValueError("gateway_count must be positive")
         if gateway_actor_config is None:
             raise ValueError("gateway_actor_config is required when gateway_count > 0")
+        if isinstance(gateway_actor_config, Mapping) != isinstance(llm_client, Mapping):
+            raise ValueError("llm_client and gateway_actor_config must both be policy mappings or both single values")
 
         from uni_agent.gateway.gateway import GatewayActor
 

@@ -6,5 +6,6 @@ uvicorn
 cachetools
 vllm==0.23.0
 ray==2.54.1
+TransferQueue==0.1.11
 loguru
 pyzmq

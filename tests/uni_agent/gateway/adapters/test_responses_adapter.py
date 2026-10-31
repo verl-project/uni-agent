@@ -14,6 +14,24 @@ ALLOWED_SAMPLING_KEYS = frozenset({"temperature", "top_p", "top_k", "max_tokens"
 _MISSING_ROLE = object()
 
 
+def _make_actor(*, sessions=None, allowed_keys=ALLOWED_SAMPLING_KEYS, client=None):
+    """Build a handler-test actor with the per-policy state handlers require.
+
+    ``object.__new__`` skips ``_GatewayActor.__init__``; keep the minimal
+    per-policy attributes in one place so adapter tests do not drift when the
+    actor contract changes.
+    """
+    from uni_agent.gateway.gateway import SINGLE_POLICY_NAME, _GatewayActor
+
+    actor = object.__new__(_GatewayActor)
+    actor._sessions = dict(sessions or {})
+    actor._session_policies = {session_id: SINGLE_POLICY_NAME for session_id in actor._sessions}
+    actor._policy_allowed_request_sampling_param_keys = {SINGLE_POLICY_NAME: frozenset(allowed_keys)}
+    actor._policy_clients = {SINGLE_POLICY_NAME: client if client is not None else object()}
+    actor._warned_discarded_request_sampling_param_keys = set()
+    return actor
+
+
 def _request(**overrides):
     request = {
         "model": "policy",
@@ -196,13 +214,8 @@ def test_responses_preserves_declared_namespace_and_tool_name(
 async def test_responses_deferred_tool_name_errors_precede_generation(stream, kind, namespaces):
     from fastapi import HTTPException
 
-    from uni_agent.gateway.gateway import _GatewayActor
-
     generate = AsyncMock(return_value=_outcome(content="done", finish_reason="stop"))
-    actor = object.__new__(_GatewayActor)
-    actor._sessions = {"s1": SimpleNamespace(sampling_params={}, run_generation=generate)}
-    actor._allowed_request_sampling_param_keys = ALLOWED_SAMPLING_KEYS
-    actor._backend = object()
+    actor = _make_actor(sessions={"s1": SimpleNamespace(sampling_params={}, run_generation=generate)})
     tool = _namespace_tool({"type": kind, "defer_loading": True}, namespaces)
     with pytest.raises(HTTPException) as error:
         await actor._handle_openai_responses("s1", _request(stream=stream, tools=[tool]))
@@ -257,17 +270,12 @@ async def test_responses_ambiguous_flat_tool_names_precede_generation(
 ):
     from fastapi import HTTPException
 
-    from uni_agent.gateway.gateway import _GatewayActor
-
     tools = [
         _namespace_tool({"type": "function", "name": "c", "defer_loading": left_deferred}, left_namespaces),
         _namespace_tool({"type": "custom", "name": right_name, "defer_loading": right_deferred}, right_namespaces),
     ]
     generate = AsyncMock(return_value=_outcome(content="done", finish_reason="stop"))
-    actor = object.__new__(_GatewayActor)
-    actor._sessions = {"s1": SimpleNamespace(sampling_params={}, run_generation=generate)}
-    actor._allowed_request_sampling_param_keys = ALLOWED_SAMPLING_KEYS
-    actor._backend = object()
+    actor = _make_actor(sessions={"s1": SimpleNamespace(sampling_params={}, run_generation=generate)})
     with pytest.raises(HTTPException) as error:
         await actor._handle_openai_responses("s1", _request(stream=stream, tools=tools))
     assert error.value.status_code == 400
@@ -350,13 +358,8 @@ def test_responses_rejects_images_without_supported_sources(source, field):
 async def test_responses_image_source_errors_precede_generation(stream, source):
     from fastapi import HTTPException
 
-    from uni_agent.gateway.gateway import _GatewayActor
-
     generate = AsyncMock(return_value=_outcome(content="done", finish_reason="stop"))
-    actor = object.__new__(_GatewayActor)
-    actor._sessions = {"s1": SimpleNamespace(sampling_params={}, run_generation=generate)}
-    actor._allowed_request_sampling_param_keys = ALLOWED_SAMPLING_KEYS
-    actor._backend = object()
+    actor = _make_actor(sessions={"s1": SimpleNamespace(sampling_params={}, run_generation=generate)})
     with pytest.raises(HTTPException) as error:
         await actor._handle_openai_responses(
             "s1", _request(stream=stream, input=[{"role": "user", "content": [{"type": "input_image", **source}]}])
@@ -578,8 +581,6 @@ async def test_responses_stream_is_consumed_by_openai_sdk(stream_case):
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.asyncio
 async def test_responses_handler_waits_for_generation_before_returning(stream):
-    from uni_agent.gateway.gateway import _GatewayActor
-
     started, release = asyncio.Event(), asyncio.Event()
 
     async def generate(*args):
@@ -587,11 +588,8 @@ async def test_responses_handler_waits_for_generation_before_returning(stream):
         await release.wait()
         return _outcome(content="done", finish_reason="stop")
 
-    actor = object.__new__(_GatewayActor)
     generate_mock = AsyncMock(side_effect=generate)
-    actor._sessions = {"s1": SimpleNamespace(sampling_params={}, run_generation=generate_mock)}
-    actor._allowed_request_sampling_param_keys = ALLOWED_SAMPLING_KEYS
-    actor._backend = object()
+    actor = _make_actor(sessions={"s1": SimpleNamespace(sampling_params={}, run_generation=generate_mock)})
     task = asyncio.create_task(actor._handle_openai_responses("s1", _request(stream=stream)))
     try:
         await asyncio.wait_for(started.wait(), timeout=1)
@@ -605,13 +603,8 @@ async def test_responses_handler_waits_for_generation_before_returning(stream):
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.asyncio
 async def test_responses_generation_errors_precede_stream_headers(stream):
-    from uni_agent.gateway.gateway import _GatewayActor
-
-    actor = object.__new__(_GatewayActor)
     generate = AsyncMock(side_effect=RuntimeError("backend unavailable"))
-    actor._sessions = {"s1": SimpleNamespace(sampling_params={}, run_generation=generate)}
-    actor._allowed_request_sampling_param_keys = ALLOWED_SAMPLING_KEYS
-    actor._backend = object()
+    actor = _make_actor(sessions={"s1": SimpleNamespace(sampling_params={}, run_generation=generate)})
     with pytest.raises(RuntimeError, match="backend unavailable"):
         await actor._handle_openai_responses("s1", _request(stream=stream))
     generate.assert_awaited_once()
@@ -802,13 +795,8 @@ def test_responses_rejects_unknown_or_invalid_message_roles(role):
 async def test_responses_capability_errors_precede_generation(stream, overrides):
     from fastapi import HTTPException
 
-    from uni_agent.gateway.gateway import _GatewayActor
-
     generate = AsyncMock(return_value=_outcome(content="done", finish_reason="stop"))
-    actor = object.__new__(_GatewayActor)
-    actor._sessions = {"s1": SimpleNamespace(sampling_params={}, run_generation=generate)}
-    actor._allowed_request_sampling_param_keys = ALLOWED_SAMPLING_KEYS
-    actor._backend = object()
+    actor = _make_actor(sessions={"s1": SimpleNamespace(sampling_params={}, run_generation=generate)})
     with pytest.raises(HTTPException) as error:
         await actor._handle_openai_responses("s1", _request(stream=stream, **overrides))
     assert error.value.status_code == 400
@@ -887,17 +875,12 @@ def test_unsupported_tool_output_media_is_rejected_before_generation(output, str
     from fastapi import FastAPI
     from httpx import ASGITransport, AsyncClient
 
-    from uni_agent.gateway.gateway import _GatewayActor
-
     async def run():
         session = SimpleNamespace(
             sampling_params={},
             run_generation=AsyncMock(return_value=_outcome(content="done", finish_reason="stop")),
         )
-        gateway = _GatewayActor.__new__(_GatewayActor)
-        gateway._sessions = {"s1": session}
-        gateway._allowed_request_sampling_param_keys = ALLOWED_SAMPLING_KEYS
-        gateway._backend = object()
+        gateway = _make_actor(sessions={"s1": session})
         gateway._app = FastAPI()
         gateway._register_routes()
         async with AsyncClient(transport=ASGITransport(app=gateway._app), base_url="http://test") as client:
@@ -922,13 +905,8 @@ async def _assert_responses_request_fails_before_generation(payload):
     from fastapi import FastAPI
     from httpx import ASGITransport, AsyncClient
 
-    from uni_agent.gateway.gateway import _GatewayActor
-
     generate = AsyncMock(return_value=_outcome(content="done", finish_reason="stop"))
-    actor = object.__new__(_GatewayActor)
-    actor._sessions = {"s1": SimpleNamespace(sampling_params={}, run_generation=generate)}
-    actor._allowed_request_sampling_param_keys = ALLOWED_SAMPLING_KEYS
-    actor._backend = object()
+    actor = _make_actor(sessions={"s1": SimpleNamespace(sampling_params={}, run_generation=generate)})
     actor._app = FastAPI()
     actor._register_routes()
     async with AsyncClient(transport=ASGITransport(app=actor._app), base_url="http://test") as client:
@@ -1112,15 +1090,12 @@ async def test_responses_allowed_sampling_fields_reach_generation_like_chat(stre
     from fastapi import FastAPI
     from httpx import ASGITransport, AsyncClient
 
-    from uni_agent.gateway.gateway import _GatewayActor
-
     base = {"presence_penalty": 0, "seed": 1, "frequency_penalty": 0.3}
     generate = AsyncMock(return_value=_outcome(content="done", finish_reason="stop"))
-    actor = object.__new__(_GatewayActor)
-    actor._sessions = {"s1": SimpleNamespace(sampling_params=base, run_generation=generate)}
-    actor._warned_discarded_request_sampling_param_keys = set()
-    actor._allowed_request_sampling_param_keys = ALLOWED_SAMPLING_KEYS | {"presence_penalty", "seed"}
-    actor._backend = object()
+    actor = _make_actor(
+        sessions={"s1": SimpleNamespace(sampling_params=base, run_generation=generate)},
+        allowed_keys=ALLOWED_SAMPLING_KEYS | {"presence_penalty", "seed"},
+    )
     actor._app = FastAPI()
     actor._register_routes()
     values = {"presence_penalty": 1.5, "seed": 42, "frequency_penalty": 1.8, "stream": stream}
