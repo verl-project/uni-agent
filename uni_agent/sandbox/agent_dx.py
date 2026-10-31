@@ -9,6 +9,8 @@ import os
 import re
 import shlex
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
@@ -291,6 +293,17 @@ class AgentDxSandbox(Sandbox):
     def raise_if_unavailable(self) -> None:
         if self._fatal_error is not None:
             raise self._fatal_error
+
+    async def __aexit__(self, *exc) -> None:
+        await super().__aexit__(*exc)
+        if not exc or exc[0] is None:
+            self.raise_if_unavailable()
+
+    @asynccontextmanager
+    async def entered(self, **start_kwargs: Any) -> AsyncIterator[AgentDxSandbox]:
+        async with super().entered(**start_kwargs):
+            yield self
+        self.raise_if_unavailable()
 
     def _require(self) -> Any:
         self.raise_if_unavailable()

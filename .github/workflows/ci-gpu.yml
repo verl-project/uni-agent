@@ -78,12 +78,13 @@ jobs:
           export PYTHONPATH="${PYTHONPATH}:${GITHUB_WORKSPACE}"
           pytest tests/uni_agent/ -m="gpu and level0" --suppress-no-test-exit-code --cov=./uni_agent/ --cov-report=xml --cov-report=term
 
-      - name: Upload coverage artifact
-        uses: actions/upload-artifact@v4
+      - name: Upload GPU coverage
+        uses: codecov/codecov-action@v4
         with:
-          name: gpu-coverage-report
-          path: coverage.xml
-          retention-days: 1
+          token: ${{ secrets.CODECOV_TOKEN }}
+          file: ./coverage.xml
+          flags: gpu-tests
+          fail_ci_if_error: false
 
   gpu-gate:
     runs-on: ubuntu-latest
@@ -97,17 +98,6 @@ jobs:
             exit 1
           fi
           echo "GPU CI SUCCESS"
-
-  upload:
-    # The self-hosted runner cannot download the uploader through its proxy.
-    needs: [ run, gpu-gate ]
-    uses: ./.github/workflows/upload_coverage_assister.yml
-    with:
-      coverage-file: coverage.xml
-      flags: gpu-tests
-      artifact-name: gpu-coverage-report
-    secrets:
-      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
   cleanup:
     runs-on: ubuntu-latest

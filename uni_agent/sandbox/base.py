@@ -466,21 +466,14 @@ class Sandbox(abc.ABC):
 
     async def __aexit__(self, *exc) -> None:
         await self.stop()
-        if not exc or exc[0] is None:
-            self.raise_if_unavailable()
 
     @asynccontextmanager
     async def entered(self, **start_kwargs: Any) -> AsyncIterator[Sandbox]:
         await self.__aenter__(**start_kwargs)
         try:
             yield self
-            self.raise_if_unavailable()
         finally:
             await self.stop()
-
-    def raise_if_unavailable(self) -> None:
-        """Reject a result after a provider has recorded an unrecoverable fault."""
-        return None
 
     def _is_fatal_exec_error(self, exc: BaseException) -> bool:
         """Whether an infrastructure/configuration error must escape exec's result conversion."""
