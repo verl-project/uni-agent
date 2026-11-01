@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import signal
+import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -11,6 +13,8 @@ from .registry import register_sandbox
 
 if TYPE_CHECKING:
     from .base import SandboxConfig
+
+logger = logging.getLogger(__name__)
 
 
 @register_sandbox("local")
@@ -84,10 +88,10 @@ class LocalSandbox(Sandbox):
         try:
             out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         except asyncio.TimeoutError:
-            _kill_group(proc.pid)
+            _kill_command(proc)
             return ExecResult(exit_code=-1, stdout="", stderr=f"local exec timed out after {timeout}s")
         except BaseException:
-            _kill_group(proc.pid)
+            _kill_command(proc)
             raise
         return ExecResult(exit_code=proc.returncode or 0, stdout=_to_str(out), stderr=_to_str(err))
 
@@ -99,6 +103,60 @@ def _kill_group(pid: int) -> None:
         pass
 
 
+def _kill_command(proc: asyncio.subprocess.Process) -> None:
+    """Kill the original group and groups found in its still-active process tree.
+
+    Snapshot before killing the leader: detached tools retain PPID ancestry until
+    their parents exit. This is best-effort cleanup, not security containment:
+    already-reparented daemons and children created after the snapshot can escape.
+    Extra groups need a recorded member still present; unobserved forks after
+    recorded members exit can be missed, and PID/PGID reuse is not fully fenced.
+    The POSIX ps call has a one-second timeout and can block the event loop on
+    abnormal exits; successful commands do not pay this cost. No pipes are awaited.
+    """
+    groups: dict[int, set[int]] = {proc.pid: {proc.pid}}
+    if proc.returncode is None:
+        try:
+            snapshot = subprocess.run(
+                ["ps", "-A", "-o", "pid=,ppid=,pgid="],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                check=True,
+                timeout=1,
+            )
+            children: dict[int, list[tuple[int, int]]] = {}
+            for line in snapshot.stdout.splitlines():
+                child, parent, group = map(int, line.split())
+                children.setdefault(parent, []).append((child, group))
+            pending, seen = [proc.pid], {proc.pid}
+            while pending:
+                for child, group in children.get(pending.pop(), []):
+                    if child not in seen:
+                        seen.add(child)
+                        pending.append(child)
+                        groups.setdefault(group, set()).add(child)
+        except (OSError, subprocess.SubprocessError, ValueError) as exc:
+            logger.warning("local exec descendant snapshot failed; killing original group only: %s", exc)
+    own_group = os.getpgrp()
+    for group in [proc.pid, *sorted(groups.keys() - {proc.pid})]:
+        if group > 1 and group != own_group:
+            if group != proc.pid and not any(_still_in_group(pid, group) for pid in groups[group]):
+                continue
+            try:
+                _kill_group(group)
+            except OSError as exc:
+                logger.warning("local exec could not terminate process group %s: %s", group, exc)
+
+
+def _still_in_group(pid: int, group: int) -> bool:
+    try:
+        return os.getpgid(pid) == group
+    except (ProcessLookupError, PermissionError):
+        return False
+
+
 def _kill_spawned(spawn: asyncio.Future[asyncio.subprocess.Process]) -> None:
     if not spawn.cancelled() and spawn.exception() is None:
-        _kill_group(spawn.result().pid)
+        _kill_command(spawn.result())

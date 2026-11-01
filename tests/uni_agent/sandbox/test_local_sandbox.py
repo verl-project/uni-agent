@@ -2,6 +2,7 @@ import asyncio
 import os
 import signal
 import time
+from contextlib import suppress
 from pathlib import Path
 
 import pytest
@@ -49,7 +50,9 @@ async def test_exec_timeout_returns_when_a_detached_process_holds_the_pipes(tmp_
     try:
         res = await asyncio.wait_for(LocalSandbox().exec(["bash", "-c", script], timeout=0.5), 5)
     finally:
-        os.kill(await _read_pid(pidfile), signal.SIGKILL)
+        # Descendant-group cleanup may have already terminated and reaped it.
+        with suppress(ProcessLookupError):
+            os.kill(await _read_pid(pidfile), signal.SIGKILL)
     assert res.exit_code == -1 and time.monotonic() - start < 2
 
 

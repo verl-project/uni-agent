@@ -87,6 +87,34 @@ The shared lifecycle uses:
 
 Remote providers should implement `is_alive()` as a non-throwing health probe.
 
+### Local command termination
+
+The POSIX LocalSandbox starts each command in a new session with stdin connected
+to `/dev/null`. Timeout and cancellation terminate the command's process group.
+Cancellation while spawning uses the same cleanup after the process handle
+becomes available. Cleanup sends signals without waiting for inherited stdout or
+stderr pipes to close.
+
+Some harnesses, including OpenCode 1.19.3, create additional sessions for their
+tools. Before terminating a still-active command, LocalSandbox takes a POSIX
+`ps` snapshot and follows PPID ancestry to find those descendant groups. It
+signals the original group and extra groups that still have an observed member.
+Snapshot or signal failures produce warnings; a timeout result or propagated
+cancellation alone is not proof that all descendants exited.
+
+This is best-effort cleanup of an active process tree, not containment. A child
+that was already reparented, a process created after the snapshot, a permission
+failure, or PID/PGID reuse can defeat this mechanism. A normal shell background
+job can be reparented after its shell exits; this limitation does not require
+hostile daemonization. LocalSandbox does not provide container isolation.
+
+The snapshot requires POSIX `ps`, adds a subprocess on abnormal termination, and
+uses a one-second timeout. It is synchronous and can delay the event loop,
+especially during many simultaneous cancellations. Normal completion keeps its
+existing behavior, including redirected background jobs continuing to run. No
+Python dependency or public configuration changes are required. This POSIX
+mechanism does not implement Windows Job Object cleanup.
+
 ## Data Plane
 
 `SandboxBackend` exposes:
