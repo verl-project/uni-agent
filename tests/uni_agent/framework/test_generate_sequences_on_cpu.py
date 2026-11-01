@@ -1819,8 +1819,8 @@ async def test_generate_sequences_marks_prompt_failure_when_all_sessions_fail(fa
         val_n=2,
     )
 
-    with pytest.raises(RuntimeError, match="All rollouts failed at global_steps=9"):
-        await framework.generate_sequences(_build_prompts(count=1, global_steps=9, validate=True))
+    # Empty validation outputs still settle the original expected sample count.
+    await framework.generate_sequences(_build_prompts(count=1, global_steps=9, validate=True))
 
     assert fake_tq.batch_puts == []
     assert fake_tq.puts == [
@@ -1998,6 +1998,19 @@ async def test_ray_task_termination_cancels_runner_and_aborts_session(monkeypatc
 
     remote_started = asyncio.Event()
     cancel_calls: list[dict] = []
+    trace_finishes = []
+    create_trace = framework_module.agent_loop_session
+
+    def observe_trace(**kwargs):
+        trace = create_trace(**kwargs)
+
+        def finish(**result):
+            trace_finishes.append(result)
+            return trace.finish(**result)
+
+        return types.SimpleNamespace(identity=trace.identity, finish=finish)
+
+    monkeypatch.setattr(framework_module, "agent_loop_session", observe_trace)
 
     class _TaskCancelledError(Exception):
         pass
@@ -2056,6 +2069,9 @@ async def test_ray_task_termination_cancels_runner_and_aborts_session(monkeypatc
     # so no force-kill escalation happened.
     assert [call["force"] for call in cancel_calls] == [False]
     assert runtime.aborted_sessions, "terminated session must be aborted"
+    assert len(trace_finishes) == 1
+    assert trace_finishes[0]["status"] == "failure"
+    assert trace_finishes[0]["trajectories"] == []
 
 
 @pytest.mark.cpu

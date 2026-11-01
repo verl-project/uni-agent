@@ -231,7 +231,7 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
     Install the sandbox SDK:
 
     ```bash
-    pip install openyuanrong-sandbox
+    pip install openyuanrong-sandbox==0.10.2rc9
     ```
 
     Configure the service endpoint and credentials through environment variables:

@@ -58,8 +58,16 @@ def _sandbox(*, add_to_path: list[str] | None = None) -> tuple[OpenyuanrongSandb
 
 @pytest.mark.cpu
 @pytest.mark.level0
-def test_exec_prepends_paths_without_overwriting_remote_path():
+def test_exec_prepends_paths_without_overwriting_remote_path(monkeypatch):
+    from uni_agent.sandbox import _openyuanrong_command
+
     sandbox, commands, _ = _sandbox(add_to_path=["/opt/claude-code/bin", "/opt/other/bin"])
+
+    async def execute(sb, connection, command, *, env, workdir, timeout, check_interval, is_current):
+        assert sb is sandbox._sandbox and is_current()
+        return commands.run(command, envs=env, cwd=workdir, timeout=timeout)
+
+    monkeypatch.setattr(_openyuanrong_command, "execute_command", execute)
 
     result = asyncio.run(sandbox._exec(["claude", "--version"], env={"TEST": "1"}))
 

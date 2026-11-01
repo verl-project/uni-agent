@@ -8,3 +8,5 @@ vllm==0.23.0
 ray==2.54.1
 loguru
 pyzmq
+# Required by the V1 trainer integration and its collection tests.
+TransferQueue==0.1.11

@@ -1700,6 +1700,7 @@ async def test_multiple_chains_terminal_state_rejects_late_commit(terminal_actio
         assert [_decode_response_ids(trajectory.response_ids) for trajectory in terminal_result] == ["FIRST"]
     else:
         await session.abort()
+        assert pending_task.done(), "Aborting must drain generation, not just reject its late commit"
 
     pending_backend.release_call(0)
     with pytest.raises(HTTPException) as exc_info:
