@@ -202,6 +202,17 @@ missing-CLI cleanup. The missing-CLI case needs no OpenCode installation; it
 still opens a temporary loopback server. Default CI does not provision the
 native CLI, so a green CPU job alone does not establish black-box compatibility.
 
+### Cross-PR process cleanup regression
+
+The original CLI probe above records leaks and uses emergency PID cleanup; its
+passing result is not a cleanup guarantee. The separate
+[`test_opencode_process_cleanup.py`](../../tests/uni_agent/agents/test_opencode_process_cleanup.py)
+checks request and active-tool timeout/cancellation with the real pinned CLI.
+It asserts that tracked processes have exited **before** emergency cleanup, and
+a passing case must send no rescue signals. See
+[PROCESS_CLEANUP.md](PROCESS_CLEANUP.md) for the #292 + #234 comparison, the small
+Sandbox follow-up, reproducible commands, and the remaining containment limits.
+
 ## Sources
 
 - [OpenCode CLI documentation](https://opencode.ai/docs/cli/)
