@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "recipes": {
+    "opencode": {
+      "context": ".",
+      "dockerfile": "Dockerfile",
+      "image": "opencode-tool",
+      "tag": "{OPENCODE_VERSION}",
+      "platform": "linux/amd64",
+      "mount_target": "/opt/opencode",
+      "entrypoint": ["/opt/opencode/bin/opencode"],
+      "probe_argv": ["/opt/opencode/bin/probe.sh"],
+      "version_arg": "OPENCODE_VERSION",
+      "build_args": {
+        "BASE_IMAGE": "alpine:3.22.2@sha256:4b7ce07002c69e8f3d704a9c5d6fd3053be500b7f1c69fc0d80990c2ad8dd412",
+        "OPENCODE_VERSION": "1.18.18",
+        "NPM_REGISTRY": "https://registry.npmjs.org",
+        "OPENCODE_SHA512": "7170f580067e4d399d137b675b2e6a3ecb598eb9db3e0d2b3d4c2d70778b69e07e298c50584a227b573cf2862665f43e45623afbff8b2c5d05536f54c9dd4daf",
+        "RG_VERSION": "15.1.0",
+        "RG_SHA256": "1c9297be4a084eea7ecaedf93eb03d058d6faae29bbc57ecdaf5063921491599"
+      }
+    }
+  }
+}
