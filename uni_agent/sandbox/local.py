@@ -16,6 +16,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Retain deferred spawn cleanups even after their cancelled caller has returned.
+_cleanup_tasks: set[asyncio.Future[None]] = set()
+
 
 @register_sandbox("local")
 class LocalSandbox(Sandbox):
@@ -88,10 +91,10 @@ class LocalSandbox(Sandbox):
         try:
             out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         except asyncio.TimeoutError:
-            _kill_command(proc)
+            await _await_cleanup(proc)
             return ExecResult(exit_code=-1, stdout="", stderr=f"local exec timed out after {timeout}s")
         except BaseException:
-            _kill_command(proc)
+            await _await_cleanup(proc)
             raise
         return ExecResult(exit_code=proc.returncode or 0, stdout=_to_str(out), stderr=_to_str(err))
 
@@ -111,8 +114,8 @@ def _kill_command(proc: asyncio.subprocess.Process) -> None:
     already-reparented daemons and children created after the snapshot can escape.
     Extra groups need a recorded member still present; unobserved forks after
     recorded members exit can be missed, and PID/PGID reuse is not fully fenced.
-    The POSIX ps call has a one-second timeout and can block the event loop on
-    abnormal exits; successful commands do not pay this cost. No pipes are awaited.
+    Called in the default executor: the one-second ps timeout does not block the
+    event loop. Successful commands do not pay this cost. No pipes are awaited.
     """
     groups: dict[int, set[int]] = {proc.pid: {proc.pid}}
     if proc.returncode is None:
@@ -159,4 +162,38 @@ def _still_in_group(pid: int, group: int) -> bool:
 
 def _kill_spawned(spawn: asyncio.Future[asyncio.subprocess.Process]) -> None:
     if not spawn.cancelled() and spawn.exception() is None:
-        _kill_command(spawn.result())
+        _start_cleanup(spawn.result())
+
+
+def _start_cleanup(proc: asyncio.subprocess.Process) -> asyncio.Future[None]:
+    # Submit immediately: a deferred coroutine could be cancelled by loop
+    # shutdown before ever submitting its worker. asyncio.run drains this
+    # executor on shutdown, including cleanups detached from spawn callers.
+    task = asyncio.get_running_loop().run_in_executor(None, _kill_command, proc)
+    _cleanup_tasks.add(task)
+    task.add_done_callback(_cleanup_finished)
+    return task
+
+
+def _cleanup_finished(task: asyncio.Future[None]) -> None:
+    _cleanup_tasks.discard(task)
+    if not task.cancelled() and (error := task.exception()) is not None:
+        logger.warning("local exec deferred cleanup failed: %s", error)
+
+
+async def _await_cleanup(proc: asyncio.subprocess.Process) -> None:
+    # shield prevents a second cancellation from cancelling the wrapper task
+    # while its thread still owns live process cleanup. Keep waiting for that
+    # same task; do not start duplicate snapshots or return before signalling.
+    task = _start_cleanup(proc)
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.cancelled():
+                raise
+            cancelled = True
+    task.result()
+    if cancelled:
+        raise asyncio.CancelledError

@@ -371,3 +371,84 @@ async def test_exec_concurrent_detached_trees_exit_before_rescue(tmp_path, monke
         await asyncio.wait_for(sibling.wait(), 5)
         for proc in spawned:
             await asyncio.wait_for(proc.wait(), 5)
+
+
+@pytest.mark.parametrize("stop", ["cancel", "timeout"])
+@pytest.mark.parametrize("repeat_cancel", [False, True])
+async def test_slow_snapshot_keeps_loop_responsive_and_cleanup_owned(tmp_path, monkeypatch, stop, repeat_cancel):
+    """The caller must retain cleanup ownership while unrelated loop work proceeds."""
+    import threading
+
+    entered, release = threading.Event(), threading.Event()
+    original_run = subprocess.run
+
+    def gated_snapshot(argv, **kwargs):
+        if argv == ["ps", "-A", "-o", "pid=,ppid=,pgid="]:
+            entered.set()
+            release.wait(2)  # finite negative control on the old synchronous implementation
+        return original_run(argv, **kwargs)
+
+    monkeypatch.setattr(local.subprocess, "run", gated_snapshot)
+    script = _worker(tmp_path)
+    task = asyncio.create_task(
+        LocalSandbox().exec(
+            [sys.executable, str(script), str(tmp_path), "parent", "detached"],
+            timeout=0.5 if stop == "timeout" else 30,
+        )
+    )
+    try:
+        tree = await _records(tmp_path, ("parent", "detached", "leaf"))
+        assert all(_running(record["pid"]) for record in tree.values())
+        if stop == "cancel":
+            task.cancel()
+        deadline = asyncio.get_running_loop().time() + 5
+        while not entered.is_set():
+            assert asyncio.get_running_loop().time() < deadline
+            await asyncio.sleep(0.01)
+        assert not task.done(), "cleanup blocked the loop until the snapshot gate expired"
+        if repeat_cancel:
+            task.cancel()
+            await asyncio.sleep(0)
+            task.cancel()
+        other = await asyncio.wait_for(LocalSandbox().exec([sys.executable, "-c", "print('responsive')"]), 1)
+        assert other.stdout.strip() == "responsive"
+        assert not task.done(), "repeated cancellation abandoned unfinished cleanup"
+        release.set()
+        if stop == "cancel" or repeat_cancel:
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 5)
+        else:
+            assert (await asyncio.wait_for(task, 5)).exit_code == -1
+        await _assert_stopped([record["pid"] for record in tree.values()])
+    finally:
+        release.set()
+        await _rescue(tmp_path, task)
+
+
+async def test_deferred_spawn_cleanup_is_submitted_before_asyncio_shutdown(tmp_path):
+    # A separate asyncio.run exercises shutdown; a pytest loop cannot test its own
+    # shutdown. No actual signals: the worker records completion after a delay.
+    marker = tmp_path / "completed"
+    script = """
+import asyncio, pathlib, time
+from types import SimpleNamespace
+from uni_agent.sandbox import local
+
+def cleanup(proc):
+    time.sleep(0.05)
+    pathlib.Path(proc.marker).write_text('completed')
+
+local._kill_command = cleanup
+async def main():
+    spawn = asyncio.get_running_loop().create_future()
+    spawn.set_result(SimpleNamespace(marker=MARKER))
+    local._kill_spawned(spawn)
+    # Return immediately, without yielding to any newly created cleanup Task.
+asyncio.run(main())
+""".replace("MARKER", repr(str(marker)))
+    result = await asyncio.create_subprocess_exec(
+        sys.executable, "-c", script, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    stdout, stderr = await asyncio.wait_for(result.communicate(), 5)
+    assert result.returncode == 0, (stdout, stderr)
+    assert marker.read_text() == "completed"

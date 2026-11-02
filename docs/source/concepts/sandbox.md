@@ -109,8 +109,15 @@ job can be reparented after its shell exits; this limitation does not require
 hostile daemonization. LocalSandbox does not provide container isolation.
 
 The snapshot requires POSIX `ps`, adds a subprocess on abnormal termination, and
-uses a one-second timeout. It is synchronous and can delay the event loop,
-especially during many simultaneous cancellations. Normal completion keeps its
+uses a one-second timeout. Snapshot and signalling run in the event loop's default
+executor, so they do not block unrelated event-loop work. The caller waits for
+cleanup even if cancelled again; cancellation received during timeout cleanup is
+propagated after cleanup. Executor queueing adds to the snapshot timeout: this is
+not a one-second end-to-end cancellation bound. Spawn-time cancellation still
+returns before the handle exists; its later cleanup is retained and submitted
+immediately when spawning completes. Applications must let spawning finish and
+drain the default executor on shutdown (as `asyncio.run` does). Abrupt process or
+custom event-loop shutdown cannot guarantee cleanup. Normal completion keeps its
 existing behavior, including redirected background jobs continuing to run. No
 Python dependency or public configuration changes are required. This POSIX
 mechanism does not implement Windows Job Object cleanup.
