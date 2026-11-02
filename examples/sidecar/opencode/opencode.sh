@@ -17,4 +17,7 @@ fi
 
 PATH="/opt/opencode/bin:${PATH:-/usr/local/bin:/usr/bin:/bin}"
 export PATH
-exec /opt/opencode/libexec/opencode "$@"
+# Override musl's lookup for this executable only. Keep the caller's environment
+# intact for task tools: clearing or exporting a replacement LD_LIBRARY_PATH
+# would break tools that need their own glibc/custom libraries.
+exec /opt/opencode/lib/ld.so --library-path /opt/opencode/lib /opt/opencode/libexec/opencode "$@"
