@@ -154,13 +154,20 @@ async def test_exec_stops_detached_tool_group_but_not_unrelated_sibling(tmp_path
         await _rescue(tmp_path, task, sibling)
 
 
-async def test_exec_snapshot_failure_still_kills_original_group(tmp_path, monkeypatch, caplog):
+@pytest.mark.parametrize("failure", ["timeout", "missing", "nonzero", "malformed"])
+async def test_exec_snapshot_failure_still_kills_original_group(tmp_path, monkeypatch, caplog, failure):
     script = _worker(tmp_path)
     original_run = subprocess.run
 
     def fail_snapshot(argv, **kwargs):
         if argv[:3] == ["ps", "-A", "-o"]:
-            raise subprocess.TimeoutExpired(argv, timeout=1)
+            if failure == "timeout":
+                raise subprocess.TimeoutExpired(argv, timeout=1)
+            if failure == "missing":
+                raise FileNotFoundError("injected missing ps")
+            if failure == "nonzero":
+                raise subprocess.CalledProcessError(1, argv)
+            return subprocess.CompletedProcess(argv, 0, "malformed process table")
         return original_run(argv, **kwargs)
 
     monkeypatch.setattr(local.subprocess, "run", fail_snapshot)
@@ -283,3 +290,84 @@ async def test_extra_group_is_revalidated_using_all_observed_members(monkeypatch
     local._kill_command(SimpleNamespace(pid=parent, returncode=None))
     expected = [parent, leader] if member_state == "surviving-member" else [parent]
     assert signalled == [(group, signal.SIGKILL) for group in expected]
+
+
+@pytest.mark.parametrize("count", [8, 32])
+@pytest.mark.parametrize("stop", ["cancel", "spawn-cancel", "timeout"])
+async def test_exec_concurrent_detached_trees_exit_before_rescue(tmp_path, monkeypatch, count, stop):
+    """Start all descendants before triggering a burst; never count rescue as success."""
+    script = _worker(tmp_path)
+    gate = asyncio.Event()
+    original_create = asyncio.create_subprocess_exec
+    spawned = []
+
+    async def delayed_create(*args, **kwargs):
+        proc = await original_create(*args, **kwargs)
+        spawned.append(proc)
+        if stop == "spawn-cancel":
+            await gate.wait()
+        return proc
+
+    sibling = await original_create(
+        sys.executable,
+        "-c",
+        "import time; time.sleep(60)",
+        start_new_session=True,
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", delayed_create)
+    directories = [tmp_path / str(i) for i in range(count)]
+    tasks = []
+    # wait_for's timer starts only after this gate: every timeout tests a live tree.
+    communicate_gate = asyncio.Event()
+    if stop == "timeout":
+        # A controlled wait_for wrapper arms each timeout only after fixture readiness.
+        original_wait_for = local.asyncio.wait_for
+
+        async def ready_wait_for(awaitable, timeout):
+            if timeout == 0.15:
+                await communicate_gate.wait()
+            return await original_wait_for(awaitable, timeout)
+
+        monkeypatch.setattr(local.asyncio, "wait_for", ready_wait_for)
+    try:
+        for directory in directories:
+            directory.mkdir()
+            tasks.append(
+                asyncio.create_task(
+                    LocalSandbox().exec(
+                        [sys.executable, str(script), str(directory), "parent", "detached"],
+                        timeout=0.15 if stop == "timeout" else 30,
+                    )
+                )
+            )
+        trees = await asyncio.gather(*(_records(d, ("parent", "detached", "leaf")) for d in directories))
+        pids = [record["pid"] for tree in trees for record in tree.values()]
+        assert all(_running(pid) for pid in pids)
+        assert _running(sibling.pid)
+        if stop == "timeout":
+            communicate_gate.set()
+        else:
+            for task in tasks:
+                task.cancel()
+                task.cancel()  # repeated cancellation must still trigger cleanup
+        results = await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), 15)
+        if stop == "timeout":
+            assert all(getattr(result, "exit_code", None) == -1 for result in results)
+        else:
+            assert all(isinstance(result, asyncio.CancelledError) for result in results)
+        gate.set()
+        await _assert_stopped(pids)
+        assert _running(sibling.pid), "burst cleanup killed an unrelated sibling"
+    finally:
+        gate.set()
+        communicate_gate.set()
+        for directory, task in zip(directories, tasks, strict=False):
+            await _rescue(directory, task)
+        if sibling.returncode is None:
+            sibling.kill()
+        await asyncio.wait_for(sibling.wait(), 5)
+        for proc in spawned:
+            await asyncio.wait_for(proc.wait(), 5)
