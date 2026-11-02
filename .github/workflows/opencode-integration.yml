@@ -64,10 +64,12 @@ jobs:
           CLI_VERSION: '${{ matrix.version }}'
         run: |
           mkdir -p results
-          args=()
           if [ "$CLI_VERSION" = 1.19.3 ]; then
-            args+=(--build-arg OPENCODE_VERSION=1.19.3 --build-arg OPENCODE_SHA512=11d46c02fd50140d73da20bc66628a75322d6a57dbe5eb37cd124958dcb11d687f0be2b0038b29780dff42adab3de2b3c78c5f8ddaac519ab40617018ffec3c6)
+            checksum=11d46c02fd50140d73da20bc66628a75322d6a57dbe5eb37cd124958dcb11d687f0be2b0038b29780dff42adab3de2b3c78c5f8ddaac519ab40617018ffec3c6
+          else
+            checksum=7170f580067e4d399d137b675b2e6a3ecb598eb9db3e0d2b3d4c2d70778b69e07e298c50584a227b573cf2862665f43e45623afbff8b2c5d05536f54c9dd4daf
           fi
+          args=(--build-arg "OPENCODE_VERSION=$CLI_VERSION" --build-arg "OPENCODE_SHA512=$checksum")
           docker build --progress=plain "${args[@]}" -t ua-opencode-integration examples/sidecar/opencode 2>&1 | tee results/build.log
           docker image inspect ua-opencode-integration > results/image.json
           cid=$(docker create ua-opencode-integration /bin/true)
