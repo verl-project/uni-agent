@@ -13,9 +13,9 @@ jobs:
   detect:
     runs-on: ubuntu-latest
     outputs:
-      cpu: ${{ steps.filter-cpu.outputs.cpu }}
-      gpu: ${{ steps.filter.outputs.gpu }}
-      npu: ${{ steps.filter.outputs.npu }}
+      cpu: ${{ steps.detect-level0.outputs.cpu }}
+      gpu: ${{ steps.detect-level0.outputs.gpu }}
+      npu: ${{ steps.detect-level0.outputs.npu }}
     steps:
       - uses: actions/checkout@v4
       - uses: dorny/paths-filter@v3
@@ -28,3 +28,66 @@ jobs:
         with:
           filters: tests/uni_agent/filter-paths.yml
           predicate-quantifier: 'every'
+
+      # 1. git clone code
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      # 2. set up python
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          cache: 'pip'
+
+      # 3. install dependencies
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements-test.txt
+          
+          git clone --branch v4.1.0 https://github.com/princeton-nlp/SWE-bench.git
+          cd SWE-bench
+          pip install -e .
+
+      # 4. Check whether test cases contain both <backend> and level0 markers,
+      #    then intersect with the corresponding path-filter result.
+      - name: Detect backend+level0 test cases
+        id: detect-level0
+        run: |
+          export PYTHONPATH="${PYTHONPATH}:${GITHUB_WORKSPACE}"
+
+          has_level0() {
+            # Collect test cases matching "<backend> and level0" markers.
+            pytest tests/uni_agent/ --collect-only -q -m "$1 and level0" | grep -q "::"
+          }
+
+          emit() {
+            local backend="$1"
+            local has="$2"
+            local filter_val="$3"
+            local result="false"
+            if [[ "$has" == "true" && "$filter_val" == "true" ]]; then
+              result="true"
+            fi
+
+            echo "[detect-level0] backend=${backend} has_${backend}_level0_cases=${has} path_filter=${filter_val} final=${result}"
+            echo "${backend}=${result}" >> "$GITHUB_OUTPUT"
+          }
+
+          for backend in cpu gpu npu; do
+            if has_level0 "$backend"; then
+              HAS_LEVEL0="true"
+            else
+              HAS_LEVEL0="false"
+            fi
+
+            case "$backend" in
+              cpu) FILTER_VAL="${{ steps.filter-cpu.outputs.cpu }}" ;;
+              gpu) FILTER_VAL="${{ steps.filter.outputs.gpu }}" ;;
+              npu) FILTER_VAL="${{ steps.filter.outputs.npu }}" ;;
+            esac
+
+            emit "$backend" "$HAS_LEVEL0" "$FILTER_VAL"
+          done

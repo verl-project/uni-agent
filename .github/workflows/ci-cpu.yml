@@ -62,6 +62,7 @@ jobs:
 
       - name: Upload CPU coverage
         uses: codecov/codecov-action@v4
+        continue-on-error: true
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           file: ./coverage.xml
@@ -75,7 +76,7 @@ jobs:
     steps:
       - name: Report result
         run: |
-          if [[ "${{ needs.run.result }}" == "failure" ]]; then
+          if [[ "${{ needs.run.result }}" == "failure" || "${{ needs.changes.result }}" != "success" ]]; then
             echo "CPU CI FAILED"
             exit 1
           fi

@@ -79,7 +79,7 @@ jobs:
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v4
         with:
-          name: coverage-report
+          name: npu-coverage-report
           path: coverage.xml
           retention-days: 1
 
@@ -90,7 +90,7 @@ jobs:
     steps:
       - name: Report result
         run: |
-          if [[ "${{ needs.run.result }}" == "failure" ]]; then
+          if [[ "${{ needs.run.result }}" == "failure" || "${{ needs.changes.result }}" != "success" ]]; then
             echo "NPU CI FAILED"
             exit 1
           fi
@@ -99,10 +99,10 @@ jobs:
   upload:
     # Call upload workflow, which is running in Ubuntu provided by GitHub
     needs: [ run, npu-gate ]
-    uses: ./.github/workflows/upload_npu_assister.yml
+    uses: ./.github/workflows/upload_coverage_assister.yml
     with:
       coverage-file: coverage.xml
       flags: npu-tests
-      artifact-name: coverage-report
+      artifact-name: npu-coverage-report
     secrets:
       CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
