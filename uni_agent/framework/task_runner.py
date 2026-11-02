@@ -8,6 +8,8 @@ from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 from uni_agent.rl_insight.adapter import task_span
+from uni_agent.sandbox import Sandbox
+from uni_agent.sandbox.registry import get_sandbox_cls
 from uni_agent.tasks import TaskConfigResolver, TaskResult, get_task
 from uni_agent.tasks.config import _deep_merge
 
@@ -29,19 +31,12 @@ def _rewrite_gateway_url(gateway_url: str, proxy_port: int) -> str:
 
 
 def _extract_upstream(gateway_url: str) -> str | None:
-    """Extract ``host:port`` from a gateway URL (the tunnel's ``upstream``).
-
-    Returns ``None`` when the URL carries no host or port, so callers can fail
-    loudly instead of forwarding a ``None:None`` upstream.
-    """
-    parsed = urlparse(gateway_url)
-    if not parsed.hostname or not parsed.port:
-        return None
-    return f"{parsed.hostname}:{parsed.port}"
+    """Return the default Sandbox upstream format."""
+    return Sandbox.tunnel_upstream(gateway_url)
 
 
 def _inject_gateway_tunnel(task: dict[str, Any], base_url: str) -> dict[str, Any]:
-    """Fill the runtime side of an openyuanrong gateway reverse tunnel.
+    """Fill the runtime side of a provider's gateway reverse tunnel.
 
     The sandbox config declares its tunnel port via ``sandbox_kwargs.proxy_port``;
     only the runtime-derived pieces are injected here: ``upstream`` (the gateway
@@ -50,22 +45,26 @@ def _inject_gateway_tunnel(task: dict[str, Any], base_url: str) -> dict[str, Any
     itself stays tunnel-agnostic -- it just sees a base_url that already points at
     ``127.0.0.1:<proxy_port>``.
 
-    The reverse tunnel is currently supported only on the openyuanrong sandbox;
-    configuring ``proxy_port`` on any other provider is rejected loudly instead of
+    Providers declare support with ``supports_reverse_tunnel``; configuring
+    ``proxy_port`` on an unsupported provider is rejected loudly instead of
     being silently ignored (which would leave the agent pointed at an unreachable
     ``127.0.0.1`` address).
     """
     provider = (task.get("sandbox") or {}).get("provider")
-    if provider != "openyuanrong":
+    sandbox_cls = get_sandbox_cls(provider) if provider else None
+    if sandbox_cls is None or not sandbox_cls.supports_reverse_tunnel:
         raise ValueError(
-            "the gateway reverse tunnel (sandbox.sandbox_kwargs.proxy_port) is currently "
-            f"supported only on 'openyuanrong' sandboxes, got provider={provider!r}; "
+            "the gateway reverse tunnel (sandbox.sandbox_kwargs.proxy_port) is "
+            "supported only on providers declaring supports_reverse_tunnel=True, "
+            f"got provider={provider!r}; "
             "switch the sandbox provider or drop proxy_port"
         )
-    upstream = _extract_upstream(base_url)
+    proxy_port = task["sandbox"]["sandbox_kwargs"]["proxy_port"]
+    if isinstance(proxy_port, bool) or not isinstance(proxy_port, int) or not 2 <= proxy_port <= 65535:
+        raise ValueError("gateway tunnel proxy_port must be an integer between 2 and 65535")
+    upstream = sandbox_cls.tunnel_upstream(base_url)
     if upstream is None:
         raise ValueError(f"cannot derive gateway tunnel upstream from base_url={base_url!r}")
-    proxy_port = task["sandbox"]["sandbox_kwargs"]["proxy_port"]
     return _deep_merge(
         task,
         {
@@ -135,13 +134,13 @@ async def run_task(
         },
     )
 
-    # openyuanrong reverse tunnel: the sandbox config pins the in-sandbox tunnel
+    # The sandbox config pins the in-sandbox reverse tunnel
     # port (sandbox_kwargs.proxy_port); only the gateway upstream + the agent's
     # base_url rewrite are runtime-derived (session.base_url), so fill them in
     # here when a tunnel is configured. The provider check lives inside
-    # _inject_gateway_tunnel (rejected loudly for non-Yuanrong sandboxes).
+    # _inject_gateway_tunnel (rejected for providers without tunnel support).
     tunnel_port = (task.get("sandbox") or {}).get("sandbox_kwargs", {}).get("proxy_port")
-    if tunnel_port and session.base_url:
+    if tunnel_port is not None and session.base_url:
         task = _inject_gateway_tunnel(task, session.base_url)
 
     task_name = task.get("name")
