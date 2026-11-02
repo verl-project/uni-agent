@@ -1,6 +1,8 @@
 import asyncio
 import os
 import signal
+import subprocess
+import sys
 import time
 from contextlib import suppress
 from pathlib import Path
@@ -9,15 +11,28 @@ import pytest
 
 from uni_agent.sandbox.local import LocalSandbox
 
-pytestmark = [pytest.mark.cpu, pytest.mark.level0, pytest.mark.asyncio]
+pytestmark = [
+    pytest.mark.cpu,
+    pytest.mark.level0,
+    pytest.mark.asyncio,
+    pytest.mark.skipif(os.name != "posix", reason="requires POSIX process groups and ps"),
+]
 
 
 def _running(pid: int) -> bool:
-    try:
-        stat = Path(f"/proc/{pid}/stat").read_text()
-    except FileNotFoundError:
-        return False
-    return stat.rsplit(")", 1)[1].split()[0] != "Z"
+    # /proc is absent on macOS; a missing procfs entry there is not proof of exit.
+    result = subprocess.run(
+        ["ps", "-o", "stat=", "-p", str(pid)], capture_output=True, text=True, check=False, timeout=2
+    )
+    assert result.returncode in {0, 1} and not result.stderr.strip(), f"cannot observe PID {pid}: {result.stderr}"
+    status = result.stdout.strip()
+    if not status:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        raise AssertionError(f"PID {pid} exists but ps did not return its state")
+    return not status.startswith("Z")
 
 
 async def _read_pid(path: Path) -> int:
@@ -45,10 +60,18 @@ async def test_exec_timeout_kills_background_children(tmp_path):
 
 async def test_exec_timeout_returns_when_a_detached_process_holds_the_pipes(tmp_path):
     pidfile = tmp_path / "pid"
-    script = f"setsid bash -c 'echo $$ > {pidfile}; exec sleep 30' & sleep 30"
+    # Python exposes setsid semantics on both Linux and macOS without requiring
+    # the Linux util-linux command. The detached child inherits the exec pipes.
+    child_script = (
+        f"import os, pathlib, time; pathlib.Path({str(pidfile)!r}).write_text(str(os.getpid())); time.sleep(30)"
+    )
+    script = (
+        "import subprocess, sys, time; "
+        f"subprocess.Popen([sys.executable, '-I', '-c', {child_script!r}], start_new_session=True); time.sleep(30)"
+    )
     start = time.monotonic()
     try:
-        res = await asyncio.wait_for(LocalSandbox().exec(["bash", "-c", script], timeout=0.5), 5)
+        res = await asyncio.wait_for(LocalSandbox().exec([sys.executable, "-I", "-c", script], timeout=0.5), 5)
     finally:
         # Descendant-group cleanup may have already terminated and reaped it.
         with suppress(ProcessLookupError):
@@ -60,6 +83,7 @@ async def test_exec_cancellation_kills_process(tmp_path):
     pidfile = tmp_path / "pid"
     task = asyncio.create_task(LocalSandbox().exec(["bash", "-c", f"echo $$ > {pidfile}; exec sleep 30"]))
     pid = await _read_pid(pidfile)
+    assert _running(pid), "the observer must detect the live fixture before cancellation"
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
@@ -70,9 +94,15 @@ async def test_exec_does_not_inherit_stdin():
     saved, (read_end, write_end) = os.dup(0), os.pipe()
     os.dup2(read_end, 0)
     try:
-        res = await LocalSandbox().exec(["readlink", "/proc/self/fd/0"], timeout=5)
+        # Check the device itself instead of a Linux-only procfs symlink.
+        script = (
+            "import os, stat; actual = os.fstat(0); expected = os.stat(os.devnull); "
+            "print(stat.S_ISCHR(actual.st_mode) and actual.st_rdev == expected.st_rdev)"
+        )
+        res = await LocalSandbox().exec([sys.executable, "-I", "-c", script], timeout=5)
     finally:
         os.dup2(saved, 0)
         for fd in (saved, read_end, write_end):
             os.close(fd)
-    assert res.stdout.strip() == "/dev/null"
+    assert res.exit_code == 0
+    assert res.stdout.strip() == "True"
