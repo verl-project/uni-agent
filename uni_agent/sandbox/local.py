@@ -27,6 +27,10 @@ class LocalSandbox(Sandbox):
     File operations use the host filesystem directly.
     """
 
+    def __init__(self) -> None:
+        self._pending_spawns: set[asyncio.Future[asyncio.subprocess.Process]] = set()
+        self._pending_drains: set[asyncio.Task[None]] = set()
+
     @classmethod
     def from_config(cls, config: SandboxConfig) -> LocalSandbox:
         if config.image is not None:
@@ -41,7 +45,36 @@ class LocalSandbox(Sandbox):
         pass
 
     async def stop(self) -> None:
-        pass
+        """Drain this instance's cancelled commands before closing its event loop.
+
+        Owners must first cancel/join their exec callers; stop does not cancel
+        independently running exec calls. Spawning and executor queueing must
+        make progress. Repeated cancellation cannot abandon this drain.
+        """
+        await _await_cleanup(asyncio.create_task(self._drain_pending()))
+
+    async def _drain_pending(self) -> None:
+        while self._pending_spawns or self._pending_drains:
+            await asyncio.gather(*self._pending_spawns, *self._pending_drains, return_exceptions=True)
+
+    def _kill_spawned(self, spawn: asyncio.Future[asyncio.subprocess.Process]) -> None:
+        try:
+            if not spawn.cancelled() and spawn.exception() is None:
+                self._schedule_cleanup(spawn.result())
+        finally:
+            self._pending_spawns.discard(spawn)
+
+    def _schedule_cleanup(self, proc: asyncio.subprocess.Process) -> asyncio.Future[None]:
+        worker = _start_cleanup(proc)
+        drain = asyncio.create_task(_drain_process(proc, worker))
+        self._pending_drains.add(drain)
+        drain.add_done_callback(self._drain_finished)
+        return worker
+
+    def _drain_finished(self, task: asyncio.Task[None]) -> None:
+        self._pending_drains.discard(task)
+        if not task.cancelled() and (error := task.exception()) is not None:
+            logger.warning("local exec transport drain failed: %s", error)
 
     async def read_file(self, path: str) -> bytes:
         """Read directly from the host filesystem without base64 transport."""
@@ -84,17 +117,18 @@ class LocalSandbox(Sandbox):
             # every pipe closes, which a background grandchild can delay.
             proc = await asyncio.shield(spawn)
         except asyncio.CancelledError:
-            spawn.add_done_callback(_kill_spawned)
+            self._pending_spawns.add(spawn)
+            spawn.add_done_callback(self._kill_spawned)
             raise
         # No proc.wait() after the kill: it also waits for the pipes, which a
         # process that left the group may hold. The event loop reaps the child.
         try:
             out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         except asyncio.TimeoutError:
-            await _await_cleanup(proc)
+            await _await_cleanup(self._schedule_cleanup(proc))
             return ExecResult(exit_code=-1, stdout="", stderr=f"local exec timed out after {timeout}s")
         except BaseException:
-            await _await_cleanup(proc)
+            await _await_cleanup(self._schedule_cleanup(proc))
             raise
         return ExecResult(exit_code=proc.returncode or 0, stdout=_to_str(out), stderr=_to_str(err))
 
@@ -160,9 +194,21 @@ def _still_in_group(pid: int, group: int) -> bool:
         return False
 
 
-def _kill_spawned(spawn: asyncio.Future[asyncio.subprocess.Process]) -> None:
-    if not spawn.cancelled() and spawn.exception() is None:
-        _start_cleanup(spawn.result())
+async def _drain_process(proc: asyncio.subprocess.Process, worker: asyncio.Future[None]) -> None:
+    await asyncio.shield(worker)
+    try:
+        # Read buffered output too: paused pipe readers can otherwise prevent
+        # transport closure even after every target process has exited.
+        await asyncio.wait_for(proc.communicate(), timeout=1)
+    except asyncio.TimeoutError:
+        logger.warning("local exec pipe drain timed out for PID %s; closing local transports", proc.pid)
+        # asyncio.Process has no public close method. This fallback only releases
+        # our pipe resources; it is not proof that an escaped descendant exited.
+        proc._transport.close()  # type: ignore[attr-defined]
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=1)
+        except asyncio.TimeoutError:
+            logger.warning("local exec process exit was not observed for PID %s", proc.pid)
 
 
 def _start_cleanup(proc: asyncio.subprocess.Process) -> asyncio.Future[None]:
@@ -181,11 +227,10 @@ def _cleanup_finished(task: asyncio.Future[None]) -> None:
         logger.warning("local exec deferred cleanup failed: %s", error)
 
 
-async def _await_cleanup(proc: asyncio.subprocess.Process) -> None:
+async def _await_cleanup(task: asyncio.Future[None]) -> None:
     # shield prevents a second cancellation from cancelling the wrapper task
     # while its thread still owns live process cleanup. Keep waiting for that
     # same task; do not start duplicate snapshots or return before signalling.
-    task = _start_cleanup(proc)
     cancelled = False
     while not task.done():
         try:

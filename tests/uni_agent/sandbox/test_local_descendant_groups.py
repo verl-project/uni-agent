@@ -442,7 +442,7 @@ local._kill_command = cleanup
 async def main():
     spawn = asyncio.get_running_loop().create_future()
     spawn.set_result(SimpleNamespace(marker=MARKER))
-    local._kill_spawned(spawn)
+    local.LocalSandbox()._kill_spawned(spawn)
     # Return immediately, without yielding to any newly created cleanup Task.
 asyncio.run(main())
 """.replace("MARKER", repr(str(marker)))
@@ -452,3 +452,100 @@ asyncio.run(main())
     stdout, stderr = await asyncio.wait_for(result.communicate(), 5)
     assert result.returncode == 0, (stdout, stderr)
     assert marker.read_text() == "completed"
+
+
+async def test_stop_owns_delayed_spawn_and_survives_repeated_cancellation(tmp_path, monkeypatch):
+    import threading
+
+    sandbox, unrelated = LocalSandbox(), LocalSandbox()
+    spawn_ready = asyncio.Event()
+    snapshot_entered, release_snapshot = threading.Event(), threading.Event()
+    original_create, original_kill = asyncio.create_subprocess_exec, local._kill_command
+
+    async def delayed_create(*args, **kwargs):
+        proc = await original_create(*args, **kwargs)
+        await spawn_ready.wait()
+        return proc
+
+    def delayed_kill(proc):
+        snapshot_entered.set()
+        assert release_snapshot.wait(5)
+        original_kill(proc)
+
+    monkeypatch.setattr(local.asyncio, "create_subprocess_exec", delayed_create)
+    monkeypatch.setattr(local, "_kill_command", delayed_kill)
+    task = asyncio.create_task(
+        sandbox.exec([sys.executable, str(_worker(tmp_path)), str(tmp_path), "parent", "detached"])
+    )
+    stop = None
+    try:
+        tree = await _records(tmp_path, ("parent", "detached", "leaf"))
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        stop = asyncio.create_task(sandbox.stop())
+        await asyncio.sleep(0)
+        await asyncio.wait_for(unrelated.stop(), 0.5)
+        assert not stop.done(), "stop discarded this instance's unresolved spawn"
+        spawn_ready.set()
+        deadline = asyncio.get_running_loop().time() + 3
+        while not snapshot_entered.is_set():
+            assert asyncio.get_running_loop().time() < deadline
+            await asyncio.sleep(0.01)
+        for _ in range(2):
+            stop.cancel()
+            await asyncio.sleep(0)
+        assert not stop.done(), "cancellation abandoned the owned drain"
+        release_snapshot.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(stop, 5)
+        await _assert_stopped([r["pid"] for r in tree.values()])
+        assert not sandbox._pending_spawns and not sandbox._pending_drains
+        await sandbox.stop()  # teardown is idempotent
+    finally:
+        spawn_ready.set()
+        release_snapshot.set()
+        await _rescue(tmp_path, task)
+        if stop is not None:
+            await asyncio.gather(stop, return_exceptions=True)
+        await sandbox.stop()
+
+
+async def test_stop_bounds_pipe_drain_when_reparented_child_escapes(tmp_path, caplog):
+    # The fixture intentionally leaves the PPID tree, outside best-effort cleanup.
+    marker = tmp_path / "escaped.pid"
+    orphan = (
+        "import os,pathlib,sys,time; parent=os.getpid(); child=os.fork(); "
+        "os._exit(0) if child else None; "
+        "exec('while os.getppid() == parent: time.sleep(0.01)'); "
+        "pathlib.Path(sys.argv[1]).write_text(str(os.getpid())); time.sleep(60)"
+    )
+    parent = (
+        "import subprocess,sys,time; "
+        "subprocess.Popen([sys.executable,'-c',sys.argv[1],sys.argv[2]], start_new_session=True).wait(); "
+        "time.sleep(60)"
+    )
+    sandbox = LocalSandbox()
+    task = asyncio.create_task(sandbox.exec([sys.executable, "-c", parent, orphan, str(marker)]))
+    pid = None
+    try:
+        deadline = asyncio.get_running_loop().time() + 5
+        while not marker.exists() or not marker.read_text():
+            assert asyncio.get_running_loop().time() < deadline
+            await asyncio.sleep(0.02)
+        pid = int(marker.read_text())
+        assert _running(pid)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        await asyncio.wait_for(sandbox.stop(), 4)
+        assert _running(pid), "fixture must actually escape ancestry-based cleanup"
+        assert "pipe drain timed out" in caplog.text
+        assert not sandbox._pending_drains
+    finally:
+        if pid is not None and _running(pid):
+            os.kill(pid, signal.SIGKILL)
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        await sandbox.stop()
