@@ -52,6 +52,15 @@ Mount the payload read-only at `/opt/opencode`, as for the 1.x recipe. The musl
 loader's library path applies to the CLI only, preserving the task tool's own
 `LD_LIBRARY_PATH`, including custom glibc libraries.
 
+For **v2 only**, the task image must also supply `/usr/bin/python3` (3.10+).
+The explicit musl loader becomes Bun's `process.execPath`, so upstream's built-in
+standalone self-spawn would execute the loader without its binary. The sidecar
+supervisor instead starts `serve --stdio --port 0`, keeps its stdin ownership
+lease, and connects the CLI with `--server` and a generated password. Both
+processes use the same bundled loader and inherit the original library
+environment. Closing the lease stops the server, including when the supervisor
+is killed. Native macOS executables use upstream's built-in `--standalone`.
+
 ## Verification
 
 ```sh

@@ -69,6 +69,7 @@ RUN curl --fail --location --retry 3 --retry-all-errors --connect-timeout 30 \
 
 COPY opencode.sh /opt/opencode/bin/opencode
 COPY probe.sh /opt/opencode/bin/probe.sh
+COPY standalone.py /opt/opencode/libexec/standalone.py
 RUN chmod 755 /opt/opencode/bin/opencode /opt/opencode/bin/probe.sh \
     && /opt/opencode/bin/probe.sh
 
