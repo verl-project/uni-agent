@@ -225,7 +225,7 @@ async def test_real_cli_processes_exit_before_test_cleanup(
         identities["cli"] = identity
         if standalone:
             children = subprocess.run(
-                ["ps", "-axo", "pid=,ppid=,args="], capture_output=True, text=True, check=True
+                ["ps", "-axww", "-o", "pid=,ppid=,args="], capture_output=True, text=True, check=True
             ).stdout
             servers = [
                 int(row.split(None, 2)[0])
@@ -235,7 +235,9 @@ async def test_real_cli_processes_exit_before_test_cleanup(
                 and "serve" in row.split()[2:]
                 and "--stdio" in row.split()[2:]
             ]
-            assert len(servers) == 1, children
+            assert len(servers) == 1, [
+                row for row in children.splitlines() if len(row.split()) >= 2 and row.split()[1] == str(proc.pid)
+            ]
             identities["standalone_server"] = _identity(servers[0])
             # A sidecar supervisor also owns a separate --server client.
             for row in children.splitlines():
