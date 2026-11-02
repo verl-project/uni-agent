@@ -100,6 +100,32 @@ legacy probes and error-injection cases are not additional containment evidence.
 Ruff lint/format checks, changed-file compileall and `git diff --check` passed;
 the repository-wide inference/training suite was not run.
 
+### Independent macOS revalidation
+
+The delivered patch bundle was independently reapplied to the pinned #292 head
+on 2026-11-01. All bundled SHA256 checks passed and the resulting Git tree matched
+the reported `8a5a8a822b7fd0567b414ba5b5539fdfd2d4e5f2` exactly before further edits.
+The rerun used macOS 26.5.1 ARM64, Python 3.10.21, and OpenCode 1.19.3, with
+synthetic SSE responses only.
+
+- The unchanged #292 baseline passed its existing 136-test selection.
+- Original #234 plus the cross-PR regression reproduced **2 failures and 2
+  passes**. Both failures were live-tool assertions before emergency cleanup.
+- The exact delivered tree passed all four cross-PR cases with no rescue signals,
+  but its full selection had **152 passes and 2 failures** in Linux-specific tests.
+- The inherited provider tests were then made portable: `ps` replaces `/proc`
+  liveness checks, Python `start_new_session` replaces the external `setsid`
+  command, and `fstat` checks the stdin device without `/proc/self/fd/0`.
+  The cancellation test also checks that its observer detects the live fixture.
+  This avoids false exit assertions on platforms without procfs.
+- With those test-only adjustments, the full selection passed **154 tests**.
+  All four cross-PR cases had empty live-process, rescue-signal, and cleanup-error
+  records. Repository-wide pre-commit checks (Ruff, formatting, mypy and compileall)
+  passed. The production provider patch was unchanged.
+
+These are separate macOS results. The portable test edits have not been rerun
+on Linux; they do not extend the original Linux evidence to a new source tree.
+
 ## Minimal provider follow-up
 
 The patch retains #234's independent session, DEVNULL stdin, shielded spawn,
@@ -135,8 +161,8 @@ may already have reaped the detached process.
   one-second timeout is not a strict wall-clock bound on process creation and
   cleanup. A cancellation burst can serialize this cost. The original PR's
   concurrency benchmarks were not rerun and do not apply to this extension.
-- **Platforms.** Linux x86_64/Python 3.12.14 was exercised. The command syntax and
-  APIs are intended for POSIX, but macOS was not executed here. Windows Job Objects,
+- **Platforms.** The original bundle exercised Linux x86_64/Python 3.12.14;
+  the independent rerun above exercised macOS ARM64/Python 3.10.21. Windows Job Objects,
   remote Sandbox providers, Docker, Ray, production Gateway parsers, real models,
   and RL training were not tested by this work.
 - **Normal completion.** Successful commands retain existing behavior; redirected
