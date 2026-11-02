@@ -29,6 +29,57 @@ from tests.uni_agent.support import (
 ALLOWED_SAMPLING_KEYS = frozenset({"temperature", "top_p", "top_k", "max_tokens", "stop"})
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_gateway_abort_settles_cancelled_generation_before_removing_session():
+    from uni_agent.gateway.config import GatewayActorConfig
+    from uni_agent.gateway.gateway import _GatewayActor
+
+    entered, cleanup_started, release_cleanup, cleanup_finished = (asyncio.Event() for _ in range(4))
+
+    async def generate(**kwargs):
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleanup_started.set()
+            await release_cleanup.wait()
+            cleanup_finished.set()
+
+    actor = _GatewayActor(GatewayActorConfig(tokenizer=FakeTokenizer()), SimpleNamespace(generate=generate))
+    actor._server_base_url = "http://test"
+    await actor.create_session("abort-http")
+    generation = asyncio.create_task(
+        actor._handle_openai_chat_completions("abort-http", {"messages": [{"role": "user", "content": "hello"}]})
+    )
+    aborts = []
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        generation.cancel()
+        await asyncio.wait_for(cleanup_started.wait(), timeout=5)
+        aborts = [asyncio.create_task(actor.abort_session("abort-http")) for _ in range(2)]
+        for _ in range(2):
+            await asyncio.sleep(0)
+            aborts[0].cancel()
+        assert "abort-http" in actor._sessions
+        assert all(not task.done() for task in (generation, *aborts))
+        assert not cleanup_finished.is_set()
+
+        release_cleanup.set()
+        results = await asyncio.wait_for(asyncio.gather(*aborts, return_exceptions=True), timeout=5)
+        assert isinstance(results[0], asyncio.CancelledError)
+        assert results[1] is None
+        with pytest.raises(asyncio.CancelledError):
+            await generation
+        assert cleanup_finished.is_set()
+        assert "abort-http" not in actor._sessions
+    finally:
+        release_cleanup.set()
+        generation.cancel()
+        await asyncio.gather(generation, *aborts, return_exceptions=True)
+
+
 async def fake_tool_call_dispatch(self, response_ids, tools, parser_name):
     text = self._tokenizer.decode(response_ids, skip_special_tokens=False)
     if "<tool_call>" not in text:
