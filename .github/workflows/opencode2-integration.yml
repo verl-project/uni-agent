@@ -1,0 +1,69 @@
+name: OpenCode 2.2.5 integration
+on:
+  push:
+    branches: [codex/opencode-2x-adapter]
+  workflow_dispatch:
+  pull_request:
+    branches: [feat/opencode-recipe]
+    paths:
+      - "uni_agent/agents/opencode*/**"
+      - "uni_agent/agents/registry.py"
+      - "tests/uni_agent/agents/test_opencode*"
+      - "examples/opencode/**"
+      - "examples/sidecar/opencode/**"
+      - ".github/workflows/opencode2-integration.yml"
+permissions:
+  contents: read
+defaults:
+  run:
+    shell: bash
+jobs:
+  sidecar:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.10', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '${{ matrix.python }}'
+      - run: python -m pip install -r scripts/validation/opencode-phase1-requirements.txt
+      - name: Build pinned native Linux musl payload
+        run: |
+          mkdir -p results
+          docker build --progress=plain \
+            --build-arg OPENCODE_VERSION=2.2.5 \
+            --build-arg OPENCODE_PACKAGE=@opencode/cli-linux-x64-baseline-musl \
+            --build-arg OPENCODE_SHA512=bae1fce61b19330d03ff788ede0205d34c1197ef8e7d24673090055eae5c324927d32f744aed25c73ac6f73820bc9aab326fca8123136b884cccec9b687b22a4 \
+            -t ua-opencode2 examples/sidecar/opencode 2>&1 | tee results/build.log
+          docker image inspect ua-opencode2 > results/image.json
+          cid=$(docker create ua-opencode2 /bin/true)
+          mkdir -p "$RUNNER_TEMP/payload"
+          docker export "$cid" | tar -x -C "$RUNNER_TEMP/payload"
+          docker rm "$cid"
+          sudo mkdir -p /opt/opencode
+          sudo mount --bind "$RUNNER_TEMP/payload" /opt/opencode
+          sudo mount -o remount,bind,ro /opt/opencode
+          /opt/opencode/bin/probe.sh | tee results/startup.log
+      - name: Adapter, Task scoring, standalone cleanup and tool libraries
+        env:
+          OPENCODE2_BIN: /opt/opencode/bin/opencode
+          OPENCODE2_SIDECAR_BIN: /opt/opencode/bin/opencode
+        run: |
+          PYTHONPATH=. python -m pytest tests/uni_agent/agents/test_opencode2_agent.py \
+            tests/uni_agent/agents/test_opencode2_cli.py tests/uni_agent/agents/test_opencode_agent.py \
+            tests/uni_agent/sandbox/test_local_sandbox.py tests/uni_agent/sandbox/test_local_descendant_groups.py \
+            -q -s --tb=short --junitxml=results/tests.xml | tee results/tests.log
+          python - <<'PY'
+          import xml.etree.ElementTree as ET
+          suites = list(ET.parse('results/tests.xml').getroot().iter('testsuite'))
+          assert suites and all(int(s.attrib[k]) == 0 for s in suites for k in ['failures','errors','skipped'])
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: opencode2-linux-python-${{ matrix.python }}
+          path: results/

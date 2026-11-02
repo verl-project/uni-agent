@@ -177,15 +177,15 @@ class OpenCodeAgent(Agent):
 
     config_model = OpenCodeConfig
 
-    async def run(self, *, sandbox: Sandbox, messages: list[dict[str, Any]], workdir: str | None = None) -> AgentResult:
-        cfg: OpenCodeConfig = self.config  # type: ignore[assignment]
-        prompt = _prompt(messages)
-        runtime_config = _runtime_config(cfg)
-        workspace = workdir or "/testbed"
-        if not PurePosixPath(workspace).is_absolute():
-            raise ValueError("opencode requires an absolute workdir")
-        root = str(PurePosixPath(cfg.state_root) / uuid.uuid4().hex)
-        env = {
+    _runtime_config = staticmethod(_runtime_config)
+
+    @staticmethod
+    def _accept_version(version: str) -> bool:
+        return _SUPPORTED_VERSION.fullmatch(version) is not None
+
+    @staticmethod
+    def _environment(cfg, root, workspace, runtime_config) -> dict[str, str]:
+        return {
             "HOME": f"{root}/home",
             "TMPDIR": root,
             "XDG_CONFIG_HOME": f"{root}/config",
@@ -207,6 +207,37 @@ class OpenCodeAgent(Agent):
             "OPENCODE_DISABLE_TERMINAL_TITLE": "1",
             _KEY_ENV: cfg.model.api_key,
         }
+
+    @staticmethod
+    def _argv(cfg, workspace, prompt) -> list[str]:
+        return [
+            cfg.opencode_bin,
+            "run",
+            "--pure",
+            "--format",
+            "json",
+            "--model",
+            f"{_PROVIDER}/{cfg.model.model_name}",
+            "--agent",
+            "build",
+            # OpenCode prefers inherited PWD over cwd without --dir.
+            "--dir",
+            workspace,
+            "--title",
+            "Uni-Agent rollout",
+            "--",
+            prompt,
+        ]
+
+    async def run(self, *, sandbox: Sandbox, messages: list[dict[str, Any]], workdir: str | None = None) -> AgentResult:
+        cfg: OpenCodeConfig = self.config  # type: ignore[assignment]
+        prompt = _prompt(messages)
+        runtime_config = self._runtime_config(cfg)
+        workspace = workdir or "/testbed"
+        if not PurePosixPath(workspace).is_absolute():
+            raise ValueError("opencode requires an absolute workdir")
+        root = str(PurePosixPath(cfg.state_root) / uuid.uuid4().hex)
+        env = self._environment(cfg, root, workspace, runtime_config)
         info: dict[str, Any] = {"exit_code": None, "error_kind": None, "cli_version": None}
         output: dict[str, Any] = {}
         finished = False
@@ -226,28 +257,11 @@ class OpenCodeAgent(Agent):
                         exit_code=version.exit_code,
                         error_kind="timeout" if version.exit_code == -1 else "cli_unavailable",
                     )
-                elif _SUPPORTED_VERSION.fullmatch(detected_version) is None:
+                elif not self._accept_version(detected_version):
                     info["error_kind"] = "unsupported_version"
                 else:
                     proc = await sandbox.exec(
-                        [
-                            cfg.opencode_bin,
-                            "run",
-                            "--pure",
-                            "--format",
-                            "json",
-                            "--model",
-                            f"{_PROVIDER}/{cfg.model.model_name}",
-                            "--agent",
-                            "build",
-                            # OpenCode prefers inherited PWD over cwd without --dir.
-                            "--dir",
-                            workspace,
-                            "--title",
-                            "Uni-Agent rollout",
-                            "--",
-                            prompt,
-                        ],
+                        self._argv(cfg, workspace, prompt),
                         env=env,
                         timeout=cfg.run_timeout,
                         workdir=workspace,

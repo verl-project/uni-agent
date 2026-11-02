@@ -7,6 +7,7 @@ RUN test "$(uname -m)" = x86_64 \
     && apk add --no-cache ca-certificates curl libstdc++ python3
 
 ARG OPENCODE_VERSION=1.18.18
+ARG OPENCODE_PACKAGE=opencode-linux-x64-baseline-musl
 ARG NPM_REGISTRY=https://registry.npmjs.org
 ARG OPENCODE_SHA512=7170f580067e4d399d137b675b2e6a3ecb598eb9db3e0d2b3d4c2d70778b69e07e298c50584a227b573cf2862665f43e45623afbff8b2c5d05536f54c9dd4daf
 ARG RG_VERSION=15.1.0
@@ -17,7 +18,7 @@ ARG RG_SHA256=1c9297be4a084eea7ecaedf93eb03d058d6faae29bbc57ecdaf5063921491599
 # and C++ libraries; copy these into the payload rather than relying on the task OS.
 RUN mkdir -p /opt/opencode/bin /opt/opencode/libexec /opt/opencode/lib /opt/opencode/etc /opt/opencode/share \
     && curl --fail --location --retry 3 --retry-all-errors --connect-timeout 30 \
-      "${NPM_REGISTRY%/}/opencode-linux-x64-baseline-musl/-/opencode-linux-x64-baseline-musl-${OPENCODE_VERSION}.tgz" \
+      "${NPM_REGISTRY%/}/${OPENCODE_PACKAGE}/-/${OPENCODE_PACKAGE##*/}-${OPENCODE_VERSION}.tgz" \
       -o /tmp/opencode.tar.gz \
     && echo "${OPENCODE_SHA512}  /tmp/opencode.tar.gz" | sha512sum -c - \
     && tar -xzf /tmp/opencode.tar.gz -C /opt/opencode/libexec --strip-components=2 package/bin/opencode \

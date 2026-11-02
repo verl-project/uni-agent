@@ -24,6 +24,7 @@ AGENT_MODULES: dict[str, str] = {
     "mini_swe_agent": "uni_agent.agents.mini_swe_agent.agent",
     "codex": "uni_agent.agents.codex.agent",
     "openclaw": "uni_agent.agents.openclaw.agent",
+    "opencode2": "uni_agent.agents.opencode2.agent",
     "opencode": "uni_agent.agents.opencode.agent",
     "mem_agent": "uni_agent.agents.mem_agent.agent",
     "deepeyes": "uni_agent.agents.deepeyes.agent",

@@ -88,8 +88,18 @@ def _configured_cli() -> str:
 
 @pytest.mark.parametrize("phase", ["request", "tool"])
 @pytest.mark.parametrize("termination", ["timeout", "cancel"])
-async def test_real_cli_processes_exit_before_test_cleanup(tmp_path, monkeypatch, phase, termination):
-    cli = _configured_cli()
+async def test_real_cli_processes_exit_before_test_cleanup(
+    tmp_path,
+    monkeypatch,
+    phase,
+    termination,
+    *,
+    agent_cls=OpenCodeAgent,
+    config_cls=OpenCodeConfig,
+    cli=None,
+    standalone=False,
+):
+    cli = cli or _configured_cli()
     workspace = tmp_path / "workspace with 'quote"
     workspace.mkdir()
     monkeypatch.setenv("PWD", str(tmp_path))
@@ -185,7 +195,7 @@ async def test_real_cli_processes_exit_before_test_cleanup(tmp_path, monkeypatch
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", observe_spawn)
     state_root = tmp_path / "state"
-    config = OpenCodeConfig(
+    config = config_cls(
         opencode_bin=cli,
         run_timeout=12 if termination == "timeout" else 45,
         state_root=str(state_root),
@@ -195,9 +205,10 @@ async def test_real_cli_processes_exit_before_test_cleanup(tmp_path, monkeypatch
             api_key="cleanup-dummy-only",
         ),
     )
+    sandbox = LocalSandbox()
     task = asyncio.create_task(
-        OpenCodeAgent(config).run(
-            sandbox=LocalSandbox(),
+        agent_cls(config).run(
+            sandbox=sandbox,
             messages=[{"role": "user", "content": "Run the controlled local tool fixture."}],
             workdir=str(workspace),
         )
@@ -212,6 +223,19 @@ async def test_real_cli_processes_exit_before_test_cleanup(tmp_path, monkeypatch
         proc, identity = spawned[0]
         assert identity is not None
         identities["cli"] = identity
+        if standalone:
+            children = subprocess.run(
+                ["ps", "-axo", "pid=,ppid=,args="], capture_output=True, text=True, check=True
+            ).stdout
+            servers = [
+                int(row.split(None, 2)[0])
+                for row in children.splitlines()
+                if len(row.split(None, 2)) == 3
+                and row.split(None, 2)[1] == str(proc.pid)
+                and "serve" in row.split(None, 2)[2]
+            ]
+            assert len(servers) == 1, children
+            identities["standalone_server"] = _identity(servers[0])
         if phase == "tool":
             for role, values in json.loads(marker.read_text()).items():
                 identity = _identity(values["pid"])
@@ -237,8 +261,12 @@ async def test_real_cli_processes_exit_before_test_cleanup(tmp_path, monkeypatch
             else:
                 pytest.fail("tool shell ancestry did not reach the captured CLI within 16 hops")
         assert all(_still_running(identity) for identity in identities.values())
-        if termination == "cancel":
+        if termination in {"cancel", "repeat-cancel"}:
             task.cancel()
+            if termination == "repeat-cancel":
+                for _ in range(3):
+                    await asyncio.sleep(0.001)
+                    task.cancel()
             _, pending = await asyncio.wait({task}, timeout=5)
             assert not pending, "Agent cancellation did not complete within 5 seconds"
             with pytest.raises(asyncio.CancelledError):
@@ -250,6 +278,7 @@ async def test_real_cli_processes_exit_before_test_cleanup(tmp_path, monkeypatch
             result = task.result()
             evidence.update(finished=result.finished, error_kind=result.info.get("error_kind"))
             assert result.finished is False and result.info["error_kind"] == "timeout"
+        await sandbox.stop()
         # SIGKILL is asynchronous. Only passive observations are permitted here.
         await _wait_until(lambda: not any(_still_running(value) for value in identities.values()), 3)
         live = {role: _identity(identity["pid"]) for role, identity in identities.items() if _still_running(identity)}
@@ -325,6 +354,7 @@ async def test_real_cli_processes_exit_before_test_cleanup(tmp_path, monkeypatch
         except Exception as exc:
             cleanup_errors.append(f"process teardown: {exc!r}")
         finally:
+            await sandbox.stop()
             release.set()
             for close in (server.shutdown, server.server_close):
                 try:
