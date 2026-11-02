@@ -8,11 +8,14 @@ forward to the right actor through Ray remote methods.
 from __future__ import annotations
 
 import asyncio
+import logging
 
 import ray
 
 from uni_agent.gateway.config import GatewayActorConfig
 from verl.workers.rollout.llm_server import LLMServerClient
+
+logger = logging.getLogger(__name__)
 
 
 class GatewayManager:
@@ -73,7 +76,9 @@ class GatewayManager:
         return self.gateways[gateway_index], gateway_index
 
     async def create_session(self, session_id: str, **kwargs):
-        """Create a session on the least-loaded actor, record the route, and return its handle."""
+        """Create a session; cancellation settles the remote call and aborts only its result."""
+        if session_id in self._session_to_gateway_index:
+            raise RuntimeError(f"Session {session_id} already exists")
         gateway_index = self._select_gateway_index()
         gateway = self.gateways[gateway_index]
         # Reserve the slot synchronously, before the await. Sessions are created
@@ -85,26 +90,53 @@ class GatewayManager:
         self._session_to_gateway_index[session_id] = gateway_index
         self.active_sessions_per_gateway[gateway_index] += 1
         try:
-            return await gateway.create_session.remote(session_id=session_id, **kwargs)
-        except BaseException:
-            self.active_sessions_per_gateway[gateway_index] -= 1
-            self._session_to_gateway_index.pop(session_id, None)
+            create = asyncio.ensure_future(gateway.create_session.remote(session_id=session_id, **kwargs))
+            return await asyncio.shield(create)
+        except asyncio.CancelledError:
+            cleanup = asyncio.ensure_future(self._abort_cancelled_create(session_id, gateway_index, create))
+            # Ray create keeps running after caller cancellation. Every wait must
+            # stay shielded so repeated cancellation cannot orphan its session.
+            while not cleanup.done():
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    continue
+            cleanup.result()
             raise
+        except BaseException:
+            self._drop_route(session_id, gateway_index)
+            raise
+
+    async def _abort_cancelled_create(self, session_id: str, gateway_index: int, create: asyncio.Future) -> None:
+        try:
+            await create
+        except (Exception, asyncio.CancelledError):
+            # A failed create owns no actor session; never abort a pre-existing one.
+            self._drop_route(session_id, gateway_index)
+            return
+        try:
+            await self.abort_session(session_id)
+        except (Exception, asyncio.CancelledError):
+            # A failed abort leaves this owner available for an explicit retry.
+            logger.exception("session %s: abort failed after cancelled create", session_id)
 
     async def finalize_session(self, session_id: str):
         """Finalize a session on its owning actor, release the route, and return its trajectories."""
         gateway, gateway_index = self._get_gateway(session_id)
         trajectories = await gateway.finalize_session.remote(session_id=session_id)
-        self._session_to_gateway_index.pop(session_id, None)
-        self.active_sessions_per_gateway[gateway_index] -= 1
+        self._drop_route(session_id, gateway_index)
         return trajectories
 
     async def abort_session(self, session_id: str) -> None:
         """Abort a routed session on its owning actor and release the route."""
         gateway, gateway_index = self._get_gateway(session_id)
         await gateway.abort_session.remote(session_id=session_id)
-        self._session_to_gateway_index.pop(session_id, None)
-        self.active_sessions_per_gateway[gateway_index] -= 1
+        self._drop_route(session_id, gateway_index)
+
+    def _drop_route(self, session_id: str, gateway_index: int) -> None:
+        # Concurrent closes must release the load slot at most once.
+        if self._session_to_gateway_index.pop(session_id, None) is not None:
+            self.active_sessions_per_gateway[gateway_index] -= 1
 
     async def shutdown(self) -> None:
         """Stop owned gateway actors and clear routing state."""

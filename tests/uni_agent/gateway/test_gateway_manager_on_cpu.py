@@ -325,3 +325,201 @@ async def test_gateway_manager_allows_independent_http_requests_when_coalescing_
         ]
     finally:
         await manager.shutdown()
+
+
+class _LifecycleGateway:
+    """Controllable remote-method stub for close failures."""
+
+    def __init__(self, *, finalize_error=None, abort_error=None):
+        self.finalize_error = finalize_error
+        self.abort_error = abort_error
+        self.abort_calls = []
+        self.finalize_calls = []
+
+    async def _abort(self, session_id):
+        self.abort_calls.append(session_id)
+        if self.abort_error is not None:
+            raise self.abort_error
+
+    async def _finalize(self, session_id):
+        self.finalize_calls.append(session_id)
+        if self.finalize_error is not None:
+            raise self.finalize_error
+        return ["trajectory"]
+
+    abort_session = property(lambda self: _FakeRemoteMethod(self._abort))
+    finalize_session = property(lambda self: _FakeRemoteMethod(self._finalize))
+
+
+def _new_manager(gateway, *, session_ids=()):
+    from uni_agent.gateway.manager import GatewayManager
+
+    manager = GatewayManager.__new__(GatewayManager)
+    manager.gateways = [gateway]
+    manager.active_sessions_per_gateway = [len(session_ids)]
+    manager._session_to_gateway_index = dict.fromkeys(session_ids, 0)
+    return manager
+
+
+class _DetachedRemoteMethod:
+    """Ray-like call: cancelling the caller's await does not stop the actor method."""
+
+    def __init__(self, fn):
+        self._fn = fn
+
+    def remote(self, *args, **kwargs):
+        return asyncio.shield(asyncio.ensure_future(self._fn(*args, **kwargs)))
+
+
+class _SlowCreateGateway(_LifecycleGateway):
+    def __init__(self, *, create_error=None):
+        super().__init__()
+        self.create_error = create_error
+        self.created = []
+        self.create_started = asyncio.Event()
+        self.create_finished = asyncio.Event()
+        self.release_create = asyncio.Event()
+
+    async def _create(self, session_id, **kwargs):
+        self.create_started.set()
+        await self.release_create.wait()
+        self.create_finished.set()
+        if self.create_error is not None:
+            raise self.create_error
+        self.created.append(session_id)
+        return session_id
+
+    create_session = property(lambda self: _DetachedRemoteMethod(self._create))
+    abort_session = property(lambda self: _DetachedRemoteMethod(self._abort))
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+@pytest.mark.parametrize("create_error", [None, RuntimeError("create failed")])
+async def test_gateway_manager_cancelled_create_aborts_what_the_actor_created(create_error):
+    """After the caller cancels, only the manager can still abort the actor-side session."""
+    gateway = _SlowCreateGateway(create_error=create_error)
+    manager = _new_manager(gateway)
+
+    create = asyncio.create_task(manager.create_session("session-cancelled"))
+    await gateway.create_started.wait()
+    create.cancel()
+    await asyncio.sleep(0)
+    gateway.release_create.set()
+    with pytest.raises(asyncio.CancelledError):
+        await create
+    await asyncio.wait_for(gateway.create_finished.wait(), timeout=1)
+
+    assert gateway.abort_calls == ([] if create_error else ["session-cancelled"])
+    assert manager._session_to_gateway_index == {}
+    assert manager.active_sessions_per_gateway == [0]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_gateway_manager_cancelled_create_retains_owner_after_abort_failure():
+    gateway = _SlowCreateGateway()
+    gateway.abort_error = RuntimeError("session abort failed before removal")
+    manager = _new_manager(gateway)
+    create = asyncio.create_task(manager.create_session("session-cancelled"))
+    await gateway.create_started.wait()
+    create.cancel()
+    gateway.release_create.set()
+    with pytest.raises(asyncio.CancelledError):
+        await create
+
+    assert manager._session_to_gateway_index == {"session-cancelled": 0}
+    assert manager.active_sessions_per_gateway == [1]
+    gateway.abort_error = None
+    await manager.abort_session("session-cancelled")
+    assert gateway.abort_calls == ["session-cancelled"] * 2
+    assert manager.active_sessions_per_gateway == [0]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_gateway_manager_repeated_cancellation_still_settles_remote_create():
+    gateway = _SlowCreateGateway()
+    manager = _new_manager(gateway)
+    create = asyncio.create_task(manager.create_session("session-cancelled"))
+    await gateway.create_started.wait()
+    for _ in range(3):
+        create.cancel()
+        await asyncio.sleep(0)
+    still_waiting = not create.done()
+    gateway.release_create.set()
+    with pytest.raises(asyncio.CancelledError):
+        await create
+    await asyncio.wait_for(gateway.create_finished.wait(), timeout=1)
+
+    assert still_waiting
+    assert gateway.abort_calls == ["session-cancelled"]
+    assert manager._session_to_gateway_index == {}
+    assert manager.active_sessions_per_gateway == [0]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_gateway_manager_close_failure_retains_mapping_and_owner():
+    close_error = RuntimeError("actor-close-unknown")
+    gateway = _LifecycleGateway(finalize_error=close_error)
+    manager = _new_manager(gateway, session_ids=("session-close",))
+
+    with pytest.raises(RuntimeError, match="actor-close-unknown") as raised:
+        await manager.finalize_session("session-close")
+
+    assert raised.value is close_error
+    assert gateway.finalize_calls == ["session-close"]
+    assert manager._session_to_gateway_index == {"session-close": 0}
+    assert manager.active_sessions_per_gateway == [1]
+
+    await manager.abort_session("session-close")
+
+    assert gateway.abort_calls == ["session-close"]
+    assert manager._session_to_gateway_index == {}
+    assert manager.active_sessions_per_gateway == [0]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_gateway_manager_rejects_duplicate_create_without_touching_owner():
+    gateway = _SlowCreateGateway()
+    manager = _new_manager(gateway)
+    create = asyncio.create_task(manager.create_session("same-id"))
+    await gateway.create_started.wait()
+
+    with pytest.raises(RuntimeError, match="already exists"):
+        await manager.create_session("same-id")
+    assert manager._session_to_gateway_index == {"same-id": 0}
+    assert manager.active_sessions_per_gateway == [1]
+    assert gateway.abort_calls == []
+
+    gateway.release_create.set()
+    assert await create == "same-id"
+    await manager.abort_session("same-id")
+    assert manager.active_sessions_per_gateway == [0]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_gateway_manager_concurrent_closes_release_load_slot_once():
+    class _ConcurrentCloseGateway(_LifecycleGateway):
+        async def _finalize(self, session_id):
+            await asyncio.sleep(0)
+            return await super()._finalize(session_id)
+
+        async def _abort(self, session_id):
+            await asyncio.sleep(0)
+            await super()._abort(session_id)
+
+    gateway = _ConcurrentCloseGateway()
+    manager = _new_manager(gateway, session_ids=("session-close",))
+    await asyncio.gather(manager.finalize_session("session-close"), manager.abort_session("session-close"))
+    assert manager._session_to_gateway_index == {}
+    assert manager.active_sessions_per_gateway == [0]
