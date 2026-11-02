@@ -355,6 +355,7 @@ class GatewayAgentFramework(AgentFramework):
             logger.info("No streaming reward worker handles; using the non-streaming reward path")
         self._processor = processor
         self._rollout_config = rollout_config
+        self._rollout_tasks: set[asyncio.Task[None]] = set()
         self._runner_semaphores: dict[str, asyncio.Semaphore] = {}
         self._semaphore_loop: asyncio.AbstractEventLoop | None = None
         self._log_dir = log_dir
@@ -506,6 +507,13 @@ class GatewayAgentFramework(AgentFramework):
 
     async def generate_sequences(self, prompts: TensorDict) -> None:
         """Run rollout-manager generation and write outputs into TransferQueue."""
+        await self._generate_sequences(prompts, wait_for_completion=True)
+
+    async def submit_sessions(self, prompts: TensorDict) -> None:
+        """Wait only for session admission; do not await rollout completion."""
+        await self._generate_sequences(prompts, wait_for_completion=False)
+
+    async def _generate_sequences(self, prompts: TensorDict, *, wait_for_completion: bool) -> None:
         if self._rollout_config is None:
             raise RuntimeError("GatewayAgentFramework requires rollout_config for generate_sequences")
 
@@ -525,11 +533,56 @@ class GatewayAgentFramework(AgentFramework):
         if uids is None:
             raise ValueError("GatewayAgentFramework requires prompts['uid'] for TransferQueue output")
 
+        admitted = None if wait_for_completion else asyncio.get_running_loop().create_future()
+        task = asyncio.create_task(
+            self._finish_generation(
+                prompts,
+                global_steps=global_steps,
+                partition_id=partition_id,
+                num_sessions=num_sessions,
+                admitted=admitted,
+            )
+        )
+        self._rollout_tasks.add(task)
+
+        def completed(task: asyncio.Task) -> None:
+            self._rollout_tasks.discard(task)
+            if not wait_for_completion:
+                try:
+                    task.result()
+                except BaseException as error:
+                    if not admitted.done():
+                        admitted.set_exception(error)
+                    elif not admitted.cancelled():
+                        if isinstance(error, Exception):
+                            logger.exception("Agent framework batch failed after admission")
+                        else:
+                            logger.warning("Agent framework batch aborted after admission", exc_info=True)
+
+        task.add_done_callback(completed)
+        try:
+            await asyncio.shield(task if wait_for_completion else admitted)
+        except BaseException:
+            if admitted is not None and not admitted.done():
+                admitted.cancel()
+            await self._cancel_and_drain_tasks([task])
+            raise
+
+    async def _finish_generation(
+        self,
+        prompts: TensorDict,
+        *,
+        global_steps: int | None,
+        partition_id: str,
+        num_sessions: int,
+        admitted: asyncio.Future[None] | None,
+    ) -> None:
         stats = await self._run_batch_rollouts(
             prompts,
             global_steps=global_steps,
             partition_id=partition_id,
             num_sessions=num_sessions,
+            admitted=admitted,
         )
         logger.info(
             "generate_sequences summary: num_input_prompts=%s num_success_sessions=%s "
@@ -557,26 +610,56 @@ class GatewayAgentFramework(AgentFramework):
         global_steps: int | None,
         partition_id: str,
         num_sessions: int = 1,
+        admitted: asyncio.Future[None] | None = None,
     ) -> dict:
-        """Run all prompts in a batch and aggregate prompt/session stats."""
+        """Own prompt tasks from admission through persistence and aggregate their results."""
         assert len(prompts) > 0, "generate_sequences requires a non-empty batch"
         if num_sessions <= 0:
             raise ValueError(f"num_sessions must be positive, got {num_sessions}")
 
-        # Batch layer: each sample/prompt owns its own group of rollout.n sessions.
-        # Prompt tasks are isolated so one prompt failure does not drop the whole batch.
-        tasks = []
-        for sample_index in range(len(prompts)):
-            tasks.append(
-                self._run_prompt_rollouts(
-                    sample_fields=self._extract_sample_fields(prompts=prompts, sample_index=sample_index),
-                    sample_index=sample_index,
-                    global_steps=global_steps,
-                    partition_id=partition_id,
-                    num_sessions=num_sessions,
-                )
+        loop = asyncio.get_running_loop()
+        tasks: list[asyncio.Task[dict]] = []
+        lanes: dict[str | int | None, list[int]] = {}
+        sample_fields = [self._extract_sample_fields(prompts=prompts, sample_index=i) for i in range(len(prompts))]
+        for index, fields in enumerate(sample_fields):
+            runner_name = self._admission_lane(fields)
+            # Unbounded runners must not serialize slow initial status writes.
+            lane = (
+                runner_name
+                if runner_name is not None and self.runner_registry[runner_name].max_concurrent_sessions
+                else index
             )
-        outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+            lanes.setdefault(lane, []).append(index)
+
+        async def admit_lane(indices: list[int]) -> None:
+            for index in indices:
+                receipt = loop.create_future()
+                task = asyncio.create_task(
+                    self._run_prompt_rollouts(
+                        sample_fields=sample_fields[index],
+                        sample_index=index,
+                        global_steps=global_steps,
+                        partition_id=partition_id,
+                        num_sessions=num_sessions,
+                        admitted=receipt,
+                    )
+                )
+                tasks.append(task)
+                # Errors before admission still settle this lane; results are
+                # collected below so an ordinary failure cannot stop siblings.
+                task.add_done_callback(lambda _task, receipt=receipt: receipt.done() or receipt.set_result(None))
+                await asyncio.shield(receipt)
+
+        lane_tasks = [asyncio.create_task(admit_lane(indices)) for indices in lanes.values()]
+        try:
+            await asyncio.gather(*lane_tasks)
+            if admitted is not None and not admitted.done():
+                admitted.set_result(None)
+            outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+        finally:
+            # The same batch owner always drains its children, including when
+            # cancellation arrives before admission or after the receipt.
+            await self._cancel_and_drain_tasks(lane_tasks + tasks)
 
         failure_reasons: list[str] = []
         stats = {
@@ -606,6 +689,56 @@ class GatewayAgentFramework(AgentFramework):
             failure_reasons.extend(outcome["failure_reasons"])
         return stats
 
+    @staticmethod
+    async def _settle_cleanup(cleanup: asyncio.Future) -> bool:
+        """Finish owned cleanup despite repeated cancellation; return whether the caller was cancelled."""
+        cancelled = False
+        while not cleanup.done():
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                cancelled = True
+        cleanup.result()
+        return cancelled
+
+    async def _cancel_and_drain_tasks(self, tasks: list[asyncio.Task]) -> bool:
+        """Cancel owned tasks once, retrieve all outcomes, and finish their cleanup.
+
+        Return whether repeated cancellation interrupted the caller; prompt
+        owners must settle their uid before propagating it.
+        """
+        for task in tasks:
+            cancelling = getattr(task, "cancelling", None)
+            if not task.done() and (cancelling is None or not cancelling()):
+                task.cancel()
+        if not tasks:
+            return False
+        return await self._settle_cleanup(asyncio.gather(*tasks, return_exceptions=True))
+
+    async def _put_uid_status(
+        self,
+        *,
+        uid: str,
+        partition_id: str,
+        status: str,
+        log_failure: bool = False,
+    ) -> None:
+        """Write a uid status, finishing the put if this task is cancelled mid-write.
+
+        Initial and terminal writes must retain their ordering, even when the
+        caller is cancelled repeatedly while the remote put is still running.
+        """
+        put = asyncio.create_task(tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": status}))
+        cancelled = False
+        try:
+            cancelled = await self._settle_cleanup(put)
+        except Exception:
+            if not log_failure:
+                raise
+            logger.exception("uid %s: failed to mark status %s", uid, status)
+        if cancelled:
+            raise asyncio.CancelledError()
+
     async def _run_prompt_rollouts(
         self,
         *,
@@ -614,37 +747,43 @@ class GatewayAgentFramework(AgentFramework):
         global_steps: int | None,
         partition_id: str,
         num_sessions: int,
+        admitted: asyncio.Future[None] | None = None,
     ) -> dict:
-        """Run ``rollout.n`` independent sessions for one prompt and persist their outputs."""
+        """Own admission, episodes, and collection for one prompt without transferring tasks."""
         uid = sample_fields.get("uid")
         if uid is None:
             raise ValueError("GatewayAgentFramework requires prompts['uid'] for TransferQueue output")
         uid = str(uid)
-        sampling_params = self._build_session_sampling_params(
-            partition_id=partition_id,
-            sample_fields=sample_fields,
-        )
-
-        # Prompt layer: rollout.n sessions race independently for the same uid.
-        # Successful sessions are written to TQ; failed sessions only affect this uid's stats.
-        await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "running"})
-        tasks = [
-            self._run_agent_episode_with_concurrency_limit(
-                sample_fields=sample_fields,
-                sample_index=sample_index,
-                session_index=session_index,
-                global_steps=global_steps,
-                sampling_params=sampling_params,
+        tasks = []
+        try:
+            sampling_params = self._build_session_sampling_params(
+                partition_id=partition_id, sample_fields=sample_fields
             )
-            for session_index in range(num_sessions)
-        ]
-        outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+            await self._put_uid_status(uid=uid, partition_id=partition_id, status="running")
+            for session_index in range(num_sessions):
+                tasks.append(
+                    await self._submit_agent_episode(
+                        sample_fields=sample_fields,
+                        sample_index=sample_index,
+                        session_index=session_index,
+                        global_steps=global_steps,
+                        sampling_params=sampling_params,
+                    )
+                )
+            if admitted is not None:
+                admitted.set_result(None)
+            outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+        except BaseException:
+            await self._cancel_and_drain_tasks(tasks)
+            await self._put_uid_status(uid=uid, partition_id=partition_id, status="failure", log_failure=True)
+            raise
 
         success_sessions = 0
         failed_sessions = 0
         success_outputs = 0
         unfinished_episodes = 0
         failure_reasons: list[str] = []
+        control_flow_error: BaseException | None = None
         for session_index, outcome in enumerate(outcomes):
             if isinstance(outcome, Exception):
                 failed_sessions += 1
@@ -652,8 +791,12 @@ class GatewayAgentFramework(AgentFramework):
                 continue
             # Propagate control-flow exceptions such as CancelledError/SystemExit;
             # only ordinary Exceptions are treated as isolated rollout failures.
+            # Raise after the loop: nothing else stores the other sessions or
+            # writes this uid's terminal status.
             if isinstance(outcome, BaseException):
-                raise outcome
+                if control_flow_error is None:
+                    control_flow_error = outcome
+                continue
 
             trajectories, session_sample_fields = outcome
             if not trajectories:
@@ -670,6 +813,15 @@ class GatewayAgentFramework(AgentFramework):
                     global_steps=global_steps,
                     partition_id=partition_id,
                 )
+            except asyncio.CancelledError:
+                # Gather already finished, so this cancel is hitting persistence.
+                # Keep any sessions already stored and still close the uid.
+                await self._put_uid_status(
+                    uid=uid,
+                    partition_id=partition_id,
+                    status="finished" if success_sessions > 0 else "failure",
+                )
+                raise
             except Exception as e:
                 logger.exception(f"TQ write failed for uid={uid} session={session_index}: {e}")
                 failed_sessions += 1
@@ -683,11 +835,13 @@ class GatewayAgentFramework(AgentFramework):
                     unfinished_episodes += 1
 
         if success_sessions > 0:
-            await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "finished"})
+            await self._put_uid_status(uid=uid, partition_id=partition_id, status="finished")
             failed_uids = 0
         else:
-            await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "failure"})
+            await self._put_uid_status(uid=uid, partition_id=partition_id, status="failure")
             failed_uids = 1
+        if control_flow_error is not None:
+            raise control_flow_error
 
         return {
             "num_success_sessions": success_sessions,
@@ -698,7 +852,32 @@ class GatewayAgentFramework(AgentFramework):
             "failure_reasons": failure_reasons,
         }
 
-    async def _run_agent_episode_with_concurrency_limit(
+    def _resolve_runner(self, sample_fields: dict[str, object]) -> tuple[str, _RunnerConfig]:
+        """Select the runner that owns this sample's sessions."""
+        if len(self.runner_registry) == 1:
+            return next(iter(self.runner_registry.items()))
+        agent_name = sample_fields.get("agent_name")
+        if agent_name is None:
+            raise ValueError("agent_name is required when multiple agent_runners are configured")
+        if not isinstance(agent_name, str):
+            raise ValueError(f"agent_name must be a string, got {type(agent_name).__name__}")
+        try:
+            return agent_name, self.runner_registry[agent_name]
+        except KeyError as exc:
+            raise ValueError(f"Unknown agent runner: {agent_name}") from exc
+
+    def _admission_lane(self, sample_fields: dict[str, object]) -> str | None:
+        """Group prompts whose sessions compete for the same runner semaphore.
+
+        Unresolvable prompts share the ``None`` lane; their error is raised by
+        ``_submit_agent_episode`` so the uid still gets a terminal status.
+        """
+        try:
+            return self._resolve_runner(sample_fields)[0]
+        except ValueError:
+            return None
+
+    async def _submit_agent_episode(
         self,
         *,
         sample_fields: dict[str, object],
@@ -706,7 +885,7 @@ class GatewayAgentFramework(AgentFramework):
         session_index: int,
         global_steps: int | None,
         sampling_params: dict[str, object],
-    ) -> tuple[list[Trajectory], dict[str, object]]:
+    ) -> asyncio.Task[tuple[list[Trajectory], dict[str, object]]]:
         # Lazy-init semaphores on first use and rebind if the running loop
         # changed: asyncio.Semaphore binds to the loop at construction, but
         # Ray actors may run sessions on a different loop than __init__.
@@ -715,23 +894,18 @@ class GatewayAgentFramework(AgentFramework):
             self._runner_semaphores = {}
             self._semaphore_loop = loop
 
-        if len(self.runner_registry) == 1:
-            runner_name, runner_config = next(iter(self.runner_registry.items()))
-        else:
-            agent_name = sample_fields.get("agent_name")
-            if agent_name is None:
-                raise ValueError("agent_name is required when multiple agent_runners are configured")
-            if not isinstance(agent_name, str):
-                raise ValueError(f"agent_name must be a string, got {type(agent_name).__name__}")
-            try:
-                runner_name = agent_name
-                runner_config = self.runner_registry[runner_name]
-            except KeyError as exc:
-                raise ValueError(f"Unknown agent runner: {agent_name}") from exc
+        runner_name, runner_config = self._resolve_runner(sample_fields)
 
-        runner_cap = runner_config.max_concurrent_sessions
-        if runner_cap <= 0:
-            return await self._run_agent_episode(
+        runner_semaphore = None
+        if runner_config.max_concurrent_sessions > 0:
+            runner_semaphore = self._runner_semaphores.get(runner_name)
+            if runner_semaphore is None:
+                runner_semaphore = asyncio.Semaphore(runner_config.max_concurrent_sessions)
+                self._runner_semaphores[runner_name] = runner_semaphore
+            await runner_semaphore.acquire()
+
+        task = asyncio.create_task(
+            self._run_agent_episode(
                 sample_fields=sample_fields,
                 sample_index=sample_index,
                 session_index=session_index,
@@ -740,22 +914,12 @@ class GatewayAgentFramework(AgentFramework):
                 runner_config=runner_config,
                 sampling_params=sampling_params,
             )
+        )
 
-        runner_semaphore = self._runner_semaphores.get(runner_name)
-        if runner_semaphore is None:
-            runner_semaphore = asyncio.Semaphore(runner_cap)
-            self._runner_semaphores[runner_name] = runner_semaphore
-
-        async with runner_semaphore:
-            return await self._run_agent_episode(
-                sample_fields=sample_fields,
-                sample_index=sample_index,
-                session_index=session_index,
-                global_steps=global_steps,
-                runner_name=runner_name,
-                runner_config=runner_config,
-                sampling_params=sampling_params,
-            )
+        if runner_semaphore is not None:
+            # Completion also returns the slot when cancelled before the episode starts.
+            task.add_done_callback(lambda _task: runner_semaphore.release())
+        return task
 
     async def _run_agent_episode(
         self,
@@ -837,7 +1001,9 @@ class GatewayAgentFramework(AgentFramework):
                             timeout=runner_config.session_timeout_seconds,
                         )
                     except (asyncio.TimeoutError, asyncio.CancelledError):
-                        await self._cancel_runner_task(object_ref, session_id)
+                        cleanup = asyncio.ensure_future(self._cancel_runner_task(object_ref, session_id))
+                        if await self._settle_cleanup(cleanup):
+                            raise asyncio.CancelledError() from None
                         raise
                 else:
                     runner = self._inline_runners[runner_name]
@@ -863,7 +1029,8 @@ class GatewayAgentFramework(AgentFramework):
                 # Parent shutdown/cancellation must not leave the Gateway route
                 # and actor-owned session live after the runner task is gone.
                 try:
-                    await asyncio.shield(self.gateway_manager.abort_session(session_id))
+                    abort = asyncio.ensure_future(self.gateway_manager.abort_session(session_id))
+                    await self._settle_cleanup(abort)
                 except Exception:
                     logger.exception("session %s: Gateway abort failed during parent cancellation", session_id)
                 raise
