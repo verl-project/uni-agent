@@ -27,6 +27,7 @@
 - Configure tags at the function granularity. Do not configure tags directly on a class.
 - Both a backend tag and a test case level tag must be specified for the test case to run in the gate.
 - Only one of `level0` and `level1` can be specified for a single test case.
+- To trigger GPU/NPU backend test cases, configure the corresponding modified file paths in the trigger rules; see Section 4.
 
 #### Test case example
 
@@ -62,8 +63,39 @@ Ensure that the test cases run without errors before merging.
 
 **Currently, this verification is only a recommendation and is not set as a mandatory check**
 
-After the Python Backend CI workflow finishes running, a coverage comment will be added to the PR, showing the coverage of the code corresponding to the changes in this PR.
+After CI workflow finishes running, a coverage comment will be added to the PR, showing the coverage of the code corresponding to the changes in this PR.
 
 This includes: `coverage of the modified code` and `coverage details displayed by code line`.
 
 It is recommended to improve the test case coverage based on the results.
+
+## 4. Configure Precise GPU/NPU Trigger Rules
+
+### 1. Mechanism Description
+
+This mechanism establishes a mapping between project files and backend test suites so that after a file is modified, only the tests for the associated backend are triggered.
+
+Triggering principles:
+
+- For files configured with a GPU/NPU backend mapping, changes trigger the corresponding backend test cases.
+- For files without a configured backend mapping, changes will trigger CPU backend test cases.
+
+### 2. Configuration Method
+
+Modify the configuration file: [filter-paths.yml](uni_agent/filter-paths.yml)
+
+Configure file paths under the corresponding backend:
+
+```
+
+gpu:
+  - '<Changes under this path will trigger GPU backend tests>'
+npu:
+  - '<Changes under this path will trigger NPU backend tests>'
+cpu:
+  - '!<Changes under this path will not trigger CPU backend tests>'
+
+```
+
+- gpu/npu: Paths that trigger the corresponding backend tests.
+- cpu: Paths whose changes will not trigger CPU backend tests; use `!` to mark exclusion paths. Paths not configured default to triggering CPU backend tests.
