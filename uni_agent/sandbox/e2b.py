@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import inspect
+import json
 import logging
 import re
 import shlex
@@ -70,6 +71,9 @@ class E2BSandbox(Sandbox):
         file_request_timeout: float = 600.0,
         image_mounts: list[ImageMount] | None = None,
         executable_paths: dict[str, str] | None = None,
+        image_as_template: bool = False,
+        backend_image_mounts: bool = False,
+        image_mounts_metadata_key: str | None = None,
     ) -> None:
         if runtime_timeout <= 0:
             raise ValueError("runtime_timeout must be positive")
@@ -87,9 +91,17 @@ class E2BSandbox(Sandbox):
             raise ValueError("either image or template must be provided")
         if proxy is not None and not proxy.strip():
             raise ValueError("proxy must be non-empty when provided")
-        if image_mounts:
+        if image_as_template and image is None:
+            raise ValueError("image_as_template requires an image")
+        if image_mounts_metadata_key is not None:
+            if not backend_image_mounts:
+                raise ValueError("image_mounts_metadata_key requires backend_image_mounts")
+            if not image_mounts_metadata_key.strip():
+                raise ValueError("image_mounts_metadata_key must be non-empty when provided")
+        if image_mounts and not backend_image_mounts:
             raise NotImplementedError(
-                "E2BSandbox does not support image mounts; build a composite E2B template instead"
+                "E2BSandbox does not support image mounts; build a composite E2B template instead, "
+                "or set backend_image_mounts when the backend provides the declared mounts"
             )
 
         self.image = image.strip() if image is not None else None
@@ -108,6 +120,11 @@ class E2BSandbox(Sandbox):
         self.file_request_timeout = float(file_request_timeout)
         self.image_mounts = list(image_mounts or [])
         self.executable_paths = dict(executable_paths or {})
+        self.image_as_template = image_as_template
+        self.backend_image_mounts = backend_image_mounts
+        self.image_mounts_metadata_key = (
+            image_mounts_metadata_key.strip() if image_mounts_metadata_key is not None else None
+        )
 
         self._sandbox: Any | None = None
         self.sandbox_id: str | None = None
@@ -129,6 +146,8 @@ class E2BSandbox(Sandbox):
         from e2b import AsyncSandbox
 
         template = self.template
+        if template is None and self.image_as_template:
+            template = self.image
         if template is None:
             assert self.image is not None
             template = await asyncio.to_thread(
@@ -139,10 +158,15 @@ class E2BSandbox(Sandbox):
                 self.proxy,
             )
 
+        metadata = dict(self.metadata)
+        if self.image_mounts_metadata_key is not None and self.image_mounts:
+            metadata[self.image_mounts_metadata_key] = json.dumps(
+                [mount.model_dump(mode="json") for mount in self.image_mounts], separators=(",", ":")
+            )
         create_kwargs: dict[str, Any] = {
             "template": template,
             "timeout": int(self.runtime_timeout),
-            "metadata": self.metadata,
+            "metadata": metadata,
             "envs": self.envs,
             "secure": self.secure,
             "allow_internet_access": self.allow_internet_access,
@@ -157,7 +181,21 @@ class E2BSandbox(Sandbox):
         sandbox = await AsyncSandbox.create(**create_kwargs)
         self._sandbox = sandbox
         self.sandbox_id = str(sandbox.sandbox_id)
+        await self._verify_backend_image_mounts()
         await self._setup_executable_paths(self.executable_paths)
+
+    async def _verify_backend_image_mounts(self) -> None:
+        # The backend owns these mounts, so fail at startup instead of letting an
+        # agent discover a missing tool directory mid-episode.
+        if not self.backend_image_mounts:
+            return
+        for mount in self.image_mounts:
+            present = await self.exec(["test", "-d", mount.mount_path])
+            if present.exit_code != 0:
+                raise RuntimeError(
+                    f"E2B sandbox {self.sandbox_id} is missing backend image mount {mount.mount_path!r} "
+                    f"for {mount.image!r}"
+                )
 
     async def stop(self) -> None:
         sandbox, self._sandbox = self._sandbox, None
