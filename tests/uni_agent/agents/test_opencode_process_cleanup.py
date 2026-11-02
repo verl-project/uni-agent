@@ -232,10 +232,16 @@ async def test_real_cli_processes_exit_before_test_cleanup(
                 for row in children.splitlines()
                 if len(row.split(None, 2)) == 3
                 and row.split(None, 2)[1] == str(proc.pid)
-                and "serve" in row.split(None, 2)[2]
+                and "serve" in row.split()[2:]
+                and "--stdio" in row.split()[2:]
             ]
             assert len(servers) == 1, children
             identities["standalone_server"] = _identity(servers[0])
+            # A sidecar supervisor also owns a separate --server client.
+            for row in children.splitlines():
+                fields = row.split(None, 2)
+                if len(fields) == 3 and fields[1] == str(proc.pid) and int(fields[0]) not in servers:
+                    identities[f"cli_child_{fields[0]}"] = _identity(int(fields[0]))
         if phase == "tool":
             for role, values in json.loads(marker.read_text()).items():
                 identity = _identity(values["pid"])
