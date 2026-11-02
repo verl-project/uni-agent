@@ -549,3 +549,39 @@ async def test_stop_bounds_pipe_drain_when_reparented_child_escapes(tmp_path, ca
             task.cancel()
         await asyncio.gather(task, return_exceptions=True)
         await sandbox.stop()
+
+
+async def test_drain_yields_to_callbacks_when_gather_is_already_complete():
+    # A separate process bounds the negative control: a tight loop cannot be
+    # interrupted by an asyncio timeout running on that same blocked loop.
+    script = """
+import asyncio
+from uni_agent.sandbox.local import LocalSandbox
+async def main():
+    sandbox = LocalSandbox()
+    completed = asyncio.get_running_loop().create_future()
+    completed.set_result(None)
+    sandbox._pending_drains.add(completed)
+    completed.add_done_callback(sandbox._pending_drains.discard)
+    original = asyncio.gather
+    def eager(*args, **kwargs):
+        if all(f.done() for f in args):
+            result = asyncio.get_running_loop().create_future()
+            result.set_result([f.result() for f in args])
+            return result
+        return original(*args, **kwargs)
+    asyncio.gather = eager
+    await sandbox._drain_pending()
+    assert not sandbox._pending_drains
+asyncio.run(main())
+"""
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable, "-c", script, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), 3)
+        assert proc.returncode == 0 and not stderr, (stdout, stderr)
+    finally:
+        if proc.returncode is None:
+            proc.kill()
+        await proc.wait()

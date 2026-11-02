@@ -56,6 +56,9 @@ class LocalSandbox(Sandbox):
     async def _drain_pending(self) -> None:
         while self._pending_spawns or self._pending_drains:
             await asyncio.gather(*self._pending_spawns, *self._pending_drains, return_exceptions=True)
+            # Python 3.12 gather may finish synchronously when inputs are done.
+            # Give their queued callbacks a turn to retire them / register drains.
+            await asyncio.sleep(0)
 
     def _kill_spawned(self, spawn: asyncio.Future[asyncio.subprocess.Process]) -> None:
         try:

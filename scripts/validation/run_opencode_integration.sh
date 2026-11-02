@@ -40,7 +40,7 @@ counts = {key: 0 for key in ('tests', 'failures', 'errors', 'skipped')}
 for suite in suites:
     for key in counts:
         counts[key] += int(suite.attrib.get(key, 0))
-assert counts['tests'] == 192, counts
+assert counts['tests'] == 193, counts
 assert not any(counts[k] for k in ('failures', 'errors', 'skipped')), counts
 records = [json.loads(m) for m in re.findall(r'opencode_process_cleanup=(\{[^\n]+\})', (out / 'tests.log').read_text())]
 assert len(records) == 4, records
