@@ -1,6 +1,6 @@
 """Optional black-box OpenCode + real Gateway integration probe.
 
-Set OPENCODE_BIN explicitly to an installed 1.19.3 CLI to opt in; the test does
+Set OPENCODE_BIN explicitly to an installed supported CLI to opt in; the test does
 not auto-detect a CLI from PATH. The backend is deterministic synthetic CPU
 output; it does not run a model or use credentials.
 """

@@ -242,7 +242,7 @@ def test_context_and_workdir_constraints():
         (FakeSandbox(exit_code=-1, stdout=""), "timeout"),
         (FakeSandbox(error=TimeoutError("test-secret-only")), "timeout"),
         (FakeSandbox(error=FileNotFoundError("test-secret-only")), "startup_failure"),
-        (FakeSandbox(version="1.18.15"), "unsupported_version"),
+        (FakeSandbox(version="1.17.15"), "unsupported_version"),
         (FakeSandbox(version_code=127), "cli_unavailable"),
         (FakeSandbox(version_code=-1), "timeout"),
         (FakeSandbox(prepare_code=1), "startup_failure"),
@@ -360,3 +360,51 @@ def test_stderr_redaction_precedes_tail_truncation():
     result, _ = run(FakeSandbox(stderr='{"apiKey":"other-key","message":"Bearer another-key"}'))
     assert "other-key" not in result.info["stderr_tail"]
     assert "another-key" not in result.info["stderr_tail"]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize("version", ["1.18.0", "1.18.18", "1.18.999", "1.19.0", "1.19.3", "1.19.999"])
+def test_supported_stable_lines_record_exact_version(version):
+    result, sandbox = run(FakeSandbox(version=version))
+    assert result.finished is True
+    assert result.info["cli_version"] == version
+    assert any(argv[1:2] == ["run"] for argv, _ in sandbox.commands)
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize(
+    "version",
+    [
+        "",
+        "1.17.99",
+        "1.20.0",
+        "2.0.0",
+        "1.18",
+        "1.19.3.1",
+        "v1.19.3",
+        "1.19.3-beta.1",
+        "1.18.18-rc.1",
+        "1.19.3+custom",
+        "1.19.03",
+        "01.19.3",
+        "OpenCode 1.19.3",
+        "1.19.3\n2.0.0",
+        "1.19.٣",
+    ],
+)
+def test_other_versions_rejected_before_prompt(version):
+    result, sandbox = run(FakeSandbox(version=version))
+    assert result.finished is False
+    assert result.info["error_kind"] == "unsupported_version"
+    assert result.info["cli_version"] == version.strip()
+    assert not any(argv[1:2] == ["run"] for argv, _ in sandbox.commands)
+    assert sandbox.commands[-1][0][:3] == ["rm", "-rf", "--"]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_failed_preflight_does_not_claim_a_version():
+    result, _ = run(FakeSandbox(version_code=127))
+    assert result.info["cli_version"] is None

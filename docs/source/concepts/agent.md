@@ -125,9 +125,9 @@ agent:
 
 Template placeholders use Task metadata. A configured template replaces the input prompt, so a user-only template does not inherit dataset system messages.
 
-## OpenCode Prototype
+## OpenCode
 
-`agent.name: opencode` selects a black-box adapter for the pinned OpenCode 1.19.3
+`agent.name: opencode` selects a black-box adapter for stable OpenCode 1.18.x and 1.19.x
 CLI. It accepts one text user message, uses an OpenAI Chat Completions provider
 pointed at `agent.model.base_url`, and checks JSON events as well as the process
 exit code before marking a run finished. The CLI must already be installed in

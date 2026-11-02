@@ -16,6 +16,7 @@ async def test_smoke_task_scores_files_not_cli_completion(tmp_path, monkeypatch,
         pytest.skip("set OPENCODE_BIN explicitly to enable the optional OpenCode Task smoke test")
     monkeypatch.setenv("PWD", str(tmp_path))
     result = await run_smoke(cli, scenario)
+    assert result.extra_info["cli_version"] == os.environ.get("OPENCODE_VERSION", "1.19.3")
     assert result.finished is True
     assert result.reward == reward
     assert result.accuracy == reward

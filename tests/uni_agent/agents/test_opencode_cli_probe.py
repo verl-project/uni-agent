@@ -1,6 +1,6 @@
 """Optional probes against a real OpenCode CLI and a synthetic SSE endpoint.
 
-Set ``OPENCODE_BIN`` explicitly to OpenCode 1.19.3 to opt in; this test does
+Set ``OPENCODE_BIN`` explicitly to OpenCode 1.18.x/1.19.x to opt in; this test does
 not auto-detect a CLI from ``PATH``. No real model, credentials, or GPU is used;
 files and subprocesses created by the probes live under ``tmp_path``.
 """

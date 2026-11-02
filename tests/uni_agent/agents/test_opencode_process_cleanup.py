@@ -1,6 +1,6 @@
 """Opt-in cross-PR regression for #292's CLI and #234's LocalSandbox.
 
-Use an explicitly provisioned OpenCode 1.19.3 (OPENCODE_BIN). All model replies
+Use an explicitly provisioned OpenCode 1.18.x/1.19.x (OPENCODE_BIN). All model replies
 come from loopback SSE with a dummy key. Liveness is judged BEFORE any rescue
 signals; teardown can clean a failed test, but cannot make that test pass.
 """
@@ -79,7 +79,7 @@ async def _wait_until(predicate, seconds: float) -> bool:
 def _configured_cli() -> str:
     setting = os.environ.get("OPENCODE_BIN")
     if not setting:
-        pytest.skip("set OPENCODE_BIN to an explicitly provisioned OpenCode 1.19.3")
+        pytest.skip("set OPENCODE_BIN to an explicitly provisioned OpenCode 1.18.x/1.19.x")
     cli = shutil.which(setting)
     if cli is None:
         pytest.fail(f"OPENCODE_BIN={setting!r} is not executable")

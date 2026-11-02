@@ -21,7 +21,8 @@ from ..registry import register_agent
 if TYPE_CHECKING:
     from uni_agent.sandbox import Sandbox
 
-OPENCODE_VERSION = "1.19.3"
+OPENCODE_VERSION = "1.19.3"  # Default representative release; not the acceptance gate.
+_SUPPORTED_VERSION = re.compile(r"1\.(?:18|19)\.(?:0|[1-9][0-9]*)")
 _PROVIDER = "uni-agent"
 _KEY_ENV = "UNI_AGENT_OPENCODE_API_KEY"
 
@@ -172,7 +173,7 @@ def _parse_events(stdout: str) -> list[dict[str, Any]]:
 
 @register_agent("opencode")
 class OpenCodeAgent(Agent):
-    """Black-box prototype for OpenCode 1.19.3; never starts or stops the Sandbox."""
+    """Black-box adapter for stable OpenCode 1.18.x and 1.19.x; never starts or stops the Sandbox."""
 
     config_model = OpenCodeConfig
 
@@ -206,7 +207,7 @@ class OpenCodeAgent(Agent):
             "OPENCODE_DISABLE_TERMINAL_TITLE": "1",
             _KEY_ENV: cfg.model.api_key,
         }
-        info: dict[str, Any] = {"exit_code": None, "error_kind": None, "cli_version": OPENCODE_VERSION}
+        info: dict[str, Any] = {"exit_code": None, "error_kind": None, "cli_version": None}
         output: dict[str, Any] = {}
         finished = False
         try:
@@ -217,12 +218,15 @@ class OpenCodeAgent(Agent):
                 # Preflight without the credential: wrong binaries fail before the prompt is submitted.
                 check_env = {key: value for key, value in env.items() if key != _KEY_ENV}
                 version = await sandbox.exec([cfg.opencode_bin, "--version"], env=check_env, timeout=30)
+                detected_version = (version.stdout or "").strip()
+                if version.exit_code == 0:
+                    info["cli_version"] = detected_version
                 if version.exit_code != 0:
                     info.update(
                         exit_code=version.exit_code,
                         error_kind="timeout" if version.exit_code == -1 else "cli_unavailable",
                     )
-                elif version.stdout.strip() != OPENCODE_VERSION:
+                elif _SUPPORTED_VERSION.fullmatch(detected_version) is None:
                     info["error_kind"] = "unsupported_version"
                 else:
                     proc = await sandbox.exec(

@@ -157,6 +157,7 @@ class PatchSmokeTask(Task):
                         "gateway": False,
                         "verifier_exit_code": verification.exit_code if verification is not None else None,
                         "agent_error": agent_result.info.get("error_kind"),
+                        "cli_version": agent_result.info.get("cli_version"),
                     },
                 )
         result.extra_info["workspace_removed"] = not root.exists()
@@ -185,7 +186,7 @@ def main() -> int:
     parser.add_argument("--scenario", choices=("patch", "no-edit"), default="patch")
     args = parser.parse_args()
     if not args.opencode_bin:
-        parser.error("provide --opencode-bin or explicitly set OPENCODE_BIN to OpenCode 1.19.3")
+        parser.error("provide --opencode-bin or explicitly set OPENCODE_BIN to a supported OpenCode release")
     result = asyncio.run(run_smoke(args.opencode_bin, args.scenario))
     print(json.dumps(dataclasses.asdict(result), indent=2))
     return 0 if result.finished is True and result.reward == 1.0 and result.extra_info["workspace_removed"] else 1

@@ -1,6 +1,10 @@
-# OpenCode adapter prototype
+# OpenCode adapter
 
-This adapter launches OpenCode **1.19.3** inside an already provisioned Sandbox.
+This adapter launches stable OpenCode **1.18.x and 1.19.x** releases inside an
+already provisioned Sandbox. The gate accepts numeric release triplets only;
+prereleases, custom build suffixes, malformed versions, and other release lines
+are rejected before a prompt is sent. `result.info["cli_version"]` records the
+actual detected version (or `None` when preflight did not succeed).
 It accepts exactly one non-blank text user message and returns the CLI's JSON
 events and generated text. The Task owns provisioning, verification, reward, and
 Sandbox teardown. The adapter only launches the harness and removes its own
@@ -18,8 +22,9 @@ npm install --prefix /opt/opencode --no-audit --no-fund opencode-ai@1.19.3
 Do this while building the image, not during an episode. The npm package selects a
 platform binary; npm installation uses Node.js, while the installed native CLI
 embeds its runtime. The development probe used macOS ARM64, Node.js 26.7.0 for
-installation, Python 3.10.21, and the native OpenCode 1.19.3 binary. Linux runtime
-images and their libc/architecture requirements still need deployment testing.
+installation, Python 3.10.21, and native OpenCode binaries. The representative
+releases are 1.18.18 and 1.19.3; the integration workflow tests both through a
+read-only sidecar on Ubuntu amd64. Other deployments still need validation.
 No minimum Node.js version is claimed here. Missing or mismatched binaries fail
 before the prompt is submitted; the adapter does not install or upgrade them.
 
@@ -222,3 +227,28 @@ Sandbox follow-up, reproducible commands, and the remaining containment limits.
 - [Pinned provider schema](https://github.com/anomalyco/opencode/blob/e3c4eb242585dcd77be1a867391b7c25fd47ce52/packages/core/src/v1/config/provider.ts)
 - [Pinned environment flags](https://github.com/anomalyco/opencode/blob/e3c4eb242585dcd77be1a867391b7c25fd47ce52/packages/core/src/flag/flag.ts)
 - [Uni-Agent Q4 roadmap](https://github.com/verl-project/uni-agent/issues/191)
+
+
+## Dual-version integration validation
+
+Select a provisioned CLI with `OPENCODE_BIN` and its exact expected release with
+`OPENCODE_VERSION` (default `1.19.3`). This selects test expectations, not the
+production version gate. There is no monkeypatch or compatibility bypass:
+
+```bash
+OPENCODE_BIN=/path/to/opencode-1.18.18 OPENCODE_VERSION=1.18.18 \
+  bash scripts/validation/run_opencode_integration.sh results/1.18.18
+OPENCODE_BIN=/path/to/opencode-1.19.3 OPENCODE_VERSION=1.19.3 \
+  bash scripts/validation/run_opencode_integration.sh results/1.19.3
+```
+
+Install `scripts/validation/opencode-phase1-requirements.txt` in an isolated
+Python environment first. Model replies in these tests are synthetic; this is
+not real-model, E2B, training, or 2.x acceptance. The sidecar's build version and
+archive checksum must match; the adapter does not install or upgrade the CLI.
+
+The Task must own the Sandbox lifecycle. Use `async with LocalSandbox()` or
+cancel/join outstanding command callers and then `await sandbox.stop()` before
+closing the event loop. This drains deferred spawn cleanups and subprocess pipe
+callbacks for that instance. Merely draining the default executor cannot ensure
+those callbacks finish. See [process cleanup](PROCESS_CLEANUP.md) for limits.
