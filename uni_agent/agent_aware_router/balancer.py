@@ -85,7 +85,27 @@ class KVCAwareBalancer:
             "on_servers_removed": [],
         }
         self._store = DataStore()
+        self._init_cache_registry()
         self._init_provider()
+
+    def _init_cache_registry(self) -> None:
+        """Install the shared layout and bind each replica's own hash profile."""
+
+        def query(handle):
+            if not hasattr(handle, "get_kv_cache_metadata"):
+                return {"status": "unsupported", "reason": "metadata_method_unavailable"}
+            try:
+                return ray.get(handle.get_kv_cache_metadata.remote(), timeout=self._DISCOVERY_TIMEOUT_SECONDS)
+            except Exception as exc:
+                return {"status": "error", "reason": f"metadata_query_failed:{type(exc).__name__}"}
+
+        with ThreadPoolExecutor(max_workers=min(self._MAX_DISCOVERY_WORKERS, len(self._servers))) as executor:
+            values = executor.map(query, self._servers.values())
+            metadata_by_node = dict(zip(self._servers, values, strict=True))
+        metadata = next(iter(metadata_by_node.values()))
+        state = self._store.configure_cache_registry(metadata, replica_metadata=metadata_by_node)
+        if state.status not in {"registered", "disabled"}:
+            logger.warning("Cache registry unavailable after replica discovery: %s", state.reason)
 
     def _fetch_rollout_config(self) -> Any | None:
         """Return the first available rollout config."""
