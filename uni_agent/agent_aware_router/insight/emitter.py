@@ -32,6 +32,12 @@ Methods are called unconditionally — the facade owns the env gate and no-op
 semantics, so with rl-insight off the cost here is just a function call plus
 dict lookups. Unknown score components and missing event fields are skipped
 silently.
+
+Level gating (``VERL_RL_INSIGHT_LEVEL``, default ``basic``) happens in the
+single choke point :meth:`Emitter._emit`: ``basic`` keeps counters and core
+gauges, ``debug`` additionally emits the A-class histograms and derived
+gauges. Call sites stay unconditional; a gated-out call costs one dict
+lookup + comparison.
 """
 
 from __future__ import annotations
@@ -39,7 +45,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from ...rl_insight import metric_count, metric_gauge, metric_histogram
+from ...rl_insight import (
+    level_allows,
+    metric_count,
+    metric_gauge,
+    metric_histogram,
+)
 from ..types.emit_spec import EMIT_SPECS, EmitKey
 
 __all__ = ["Emitter", "WriteEvent", "WriteKind", "emitter"]
@@ -179,8 +190,14 @@ class Emitter:
 
     # ── fan-out ───────────────────────────────────────────────────────
     def _emit(self, key: str, value: float, replica: str | None = None) -> None:
-        """Map one canonical key to the right facade call via ``EMIT_SPECS``."""
+        """Map one canonical key to the right facade call via ``EMIT_SPECS``.
+
+        Level gate: signals above the configured ``VERL_RL_INSIGHT_LEVEL``
+        are dropped here, before any facade call.
+        """
         spec = EMIT_SPECS[key]
+        if not level_allows(spec.get("level", "basic")):
+            return
         labels: dict[str, Any] = {"replica": replica} if spec["labels"] else {}
         metric_type = spec["type"]
         if metric_type == "counter":

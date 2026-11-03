@@ -341,6 +341,11 @@ class TestCollectorEmitsToInsight:
 
         monkeypatch.setenv(facade.ENABLE_ENV, "1")
         monkeypatch.setattr(facade, "_enabled", True)  # pre-flip gate cache
+        # These tests pin the full B-class set including the debug-level
+        # derived inflight_avg_turn gauge: opt into debug.
+        monkeypatch.setenv(facade.LEVEL_ENV, "debug")
+        monkeypatch.setattr(facade, "_level", None)
+        monkeypatch.setattr(facade, "_level_warned", False)
         self._emitter = emitter
         self._rl = _RecordingRLInsight()
         monkeypatch.setitem(sys.modules, "rl_insight", self._rl)

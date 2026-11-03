@@ -77,79 +77,98 @@ class EmitKey:
 #   type    : "counter" | "gauge" | "histogram" — emitter picks the rl_insight API
 #   labels  : list of label names; ["replica"] for per-replica, [] for global
 #   help    : Prometheus HELP string
+#   level   : "basic" | "debug" — the emitter drops signals above the level
+#             configured via VERL_RL_INSIGHT_LEVEL (default "basic").
+#             "basic" = counters + core gauges dashboards need;
+#             "debug" = high-frequency A-class histograms + derived gauges
+#             (e.g. inflight_avg_turn) that production runs rarely consume.
 EMIT_SPECS: dict[str, dict[str, Any]] = {
     # ── B-class gauge · vLLM cumulative counters forwarded as-is ──
     # vLLM already maintains these as monotonic counters; the emitter sets the
     # cumulative value directly (no prev, no delta). rate() on a gauge works.
     EmitKey.PROMPT_TOKENS: {
+        "level": "basic",
         "type": "gauge",
         "labels": ["replica"],
         "help": "Cumulative prefill tokens computed locally (cache miss), forwarded from vLLM",
     },
     EmitKey.PROMPT_TOKENS_CACHED: {
+        "level": "basic",
         "type": "gauge",
         "labels": ["replica"],
         "help": "Cumulative prompt tokens served from prefix cache, forwarded from vLLM",
     },
     EmitKey.EXTERNAL_PREFIX_CACHE_HITS: {
+        "level": "basic",
         "type": "gauge",
         "labels": ["replica"],
         "help": "Cumulative external (cross-replica) prefix-cache hits, forwarded from vLLM",
     },
     EmitKey.ESTIMATED_FLOPS_PER_GPU: {
+        "level": "basic",
         "type": "gauge",
         "labels": ["replica"],
         "help": "Cumulative estimated FLOPs per GPU, forwarded from vLLM (MFU = rate / peak)",
     },
     # ── B-class gauge · instantaneous levels (poll / event write) ──
     EmitKey.KV_CACHE_USAGE_PERC: {
+        "level": "basic",
         "type": "gauge",
         "labels": ["replica"],
         "help": "vLLM KV cache usage percentage",
     },
     EmitKey.NUM_REQUESTS_RUNNING: {
+        "level": "basic",
         "type": "gauge",
         "labels": ["replica"],
         "help": "Requests currently running on the replica",
     },
     EmitKey.NUM_REQUESTS_WAITING: {
+        "level": "basic",
         "type": "gauge",
         "labels": ["replica"],
         "help": "Requests waiting to be processed on the replica",
     },
     EmitKey.KV_CACHE_LOAD: {
+        "level": "basic",
         "type": "gauge",
         "labels": ["replica"],
         "help": "Router-derived KV occupancy (retained blocks / num_gpu_blocks)",
     },
     EmitKey.INFLIGHT_TOKENS: {
+        "level": "basic",
         "type": "gauge",
         "labels": ["replica"],
         "help": "Prompt tokens across in-flight requests on the replica (acquire +plen / release -plen)",
     },
     # ── B-class gauge · derived ──
     EmitKey.INFLIGHT_AVG_TURN: {
+        "level": "debug",
         "type": "gauge",
         "labels": ["replica"],
         "help": "Average turn of in-flight requests on the replica (instantaneous level)",
     },
     # ── B-class counter · routing events (delta available; prometheus_client accumulates) ──
     EmitKey.DISPATCHED_COUNT: {
+        "level": "basic",
         "type": "counter",
         "labels": ["replica"],
         "help": "Cumulative dispatched requests (acquire +1) — pair with completed_count for dispatch rates",
     },
     EmitKey.COMPLETED_COUNT: {
+        "level": "basic",
         "type": "counter",
         "labels": ["replica"],
         "help": "Cumulative completed requests (release +1) — realized-throughput share",
     },
     EmitKey.PROMPT_LEN_SUM: {
+        "level": "basic",
         "type": "counter",
         "labels": ["replica"],
         "help": "Cumulative sum of dispatched prompt lengths (avg prompt len = rate / rate(dispatched_count))",
     },
     EmitKey.KV_EVICTIONS: {
+        "level": "basic",
         "type": "counter",
         "labels": ["replica"],
         "help": (
@@ -159,33 +178,39 @@ EMIT_SPECS: dict[str, dict[str, Any]] = {
     },
     # ── A-class histogram · strategy components (per-dispatch × per-replica observe) ──
     EmitKey.LOAD: {
+        "level": "debug",
         "type": "histogram",
         "labels": ["replica"],
         "help": "Prefix-load-aware load score (replica-state component, [0, 1])",
     },
     EmitKey.S_CACHE: {
+        "level": "debug",
         "type": "histogram",
         "labels": ["replica"],
         "help": "Weighted three-layer prefix cache hit rate (request-replica component, [0, 1])",
     },
     EmitKey.AVAIL_RATIO: {
+        "level": "debug",
         "type": "histogram",
         "labels": ["replica"],
         "help": "Free capacity-token headroom as a fraction of capacity = 1 - kv_usage ([0, 1])",
     },
     EmitKey.NEED_RATIO: {
+        "level": "debug",
         "type": "histogram",
         "labels": ["replica"],
         "help": "Prefill this request adds as a fraction of capacity = plen * (1 - gpu_hit) / cap"
         "(may exceed 1 for oversized prompts)",
     },
     EmitKey.REMAINING_RATIO: {
+        "level": "debug",
         "type": "histogram",
         "labels": ["replica"],
         "help": "(avail - need) / cap after assigning this request (may be negative when need exceeds avail)",
     },
     # ── A-class histogram · route latency (per-call, global — no replica label) ──
     EmitKey.ROUTE_LATENCY_SECONDS: {
+        "level": "debug",
         "type": "histogram",
         "labels": [],
         "help": "score() policy-scoring latency, seconds (self-timed in score() try/finally)",

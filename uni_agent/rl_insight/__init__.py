@@ -25,6 +25,12 @@ verl/trainer reads). The metric path is lazily wired: with the switch off the
 facade never imports ``rl_insight`` and pays ~zero cost; wiring failures are
 logged once and degrade to permanently-off (observability must never crash
 its host).
+
+The metric channel additionally honours ``VERL_RL_INSIGHT_LEVEL`` (``basic`` /
+``debug``, default ``basic``): emitters tag each signal with a level and drop
+signals above the configured level in their single choke point, so production
+runs pay no hot-path cost for debug-only signals while debugging sessions keep
+the full set. An invalid level warns once and falls back to ``basic``.
 """
 
 from __future__ import annotations
@@ -35,6 +41,9 @@ from typing import Any
 
 __all__ = [
     "ENABLE_ENV",
+    "LEVEL_ENV",
+    "get_emit_level",
+    "level_allows",
     "metric_count",
     "metric_gauge",
     "metric_histogram",
@@ -44,10 +53,46 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 ENABLE_ENV = "VERL_RL_INSIGHT_ENABLE"
+LEVEL_ENV = "VERL_RL_INSIGHT_LEVEL"
+
+# Ordered signal levels: a signal emits when its level rank is at most the
+# configured level rank. ``basic`` = counters + core gauges for dashboards;
+# ``debug`` = everything, including high-frequency histograms and derived gauges.
+_LEVEL_RANK = {"basic": 0, "debug": 1}
 
 
 _enabled: bool | None = None
 _dead: bool = False
+_level: str | None = None
+_level_warned: bool = False
+
+
+def get_emit_level() -> str:
+    """Return the configured emit level (``basic`` / ``debug``), cached per process.
+
+    Unset defaults to ``basic``; an invalid value warns once and falls back to
+    ``basic``. Like the enable gate, the value is read once and cached, so a
+    mid-process env change does not take effect.
+    """
+    global _level, _level_warned
+    if _level is None:
+        raw = os.getenv(LEVEL_ENV, "basic").strip().lower()
+        if raw not in _LEVEL_RANK:
+            if not _level_warned:
+                _level_warned = True
+                logger.warning("invalid %s=%r; falling back to 'basic'", LEVEL_ENV, raw)
+            raw = "basic"
+        _level = raw
+    return _level
+
+
+def level_allows(signal_level: str) -> bool:
+    """Return whether a signal at ``signal_level`` emits at the configured level.
+
+    Unknown signal levels are treated as ``basic`` so a signal added without a
+    level keeps emitting under the default configuration.
+    """
+    return _LEVEL_RANK.get(signal_level, 0) <= _LEVEL_RANK[get_emit_level()]
 
 
 def _get_rl_insight() -> Any | None:
