@@ -18,21 +18,19 @@ class _FakeSandbox:
         *,
         exit_code: int = 0,
         stderr: str = "",
-        timed_out: bool = False,
         file_bytes: bytes = PNG,
         geometry: str = "1024 768",
     ):
         self.geometry = geometry
         self.exit_code = exit_code
         self.stderr = stderr
-        self.timed_out = timed_out
         self.file_bytes = file_bytes
         self.execs: list[tuple[list[str], dict | None]] = []
 
     async def exec(self, argv, *, timeout=None, workdir=None, env=None):
         self.execs.append((list(argv), env))
         stdout = self.geometry if argv[:2] == ["xdotool", "getdisplaygeometry"] else ""
-        return ExecResult(exit_code=self.exit_code, stdout=stdout, stderr=self.stderr, timed_out=self.timed_out)
+        return ExecResult(exit_code=self.exit_code, stdout=stdout, stderr=self.stderr)
 
     async def read_file(self, path):
         return self.file_bytes
@@ -214,7 +212,7 @@ def test_relative_mode_is_announced_in_the_tool_description():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("tool", ["screenshot", "click"])
 async def test_command_timeout_is_a_timeout_result_not_an_error(tool):
-    sandbox = _FakeSandbox(exit_code=-1, stderr="exec timed out after 5s", timed_out=True)
+    sandbox = _FakeSandbox(exit_code=-1, stderr="exec timed out after 5s")
 
     result = await _toolbox(sandbox).call(tool, {"x": 1, "y": 1} if tool == "click" else {}, timeout=5)
 

@@ -45,7 +45,6 @@ class ExecResult:
     exit_code: int
     stdout: str
     stderr: str
-    timed_out: bool = False
 
 
 def _name_tag(ref: str) -> tuple[str, str | None]:
@@ -491,9 +490,7 @@ class Sandbox(abc.ABC):
             return await self._exec(argv, timeout=timeout, workdir=workdir, env=env)
         except Exception as exc:
             if self._is_timeout_error(exc):
-                return ExecResult(
-                    exit_code=-1, stdout="", stderr=f"exec timed out after {timeout}s: {exc}", timed_out=True
-                )
+                return ExecResult(exit_code=-1, stdout="", stderr=f"exec timed out after {timeout}s: {exc}")
             if not await self.is_alive():
                 raise
             return ExecResult(exit_code=127, stdout="", stderr=str(exc))

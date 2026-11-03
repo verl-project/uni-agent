@@ -94,7 +94,7 @@ class _GuiTool(Tool):
 
     async def _x(self, argv: list[str], *, timeout: float | None = None, check: bool = True) -> ExecResult:
         result = await self.sandbox.exec(argv, timeout=timeout, env={"DISPLAY": self._cfg.display})
-        if result.timed_out:
+        if result.exit_code == -1:  # sandbox convention for a timed-out exec
             raise _CommandTimeout(f"`{argv[0]}` did not finish within {timeout}s")
         if check and result.exit_code != 0:
             detail = (result.stderr or result.stdout).strip()[:500]
