@@ -5,6 +5,9 @@ already provisioned Sandbox. The gate accepts numeric release triplets only;
 prereleases, custom build suffixes, malformed versions, and other release lines
 are rejected before a prompt is sent. `result.info["cli_version"]` records the
 actual detected version (or `None` when preflight did not succeed).
+The SWE-rebench training recipe in
+[`examples/blackbox_recipes/opencode_swe_task`](../blackbox_recipes/opencode_swe_task/README.md)
+runs the sidecar image on E2B.
 It accepts exactly one non-blank text user message and returns the CLI's JSON
 events and generated text. The Task owns provisioning, verification, reward, and
 Sandbox teardown. The adapter only launches the harness and removes its own
