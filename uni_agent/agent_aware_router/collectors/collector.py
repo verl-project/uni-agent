@@ -22,6 +22,7 @@ import threading
 import time
 from collections import defaultdict
 from concurrent.futures import Future
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from typing import Any
 
 from ..config.collector import CollectorConfig
@@ -32,7 +33,7 @@ from ..types import EmitKey, MetricKey
 from ..utils.knob import coerce_knob_value
 from .parse import InflightBlockUpdate, KVCacheUpdate, MetricsUpdate, Parser, StickyUpdate
 from .parse.basic.inflight import InflightParser
-from .transport.base import Transport
+from .transport.base import Transport, TransportMessage
 from .transport.callback import StatisticEvent
 
 logger = logging.getLogger(__name__)
@@ -98,8 +99,10 @@ class Collector:
         self._parser = parser
         self._data_store = DataStore()
         self._future: Future | None = None
+        self._stop_future: Future | None = None
         self._loop: asyncio.AbstractEventLoop = asyncio.new_event_loop()
         self._loop_thread: threading.Thread | None = None
+        self._sync_started = False
         # Periodic evidence-log state. The parser is stateless (returns
         # MetricsUpdate; merged here), so the log reads a current snapshot.
         self._metrics_poll_count = 0
@@ -125,8 +128,10 @@ class Collector:
             asyncio.set_event_loop(self._loop)
             self._loop.run_forever()
 
-        def handler(raw_data: bytes | str, node_id: str) -> None:
+        def handler(raw_data: Any, node_id: str) -> None:
             """Handler: parse and dispatch each update to the right store write path."""
+            if isinstance(raw_data, bytes):
+                raw_data = TransportMessage(raw_data)
             if isinstance(self._parser, InflightParser):
                 # The inflight parser is pure — the collector gathers its state
                 # from the store and drives it event by event.
@@ -152,11 +157,25 @@ class Collector:
                     logger.debug(f"parser.parse returned an unknown update: {update}")
 
         if getattr(self._transport, "is_async", True):
+            if self._loop_thread is not None or self._loop.is_running():
+                raise RuntimeError("stop the collector before starting it again")
+            if not self._loop.is_closed() and any(not task.done() for task in asyncio.all_tasks(self._loop)):
+                raise RuntimeError("finish collector cleanup before starting it again")
+            if self._loop.is_closed():
+                self._loop = asyncio.new_event_loop()
+            ready = threading.Event()
+            self._loop.call_soon(ready.set)
             self._loop_thread = threading.Thread(
                 target=run_loop,
                 daemon=True,
             )
             self._loop_thread.start()
+            if not ready.wait(5):
+                try:
+                    self.stop()
+                except Exception as exc:
+                    raise TimeoutError("collector event loop startup timed out") from exc
+                raise TimeoutError("collector event loop startup timed out")
 
             self._future = asyncio.run_coroutine_threadsafe(
                 self._transport.subscribe(handler),
@@ -165,7 +184,11 @@ class Collector:
         else:
             # CallbackTransport: subscribe only registers callbacks — run it on a
             # throwaway loop; stop() just unregisters.
+            if self._sync_started:
+                raise RuntimeError("stop the collector before starting it again")
             tmp_loop = asyncio.new_event_loop()
+            # A failed subscribe may have registered only some callbacks.
+            self._sync_started = True
             try:
                 tmp_loop.run_until_complete(self._transport.subscribe(handler))
             finally:
@@ -432,37 +455,55 @@ class Collector:
         # Snapshot current cumulative values for next window's delta.
         self._metrics_prev[node_id] = {k: float(snap.get(k, 0) or 0) for k in _CUMULATIVE_KEYS}
 
-    def stop(self) -> None:
+    def stop(self, timeout: float = 15.0) -> None:
         """
         Stop the collector — cancel tasks, drain cleanup, stop event-loop thread.
         """
-        # Transport closes protocol-level resources (sockets/clients);
-        # we own task cancellation and finally-block draining below.
-        self._transport.stop()
-
         if self._loop.is_running():
             # Cancel all tasks and wait for their finally blocks inside the loop
             # so that aclose() runs while the loop is still alive.
             async def _cancel_and_drain() -> None:
-                current = asyncio.current_task()
-                tasks = [t for t in asyncio.all_tasks() if not t.done() and t is not current]
-                for t in tasks:
-                    t.cancel()
-                await asyncio.gather(*tasks, return_exceptions=True)
+                try:
+                    self._transport.stop()
+                finally:
+                    current = asyncio.current_task()
+                    tasks = [t for t in asyncio.all_tasks() if not t.done() and t is not current]
+                    for t in tasks:
+                        t.cancel()
+                    await asyncio.gather(*tasks, return_exceptions=True)
 
-            drain = asyncio.run_coroutine_threadsafe(_cancel_and_drain(), self._loop)
+            if self._stop_future is None:
+                self._stop_future = asyncio.run_coroutine_threadsafe(_cancel_and_drain(), self._loop)
             try:
-                drain.result(timeout=15)
+                self._stop_future.result(timeout=timeout)
+            except FutureTimeoutError as exc:
+                if self._stop_future.done():
+                    self._stop_future = None
+                raise TimeoutError("collector cleanup timed out") from exc
             except Exception as exc:
-                logger.debug(f"Error draining tasks on stop: {exc}")
+                self._stop_future = None
+                raise RuntimeError("collector cleanup did not finish") from exc
 
             self._loop.call_soon_threadsafe(self._loop.stop)
+        else:
+            self._transport.stop()
+            if self._loop_thread is not None and not self._loop.is_closed():
+                self._loop.call_soon_threadsafe(self._loop.stop)
 
         if self._loop_thread is not None:
-            self._loop_thread.join(timeout=10)
+            self._loop_thread.join(timeout=min(10, timeout))
+            if self._loop_thread.is_alive():
+                raise TimeoutError("collector event loop did not stop")
             self._loop_thread = None
-
+        if self._loop.is_running():
+            raise TimeoutError("collector event loop is still running")
+        if not self._loop.is_closed():
+            if any(not task.done() for task in asyncio.all_tasks(self._loop)):
+                raise RuntimeError("collector event loop still has pending tasks")
+            self._loop.close()
         self._future = None
+        self._stop_future = None
+        self._sync_started = False
 
 
 # ── Factory function ───────────────────────────────────────────────────

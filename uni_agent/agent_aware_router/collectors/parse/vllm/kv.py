@@ -28,6 +28,7 @@ import msgpack
 
 from ....collectors.parse import KVCacheUpdate, Parser
 from ....collectors.parse.vllm.kv_event import KVCacheEvent
+from ....collectors.transport.base import TransportMessage
 from ....types import Layer
 from ....utils.hash import compute_hash
 
@@ -41,6 +42,11 @@ class VLLMKVParser(Parser):
 
     Each event type has a dedicated handler that folds its blocks into a single
     ``KVCacheUpdate`` accumulator; ``parse`` is pure dispatch.
+
+    This legacy accumulator assumes complete, non-overlapping event delivery.
+    It unwraps transport messages without enforcing sequence or continuity
+    policy: missed removals or overlapping replay can leave stale routing state.
+    Those policies belong to the consuming cache model.
 
     Attributes:
         remote_to_local_block_hash: Mapping from replica node_id to that
@@ -64,7 +70,7 @@ class VLLMKVParser(Parser):
         """Remote→local hash map for one replica (created on first event)."""
         return self.remote_to_local_block_hash.setdefault(node_id, {})
 
-    def parse(self, raw_data: bytes | str, node_id: str) -> KVCacheUpdate | None:
+    def parse(self, raw_data: TransportMessage | bytes | str, node_id: str) -> KVCacheUpdate | None:
         """Parse msgpack payload and return structured update command.
 
         Handles both single batches (real-time) and multiple batches (replay):
@@ -74,12 +80,17 @@ class VLLMKVParser(Parser):
         fields and a ``type`` discriminator.
 
         Args:
-            raw_data: ZMQ payload bytes (msgpack-encoded).
+            raw_data: Msgpack payload bytes, optionally wrapped in a transport message.
             node_id: The endpoint that sent this payload.
 
         Returns:
             KVCacheUpdate with operations to apply, or None if parsing failed.
         """
+        if isinstance(raw_data, TransportMessage):
+            # Protocol status notifications contain no KV batch.
+            if raw_data.status != "ok":
+                return None
+            raw_data = raw_data.payload
         if isinstance(raw_data, str):
             logger.debug("VLLMKVParser received string data, expected bytes — skipping")
             return None

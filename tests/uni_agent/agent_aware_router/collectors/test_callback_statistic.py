@@ -267,6 +267,79 @@ class TestCollectorCallbackIntegration:
         PerRequestStore._instance = None
         KVCacheStore._instance = None
 
+    def test_duplicate_start_preserves_one_hook_and_clean_restart(self):
+        from uni_agent.agent_aware_router.collectors.collector import Collector
+
+        balancer = _FakeBalancer()
+        collector = Collector(CallbackTransport(balancer), StickyParser())
+        try:
+            for _ in range(2):
+                collector.start()
+                assert set(balancer.callbacks) == {"on_acquire", "on_release", "on_servers_removed"}
+                with pytest.raises(RuntimeError, match="stop the collector"):
+                    collector.start()
+                assert all(len(callbacks) == 1 for callbacks in balancer.callbacks.values())
+                collector.stop()
+                assert all(not callbacks for callbacks in balancer.callbacks.values())
+        finally:
+            collector.stop()
+
+    def test_partial_callback_registration_requires_cleanup_before_retry(self, monkeypatch):
+        from uni_agent.agent_aware_router.collectors.collector import Collector
+
+        balancer = _FakeBalancer()
+        collector = Collector(CallbackTransport(balancer), StickyParser())
+        register = balancer.register_call_back
+
+        def partial_registration(event, callback):
+            if event == "on_release":
+                raise RuntimeError("registration failed")
+            register(event, callback)
+
+        try:
+            with monkeypatch.context() as patch:
+                patch.setattr(balancer, "register_call_back", partial_registration)
+                with pytest.raises(RuntimeError, match="registration failed"):
+                    collector.start()
+                with pytest.raises(RuntimeError, match="stop the collector"):
+                    collector.start()
+                assert len(balancer.callbacks["on_acquire"]) == 1
+            collector.stop()
+            assert all(not callbacks for callbacks in balancer.callbacks.values())
+            collector.start()
+            assert all(len(callbacks) == 1 for callbacks in balancer.callbacks.values())
+        finally:
+            collector.stop()
+
+    def test_failed_callback_cleanup_blocks_start_until_retry(self, monkeypatch):
+        from uni_agent.agent_aware_router.collectors.collector import Collector
+
+        balancer = _FakeBalancer()
+        collector = Collector(CallbackTransport(balancer), StickyParser())
+        unregister = balancer.un_register_call_back
+
+        def partial_cleanup(event, callback):
+            if event == "on_release":
+                raise RuntimeError("cleanup failed")
+            unregister(event, callback)
+
+        collector.start()
+        try:
+            with monkeypatch.context() as patch:
+                patch.setattr(balancer, "un_register_call_back", partial_cleanup)
+                with pytest.raises(RuntimeError, match="cleanup failed"):
+                    collector.stop()
+                with pytest.raises(RuntimeError, match="stop the collector"):
+                    collector.start()
+                assert not balancer.callbacks["on_acquire"]
+                assert len(balancer.callbacks["on_release"]) == 1
+            collector.stop()
+            assert all(not callbacks for callbacks in balancer.callbacks.values())
+            collector.start()
+            assert all(len(callbacks) == 1 for callbacks in balancer.callbacks.values())
+        finally:
+            collector.stop()
+
     def test_sticky_collector_writes_binding_on_acquire(self):
         from uni_agent.agent_aware_router.collectors.collector import Collector
         from uni_agent.agent_aware_router.store.data_store import DataStore

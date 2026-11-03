@@ -25,6 +25,7 @@ from conftest import mapping_event
 
 from uni_agent.agent_aware_router.collectors.parse.vllm.kv import VLLMKVParser
 from uni_agent.agent_aware_router.collectors.parse.vllm.kv_event import KVCacheEvent
+from uni_agent.agent_aware_router.collectors.transport.base import TransportMessage
 from uni_agent.agent_aware_router.store.data_store import DataStore
 from uni_agent.agent_aware_router.types import Layer
 
@@ -32,6 +33,23 @@ from uni_agent.agent_aware_router.types import Layer
 def _stored_event(block_hash, parent, token_ids, block_size, medium):
     """A stored event entry: [tag, block_hashes, parent, token_ids, block_size, <unused>, medium]."""
     return ["BlockStored", [block_hash], parent, token_ids, block_size, None, medium]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_transport_message_preserves_existing_payload_parsing():
+    payload = msgpack.packb([0, [_stored_event("parent", None, [1, 2], 2, "GPU")]])
+    expected = VLLMKVParser().parse(payload, "node1")
+    assert VLLMKVParser().parse(TransportMessage(payload, sequence=7), "node1") == expected
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize("status", ["new_stream", "no_continuity", "unreachable"])
+def test_protocol_status_notifications_are_not_kv_payloads(status):
+    parser = VLLMKVParser()
+    assert parser.parse(TransportMessage(b"", status=status), "node1") is None
+    assert not parser.remote_to_local_block_hash
 
 
 @pytest.mark.cpu
@@ -361,8 +379,11 @@ def _removed(hashes, medium="GPU"):
     return [0, [["removed", list(hashes), medium, None]]]
 
 
-def _apply(parser, payload, node_id, store):
-    update = parser.parse(msgpack.packb(payload), node_id)
+def _apply(parser, payload, node_id, store, *, wrapped=False):
+    raw_data = msgpack.packb(payload)
+    if wrapped:
+        raw_data = TransportMessage(raw_data)
+    update = parser.parse(raw_data, node_id)
     assert update is not None
     for layer, hashes in update.remove_blocks.items():
         if hashes:
@@ -373,7 +394,10 @@ def _apply(parser, payload, node_id, store):
     return update
 
 
-def test_hash_map_is_per_replica_and_survives_sibling_eviction():
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize("wrapped", [False, True], ids=["raw", "transport-message"])
+def test_hash_map_is_per_replica_and_survives_sibling_eviction(wrapped):
     """A sibling replica's eviction must not break this replica's translation.
 
     Regression: a flat shared map let replica A's eviction pop the entry
@@ -385,8 +409,8 @@ def test_hash_map_is_per_replica_and_survives_sibling_eviction():
     remote_hashes = ["rh0", "rh1", "rh2"]
 
     # Same content-chained prefix stored on both replicas → identical local chain.
-    _apply(parser, _chained_stored(remote_hashes), "nodeA", store)
-    _apply(parser, _chained_stored(remote_hashes), "nodeB", store)
+    _apply(parser, _chained_stored(remote_hashes), "nodeA", store, wrapped=wrapped)
+    _apply(parser, _chained_stored(remote_hashes), "nodeB", store, wrapped=wrapped)
     assert store.per_replica_block_counts() == {"nodeA": 3, "nodeB": 3}
 
     # Per-replica maps: one entry per node, and local hashes agree across nodes
@@ -396,11 +420,11 @@ def test_hash_map_is_per_replica_and_survives_sibling_eviction():
     assert node_maps["nodeA"] == node_maps["nodeB"], "local chain must not depend on the replica"
 
     # nodeA drops the whole prefix first …
-    _apply(parser, _removed(remote_hashes), "nodeA", store)
+    _apply(parser, _removed(remote_hashes), "nodeA", store, wrapped=wrapped)
     assert store.per_replica_block_counts() == {"nodeA": 0, "nodeB": 3}
 
     # … nodeB's eviction of the same remote hashes must still translate.
-    update = _apply(parser, _removed(remote_hashes), "nodeB", store)
+    update = _apply(parser, _removed(remote_hashes), "nodeB", store, wrapped=wrapped)
     assert len(update.remove_blocks[Layer.GPU]) == 3, "sibling eviction must not eat this replica's mapping"
     assert store.per_replica_block_counts()["nodeB"] == 0, "nodeB must not retain blocks its engine freed"
     assert parser.stats["removed_unmapped"] == 0
