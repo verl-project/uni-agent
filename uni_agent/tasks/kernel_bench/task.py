@@ -7,6 +7,7 @@ import asyncio
 import json
 import logging
 import math
+import os
 import re
 import shlex
 import time
@@ -147,6 +148,9 @@ class TritonOperatorTask(Task):
                         "exit_code": agent_result.info.get("exit_code"),
                         "finished": agent_result.finished,
                     }
+                    boundary_rewards = agent_result.info.get("segment_boundary_rewards")
+                    if isinstance(boundary_rewards, list):
+                        agent_info["segment_boundary_rewards"] = [float(item) for item in boundary_rewards]
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:  # preserve partial workspace and agent-time verifier artifacts
@@ -1149,9 +1153,10 @@ def _compact_extra_info(
         )
         if key in metrics
     }
+    final_reward = float(metrics.get("reward", 0.0))
     result: dict[str, Any] = {
         "op_name": op_name,
-        "reward_score": float(metrics.get("reward", 0.0)),
+        "reward_score": final_reward,
         "metrics": compact_metrics,
         "selected_metrics_source": evaluation.get("selected_metrics_source"),
         "used_best_metrics": bool(evaluation.get("used_best_metrics")),
@@ -1179,6 +1184,16 @@ def _compact_extra_info(
     ):
         if key in evaluation:
             result[key] = evaluation[key]
+    boundary_rewards = agent_info.get("segment_boundary_rewards")
+    if isinstance(boundary_rewards, list):
+        from uni_agent.atrl.segment_reward import combined_segment_rewards
+
+        alpha = float(os.environ.get("TRITON_COMPACTION_REWARD_ALPHA", "0.5"))
+        result["segment_combined_rewards"] = combined_segment_rewards(
+            [float(item) for item in boundary_rewards],
+            final_reward,
+            alpha=alpha,
+        )
     return result
 
 

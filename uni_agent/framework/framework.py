@@ -912,8 +912,13 @@ class GatewayAgentFramework(AgentFramework):
                 )
                 reward_source = "reward_loop_worker"
             elif task_result.reward is not None:
-                annotations = [(float(task_result.reward), {}) for _ in session_trajectories]
-                reward_source = "agent_runner"
+                segment_rewards = (task_result.extra_info or {}).get("segment_combined_rewards")
+                if isinstance(segment_rewards, list) and len(segment_rewards) == len(session_trajectories):
+                    annotations = [(float(score), {}) for score in segment_rewards]
+                    reward_source = "atrl_segment"
+                else:
+                    annotations = [(float(task_result.reward), {}) for _ in session_trajectories]
+                    reward_source = "agent_runner"
             elif self.reward_loop_worker_handles:
                 annotations = await self._score_trajectories(session_trajectories, sample_fields, task_result)
                 reward_source = "reward_loop_worker"
@@ -926,15 +931,29 @@ class GatewayAgentFramework(AgentFramework):
                 result_trajectories = session_trajectories
             else:
                 logger.info("session %s: scored via %s", session_id, reward_source)
-                result_trajectories = [
-                    replace(
-                        traj,
-                        finished=task_result.finished,
-                        reward_score=score,
-                        reward_metrics=extra if reward_source == "reward_loop_worker" else dict(task_metrics),
+                segment_mode = reward_source == "atrl_segment"
+                result_trajectories = []
+                for traj, (score, extra) in zip(session_trajectories, annotations, strict=True):
+                    extra_fields = dict(traj.extra_fields)
+                    if segment_mode:
+                        response_len = len(traj.response_ids)
+                        extra_fields["segment_boundaries"] = [
+                            {
+                                "response_start": 0,
+                                "response_end": response_len,
+                                "num_segments_in_rollout": len(annotations),
+                            }
+                        ]
+                        extra_fields["combined_rewards"] = [float(score)]
+                    result_trajectories.append(
+                        replace(
+                            traj,
+                            finished=task_result.finished,
+                            reward_score=score,
+                            reward_metrics=extra if reward_source == "reward_loop_worker" else dict(task_metrics),
+                            extra_fields=extra_fields,
+                        )
                     )
-                    for traj, (score, extra) in zip(session_trajectories, annotations, strict=True)
-                ]
 
             result_trajectories = _attach_runner_reward_info(result_trajectories, task_result)
 
@@ -1217,6 +1236,9 @@ class GatewayAgentFramework(AgentFramework):
             **trajectory.extra_fields,
             "reward_extra_info": dict(trajectory.reward_metrics),
         }
+        if trajectory.extra_fields.get("segment_boundaries"):
+            field["segment_boundaries"] = trajectory.extra_fields["segment_boundaries"]
+            field["combined_rewards"] = trajectory.extra_fields.get("combined_rewards", [])
         # Framework-owned masks must win over same-named Gateway extra fields.
         field["response_mask"] = response_mask
         field["loss_mask"] = response_mask
