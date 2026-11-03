@@ -149,13 +149,25 @@ class DataStore:
         """
         self._kv.remove_blocks(replica_id, block_hashes, layer=layer)
 
-    def clear_kv_replica(self, replica_id: str) -> None:
-        """Clear all KV cache state for a node: resident blocks, block refs, markers.
+    def clear_kv_resident_blocks(self, replica_id: str) -> None:
+        """Clear resident blocks without changing request accounting or readiness."""
+        self._kv.clear_resident_blocks(replica_id)
 
-        Args:
-            replica_id: Target node.
+    def invalidate_kv_replica(self, replica_id: str) -> None:
+        """Clear untrusted resident blocks while preserving request refs and markers.
+
+        Prefix hits and dispatch-based resident writes stay disabled while
+        the transport rebuilds its view.
         """
-        self._kv.clear_replica(replica_id)
+        self._kv.invalidate_replica(replica_id)
+
+    def mark_kv_replica_ready(self, replica_id: str) -> None:
+        """Enable prefix hits from a replica's rebuilt resident index."""
+        self._kv.mark_replica_ready(replica_id)
+
+    def enable_kv_dispatch_estimates(self, replica_id: str) -> None:
+        """Discard untrusted residency and allow new dispatch estimates."""
+        self._kv.enable_dispatch_estimates(replica_id)
 
     def get_kv_block_count(self) -> int:
         """Return the number of unique block hashes currently cached."""

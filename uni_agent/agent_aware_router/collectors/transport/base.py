@@ -41,6 +41,10 @@ class Transport(ABC):
 
     is_async: bool = True
 
+    def get_stream_status(self) -> dict:
+        """Return stream diagnostics when supported by the transport."""
+        return {}
+
     @abstractmethod
     async def subscribe(self, handler: Callable[[bytes | str, str], None]) -> None:
         """Start data acquisition and deliver each item to handler.
