@@ -8,7 +8,7 @@ import json
 import logging
 import os
 import random
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from functools import partial
@@ -28,7 +28,7 @@ from uni_agent.rl_insight.adapter import agent_loop_session
 from uni_agent.tasks import TaskResult
 from verl.tools.tool_registry import initialize_tools_from_config
 from verl.utils import tensordict_utils as tu
-from verl.utils.import_utils import load_class_from_fqn
+from verl.utils.import_utils import load_class_from_fqn, load_extern_object
 from verl.utils.model import compute_position_id_with_mask
 from verl.utils.transferqueue_utils import tq
 
@@ -39,6 +39,59 @@ logger = logging.getLogger(__name__)
 
 
 TrajectoryPostprocessor = Callable[..., list[Trajectory] | Awaitable[list[Trajectory]]]
+TrajectorySelectFunction = Callable[[str, list[Trajectory]], list[Trajectory] | Awaitable[list[Trajectory]]]
+
+
+@dataclass(frozen=True)
+class _CustomSelectFunction:
+    """``{path, name}`` reference to a user-owned select function."""
+
+    path: str
+    name: str
+
+
+def _parse_trajectory_selection(
+    runner_name: object,
+    runner_cfg,
+) -> tuple[str, _CustomSelectFunction | None]:
+    """Decode ``trajectory_selection`` into (selection, custom_select_function)."""
+    # A top-level key would be silently ignored by the all/longest path.
+    if "custom_select_function" in runner_cfg:
+        raise ValueError(
+            f"agent_runners.{runner_name}: 'custom_select_function' must be nested under "
+            "'trajectory_selection' (mapping form), not a top-level runner key"
+        )
+
+    raw = runner_cfg.get("trajectory_selection", "all")
+    if isinstance(raw, str):
+        return raw, None
+    if isinstance(raw, Mapping):
+        csf = OmegaConf.to_container(OmegaConf.create(raw.get("custom_select_function", {})), resolve=True) or {}
+        if not isinstance(csf, Mapping):
+            raise ValueError(
+                f"agent_runners.{runner_name}: trajectory_selection.custom_select_function must be a mapping, "
+                f"got {type(csf).__name__}"
+            )
+        # The mapping form keeps the neutral value: select_fn decides the mode.
+        return "all", _CustomSelectFunction(
+            path=str(csf.get("path") or ""),
+            name=str(csf.get("name") or ""),
+        )
+    raise ValueError(
+        f"agent_runners.{runner_name}: trajectory_selection must be 'all'/'longest' or a mapping with "
+        f"custom_select_function.{{path, name}}, got {type(raw).__name__}"
+    )
+
+
+def _load_select_function(custom: _CustomSelectFunction) -> TrajectorySelectFunction:
+    """Resolve a ``{path, name}`` reference to a callable, failing fast at start-up."""
+    try:
+        fn = load_extern_object(module_path=custom.path, object_name=custom.name)
+    except Exception as exc:
+        raise ValueError(f"cannot load select function {custom.path}.{custom.name}: {exc}") from exc
+    if not callable(fn):
+        raise TypeError(f"select function {custom.path}.{custom.name} is not callable")
+    return fn
 
 
 @dataclass
@@ -48,6 +101,7 @@ class _RunnerConfig:
     dispatch_mode: str
     max_concurrent_sessions: int
     trajectory_selection: str = "all"
+    custom_select_function: _CustomSelectFunction | None = None
     session_timeout_seconds: float | None = None
 
     def __post_init__(self) -> None:
@@ -59,6 +113,10 @@ class _RunnerConfig:
             raise ValueError(f"max_concurrent_sessions must be non-negative, got {self.max_concurrent_sessions}")
         if self.trajectory_selection not in {"all", "longest"}:
             raise ValueError(f"Unknown trajectory selection: {self.trajectory_selection}. Expected 'all' or 'longest'")
+        if self.custom_select_function is not None and not (
+            self.custom_select_function.path and self.custom_select_function.name
+        ):
+            raise ValueError("custom_select_function requires non-empty 'path' and 'name'")
         if self.session_timeout_seconds is not None and self.session_timeout_seconds <= 0:
             raise ValueError(f"session_timeout_seconds must be positive, got {self.session_timeout_seconds}")
 
@@ -78,7 +136,7 @@ class _RunnerConfig:
             runner_kwargs["tool_config"] = tool_config
         dispatch_mode = str(runner_cfg.get("dispatch_mode", "inline_async"))
         max_concurrent_sessions = int(runner_cfg.get("max_concurrent_sessions", 0) or 0)
-        trajectory_selection = str(runner_cfg.get("trajectory_selection", "all"))
+        trajectory_selection, custom_select_function = _parse_trajectory_selection(runner_name, runner_cfg)
         raw_timeout = runner_cfg.get("session_timeout_seconds")
         session_timeout_seconds = None if raw_timeout is None else float(raw_timeout)
         try:
@@ -88,6 +146,7 @@ class _RunnerConfig:
                 dispatch_mode=dispatch_mode,
                 max_concurrent_sessions=max_concurrent_sessions,
                 trajectory_selection=trajectory_selection,
+                custom_select_function=custom_select_function,
                 session_timeout_seconds=session_timeout_seconds,
             )
         except ValueError as exc:
@@ -140,34 +199,71 @@ def _short_failure_reason(error: BaseException) -> str:
     return f"{error.__class__.__name__}:{message}"[:512]
 
 
-def _select_session_trajectories(
+async def _select_session_trajectories(
     session_id: str,
     trajectories: list[Trajectory],
     selection: str,
+    *,
+    select_fn: TrajectorySelectFunction | None = None,
 ) -> list[Trajectory]:
     """Apply the runner's trajectory-retention policy before scoring and TQ writes."""
-    if selection == "all" or len(trajectories) <= 1:
-        return trajectories
+    if select_fn is None:
+        if selection == "all" or len(trajectories) <= 1:
+            return trajectories
 
-    index, trajectory = max(
-        enumerate(trajectories),
-        key=lambda item: (
-            sum(item[1].response_mask),
-            len(item[1].response_ids),
-            item[1].num_turns,
-            item[0],
-        ),
-    )
-    logger.info(
-        "session %s: selected longest trajectory index=%s model_tokens=%s response_tokens=%s turns=%s candidates=%s",
-        session_id,
-        index,
-        sum(trajectory.response_mask),
-        len(trajectory.response_ids),
-        trajectory.num_turns,
-        len(trajectories),
-    )
-    return [trajectory]
+        index, trajectory = max(
+            enumerate(trajectories),
+            key=lambda item: (
+                sum(item[1].response_mask),
+                len(item[1].response_ids),
+                item[1].num_turns,
+                item[0],
+            ),
+        )
+        logger.info(
+            "session %s: selected longest trajectory index=%s model_tokens=%s "
+            "response_tokens=%s turns=%s candidates=%s",
+            session_id,
+            index,
+            sum(trajectory.response_mask),
+            len(trajectory.response_ids),
+            trajectory.num_turns,
+            len(trajectories),
+        )
+        return [trajectory]
+
+    # Custom mode skips the len<=1 short-circuit: a single trajectory may be the one to drop.
+    # This is what the session keeps if the function mutates the list and then raises.
+    fallback_trajectories = list(trajectories)
+    try:
+        kept: list[Trajectory] | Awaitable[list[Trajectory]] = select_fn(session_id, trajectories)
+        if inspect.isawaitable(kept):
+            kept = await kept
+    except Exception:
+        logger.exception("session %s: custom select raised; falling back to 'all'", session_id)
+        kept = fallback_trajectories
+    return _finalize_custom_select(session_id, fallback_trajectories, kept)
+
+
+def _finalize_custom_select(
+    session_id: str,
+    fallback_trajectories: list[Trajectory],
+    kept: list[Trajectory],
+) -> list[Trajectory]:
+    """Normalise the user's return value and release message text."""
+    if not isinstance(kept, list):
+        kept = list(kept)
+
+    # Before reward scoring, artifact logging and the TQ write, so the text reaches
+    # none of them. ``kept`` too: it may hold copies the input list no longer reaches.
+    for trajectory in [*fallback_trajectories, *kept]:
+        trajectory.extra_fields.pop("message_history", None)
+
+    if not kept:
+        logger.warning("session %s: custom select returned no trajectories -> status=empty", session_id)
+    else:
+        logger.info("session %s: custom select kept=%s/%s", session_id, len(kept), len(fallback_trajectories))
+    return kept
 
 
 _TQ_NESTED_SEQUENCE_FIELDS = {
@@ -361,6 +457,16 @@ class GatewayAgentFramework(AgentFramework):
         self._mask_unfinished_episode = mask_unfinished_episode
         self._trajectory_postprocessor = trajectory_postprocessor
         self._trajectory_postprocessor_kwargs = trajectory_postprocessor_kwargs or {}
+        # Preloaded so a bad reference fails at start-up, and kept per runner so a
+        # multi-agent deployment can mix select functions.
+        self._select_functions: dict[str, TrajectorySelectFunction] = {}
+        for runner_name, runner_config in runner_registry.items():
+            if runner_config.custom_select_function is None:
+                continue
+            try:
+                self._select_functions[runner_name] = _load_select_function(runner_config.custom_select_function)
+            except (TypeError, ValueError) as exc:
+                raise type(exc)(f"agent_runners.{runner_name}: {exc}") from exc
 
     @classmethod
     def from_config(
@@ -795,11 +901,14 @@ class GatewayAgentFramework(AgentFramework):
         tools_kwargs = sample_fields.get("tools_kwargs")
         tools_kwargs = dict(tools_kwargs or {})
         tools_kwargs["_trace_identity"] = trace_identity
+        # Runners without a function never load one and pay no message copy.
+        select_fn = self._select_functions.get(runner_name)
         async with _log_scope(parent_log):
             session = await self.gateway_manager.create_session(
                 session_id,
                 metadata={"_trace_identity": trace_identity, "_log_dir": str(run_dir) if run_dir is not None else None},
                 sampling_params=dict(sampling_params),
+                pass_through_message_history=select_fn is not None,
             )
             logger.info(
                 "session %s start: runner=%s sample_index=%s session_index=%s global_steps=%s",
@@ -854,11 +963,22 @@ class GatewayAgentFramework(AgentFramework):
                         f"Agent runner {runner_name!r} must return TaskResult or None, got {type(task_result).__name__}"
                     )
                 session_trajectories = await self.gateway_manager.finalize_session(session_id)
-                session_trajectories = _select_session_trajectories(
+                # Audit only: the full list the policy chose from, so the dump can
+                # report what it discarded. Skipped entirely when logging is off.
+                audit_candidates = list(session_trajectories) if run_dir is not None else []
+                session_trajectories = await _select_session_trajectories(
                     session_id,
                     session_trajectories,
                     runner_config.trajectory_selection,
+                    select_fn=select_fn,
                 )
+                dropped_trajectories: list[Trajectory] = []
+                if audit_candidates:
+                    # Matched on chain_id, not id(): a select function may return copies.
+                    kept_chain_ids = {trajectory.chain_id for trajectory in session_trajectories}
+                    dropped_trajectories = [
+                        trajectory for trajectory in audit_candidates if trajectory.chain_id not in kept_chain_ids
+                    ]
             except asyncio.CancelledError:
                 # Parent shutdown/cancellation must not leave the Gateway route
                 # and actor-owned session live after the runner task is gone.
@@ -897,6 +1017,9 @@ class GatewayAgentFramework(AgentFramework):
                 session_trajectories = await self._apply_trajectory_postprocessor(session_trajectories, task_result)
 
             if not session_trajectories:
+                # A selector that dropped everything still leaves an audit trail.
+                if dropped_trajectories:
+                    await asyncio.to_thread(self._dump_trajectories, run_dir, session_id, [], dropped_trajectories)
                 session_trace.finish(
                     runner_name=runner_name,
                     status="empty",
@@ -940,7 +1063,13 @@ class GatewayAgentFramework(AgentFramework):
 
             self._log_trajectory_summary(session_id, result_trajectories)
             if run_dir is not None:
-                await asyncio.to_thread(self._dump_trajectories, run_dir, session_id, result_trajectories)
+                await asyncio.to_thread(
+                    self._dump_trajectories,
+                    run_dir,
+                    session_id,
+                    result_trajectories,
+                    dropped_trajectories,
+                )
             session_trace.finish(
                 runner_name=runner_name,
                 status="success",
@@ -1009,7 +1138,13 @@ class GatewayAgentFramework(AgentFramework):
                 )
         logger.info("\n".join(lines))
 
-    def _dump_trajectories(self, run_dir: Path, session_id: str, trajectories: list[Trajectory]) -> None:
+    def _dump_trajectories(
+        self,
+        run_dir: Path,
+        session_id: str,
+        trajectories: list[Trajectory],
+        dropped_trajectories: list[Trajectory] | None = None,
+    ) -> None:
         """Persist finalized trajectories next to ``task.log``.
 
         Split by cost: a small human-readable summary (reward, turns, lengths) is written
@@ -1018,33 +1153,49 @@ class GatewayAgentFramework(AgentFramework):
         (token ids repeat, the mask is runs of 0/1), so this is far smaller and faster than
         the old indented-JSON dump -- which matters most on a network / HDFS log_dir.
 
+        Discarded trajectories go to ``dropped_trajectory.*`` in the same shape, so a
+        chain the policy dropped stays inspectable.
+
         Runs off the event loop (caller wraps this in ``asyncio.to_thread``) and is
         best-effort: an IO / serialization error is logged but never aborts the rollout.
         """
         try:
             run_dir.mkdir(parents=True, exist_ok=True)
-            meta = {
-                "session_id": session_id,
-                "num_trajectories": len(trajectories),
-                "trajectories": [self._trajectory_meta(traj) for traj in trajectories],
-            }
-            (run_dir / "trajectory.json").write_text(
-                json.dumps(meta, ensure_ascii=False, separators=(",", ":"), default=_json_default),
-                encoding="utf-8",
-            )
-            arrays: dict[str, np.ndarray] = {}
-            for i, traj in enumerate(trajectories):
-                arrays[f"traj{i}_prompt_ids"] = np.asarray(traj.prompt_ids, dtype=np.int32)
-                arrays[f"traj{i}_response_ids"] = np.asarray(traj.response_ids, dtype=np.int32)
-                arrays[f"traj{i}_response_mask"] = np.asarray(traj.response_mask, dtype=np.int8)
-                if traj.response_logprobs is not None:
-                    arrays[f"traj{i}_response_logprobs"] = np.asarray(traj.response_logprobs, dtype=np.float32)
-
-            buf = io.BytesIO()
-            np.savez_compressed(buf, **arrays)
-            (run_dir / "trajectory.npz").write_bytes(buf.getvalue())
+            if trajectories:
+                self._write_trajectory_group(run_dir, session_id, "trajectory", trajectories)
+            if dropped_trajectories:
+                self._write_trajectory_group(run_dir, session_id, "dropped_trajectory", dropped_trajectories)
         except Exception:
             logger.exception("session %s: failed to write trajectory dump under %s", session_id, run_dir)
+
+    def _write_trajectory_group(
+        self,
+        run_dir: Path,
+        session_id: str,
+        stem: str,
+        trajectories: list[Trajectory],
+    ) -> None:
+        """Write one ``<stem>.json`` summary plus its ``<stem>.npz`` token arrays."""
+        meta = {
+            "session_id": session_id,
+            "num_trajectories": len(trajectories),
+            "trajectories": [self._trajectory_meta(traj) for traj in trajectories],
+        }
+        (run_dir / f"{stem}.json").write_text(
+            json.dumps(meta, ensure_ascii=False, separators=(",", ":"), default=_json_default),
+            encoding="utf-8",
+        )
+        arrays: dict[str, np.ndarray] = {}
+        for i, traj in enumerate(trajectories):
+            arrays[f"traj{i}_prompt_ids"] = np.asarray(traj.prompt_ids, dtype=np.int32)
+            arrays[f"traj{i}_response_ids"] = np.asarray(traj.response_ids, dtype=np.int32)
+            arrays[f"traj{i}_response_mask"] = np.asarray(traj.response_mask, dtype=np.int8)
+            if traj.response_logprobs is not None:
+                arrays[f"traj{i}_response_logprobs"] = np.asarray(traj.response_logprobs, dtype=np.float32)
+
+        buf = io.BytesIO()
+        np.savez_compressed(buf, **arrays)
+        (run_dir / f"{stem}.npz").write_bytes(buf.getvalue())
 
     def _trajectory_meta(self, traj: Trajectory) -> dict[str, object]:
         """Small, human-readable per-trajectory summary; the token arrays live in the npz."""

@@ -47,6 +47,7 @@ def _session(
     sampling_params: dict | None = None,
     enable_last_assistant_rollback: bool = False,
     coalesce_reserved_exact_requests: bool = True,
+    pass_through_message_history: bool = False,
     processor=None,
     vision_info_extractor=None,
     tool_parser_name: str | None = None,
@@ -66,6 +67,7 @@ def _session(
         sampling_params=sampling_params,
         enable_last_assistant_rollback=enable_last_assistant_rollback,
         coalesce_reserved_exact_requests=coalesce_reserved_exact_requests,
+        pass_through_message_history=pass_through_message_history,
     )
 
 
@@ -2287,3 +2289,76 @@ async def test_image_requires_multimodal_processor_before_backend(role):
         await _run(session, backend, [{"role": "user", "content": "start"}, message])
     assert backend.calls == []
     assert await session.finalize() == []
+
+
+# ---------------------------------------------------------------------------
+# message_history pass-through (consumed by custom trajectory selection)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_message_history_is_not_materialized_by_default():
+    """The opt-in copy is off unless the session asked for it."""
+    session = _session("no-pass-through")
+    backend = SequencedBackend(["HELLO"])
+
+    await _run(session, backend, [HELPFUL_SYS, {"role": "user", "content": "hi"}])
+    [trajectory] = await session.finalize()
+
+    assert "message_history" not in trajectory.extra_fields
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_message_history_is_passed_through_at_finalize():
+    """Enabling it copies the chain's chat text onto the materialized trajectory."""
+    session = _session("pass-through-finalize", pass_through_message_history=True)
+    backend = SequencedBackend(["HELLO"])
+
+    await _run(session, backend, [HELPFUL_SYS, {"role": "user", "content": "hi"}])
+    [trajectory] = await session.finalize()
+
+    history = trajectory.extra_fields["message_history"]
+    assert [message["role"] for message in history] == ["system", "user", "assistant"]
+    assert [message["content"] for message in history] == ["You are helpful.", "hi", "HELLO"]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_message_history_pass_through_covers_length_exhausted_chains():
+    """Chains closed mid-generation must carry their text too, not only finalize ones."""
+    main_first = [HELPFUL_SYS, {"role": "user", "content": "main"}]
+    subagent = [SUBAGENT_SYS, {"role": "user", "content": "sub"}]
+    session = _session(
+        "pass-through-length-exhausted",
+        prompt_length=max(_prompt_length(main_first), _prompt_length(subagent)),
+        response_length=len("MAIN1"),
+        pass_through_message_history=True,
+    )
+    backend = SequencedBackend(["MAIN1", "SUB"])
+    main_too_long = [
+        HELPFUL_SYS,
+        {"role": "user", "content": "main"},
+        {"role": "assistant", "content": "MAIN1"},
+        {"role": "user", "content": "too long"},
+    ]
+
+    await _run(session, backend, main_first)
+    await _run(session, backend, subagent)
+    await _run(session, backend, main_too_long)
+    trajectories = await session.finalize()
+
+    assert len(trajectories) == 2
+    exhausted = trajectories[1]
+    assert exhausted.extra_fields["materialization_reason"] == "max_trajectory_length"
+    assert [message["content"] for message in exhausted.extra_fields["message_history"]] == [
+        "You are helpful.",
+        "main",
+        "MAIN1",
+    ]
+    # The finalize-materialized sibling carries its own, different text.
+    assert trajectories[0].extra_fields["message_history"][0]["content"] == "You are a focused subagent."

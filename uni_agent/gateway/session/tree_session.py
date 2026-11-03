@@ -108,6 +108,7 @@ class TreeGatewaySession(GatewaySession):
         sampling_params: dict[str, Any] | None = None,
         enable_last_assistant_rollback: bool = True,
         coalesce_reserved_exact_requests: bool = True,
+        pass_through_message_history: bool = False,
         metadata: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(
@@ -118,6 +119,7 @@ class TreeGatewaySession(GatewaySession):
             sampling_params=sampling_params,
             enable_last_assistant_rollback=enable_last_assistant_rollback,
             coalesce_reserved_exact_requests=coalesce_reserved_exact_requests,
+            pass_through_message_history=pass_through_message_history,
             metadata=metadata,
         )
         if type(coalesce_reserved_exact_requests) is not bool:
@@ -882,6 +884,8 @@ class TreeGatewaySession(GatewaySession):
         if leaf.rollback_count:
             extra_fields["rollback_count"] = leaf.rollback_count
             extra_fields["rollback_dropped_trainable_tokens_total"] = leaf.rollback_dropped_trainable_tokens_total
+        if self._pass_through_message_history:
+            extra_fields["message_history"] = self._path_messages(path)
         return Trajectory(
             prompt_ids=prompt_ids,
             response_ids=response_ids,

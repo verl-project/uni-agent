@@ -166,18 +166,85 @@ A finalized trajectory contains:
 
 Before writing to TransferQueue, the Agent Framework derives the full training record, including `input_ids`, attention masks, position IDs, loss masks, and sparse `rm_scores`.
 
-An optional trajectory postprocessor can filter, reorder, or replace the
-finalized trajectories before reward scoring and artifact logging. The order is:
+The Gateway uses a `MessageCodec` to:
+
+- Apply the model chat template.
+- Incrementally encode Tool observations between turns.
+- Decode model tokens into text and Tool calls.
+- Handle OpenAI and Anthropic wire formats.
+- Extract multimodal inputs when a processor is configured.
+
+The configured Tool parser must match the model's chat template.
+
+Both hooks sit around the same pipeline. The order is:
 
 ```text
 Gateway finalization
-    -> Runner trajectory_selection (all or longest)
+    -> Runner trajectory_selection (all, longest, or a custom function)
     -> trajectory postprocessor
     -> reward scoring
     -> trajectory logs and TransferQueue
 ```
 
-Configure a postprocessor at the Framework level:
+### Trajectory selection
+
+A session can split into several trajectories (compaction, subagent switches,
+title generation, branch rollback). `agent_runners.<name>.trajectory_selection`
+decides which are kept. The form of the value is the mode:
+
+```yaml
+agent_runners:
+  <name>:
+    trajectory_selection: all        # default | longest
+    # or: call a user-owned function and keep what it returns
+    trajectory_selection:
+      custom_select_function:
+        path: /abs/path/to/my_select.py   # or pkg://my_pkg.trajectory_select
+        name: select_trajectories
+```
+
+`longest` keeps the trajectory with the most model-generated tokens, breaking
+ties by response length, turn count, then input order.
+
+Custom functions are loaded at start-up through the same `{path, name}` pattern
+as `reward.custom_reward_function`, so a bad reference fails immediately rather
+than on the first session. Each runner owns its function, so a framework with
+several `agent_runners` can mix selectors. Sync and async are both supported.
+
+```python
+def select_trajectories(session_id: str, trajectories: list[Trajectory]) -> list[Trajectory]:
+    return trajectories
+```
+
+It is called once per session, after finalization and before the postprocessor.
+The list arrives in the gateway's **close order**, most recently active last, and
+reward scoring dispatches whichever entry you return last -- so in close order
+that is the chain holding the task result. Each entry carries `chain_id` (creation
+order, from 1) plus the usual structural signals, and in custom mode
+`extra_fields["message_history"]` -- a shallow copy of the chain's chat text,
+shared with the session, so treat it as read-only.
+
+The returned list is kept verbatim and in order. An empty return means "drop
+this session": it takes the existing `status="empty"` path and counts as a
+failure. A raised exception falls back to keeping everything. `message_history`
+is released right after the call -- before reward scoring, artifact logging and
+the TQ write -- so the text never reaches training data.
+
+Whatever the policy discards is written next to the session artifacts as
+`dropped_trajectory.json` / `dropped_trajectory.npz`, in the same format as the
+kept files, gated only by the existing `log_dir`. Nothing is written when
+nothing was dropped.
+
+`all` / `longest` never load a function and never copy message text, so
+unconfigured runs keep their historical zero-copy behaviour.
+
+Sample selectors for title generation, compaction replays and subagent shells live
+in [`examples/quickstart/trajectory_selectors/`](../../../examples/quickstart/trajectory_selectors/README.md).
+
+### Postprocessing
+
+An optional postprocessor can filter, reorder, or replace the
+finalized trajectories. Configure a postprocessor at the Framework level:
 
 ```yaml
 actor_rollout_ref:
@@ -235,16 +302,6 @@ crops them must preserve token-array alignment and valid turn boundaries.
 The hook is disabled when `trajectory_postprocessor_fqn` is omitted or `null`.
 In that case no extension is imported or called, and finalized trajectories
 continue through the original scoring, logging, and TransferQueue path.
-
-The Gateway uses a `MessageCodec` to:
-
-- Apply the model chat template.
-- Incrementally encode Tool observations between turns.
-- Decode model tokens into text and Tool calls.
-- Handle OpenAI and Anthropic wire formats.
-- Extract multimodal inputs when a processor is configured.
-
-The configured Tool parser must match the model's chat template.
 
 ## Multiple Turns and Chains
 
