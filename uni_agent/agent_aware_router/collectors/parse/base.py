@@ -61,8 +61,10 @@ class KVCacheUpdate:
         self.remove_blocks.setdefault(layer, []).extend(block_hashes)
 
     def clear(self) -> None:
-        """Mark the replica for a full block clear."""
+        """Clear the replica, superseding block operations accumulated so far."""
         self.clear_all = True
+        self.add_blocks.clear()
+        self.remove_blocks.clear()
 
     def set_block_size(self, size: int) -> None:
         """Set the learned block size (first BlockStored wins; set by the parser)."""

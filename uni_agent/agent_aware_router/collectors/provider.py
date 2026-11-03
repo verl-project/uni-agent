@@ -21,8 +21,12 @@ not from the manager.
 
 from __future__ import annotations
 
+import logging
+
 from ..config.collector import CollectorConfig
 from .collector import Collector, get_collector
+
+logger = logging.getLogger(__name__)
 
 
 class CollectorManager:
@@ -67,6 +71,13 @@ class CollectorManager:
             collector.start()
 
     def stop(self) -> None:
-        """Stop all collectors."""
+        """Attempt every collector's cleanup, then report any failures for retry."""
+        errors: list[Exception] = []
         for collector in self._collectors:
-            collector.stop()
+            try:
+                collector.stop()
+            except Exception as exc:
+                errors.append(exc)
+                logger.exception("Failed to stop collector %s", type(collector).__name__)
+        if errors:
+            raise RuntimeError(f"Failed to stop {len(errors)} collector(s)") from errors[0]

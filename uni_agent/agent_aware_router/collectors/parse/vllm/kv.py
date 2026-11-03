@@ -42,6 +42,11 @@ class VLLMKVParser(Parser):
     Each event type has a dedicated handler that folds its blocks into a single
     ``KVCacheUpdate`` accumulator; ``parse`` is pure dispatch.
 
+    Stored chains whose parent is unknown are skipped: a retained replay
+    window may not contain the events needed to reconstruct their prefix.
+    Completing replay exposes the known subset of residency. Missing prefixes
+    require their relevant chain to be stored again or estimated by dispatch.
+
     Attributes:
         remote_to_local_block_hash: Mapping from replica replica_id to that
             replica's {vLLM remote block_hash → locally-computed prefix hash
@@ -63,6 +68,10 @@ class VLLMKVParser(Parser):
     def _replica_map(self, replica_id: str) -> dict[str, str]:
         """Remote→local hash map for one replica (created on first event)."""
         return self.remote_to_local_block_hash.setdefault(replica_id, {})
+
+    def reset_replica(self, replica_id: str) -> None:
+        """Forget this replica's hash translations before rebuilding its cache view."""
+        self.remote_to_local_block_hash.pop(replica_id, None)
 
     def parse(self, raw_data: bytes | str, replica_id: str) -> KVCacheUpdate | None:
         """Parse msgpack payload and return structured update command.
@@ -171,8 +180,9 @@ class VLLMKVParser(Parser):
             if local_parent_str is not None:
                 local_parent_hash = int(local_parent_str)
             else:
-                # Parent unknown (replay gap / earlier parse failure) → chain restarts at seed.
+                # The missing prefix cannot be reconstructed from this suffix.
                 self.stats["parent_unresolved"] += 1
+                return
 
         local_hashes: list[str] = []
         for i, block_bytes in enumerate(event.token_ids):
@@ -215,4 +225,5 @@ class VLLMKVParser(Parser):
 
     def _on_all_blocks_cleared(self, event: KVCacheEvent, update: KVCacheUpdate) -> None:
         """Handle AllBlocksCleared: mark the replica for a full clear."""
+        self.reset_replica(event.replica_id)
         update.clear()

@@ -18,10 +18,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import threading
 import time
 from collections import defaultdict
-from concurrent.futures import Future
 from typing import Any
 
 from ..config.collector import CollectorConfig
@@ -30,6 +28,7 @@ from ..insight import WriteEvent, WriteKind, emitter
 from ..store.data_store import DataStore
 from ..types import EmitKey, MetricKey
 from ..utils.knob import coerce_knob_value
+from ._loop_runner import _LoopRunner
 from .parse import InflightBlockUpdate, KVCacheUpdate, MetricsUpdate, Parser, StickyUpdate
 from .parse.basic.inflight import InflightParser
 from .transport.base import Transport
@@ -97,9 +96,8 @@ class Collector:
         self._transport = transport
         self._parser = parser
         self._data_store = DataStore()
-        self._future: Future | None = None
-        self._loop: asyncio.AbstractEventLoop = asyncio.new_event_loop()
-        self._loop_thread: threading.Thread | None = None
+        self._loop_runner = _LoopRunner(transport) if getattr(transport, "is_async", True) else None
+        self._sync_started = False
         # Periodic evidence-log state. The parser is stateless (returns
         # MetricsUpdate; merged here), so the log reads a current snapshot.
         self._metrics_poll_count = 0
@@ -120,63 +118,59 @@ class Collector:
 
     def start(self) -> None:
         """Start the collector — launch event-loop thread and subscribe."""
-
-        def run_loop() -> None:
-            asyncio.set_event_loop(self._loop)
-            self._loop.run_forever()
-
-        def handler(raw_data: bytes | str, replica_id: str) -> None:
-            """Handler: parse and dispatch each update to the right store write path."""
-            if isinstance(self._parser, InflightParser):
-                # The inflight parser is pure — the collector gathers its state
-                # from the store and drives it event by event.
-                result = self._inflight_event(raw_data, replica_id)
-            else:
-                result = self._parser.parse(raw_data, replica_id)
-            if result is None:
-                # None is normal for statistic parsers that skip an event
-                # (e.g. StickyParser on_release); demote to debug to avoid per-turn noise.
-                logger.debug(f"parser.parse returned no update: {result}")
-                return
-            updates = result if isinstance(result, list) else [result]
-            for update in updates:
-                if isinstance(update, KVCacheUpdate):
-                    self._write_kv_update(update)
-                elif isinstance(update, MetricsUpdate):
-                    self._write_metrics_update(update)
-                elif isinstance(update, StickyUpdate):
-                    self._write_sticky_update(update)
-                elif isinstance(update, InflightBlockUpdate):
-                    self._apply_inflight_block_update(update)
-                else:
-                    logger.debug(f"parser.parse returned an unknown update: {update}")
-
-        if getattr(self._transport, "is_async", True):
-            self._loop_thread = threading.Thread(
-                target=run_loop,
-                daemon=True,
-            )
-            self._loop_thread.start()
-
-            self._future = asyncio.run_coroutine_threadsafe(
-                self._transport.subscribe(handler),
-                self._loop,
-            )
+        if self._loop_runner is not None:
+            if not self._loop_runner.start():
+                try:
+                    self.stop()
+                except Exception as exc:
+                    raise TimeoutError("collector event loop startup timed out") from exc
+                raise TimeoutError("collector event loop startup timed out")
+            self._loop_runner.subscribe(self._handle_raw_data)
         else:
             # CallbackTransport: subscribe only registers callbacks — run it on a
             # throwaway loop; stop() just unregisters.
+            if self._sync_started:
+                raise RuntimeError("stop the collector before starting it again")
             tmp_loop = asyncio.new_event_loop()
+            # A failed subscribe may have registered only some callbacks.
+            self._sync_started = True
             try:
-                tmp_loop.run_until_complete(self._transport.subscribe(handler))
+                tmp_loop.run_until_complete(self._transport.subscribe(self._handle_raw_data))
             finally:
                 tmp_loop.close()
+
+    def _handle_raw_data(self, raw_data: bytes | str, replica_id: str) -> None:
+        """Handler: parse and dispatch each update to the right store write path."""
+        if isinstance(self._parser, InflightParser):
+            # The inflight parser is pure — the collector gathers its state
+            # from the store and drives it event by event.
+            result = self._inflight_event(raw_data, replica_id)
+        else:
+            result = self._parser.parse(raw_data, replica_id)
+        if result is None:
+            # None is normal for statistic parsers that skip an event
+            # (e.g. StickyParser on_release); demote to debug to avoid per-turn noise.
+            logger.debug(f"parser.parse returned no update: {result}")
+            return
+        updates = result if isinstance(result, list) else [result]
+        for update in updates:
+            if isinstance(update, KVCacheUpdate):
+                self._write_kv_update(update)
+            elif isinstance(update, MetricsUpdate):
+                self._write_metrics_update(update)
+            elif isinstance(update, StickyUpdate):
+                self._write_sticky_update(update)
+            elif isinstance(update, InflightBlockUpdate):
+                self._apply_inflight_block_update(update)
+            else:
+                logger.debug(f"parser.parse returned an unknown update: {update}")
 
     def _write_kv_update(self, update: KVCacheUpdate) -> None:
         """Write KVCacheUpdate via DataStore, then emit a periodic kv-events tally."""
         if update.block_size is not None:
             self._data_store.set_block_size(update.block_size)
         if update.clear_all:
-            self._data_store.clear_kv_replica(update.replica_id)
+            self._data_store.clear_kv_resident_blocks(update.replica_id)
         for layer, hashes in update.remove_blocks.items():
             if hashes:
                 self._data_store.remove_kv_blocks(update.replica_id, hashes, layer=layer)
@@ -205,8 +199,8 @@ class Collector:
         total = sum(self._kv_event_counts.values())
         if total - self._kv_last_logged_total >= _KV_EVENT_LOG_INTERVAL_S:
             self._kv_last_logged_total = total
-            # Parser-side translation failures: non-zero means the event-side
-            # retained count is drifting above the engine's truth.
+            # Unmapped removals can overstate residency; unknown parents skip
+            # chains conservatively and can understate it.
             hash_map_stats = getattr(self._parser, "stats", None)
             logger.debug(
                 f"kv-events tally: events={dict(self._kv_event_counts)} "
@@ -432,37 +426,15 @@ class Collector:
         # Snapshot current cumulative values for next window's delta.
         self._metrics_prev[replica_id] = {k: float(snap.get(k, 0) or 0) for k in _CUMULATIVE_KEYS}
 
-    def stop(self) -> None:
+    def stop(self, timeout: float = 15.0) -> None:
         """
         Stop the collector — cancel tasks, drain cleanup, stop event-loop thread.
         """
-        # Transport closes protocol-level resources (sockets/clients);
-        # we own task cancellation and finally-block draining below.
-        self._transport.stop()
-
-        if self._loop.is_running():
-            # Cancel all tasks and wait for their finally blocks inside the loop
-            # so that aclose() runs while the loop is still alive.
-            async def _cancel_and_drain() -> None:
-                current = asyncio.current_task()
-                tasks = [t for t in asyncio.all_tasks() if not t.done() and t is not current]
-                for t in tasks:
-                    t.cancel()
-                await asyncio.gather(*tasks, return_exceptions=True)
-
-            drain = asyncio.run_coroutine_threadsafe(_cancel_and_drain(), self._loop)
-            try:
-                drain.result(timeout=15)
-            except Exception as exc:
-                logger.debug(f"Error draining tasks on stop: {exc}")
-
-            self._loop.call_soon_threadsafe(self._loop.stop)
-
-        if self._loop_thread is not None:
-            self._loop_thread.join(timeout=10)
-            self._loop_thread = None
-
-        self._future = None
+        if self._loop_runner is not None:
+            self._loop_runner.stop(timeout)
+        else:
+            self._transport.stop()
+        self._sync_started = False
 
 
 # ── Factory function ───────────────────────────────────────────────────
@@ -522,14 +494,29 @@ def get_collector(
         from .parse.vllm.kv import VLLMKVParser
         from .transport.zmq import ZMQTransport
 
+        kv_parser = VLLMKVParser()
+        data_store = DataStore()
+
+        def reset_stream(replica_id: str) -> None:
+            # Gate routing reads before discarding the parser's old hash chain.
+            data_store.invalidate_kv_replica(replica_id)
+            kv_parser.reset_replica(replica_id)
+
+        def unavailable_stream(replica_id: str) -> None:
+            reset_stream(replica_id)
+            data_store.enable_kv_dispatch_estimates(replica_id)
+
         transport = ZMQTransport(
             endpoints=kv_event_endpoints or {},
+            on_stream_reset=reset_stream,
+            on_stream_ready=data_store.mark_kv_replica_ready,
+            on_stream_unavailable=unavailable_stream,
             base_retry_delay=_debug_knob("base_retry_delay"),
             max_retry_delay=_debug_knob("max_retry_delay"),
             max_retry_attempts=_debug_knob("max_retry_attempts"),
             retry_backoff_factor=_debug_knob("retry_backoff_factor"),
         )
-        return Collector(transport, VLLMKVParser())
+        return Collector(transport, kv_parser)
 
     if name == "sticky_stat":
         from .parse.basic.sticky import StickyParser
