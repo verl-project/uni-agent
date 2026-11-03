@@ -23,11 +23,11 @@ from ..types import METRIC_SPECS
 
 
 class PerReplicaStore:
-    """Per-replica metric store: ``{node_id: {canonical_key: value}}``.
+    """Per-replica metric store: ``{replica_id: {canonical_key: value}}``.
 
-    - ``get(node_id, key)``  → single value; falls back to ``METRIC_SPECS[key]["default"]``;
+    - ``get(replica_id, key)``  → single value; falls back to ``METRIC_SPECS[key]["default"]``;
                                raises ``KeyError`` if key is not a valid canonical key
-    - ``get(node_id)``       → entire node dict (empty dict if unknown)
+    - ``get(replica_id)``       → entire node dict (empty dict if unknown)
     - ``refresh(new_data)``  → batch update; only updates nodes present in ``new_data``,
                                existing nodes NOT in ``new_data`` are left untouched
     """
@@ -45,25 +45,25 @@ class PerReplicaStore:
             cls._instance = cls()
         return cls._instance
 
-    def get(self, node_id: str, key: str | None = None) -> Any | dict[str, Any]:
+    def get(self, replica_id: str, key: str | None = None) -> Any | dict[str, Any]:
         """Read metrics.
 
-        ``get(node_id, key)``  → single value, falls back to spec default.
+        ``get(replica_id, key)``  → single value, falls back to spec default.
             Raises ``KeyError`` if ``key`` is not a valid canonical key
             (i.e. not present in ``METRIC_SPECS``).
-        ``get(node_id)``       → entire node dict
+        ``get(replica_id)``       → entire node dict
         """
         if key is None:
-            return dict(self._data.get(node_id, {}))
+            return dict(self._data.get(replica_id, {}))
 
         if key not in METRIC_SPECS:
             raise KeyError(f"Unknown metric key '{key}'. Valid keys: {sorted(METRIC_SPECS.keys())}")
-        node = self._data.get(node_id, {})
+        node = self._data.get(replica_id, {})
         if key in node:
             return node[key]
         return METRIC_SPECS[key]["default"]
 
-    def incr(self, node_id: str, key: str, delta: int | float = 1) -> int | float:
+    def incr(self, replica_id: str, key: str, delta: int | float = 1) -> int | float:
         """Apply a numeric delta to one key for one node (inflight ±1).
 
         Unlike ``refresh`` (batch merge overwrite), this is an incremental
@@ -72,7 +72,7 @@ class PerReplicaStore:
         — it only emits the +/-1 delta; the store owns the running counter.
 
         Args:
-            node_id: Target node.
+            replica_id: Target node.
             key: Canonical metric key (must be in ``METRIC_SPECS``).
             delta: Signed delta to add (default +1).
 
@@ -84,9 +84,9 @@ class PerReplicaStore:
         """
         if key not in METRIC_SPECS:
             raise KeyError(f"Unknown metric key '{key}'. Valid keys: {sorted(METRIC_SPECS.keys())}")
-        return self._apply(node_id, {key: delta})[key]
+        return self._apply(replica_id, {key: delta})[key]
 
-    def incr_many(self, node_id: str, deltas: dict[str, int | float]) -> dict[str, int | float]:
+    def incr_many(self, replica_id: str, deltas: dict[str, int | float]) -> dict[str, int | float]:
         """Apply multiple signed deltas to one node under a single lock.
 
         Same incremental semantics as :meth:`incr` (reads current, adds delta,
@@ -96,7 +96,7 @@ class PerReplicaStore:
         cycles per request on the hot path.
 
         Args:
-            node_id: Target node.
+            replica_id: Target node.
             deltas: ``{canonical_key: signed_delta}`` (all keys in ``METRIC_SPECS``).
 
         Returns:
@@ -110,9 +110,9 @@ class PerReplicaStore:
         bad = [k for k in deltas if k not in METRIC_SPECS]
         if bad:
             raise KeyError(f"Unknown metric keys: {sorted(bad)}. Valid keys: {sorted(METRIC_SPECS.keys())}")
-        return self._apply(node_id, deltas)
+        return self._apply(replica_id, deltas)
 
-    def _apply(self, node_id: str, deltas: dict[str, int | float]) -> dict[str, int | float]:
+    def _apply(self, replica_id: str, deltas: dict[str, int | float]) -> dict[str, int | float]:
         """Apply signed deltas to one node under one lock (caller validates keys).
 
         Each key falls back to its ``METRIC_SPECS`` default before adding the
@@ -125,7 +125,7 @@ class PerReplicaStore:
             is no second locked read (the emitter consumes these absolutes).
         """
         with self._lock:
-            node = self._data.setdefault(node_id, {})
+            node = self._data.setdefault(replica_id, {})
             new_values: dict[str, int | float] = {}
             for key, delta in deltas.items():
                 new = node.get(key, METRIC_SPECS[key]["default"]) + delta
@@ -141,18 +141,18 @@ class PerReplicaStore:
         are left untouched.
 
         Returns:
-            ``{node_id: full_merged_snapshot}`` for every node in ``new_data``
+            ``{replica_id: full_merged_snapshot}`` for every node in ``new_data``
             (all keys, not just the refreshed ones), so callers needing absolute
             post-refresh values get them without a second locked read.
         """
         with self._lock:
             snapshots: dict[str, dict[str, Any]] = {}
-            for node_id, metrics in new_data.items():
-                existing = self._data.get(node_id, {})
+            for replica_id, metrics in new_data.items():
+                existing = self._data.get(replica_id, {})
                 merged = dict(existing)
                 merged.update(metrics)
-                self._data[node_id] = merged
-                snapshots[node_id] = dict(merged)
+                self._data[replica_id] = merged
+                snapshots[replica_id] = dict(merged)
             return snapshots
 
     def all_ids(self) -> list[str]:

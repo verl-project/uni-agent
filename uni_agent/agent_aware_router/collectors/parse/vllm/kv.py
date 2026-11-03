@@ -43,7 +43,7 @@ class VLLMKVParser(Parser):
     ``KVCacheUpdate`` accumulator; ``parse`` is pure dispatch.
 
     Attributes:
-        remote_to_local_block_hash: Mapping from replica node_id to that
+        remote_to_local_block_hash: Mapping from replica replica_id to that
             replica's {vLLM remote block_hash → locally-computed prefix hash
             (str)}.  Used for chained hash computation.
         _block_size: Learned block size from first eligible GPU stored event.
@@ -60,11 +60,11 @@ class VLLMKVParser(Parser):
         self._filtered_event_counts: dict[tuple[str, str], Counter[str]] = defaultdict(Counter)
         self._filter_last_logged: dict[tuple[str, str], float] = {}
 
-    def _node_map(self, node_id: str) -> dict[str, str]:
+    def _replica_map(self, replica_id: str) -> dict[str, str]:
         """Remote→local hash map for one replica (created on first event)."""
-        return self.remote_to_local_block_hash.setdefault(node_id, {})
+        return self.remote_to_local_block_hash.setdefault(replica_id, {})
 
-    def parse(self, raw_data: bytes | str, node_id: str) -> KVCacheUpdate | None:
+    def parse(self, raw_data: bytes | str, replica_id: str) -> KVCacheUpdate | None:
         """Parse msgpack payload and return structured update command.
 
         Handles both single batches (real-time) and multiple batches (replay):
@@ -75,7 +75,7 @@ class VLLMKVParser(Parser):
 
         Args:
             raw_data: ZMQ payload bytes (msgpack-encoded).
-            node_id: The endpoint that sent this payload.
+            replica_id: The endpoint that sent this payload.
 
         Returns:
             KVCacheUpdate with operations to apply, or None if parsing failed.
@@ -88,13 +88,13 @@ class VLLMKVParser(Parser):
             raw = msgpack.unpackb(raw_data, raw=False)
 
             if not isinstance(raw, list) or len(raw) == 0:
-                logger.warning(f"Unexpected msgpack format from node {node_id} (type={type(raw).__name__})")
+                logger.warning(f"Unexpected msgpack format from node {replica_id} (type={type(raw).__name__})")
                 return None
             event_payloads = raw if isinstance(raw[0], list) else [raw]
 
-            update = KVCacheUpdate(node_id=node_id)
+            update = KVCacheUpdate(replica_id=replica_id)
             for payload in event_payloads:
-                events = KVCacheEvent.from_raw(payload, default_node_id=node_id)
+                events = KVCacheEvent.from_raw(payload, default_replica_id=replica_id)
                 for event in events:
                     if event.event_type == "stored":
                         self._on_block_stored(event, update)
@@ -109,7 +109,7 @@ class VLLMKVParser(Parser):
         except (msgpack.UnpackException, ValueError, TypeError) as exc:
             preview = bytes(raw_data[:32]).hex() if isinstance(raw_data, bytes | bytearray) else str(raw_data)[:64]
             logger.warning(
-                f"Failed to parse msgpack payload from node {node_id}: {exc!r} (len={len(raw_data)}, head={preview})"
+                f"Failed to parse msgpack payload from node {replica_id}: {exc!r} (len={len(raw_data)}, head={preview})"
             )
             return None
 
@@ -126,7 +126,7 @@ class VLLMKVParser(Parser):
         """Count excluded media without mutating the GPU routing cache view."""
         assert event.medium is not None
         medium = event.medium.upper()
-        key = (event.node_id, medium)
+        key = (event.replica_id, medium)
         counts = self._filtered_event_counts[key]
         counts[f"{event.event_type}_events"] += 1
         counts[f"{event.event_type}_blocks"] += len(event.block_hashes)
@@ -140,7 +140,7 @@ class VLLMKVParser(Parser):
             "KV events excluded from router cache view (node=%s, medium=%r, reason=%s): "
             "stored_events=%d removed_events=%d stored_blocks=%d removed_blocks=%d; "
             "only GPU residency is tracked",
-            event.node_id,
+            event.replica_id,
             medium,
             "unknown medium" if layer is None else "non-GPU medium",
             counts["stored_events"],
@@ -163,11 +163,11 @@ class VLLMKVParser(Parser):
             self._block_size = event.block_size
             update.set_block_size(event.block_size)
 
-        node_map = self._node_map(event.node_id)
+        replica_map = self._replica_map(event.replica_id)
         seed = 0
         local_parent_hash = seed
         if event.parent_block_hash is not None:
-            local_parent_str = node_map.get(event.parent_block_hash)
+            local_parent_str = replica_map.get(event.parent_block_hash)
             if local_parent_str is not None:
                 local_parent_hash = int(local_parent_str)
             else:
@@ -185,7 +185,7 @@ class VLLMKVParser(Parser):
             )
             local_hash_str = str(local_hash_int)
             bh = event.block_hashes[i]
-            node_map[bh] = local_hash_str
+            replica_map[bh] = local_hash_str
             local_hashes.append(local_hash_str)
             local_parent_hash = local_hash_int  # chain
 
@@ -194,17 +194,17 @@ class VLLMKVParser(Parser):
     def _on_block_removed(self, event: KVCacheEvent, update: KVCacheUpdate) -> None:
         """Handle BlockRemoved: convert remote hashes to local, fold into update.
 
-        Only touches ``event.node_id``'s own map; the ``pop`` keeps the map
+        Only touches ``event.replica_id``'s own map; the ``pop`` keeps the map
         bounded by the resident set.
         """
         layer = self._medium_to_layer(event.medium)
         if layer != Layer.GPU:
             self._record_filtered_event(event, layer)
             return
-        node_map = self._node_map(event.node_id)
+        replica_map = self._replica_map(event.replica_id)
         local_hashes: list[str] = []
         for bh in event.block_hashes:
-            local_hash = node_map.pop(bh, None)
+            local_hash = replica_map.pop(bh, None)
             if local_hash is None:
                 # Untranslatable removal — retained keeps the block (surfaced via stats).
                 self.stats["removed_unmapped"] += 1

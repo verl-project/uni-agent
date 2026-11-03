@@ -95,7 +95,7 @@ class TestInflightParser:
         )
         assert [type(u).__name__ for u in updates] == ["MetricsUpdate"]  # nothing resolvable → no block command
         upd = updates[0]
-        assert upd.node_id == "s0"
+        assert upd.replica_id == "s0"
         assert upd.metrics == {
             MetricKey.INFLIGHT_COUNT: 1,
             MetricKey.INFLIGHT_TOKENS: 42,
@@ -120,7 +120,7 @@ class TestInflightParser:
         assert [type(u).__name__ for u in updates] == ["InflightBlockUpdate", "MetricsUpdate"]
         pin = updates[0]
         assert pin.action == "pin"
-        assert pin.node_id == "s0"
+        assert pin.replica_id == "s0"
         assert pin.request_id == "r1"
         hashes, _ = get_prefix_hashes_incremental(prompt, BLOCK_SIZE, 0, 0)
         assert pin.block_hashes == [str(h) for h in hashes]
@@ -460,7 +460,7 @@ class TestInflightBlockPin:
             balancer.callbacks["on_acquire"][0]("r1", "s0", prompt)
             assert ds.inflight_block_count("s0") == 4
 
-            collector._write_kv_update(KVCacheUpdate(node_id="s0", clear_all=True))
+            collector._write_kv_update(KVCacheUpdate(replica_id="s0", clear_all=True))
             assert ds.inflight_block_count("s0") == 0  # the book itself was cleared, no phantom count
 
             balancer.callbacks["on_release"][0]("s0", "r1")  # pre-clear request: no marker, no-op
@@ -693,7 +693,7 @@ class TestCollectorEmitsToInsight:
         collector = Collector(CallbackTransport(_FakeBalancer()), InflightParser())
         collector._write_metrics_update(
             MetricsUpdate(
-                node_id="s0",
+                replica_id="s0",
                 metrics={
                     MetricKey.KV_CACHE_USAGE_PERC: 0.5,
                     MetricKey.NUM_REQUESTS_RUNNING: 2,
@@ -728,6 +728,6 @@ class TestCollectorEmitsToInsight:
         from uni_agent.agent_aware_router.types import Layer
 
         collector = Collector(CallbackTransport(_FakeBalancer()), InflightParser())
-        collector._write_kv_update(KVCacheUpdate(node_id="s0", remove_blocks={Layer.GPU: ["h1", "h2", "h3"]}))
+        collector._write_kv_update(KVCacheUpdate(replica_id="s0", remove_blocks={Layer.GPU: ["h1", "h2", "h3"]}))
 
         assert self._rl.calls == [("counter", "kv_evictions", 3, {"replica": "s0"})]

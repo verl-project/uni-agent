@@ -104,7 +104,7 @@ class Collector:
         # MetricsUpdate; merged here), so the log reads a current snapshot.
         self._metrics_poll_count = 0
         # Previous cumulative snapshot per node — for windowed delta
-        # computation. {node_id: {canonical_key: value}}
+        # computation. {replica_id: {canonical_key: value}}
         self._metrics_prev: dict[str, dict[str, float]] = {}
         # kv-event tallies for periodic summary logging (kv parser only).
         self._kv_event_counts: dict[str, int] = defaultdict(int)
@@ -125,14 +125,14 @@ class Collector:
             asyncio.set_event_loop(self._loop)
             self._loop.run_forever()
 
-        def handler(raw_data: bytes | str, node_id: str) -> None:
+        def handler(raw_data: bytes | str, replica_id: str) -> None:
             """Handler: parse and dispatch each update to the right store write path."""
             if isinstance(self._parser, InflightParser):
                 # The inflight parser is pure — the collector gathers its state
                 # from the store and drives it event by event.
-                result = self._inflight_event(raw_data, node_id)
+                result = self._inflight_event(raw_data, replica_id)
             else:
-                result = self._parser.parse(raw_data, node_id)
+                result = self._parser.parse(raw_data, replica_id)
             if result is None:
                 # None is normal for statistic parsers that skip an event
                 # (e.g. StickyParser on_release); demote to debug to avoid per-turn noise.
@@ -176,13 +176,13 @@ class Collector:
         if update.block_size is not None:
             self._data_store.set_block_size(update.block_size)
         if update.clear_all:
-            self._data_store.clear_kv_node(update.node_id)
+            self._data_store.clear_kv_replica(update.replica_id)
         for layer, hashes in update.remove_blocks.items():
             if hashes:
-                self._data_store.remove_kv_blocks(update.node_id, hashes, layer=layer)
+                self._data_store.remove_kv_blocks(update.replica_id, hashes, layer=layer)
         for layer, hashes in update.add_blocks.items():
             if hashes:
-                self._data_store.add_kv_blocks(update.node_id, hashes, layer=layer)
+                self._data_store.add_kv_blocks(update.replica_id, hashes, layer=layer)
 
         # Tally for periodic summary — observe BlockStored/BlockRemoved flow.
         n_added = sum(len(v) for v in update.add_blocks.values())
@@ -198,7 +198,7 @@ class Collector:
             emitter.on_write(
                 WriteEvent(
                     kind=WriteKind.KV_REMOVED,
-                    node=update.node_id,
+                    node=update.replica_id,
                     deltas={EmitKey.KV_EVICTIONS: n_removed},
                 )
             )
@@ -232,12 +232,12 @@ class Collector:
         if update.is_delta:
             is_acquire = MetricKey.DISPATCHED_COUNT in update.metrics
             is_release = MetricKey.COMPLETED_COUNT in update.metrics
-            new_values = self._data_store.incr_metrics(update.node_id, update.metrics)
+            new_values = self._data_store.incr_metrics(update.replica_id, update.metrics)
             if is_acquire or is_release:
                 emitter.on_write(
                     WriteEvent(
                         kind=WriteKind.ACQUIRE if is_acquire else WriteKind.RELEASE,
-                        node=update.node_id,
+                        node=update.replica_id,
                         deltas=update.metrics,
                         new_values=new_values,
                         turn_sum=new_values.get(MetricKey.INFLIGHT_TURN_SUM),
@@ -246,13 +246,13 @@ class Collector:
                 )
             self._maybe_log_dispatch_stats()
             return
-        snapshots = self._data_store.refresh_metrics({update.node_id: update.metrics})
+        snapshots = self._data_store.refresh_metrics({update.replica_id: update.metrics})
         emitter.on_write(
             WriteEvent(
                 kind=WriteKind.POLL,
-                node=update.node_id,
-                new_values=snapshots.get(update.node_id, {}),
-                load=self._data_store.kv_cache_load(update.node_id),
+                node=update.replica_id,
+                new_values=snapshots.get(update.replica_id, {}),
+                load=self._data_store.kv_cache_load(update.replica_id),
             )
         )
 
@@ -262,16 +262,16 @@ class Collector:
         if self._metrics_poll_count % _METRICS_LOG_INTERVAL_S == 0:
             # Emit evidence for ALL known replicas, not just the one that happened
             # to be polled at this poll-count tick. Metrics polling is serial
-            # (one replica per poll), so emitting only ``update.node_id`` here
+            # (one replica per poll), so emitting only ``update.replica_id`` here
             # sampled ~1/N of replicas per window → some replicas never got an
             # evidence line (e.g. 4/8 seen). Each replica keeps its own
             # ``_metrics_prev`` baseline, so windowed deltas stay correct.
-            for nid in self._data_store.get_metric_node_ids():
+            for nid in self._data_store.get_metric_replica_ids():
                 self._log_evidence_window(nid)
 
     # ── Inflight flow: the collector owns all inflight store access ─────
 
-    def _inflight_event(self, raw_data: bytes | str | Any, node_id: str) -> list | None:
+    def _inflight_event(self, raw_data: bytes | str | Any, replica_id: str) -> list | None:
         """Drive the pure ``InflightParser`` for one Balancer callback.
 
         The parser holds no store: this branch reads the per-event state its
@@ -286,12 +286,12 @@ class Collector:
         if not isinstance(raw_data, StatisticEvent) or raw_data.replica_id is None:
             return None
         if raw_data.event == "on_acquire":
-            return self._inflight_acquire(parser, raw_data, node_id)
+            return self._inflight_acquire(parser, raw_data, replica_id)
         if raw_data.event == "on_release":
-            return self._inflight_release(parser, raw_data, node_id)
+            return self._inflight_release(parser, raw_data, replica_id)
         return None
 
-    def _inflight_acquire(self, parser: InflightParser, event: StatisticEvent, node_id: str) -> list:
+    def _inflight_acquire(self, parser: InflightParser, event: StatisticEvent, replica_id: str) -> list:
         """Gather the acquire state in the protocol's store order, then decide."""
         rid = event.request_id
         turn = self._data_store.incr_per_request(rid, "turn") if rid else 0
@@ -300,14 +300,14 @@ class Collector:
         if rid:
             self._data_store.set_per_request(rid, _PROMPT_LEN_KEY, len(event.prompt_ids))
         block_size = self._data_store.get_block_size() or 0
-        return parser.parse(event, node_id, turn=turn, stale=stale, block_size=block_size, booked_len=booked_len)
+        return parser.parse(event, replica_id, turn=turn, stale=stale, block_size=block_size, booked_len=booked_len)
 
-    def _inflight_release(self, parser: InflightParser, event: StatisticEvent, node_id: str) -> list:
+    def _inflight_release(self, parser: InflightParser, event: StatisticEvent, replica_id: str) -> list:
         """Gather the release folds from the acquire-time rows, then decide."""
         rid = event.request_id
         turn = self._data_store.get_per_request(rid, "turn", 0) if rid else 0
         booked_len = self._data_store.get_per_request(rid, _PROMPT_LEN_KEY, 0) if rid else 0
-        return parser.parse(event, node_id, turn=turn, booked_len=booked_len)
+        return parser.parse(event, replica_id, turn=turn, booked_len=booked_len)
 
     def _apply_inflight_block_update(self, update: InflightBlockUpdate) -> None:
         """Apply an ``InflightBlockUpdate`` command to the held-block book — mechanically.
@@ -320,19 +320,19 @@ class Collector:
         replaced still unwinds exactly the original set.
         """
         if update.action == "pin":
-            self._data_store.incr_block_refs(update.node_id, update.block_hashes)
+            self._data_store.incr_block_refs(update.replica_id, update.block_hashes)
             # Resident record runs after the ref count, on the same chain;
             # idempotent against the engine's later ``BlockStored``.
             if update.mark_resident:
                 self._dispatch_recorded_blocks += self._data_store.record_dispatch_blocks(
-                    update.node_id, update.block_hashes
+                    update.replica_id, update.block_hashes
                 )
-            self._data_store.put_marker(update.request_id, update.node_id, update.block_hashes)
+            self._data_store.put_marker(update.request_id, update.replica_id, update.block_hashes)
         elif update.action == "unpin":
             marker = self._data_store.pop_marker(update.request_id)
             if marker is None:
                 # Nothing was pinned at acquire — the held set never knew about this request.
-                logger.debug(f"release with no pinned blocks request={update.request_id} on {update.node_id}")
+                logger.debug(f"release with no pinned blocks request={update.request_id} on {update.replica_id}")
                 return
             self._data_store.decr_block_refs(marker["replica"], marker["hashes"])
         elif update.action == "stale_unpin":
@@ -368,7 +368,7 @@ class Collector:
         if now - self._dispatch_last_log < _DISPATCH_LOG_INTERVAL_S:
             return
         self._dispatch_last_log = now
-        for rep in self._data_store.get_metric_node_ids():
+        for rep in self._data_store.get_metric_replica_ids():
             snap = self._data_store.get_metrics(rep)
             dispatched = snap.get(MetricKey.DISPATCHED_COUNT, 0)
             if not dispatched:  # skip replicas that never received a dispatch
@@ -381,7 +381,7 @@ class Collector:
                 f"inflight_turn_sum={inflight_turn_sum} prompt_len_sum={prompt_len_sum}"
             )
 
-    def _log_evidence_window(self, node_id: str) -> None:
+    def _log_evidence_window(self, replica_id: str) -> None:
         """Emit a windowed evidence summary for one replica.
 
         Deltas vs the previous snapshot, over ~``_METRICS_LOG_INTERVAL_S``
@@ -389,8 +389,8 @@ class Collector:
         update) so a transiently-missing scrape line doesn't zero a
         cumulative counter.
         """
-        snap = self._data_store.get_metrics(node_id)
-        prev = self._metrics_prev.get(node_id, {})
+        snap = self._data_store.get_metrics(replica_id)
+        prev = self._metrics_prev.get(replica_id, {})
 
         def _delta(key: str) -> float:
             cur = float(snap.get(key, 0) or 0)
@@ -399,7 +399,7 @@ class Collector:
         # kv = retained blocks (cached-freeable + running-with-hash); usage =
         # vLLM's running-only fraction. Emit both: cache-fill (kv) vs running
         # pressure (usage).
-        kv = self._data_store.kv_cache_load(node_id)
+        kv = self._data_store.kv_cache_load(replica_id)
         usage_raw = snap.get(MetricKey.KV_CACHE_USAGE_PERC)
         run = snap.get(MetricKey.NUM_REQUESTS_RUNNING)
         wait = snap.get(MetricKey.NUM_REQUESTS_WAITING)
@@ -423,14 +423,14 @@ class Collector:
         usage_str = f"{float(usage_raw):.3f}" if usage_raw is not None else "-"
         hit_str = f"{cache_hit_pct:.1f}" if cache_hit_pct == cache_hit_pct else "-"
         logger.debug(
-            f"vllm-evidence replica={node_id} kv={kv_str} usage={usage_str} run={run} wait={wait} | "
+            f"vllm-evidence replica={replica_id} kv={kv_str} usage={usage_str} run={run} wait={wait} | "
             f"TTFT={_ms(ttft_avg)}ms queue={_ms(queue_avg)}ms prefillT={_ms(prefill_t)}ms TPOT={_ms(tpot_avg)}ms | "
             f"prefill={int(d_prefill)} cached={int(d_cached)} (hit={hit_str}%) "
             f"decode={int(d_decode)} external={int(d_external)} flops={int(d_flops)} [poll #{self._metrics_poll_count}]"
         )
 
         # Snapshot current cumulative values for next window's delta.
-        self._metrics_prev[node_id] = {k: float(snap.get(k, 0) or 0) for k in _CUMULATIVE_KEYS}
+        self._metrics_prev[replica_id] = {k: float(snap.get(k, 0) or 0) for k in _CUMULATIVE_KEYS}
 
     def stop(self) -> None:
         """
@@ -496,9 +496,9 @@ def get_collector(
     Args:
         name: Collector type — ``"vllm_metrics"`` or ``"vllm_zmq"``.
         collectors_config: ``CollectorConfig`` carrying connection-type knobs.
-        server_addresses: ``{node_id: ip:port}`` for HTTP transport
+        server_addresses: ``{replica_id: ip:port}`` for HTTP transport
             (used by ``"vllm_metrics"``).
-        kv_event_endpoints: ``{node_id: [sub_addr, replay_addr]}`` for ZMQ
+        kv_event_endpoints: ``{replica_id: [sub_addr, replay_addr]}`` for ZMQ
             transport (used by ``"vllm_zmq"``).
 
     Returns:

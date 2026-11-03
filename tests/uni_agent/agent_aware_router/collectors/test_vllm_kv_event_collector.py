@@ -28,7 +28,7 @@ from __future__ import annotations
 import time
 
 import pytest
-from conftest import BLOCK_SIZE, NODE_ID, FakeZMQTransport, kv_payload, make_stored_event, mapping_event
+from conftest import BLOCK_SIZE, REPLICA_ID, FakeZMQTransport, kv_payload, make_stored_event, mapping_event
 
 from uni_agent.agent_aware_router.collectors.collector import Collector
 from uni_agent.agent_aware_router.collectors.parse.vllm.kv import VLLMKVParser
@@ -69,14 +69,16 @@ class TestVLLMKVEventCollector:
         Expectation:
             block_size is set (learned from first event).
             At least one block is cached.
-            NODE_ID appears in at least one cached block.
+            REPLICA_ID appears in at least one cached block.
         """
         store, _ = _run([kv_payload(make_stored_event("rh0", _block_ids(0)))])
 
         assert store.get_block_size() is not None, "block_size should be learned from KV events"
         assert store.get_block_size() > 0
         assert store.get_kv_block_count() > 0, "KV cache should have blocks after BlockStored events"
-        assert store.kv_node_has_blocks(NODE_ID), f"Expected NODE_ID '{NODE_ID}' in at least one cached block"
+        assert store.kv_replica_has_blocks(REPLICA_ID), (
+            f"Expected REPLICA_ID '{REPLICA_ID}' in at least one cached block"
+        )
 
     @pytest.mark.cpu
     @pytest.mark.level0
@@ -112,18 +114,18 @@ class TestVLLMKVEventCollector:
 
     @pytest.mark.cpu
     @pytest.mark.level0
-    def test_clear_kv_node_removes_all_blocks(self):
+    def test_clear_kv_replica_removes_all_blocks(self):
         """
-        Feature: DataStore.clear_kv_node removes all blocks for a node
+        Feature: DataStore.clear_kv_replica removes all blocks for a node
         Expectation:
-            After clear_kv_node, NODE_ID no longer appears in any cached block.
+            After clear_kv_replica, REPLICA_ID no longer appears in any cached block.
         """
         store, _ = _run([kv_payload(make_stored_event("rh0", _block_ids(0)))])
 
         assert store.get_kv_block_count() > 0, "Precondition: blocks should exist before clear"
-        store.clear_kv_node(NODE_ID)
-        assert not store.kv_node_has_blocks(NODE_ID), (
-            f"NODE_ID '{NODE_ID}' should not appear in any block after clear_kv_node"
+        store.clear_kv_replica(REPLICA_ID)
+        assert not store.kv_replica_has_blocks(REPLICA_ID), (
+            f"REPLICA_ID '{REPLICA_ID}' should not appear in any block after clear_kv_replica"
         )
 
     @pytest.mark.cpu
@@ -135,14 +137,14 @@ class TestVLLMKVEventCollector:
             Verify that the parser's per-replica hash mapping tracks remote->local
             block hashes, and that every local hash appears in the KV cache store.
         Expectation:
-            The map is keyed by node_id and holds this node's remote->local entries.
+            The map is keyed by replica_id and holds this node's remote->local entries.
             All local hashes are present in the KV cache store.
         """
         store, collector = _run([kv_payload(make_stored_event("rh0", _block_ids(0)))])
 
-        node_maps = collector._parser.remote_to_local_block_hash
-        assert NODE_ID in node_maps, "map must be keyed by node_id (per-replica isolation)"
-        mapping = node_maps[NODE_ID]
+        replica_maps = collector._parser.remote_to_local_block_hash
+        assert REPLICA_ID in replica_maps, "map must be keyed by replica_id (per-replica isolation)"
+        mapping = replica_maps[REPLICA_ID]
         assert len(mapping) > 0, "remote_to_local_block_hash should have entries after processing events"
         for remote_bh, local_bh in mapping.items():
             assert isinstance(remote_bh, str)
@@ -161,7 +163,7 @@ def test_wire_events_change_store():
     store, collector = _run([kv_payload(mapping_event(event)) for event in events])
     assert store.get_block_size() == BLOCK_SIZE
     assert store.get_kv_block_count() == 1
-    assert set(collector._parser.remote_to_local_block_hash[NODE_ID]) == {"101"}
+    assert set(collector._parser.remote_to_local_block_hash[REPLICA_ID]) == {"101"}
 
 
 @pytest.mark.cpu
@@ -181,7 +183,7 @@ def test_excluded_media_preserve_gpu_hit_and_counts(medium, remove_gpu):
     store, _ = _run(payloads)
     hashes, _ = get_prefix_hashes_incremental(tokens, BLOCK_SIZE, 0, 0)
     assert store.get_block_size() == BLOCK_SIZE
-    assert store.get_layer_prefix_hit_rate(NODE_ID, [str(h) for h in hashes]) == (0.0 if remove_gpu else 1.0)
-    assert store.per_replica_block_counts() == {NODE_ID: 1 if remove_gpu else 2}
+    assert store.get_layer_prefix_hit_rate(REPLICA_ID, [str(h) for h in hashes]) == (0.0 if remove_gpu else 1.0)
+    assert store.per_replica_block_counts() == {REPLICA_ID: 1 if remove_gpu else 2}
     assert store._kv._replica_layer_counts[Layer.CPU] == {}
     assert store._kv._replica_layer_counts[Layer.SSD] == {}

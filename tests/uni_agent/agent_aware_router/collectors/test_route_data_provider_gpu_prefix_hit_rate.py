@@ -19,7 +19,7 @@ Test flow:
 2. Call start() to begin event processing.
 3. Inject ChainBlocks of a "long" prompt through the fake transport.
 4. Compute the prefix-hash chains of the long and short prompts locally.
-5. Call DataStore().get_layer_prefix_hit_rate(node_id, hash_chain, Layer.GPU)
+5. Call DataStore().get_layer_prefix_hit_rate(replica_id, hash_chain, Layer.GPU)
    and verify the results.
 
 No real vLLM service is required.
@@ -30,7 +30,7 @@ from __future__ import annotations
 import time
 
 import pytest
-from conftest import BLOCK_SIZE, NODE_ID, FakeZMQTransport, kv_payload, make_stored_event, mapping_event
+from conftest import BLOCK_SIZE, REPLICA_ID, FakeZMQTransport, kv_payload, make_stored_event, mapping_event
 
 from uni_agent.agent_aware_router.collectors.collector import Collector
 from uni_agent.agent_aware_router.collectors.parse.vllm.kv import VLLMKVParser
@@ -96,7 +96,7 @@ class TestGpuPrefixHitRate:
         assert len(short_chain) < len(_hash_chain(LONG_IDS)), (
             f"Short prompt should have fewer blocks, got short={len(short_chain)}"
         )
-        hit = store.get_layer_prefix_hit_rate(NODE_ID, short_chain, Layer.GPU)
+        hit = store.get_layer_prefix_hit_rate(REPLICA_ID, short_chain, Layer.GPU)
 
         assert hit == 1.0, f"Expected hit_rate=1.0 for prefix match, got {hit}"
 
@@ -114,7 +114,7 @@ class TestGpuPrefixHitRate:
 
         long_chain = _hash_chain(LONG_IDS)
         assert len(long_chain) == 2, f"Expected 2 full blocks, got {len(long_chain)}"
-        hit = store.get_layer_prefix_hit_rate(NODE_ID, long_chain, Layer.GPU)
+        hit = store.get_layer_prefix_hit_rate(REPLICA_ID, long_chain, Layer.GPU)
 
         assert 0.0 <= hit <= 1.0, f"Hit rate should be in [0.0, 1.0], got {hit}"
         assert hit == 1.0, f"Expected hit_rate=1.0 for fully cached chain, got {hit}"
@@ -128,17 +128,17 @@ def test_wire_events_change_prefix_hit_rate(removed_hash, expected_hit):
     chain = _hash_chain(LONG_IDS)
 
     def apply(event):
-        update = collector._parser.parse(kv_payload(mapping_event(event)), NODE_ID)
+        update = collector._parser.parse(kv_payload(mapping_event(event)), REPLICA_ID)
         assert update is not None
         collector._write_kv_update(update)
 
     try:
         apply(["BlockStored", [101], None, SHORT_IDS, BLOCK_SIZE, None, "GPU"])
         apply(["BlockStored", [102], 101, LONG_IDS[BLOCK_SIZE:], BLOCK_SIZE, None, "GPU"])
-        assert store.get_layer_prefix_hit_rate(NODE_ID, chain, Layer.GPU) == 1.0
+        assert store.get_layer_prefix_hit_rate(REPLICA_ID, chain, Layer.GPU) == 1.0
         apply(["BlockRemoved", [removed_hash], "GPU", 0])
-        assert store.get_layer_prefix_hit_rate(NODE_ID, chain, Layer.GPU) == expected_hit
+        assert store.get_layer_prefix_hit_rate(REPLICA_ID, chain, Layer.GPU) == expected_hit
         apply(["AllBlocksCleared"])
-        assert store.get_layer_prefix_hit_rate(NODE_ID, chain, Layer.GPU) == 0.0
+        assert store.get_layer_prefix_hit_rate(REPLICA_ID, chain, Layer.GPU) == 0.0
     finally:
         collector.stop()

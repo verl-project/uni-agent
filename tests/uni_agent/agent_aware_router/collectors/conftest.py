@@ -35,7 +35,7 @@ from uni_agent.agent_aware_router.types import Layer
 
 # ── Shared configuration constants ───────────────────────────────────────
 
-NODE_ID = "127.0.0.1:8000"
+REPLICA_ID = "127.0.0.1:8000"
 BLOCK_SIZE = 16
 
 # Prometheus-format metrics text — covers all assertions in the polling tests.
@@ -56,7 +56,7 @@ vllm:num_requests_waiting 7
 class FakeHTTPTransport(Transport):
     """Fake HTTP transport — injects pre-canned Prometheus text.
 
-    ``subscribe(handler)`` feeds ``handler(text, NODE_ID)`` periodically
+    ``subscribe(handler)`` feeds ``handler(text, REPLICA_ID)`` periodically
     until cancelled, simulating the real HTTP polling loop.
     """
 
@@ -69,7 +69,7 @@ class FakeHTTPTransport(Transport):
     async def subscribe(self, handler):
         try:
             while True:
-                handler(self._text, NODE_ID)
+                handler(self._text, REPLICA_ID)
                 await asyncio.sleep(self._interval)
         except (asyncio.CancelledError, GeneratorExit):
             pass
@@ -94,7 +94,7 @@ class FakeZMQTransport(Transport):
     async def subscribe(self, handler):
         try:
             for p in self._payloads:
-                handler(p, NODE_ID)
+                handler(p, REPLICA_ID)
                 await asyncio.sleep(self._interval)
             while True:
                 await asyncio.sleep(self._interval)

@@ -38,7 +38,7 @@ class HTTPTransport(Transport):
     Response text is delivered to the handler callback for decoding.
 
     Args:
-        endpoints: ``{node_id: ip:port}`` — each address polls
+        endpoints: ``{replica_id: ip:port}`` — each address polls
             ``http://{address}/metrics``.
         interval: Polling interval in seconds.
         http_timeout: HTTP request timeout in seconds.

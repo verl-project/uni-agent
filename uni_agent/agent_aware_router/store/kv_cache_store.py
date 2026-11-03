@@ -245,7 +245,7 @@ class KVCacheStore:
 
     def get_layer_prefix_hit_rate(
         self,
-        node_id: str,
+        replica_id: str,
         hash_strs: list[str],
         layer: Layer = Layer.GPU,
     ) -> float:
@@ -265,15 +265,15 @@ class KVCacheStore:
         if layer != Layer.GPU or self.block_size is None:
             return 0.0
         with self._lock:
-            return self._gpu_hit_rate_locked(node_id, hash_strs)
+            return self._gpu_hit_rate_locked(replica_id, hash_strs)
 
-    def _gpu_hit_rate_locked(self, node_id: str, hash_strs: list[str]) -> float:
+    def _gpu_hit_rate_locked(self, replica_id: str, hash_strs: list[str]) -> float:
         """Walk the reverse index along the hash chain. Caller holds ``_lock``."""
         if not hash_strs:
             return 0.0
         matched = 0
         for i, hs in enumerate(hash_strs):
-            if not self._is_cached_locked(node_id, hs):
+            if not self._is_cached_locked(replica_id, hs):
                 break  # chain break — this node doesn't cache this hash
             matched = i + 1
         return matched / len(hash_strs)

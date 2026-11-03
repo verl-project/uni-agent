@@ -103,8 +103,8 @@ def test_filtered_counts_and_summary_are_per_node_medium_and_throttled(caplog, m
     monkeypatch.setattr(module_logger, "propagate", False)
     module_logger.addHandler(caplog.handler)
 
-    def parse(node_id, event):
-        update = parser.parse(msgpack.packb([0, [event]]), node_id)
+    def parse(replica_id, event):
+        update = parser.parse(msgpack.packb([0, [event]]), replica_id)
         assert update is not None and not update.add_blocks and not update.remove_blocks
 
     try:
@@ -201,7 +201,7 @@ def test_parse_failure_surfaces_exception_not_swallowed():
     assert update is None
     text = "\n".join(record.getMessage() for record in records)
     assert "{exc}" not in text  # placeholder must be gone
-    assert "node1" in text  # node_id must interpolate
+    assert "node1" in text  # replica_id must interpolate
     assert "len=" in text and "head=c1c1c1" in text  # diagnostic preview present
 
 
@@ -361,15 +361,15 @@ def _removed(hashes, medium="GPU"):
     return [0, [["removed", list(hashes), medium, None]]]
 
 
-def _apply(parser, payload, node_id, store):
-    update = parser.parse(msgpack.packb(payload), node_id)
+def _apply(parser, payload, replica_id, store):
+    update = parser.parse(msgpack.packb(payload), replica_id)
     assert update is not None
     for layer, hashes in update.remove_blocks.items():
         if hashes:
-            store.remove_kv_blocks(node_id, hashes, layer=layer)
+            store.remove_kv_blocks(replica_id, hashes, layer=layer)
     for layer, hashes in update.add_blocks.items():
         if hashes:
-            store.add_kv_blocks(node_id, hashes, layer=layer)
+            store.add_kv_blocks(replica_id, hashes, layer=layer)
     return update
 
 
@@ -391,9 +391,9 @@ def test_hash_map_is_per_replica_and_survives_sibling_eviction():
 
     # Per-replica maps: one entry per node, and local hashes agree across nodes
     # (the prompt-side chain is replica-independent, so they must).
-    node_maps = parser.remote_to_local_block_hash
-    assert set(node_maps) == {"nodeA", "nodeB"}
-    assert node_maps["nodeA"] == node_maps["nodeB"], "local chain must not depend on the replica"
+    replica_maps = parser.remote_to_local_block_hash
+    assert set(replica_maps) == {"nodeA", "nodeB"}
+    assert replica_maps["nodeA"] == replica_maps["nodeB"], "local chain must not depend on the replica"
 
     # nodeA drops the whole prefix first …
     _apply(parser, _removed(remote_hashes), "nodeA", store)
