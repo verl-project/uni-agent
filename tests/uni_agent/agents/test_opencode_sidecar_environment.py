@@ -20,8 +20,10 @@ pytestmark = [pytest.mark.cpu, pytest.mark.level0, pytest.mark.asyncio]
 
 
 @pytest.mark.parametrize("library_env", ["unset", "empty", "glibc", "custom"])
-async def test_sidecar_preserves_task_library_environment(tmp_path, monkeypatch, library_env):
-    cli = os.environ.get("OPENCODE_SIDECAR_BIN")
+async def test_sidecar_preserves_task_library_environment(
+    tmp_path, monkeypatch, library_env, *, agent_cls=OpenCodeAgent, config_cls=OpenCodeConfig, cli=None
+):
+    cli = cli or os.environ.get("OPENCODE_SIDECAR_BIN")
     if not cli:
         pytest.skip("set OPENCODE_SIDECAR_BIN to the mounted Linux supported sidecar")
     assert sys.platform == "linux"
@@ -103,7 +105,7 @@ async def test_sidecar_preserves_task_library_environment(tmp_path, monkeypatch,
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        config = OpenCodeConfig(
+        config = config_cls(
             opencode_bin=cli,
             state_root=str(tmp_path / "state"),
             run_timeout=30,
@@ -111,7 +113,7 @@ async def test_sidecar_preserves_task_library_environment(tmp_path, monkeypatch,
                 base_url=f"http://127.0.0.1:{server.server_port}/v1", model_name="scripted", api_key="env-dummy"
             ),
         )
-        result = await OpenCodeAgent(config).run(
+        result = await agent_cls(config).run(
             sandbox=LocalSandbox(),
             messages=[{"role": "user", "content": "Run the library check."}],
             workdir=str(workspace),

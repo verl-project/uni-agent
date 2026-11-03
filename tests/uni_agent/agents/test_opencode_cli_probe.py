@@ -88,8 +88,10 @@ def _configured_cli() -> str:
 @pytest.mark.cpu
 @pytest.mark.level0
 @pytest.mark.asyncio
-async def test_real_cli_synthetic_sse_and_process_boundary_probes(tmp_path, monkeypatch):
-    cli = _configured_cli()
+async def test_real_cli_synthetic_sse_and_process_boundary_probes(
+    tmp_path, monkeypatch, *, agent_cls=OpenCodeAgent, config_cls=OpenCodeConfig, cli=None
+):
+    cli = cli or _configured_cli()
 
     # OpenCode otherwise prefers inherited PWD over the subprocess cwd. Use a
     # different, test-owned directory and a relative tool write to catch this.
@@ -187,13 +189,13 @@ async def test_real_cli_synthetic_sse_and_process_boundary_probes(tmp_path, monk
         async def run_scenario(name, workspace, *, timeout=20, cli_path=cli):
             state["scenario"] = name
             state["requests"] = []
-            cfg = OpenCodeConfig(
+            cfg = config_cls(
                 opencode_bin=cli_path,
                 run_timeout=timeout,
                 state_root=str(tmp_path / "state" / name),
                 model=ModelConfig(base_url=endpoint, model_name="synthetic-policy", api_key="probe-dummy-only"),
             )
-            return await OpenCodeAgent(cfg).run(
+            return await agent_cls(cfg).run(
                 sandbox=LocalSandbox(),
                 messages=[{"role": "user", "content": "Run the harmless local probe and reply."}],
                 workdir=str(workspace),
@@ -287,14 +289,14 @@ async def test_real_cli_synthetic_sse_and_process_boundary_probes(tmp_path, monk
         state["requests"] = []
         state["tool_command"] = f"printf '%s\\n' $$ > {shlex.quote(str(cancel_pid_file))}; exec sleep 30"
         state["scenario"] = "cancel-after-tool"
-        cancel_cfg = OpenCodeConfig(
+        cancel_cfg = config_cls(
             opencode_bin=cli,
             run_timeout=30,
             state_root=str(tmp_path / "state" / "cancel-after-tool"),
             model=ModelConfig(base_url=endpoint, model_name="synthetic-policy", api_key="probe-dummy-only"),
         )
         cancel_task = asyncio.create_task(
-            OpenCodeAgent(cancel_cfg).run(
+            agent_cls(cancel_cfg).run(
                 sandbox=LocalSandbox(),
                 messages=[{"role": "user", "content": "Run the harmless local probe and reply."}],
                 workdir=str(cancel_workspace),

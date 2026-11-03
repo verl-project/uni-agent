@@ -164,11 +164,13 @@ class PatchSmokeTask(Task):
         return result
 
 
-async def run_smoke(opencode_bin: str, scenario: Scenario = "patch") -> TaskResult:
+async def run_smoke(
+    opencode_bin: str, scenario: Scenario = "patch", *, config_cls: type[OpenCodeConfig] = OpenCodeConfig
+) -> TaskResult:
     with scripted_endpoint(scenario) as endpoint:
         config = TaskConfig(
             sandbox=SandboxConfig(provider="local"),
-            agent=OpenCodeConfig(
+            agent=config_cls(
                 opencode_bin=opencode_bin,
                 run_timeout=30,
                 model=ModelConfig(base_url=endpoint.base_url, model_name="scripted-policy", api_key="smoke-dummy"),
