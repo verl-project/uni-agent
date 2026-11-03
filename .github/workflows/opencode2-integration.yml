@@ -1,16 +1,19 @@
 name: OpenCode 2.2.5 integration
 on:
   push:
-    branches: [codex/opencode-2x-adapter, codex/opencode-review-followup]
+    branches: [codex/opencode-2x-adapter, codex/opencode-review-followup, codex/opencode-validation-followup]
   workflow_dispatch:
   pull_request:
-    branches: [feat/opencode-recipe]
+    branches: [feat/opencode-recipe, main]
     paths:
       - "uni_agent/agents/opencode*/**"
       - "uni_agent/agents/registry.py"
       - "uni_agent/sandbox/**"
       - "uni_agent/tasks/swe_rebench/preprocess.py"
       - "tests/uni_agent/agents/test_opencode*"
+      - "tests/uni_agent/sandbox/**"
+      - "scripts/validation/**"
+      - "tests/uni_agent/tasks/test_swe*"
       - "examples/opencode/**"
       - "examples/sidecar/opencode/**"
       - "examples/blackbox_recipes/opencode_swe_task/**"
@@ -21,6 +24,38 @@ defaults:
   run:
     shell: bash
 jobs:
+  recipe-data:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.10', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '${{ matrix.python }}'
+      - run: python -m pip install -r scripts/validation/opencode-data-requirements.txt
+      - name: Offline Parquet and documented preprocessing command
+        env:
+          HF_DATASETS_OFFLINE: '1'
+          HF_HUB_OFFLINE: '1'
+        run: |
+          mkdir -p results
+          PYTHONPATH=. python -m pytest tests/uni_agent/tasks/test_swe_rebench_parquet.py \
+            -q --tb=short --junitxml=results/parquet.xml | tee results/parquet.log
+          python - <<'PY'
+          import xml.etree.ElementTree as ET
+          suites = list(ET.parse('results/parquet.xml').getroot().iter('testsuite'))
+          assert sum(int(s.attrib['tests']) for s in suites) == 6
+          assert all(int(s.attrib[k]) == 0 for s in suites for k in ['failures', 'errors', 'skipped'])
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: opencode-parquet-python-${{ matrix.python }}
+          path: results/
   sidecar:
     runs-on: ubuntu-24.04
     timeout-minutes: 20

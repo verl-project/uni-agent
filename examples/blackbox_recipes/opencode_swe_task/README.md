@@ -58,11 +58,14 @@ Hugging Face access:
 python -m uni_agent.tasks.swe_rebench.preprocess \
   --data-files /data/swe-rebench/filtered-00000-of-00001.parquet \
   --local-save-dir /data/uni_agent \
-  [--instance-ids EmilStenstrom__conllu-64,NOhs__dkey-18 --output-name swe_rebench_2task.parquet]
+  --instance-ids EmilStenstrom__conllu-64,NOhs__dkey-18 \
+  --output-name swe_rebench_2task.parquet
 ```
 
 `--instance-ids` keeps the given order and fails if an ID is missing or duplicated
 in the dataset. An explicitly empty selection or file list is rejected.
+Omit `--instance-ids` to keep all instances. Omit `--output-name` to use
+`swe_rebench_filtered.parquet`.
 
 Dynamic reward-group filtering defaults to disabled (`FILTER_GROUPS=False`) so
 uniform rewards, including an all-failing smoke dataset, cannot cause repeated
@@ -117,6 +120,18 @@ bash examples/blackbox_recipes/opencode_swe_task/run_train.sh
 
 ## Validation status
 
+- Offline preprocessing regression uses real `datasets`/Arrow/Parquet I/O with
+  synthetic rows. It checks selection order, missing/duplicate IDs, nested task
+  metadata, prompt separation from gold patches, and the runnable command above:
+
+  ```bash
+  python -m pip install -r scripts/validation/opencode-data-requirements.txt
+  HF_HUB_OFFLINE=1 HF_DATASETS_OFFLINE=1 PYTHONPATH=. python -m pytest \
+    tests/uni_agent/tasks/test_swe_rebench_parquet.py -q
+  ```
+
+  This checks the data pipeline without downloading SWE-rebench or running its
+  evaluator. It does not establish model performance.
 - CPU tests: adapter (`tests/uni_agent/agents/test_opencode_agent.py`) and E2B
   options (`tests/uni_agent/sandbox/test_e2b_backend_options.py`).
 - Real OpenCode 1.18.18 and 1.19.3 CLIs: CLI probe and task smoke through

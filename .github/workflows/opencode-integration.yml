@@ -1,10 +1,10 @@
 name: OpenCode 1.x integration
 on:
   push:
-    branches: [codex/opencode-1x-integration, codex/opencode-review-followup]
+    branches: [codex/opencode-1x-integration, codex/opencode-review-followup, codex/opencode-validation-followup]
   workflow_dispatch:
   pull_request:
-    branches: [feat/opencode-recipe]
+    branches: [feat/opencode-recipe, main]
     paths:
       - "uni_agent/agents/opencode/**"
       - "uni_agent/sandbox/**"
