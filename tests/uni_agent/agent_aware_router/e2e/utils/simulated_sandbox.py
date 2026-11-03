@@ -190,6 +190,8 @@ class _SimulatedSession:
                         arguments = json.loads(call["function"]["arguments"] or "{}")
                     except json.JSONDecodeError:
                         arguments = {}
+                    if not isinstance(arguments, dict):
+                        arguments = {}
                     if name == "submit":
                         observation = "Submitted."
                         finished = True

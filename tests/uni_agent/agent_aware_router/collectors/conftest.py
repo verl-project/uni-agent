@@ -159,8 +159,12 @@ def _reset_store_singletons():
     # KVCacheStore
     kv = KVCacheStore.singleton()
     kv.block_size = None
+    kv._rebuilding_replicas.clear()
     kv.replicas_by_block.clear()
+    kv._resident_blocks_by_replica.clear()
     kv._replica_layer_counts = {Layer.GPU: {}, Layer.CPU: {}, Layer.SSD: {}}
+    kv._inflight_blocks.clear()
+    kv._inflight_pins.clear()
     # PerReplicaStore
     pr = PerReplicaStore.singleton()
     pr._data.clear()
