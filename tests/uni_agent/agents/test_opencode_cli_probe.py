@@ -208,6 +208,7 @@ async def test_real_cli_synthetic_sse_and_process_boundary_probes(
         results.append({"scenario": "text", "finished": text_result.finished, "requests": len(state["requests"])})
         assert text_result.finished is True
         assert len(state["requests"]) == 1
+        assert all(r["path"] == "/sessions/probe/v1/chat/completions" and r["auth_ok"] for r in state["requests"])
 
         edit_workspace = tmp_path / "edit workspace with 'quote"
         edit_workspace.mkdir()
@@ -217,6 +218,7 @@ async def test_real_cli_synthetic_sse_and_process_boundary_probes(
         results.append({"scenario": "tool-edit", "finished": edit_result.finished, "requests": len(state["requests"])})
         assert edit_result.finished is True
         assert len(state["requests"]) == 2
+        assert all(r["path"] == "/sessions/probe/v1/chat/completions" and r["auth_ok"] for r in state["requests"])
         assert edited_file.read_text(encoding="utf-8") == "safe-probe\n"
         assert not (inherited_directory / "safe-marker.txt").exists()
 

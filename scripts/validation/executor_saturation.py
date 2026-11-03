@@ -1,4 +1,8 @@
-"""Bounded default-executor saturation probes with real detached process trees."""
+"""Bounded default-executor saturation probes with real detached process trees.
+
+From the checkout: PYTHONPATH=. python scripts/validation/executor_saturation.py
+--output results.json (optionally --require-clean-shutdown).
+"""
 
 from __future__ import annotations
 

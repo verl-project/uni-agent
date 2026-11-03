@@ -1,16 +1,19 @@
 name: OpenCode 2.2.5 integration
 on:
   push:
-    branches: [codex/opencode-2x-adapter]
+    branches: [codex/opencode-2x-adapter, codex/opencode-review-followup]
   workflow_dispatch:
   pull_request:
     branches: [feat/opencode-recipe]
     paths:
       - "uni_agent/agents/opencode*/**"
       - "uni_agent/agents/registry.py"
+      - "uni_agent/sandbox/**"
+      - "uni_agent/tasks/swe_rebench/preprocess.py"
       - "tests/uni_agent/agents/test_opencode*"
       - "examples/opencode/**"
       - "examples/sidecar/opencode/**"
+      - "examples/blackbox_recipes/opencode_swe_task/**"
       - ".github/workflows/opencode2-integration.yml"
 permissions:
   contents: read
@@ -55,6 +58,8 @@ jobs:
         run: |
           PYTHONPATH=. python -m pytest tests/uni_agent/agents/test_opencode2_agent.py \
             tests/uni_agent/agents/test_opencode2_cli.py tests/uni_agent/agents/test_opencode_agent.py \
+            tests/uni_agent/agents/test_opencode_review_regressions.py \
+            tests/uni_agent/agents/test_opencode_supervisor.py tests/uni_agent/agents/test_opencode_recipe_review.py \
             tests/uni_agent/sandbox/test_local_sandbox.py tests/uni_agent/sandbox/test_local_descendant_groups.py \
             -q -s --tb=short --junitxml=results/tests.xml | tee results/tests.log
           python - <<'PY'

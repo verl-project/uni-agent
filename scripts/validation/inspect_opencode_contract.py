@@ -72,3 +72,5 @@ args.output.write_text(
     )
     + "\n"
 )
+missing_flags = [flag for flag, present in advertised.items() if not present]
+assert not missing_flags, f"CLI help omits required flags: {missing_flags}"
