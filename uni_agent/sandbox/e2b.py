@@ -185,8 +185,8 @@ class E2BSandbox(Sandbox):
         await self._setup_executable_paths(self.executable_paths)
 
     async def _verify_backend_image_mounts(self) -> None:
-        # The backend owns these mounts, so fail at startup instead of letting an
-        # agent discover a missing tool directory mid-episode.
+        # Check backend-owned mount directories at startup. Executable presence
+        # and version remain the agent's preflight responsibility.
         if not self.backend_image_mounts:
             return
         for mount in self.image_mounts:

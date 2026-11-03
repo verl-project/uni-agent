@@ -51,7 +51,7 @@ LOSS_AGG_MODE="${LOSS_AGG_MODE:-token-mean}"
 LOSS_MODE="${LOSS_MODE:-vanilla}"
 # Dynamic-sampling filter; disable for tiny smoke datasets where every group can
 # share one reward and the filter would keep asking for more batches.
-FILTER_GROUPS="${FILTER_GROUPS:-True}"
+FILTER_GROUPS="${FILTER_GROUPS:-False}"
 
 # ── Sequence lengths ─────────────────────────────────────────────────────
 # Keep PROMPT_LENGTH + RESPONSE_LENGTH >= agent.context_limit in TASK_CONFIG.
@@ -183,11 +183,6 @@ RUNNER_ARGS=(
     "${RUNNER_PREFIX}.agent_runners.task.runner_kwargs.model_name=${SERVED_MODEL_NAME}"
     "${RUNNER_PREFIX}.agent_runners.task.runner_kwargs.report_reward=True"
 )
-
-if [[ "${RAY_SUBMIT_MODE}" == "job" ]] && ! timeout "${RAY_STATUS_TIMEOUT}" ray status &>/dev/null; then
-    echo "No running Ray cluster found; start Ray on every node first." >&2
-    exit 1
-fi
 
 WORKING_DIR="${WORKING_DIR:-${REPO_ROOT}}"
 
@@ -335,12 +330,23 @@ fi
 MAIN_CMD+=("$@")
 
 if [[ "${PRINT_CMD_ONLY:-0}" == "1" ]]; then
-    printf '%q ' "${MAIN_CMD[@]}" | sed -E 's/(E2B_API_KEY=)[^ ]*/\1<redacted>/'
+    # Redact whole raw arguments before shell quoting (spaces/newlines in a key
+    # otherwise leave suffixes visible). Covers caller-supplied overrides too.
+    for arg in "${MAIN_CMD[@]}"; do
+        if [[ "$arg" == *E2B_API_KEY=* ]]; then
+            arg="${arg%%E2B_API_KEY=*}E2B_API_KEY=<redacted>"
+        fi
+        printf '%q ' "$arg"
+    done
     echo
     exit 0
 fi
 
 if [[ "${RAY_SUBMIT_MODE}" == "job" ]]; then
+    if ! timeout "${RAY_STATUS_TIMEOUT}" ray status &>/dev/null; then
+        echo "No running Ray cluster found; start Ray on every node first." >&2
+        exit 1
+    fi
     ray job submit --no-wait --working-dir="${WORKING_DIR}" "${RUNTIME_ENV_ARGS[@]}" -- "${MAIN_CMD[@]}"
 elif [[ "${RAY_SUBMIT_MODE}" == "local" ]]; then
     "${MAIN_CMD[@]}"

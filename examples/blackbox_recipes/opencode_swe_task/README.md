@@ -58,10 +58,16 @@ Hugging Face access:
 python -m uni_agent.tasks.swe_rebench.preprocess \
   --data-files /data/swe-rebench/filtered-00000-of-00001.parquet \
   --local-save-dir /data/uni_agent \
-  [--instance-ids EmilStenstrom__conllu-64 NOhs__dkey-18 --output-name swe_rebench_2task.parquet]
+  [--instance-ids EmilStenstrom__conllu-64,NOhs__dkey-18 --output-name swe_rebench_2task.parquet]
 ```
 
-`--instance-ids` keeps the given order and fails if an ID is missing.
+`--instance-ids` keeps the given order and fails if an ID is missing or duplicated
+in the dataset. An explicitly empty selection or file list is rejected.
+
+Dynamic reward-group filtering defaults to disabled (`FILTER_GROUPS=False`) so
+uniform rewards, including an all-failing smoke dataset, cannot cause repeated
+generation without a training batch. Enable it only with a suitable dataset and
+a retry limit supported by the deployed trainer.
 
 ## Configure the sandbox backend
 
@@ -99,8 +105,8 @@ arguments are appended as Hydra overrides. Keep
 `SESSION_TIMEOUT_SECONDS` (5400) covers `agent.run_timeout` (3600) plus
 verification and sandbox startup.
 
-For a two-task smoke run, turn off the dynamic-sampling filter so a batch where
-every rollout gets the same reward does not stall:
+For a two-task smoke run, keep the default dynamic-sampling filter disabled so a
+batch where every rollout gets the same reward does not stall:
 
 ```bash
 TRAIN_DATA=/data/uni_agent/swe_rebench_2task.parquet \
