@@ -32,6 +32,7 @@ from uni_agent.agent_aware_router.collectors.parse import InflightBlockUpdate, M
 from uni_agent.agent_aware_router.collectors.parse.basic import inflight as inflight_module
 from uni_agent.agent_aware_router.collectors.parse.basic.inflight import InflightParser
 from uni_agent.agent_aware_router.collectors.parse.basic.sticky import StickyParser
+from uni_agent.agent_aware_router.collectors.transport.base import TransportMessage
 from uni_agent.agent_aware_router.collectors.transport.callback import (
     CallbackTransport,
     StatisticEvent,
@@ -58,24 +59,24 @@ class TestStatisticEvent:
 
 class TestStickyParser:
     def test_on_acquire_emits_put(self):
-        upd = StickyParser().parse(StatisticEvent("on_acquire", request_id="r1", replica_id="s0"), "")
+        upd = StickyParser().parse(TransportMessage(StatisticEvent("on_acquire", request_id="r1", replica_id="s0"), ""))
         assert isinstance(upd, StickyUpdate)
         assert upd.action == "put"
         assert upd.request_id == "r1"
         assert upd.replica_id == "s0"
 
     def test_on_servers_removed_emits_invalidate_replica(self):
-        upd = StickyParser().parse(StatisticEvent("on_servers_removed", server_ids=["s0", "s1"]), "")
+        upd = StickyParser().parse(TransportMessage(StatisticEvent("on_servers_removed", server_ids=["s0", "s1"]), ""))
         assert isinstance(upd, StickyUpdate)
         assert upd.action == "invalidate_replica"
         assert upd.replica_ids == ("s0", "s1")
 
     def test_return_is_none(self):
         d = StickyParser()
-        assert d.parse(b"bytes", "") is None
-        assert d.parse("str", "") is None
-        assert d.parse(StatisticEvent("on_acquire"), "") is None
-        assert d.parse(StatisticEvent("on_release", replica_id="s0"), "") is None
+        assert d.parse(TransportMessage(b"bytes", "")) is None
+        assert d.parse(TransportMessage("str", "")) is None
+        assert d.parse(TransportMessage(StatisticEvent("on_acquire"), "")) is None
+        assert d.parse(TransportMessage(StatisticEvent("on_release", replica_id="s0"), "")) is None
 
 
 class TestInflightParser:
@@ -89,8 +90,9 @@ class TestInflightParser:
     def test_on_acquire_unresolvable_chain_emits_netted_delta_only(self):
         """No learned block size → nothing resolvable → netted deltas without a block command."""
         updates = self._parser().parse(
-            StatisticEvent("on_acquire", request_id="r1", replica_id="s0", prompt_ids=tuple(range(42))),
-            "",
+            TransportMessage(
+                StatisticEvent("on_acquire", request_id="r1", replica_id="s0", prompt_ids=tuple(range(42))), ""
+            ),
             turn=1,
         )
         assert [type(u).__name__ for u in updates] == ["MetricsUpdate"]  # nothing resolvable → no block command
@@ -112,8 +114,9 @@ class TestInflightParser:
 
         prompt = list(range(2 * BLOCK_SIZE))
         updates = self._parser().parse(
-            StatisticEvent("on_acquire", request_id="r1", replica_id="s0", prompt_ids=tuple(prompt)),
-            "",
+            TransportMessage(
+                StatisticEvent("on_acquire", request_id="r1", replica_id="s0", prompt_ids=tuple(prompt)), ""
+            ),
             turn=1,
             block_size=BLOCK_SIZE,
         )
@@ -128,7 +131,7 @@ class TestInflightParser:
 
     def test_on_release_emits_unpin_and_netted_deltas(self):
         updates = self._parser().parse(
-            StatisticEvent("on_release", replica_id="s0", request_id="r1"), "", turn=0, booked_len=0
+            TransportMessage(StatisticEvent("on_release", replica_id="s0", request_id="r1"), ""), turn=0, booked_len=0
         )
         assert [type(u).__name__ for u in updates] == ["InflightBlockUpdate", "MetricsUpdate"]
         unpin = updates[0]
@@ -147,8 +150,9 @@ class TestInflightParser:
         """A still-held marker (stale) means the previous release was dropped: the
         parser emits the unwind and nets the stale dispatch's booked tokens out."""
         updates = self._parser().parse(
-            StatisticEvent("on_acquire", request_id="r1", replica_id="s0", prompt_ids=tuple(range(32))),
-            "",
+            TransportMessage(
+                StatisticEvent("on_acquire", request_id="r1", replica_id="s0", prompt_ids=tuple(range(32))), ""
+            ),
             turn=2,  # the stale dispatch was turn 1
             stale={"replica": "s0", "hashes": ["h1", "h2"]},
             booked_len=64,  # its booked tokens
@@ -162,7 +166,9 @@ class TestInflightParser:
         assert metrics[MetricKey.INFLIGHT_TURN_SUM] == 2  # this dispatch is turn 2
 
     def test_acquire_without_request_id_books_raw_len_only(self):
-        updates = self._parser().parse(StatisticEvent("on_acquire", replica_id="s0", prompt_ids=tuple(range(7))), "")
+        updates = self._parser().parse(
+            TransportMessage(StatisticEvent("on_acquire", replica_id="s0", prompt_ids=tuple(range(7))), "")
+        )
         assert [type(u).__name__ for u in updates] == ["MetricsUpdate"]
         assert updates[0].metrics == {
             MetricKey.INFLIGHT_COUNT: 1,
@@ -203,7 +209,7 @@ class TestCallbackTransport:
         balancer = _FakeBalancer()
         transport = CallbackTransport(balancer)
         received: list = []
-        _run(transport.subscribe(lambda raw, nid: received.append(raw)))
+        _run(transport.subscribe(received.append))
 
         assert set(balancer.callbacks) == {"on_acquire", "on_release", "on_servers_removed"}
         # one callback per hook
@@ -214,28 +220,28 @@ class TestCallbackTransport:
         balancer.callbacks["on_servers_removed"][0](["s1", "s2"])
 
         assert received == [
-            StatisticEvent("on_acquire", request_id="r1", replica_id="s0"),
-            StatisticEvent("on_release", replica_id="s0"),
-            StatisticEvent("on_servers_removed", server_ids=("s1", "s2")),
+            TransportMessage(StatisticEvent("on_acquire", request_id="r1", replica_id="s0"), ""),
+            TransportMessage(StatisticEvent("on_release", replica_id="s0"), ""),
+            TransportMessage(StatisticEvent("on_servers_removed", server_ids=("s1", "s2")), ""),
         ]
 
     def test_on_release_callback_forwards_request_id(self):
         balancer = _FakeBalancer()
         transport = CallbackTransport(balancer)
         received: list = []
-        _run(transport.subscribe(lambda raw, nid: received.append(raw)))
+        _run(transport.subscribe(received.append))
 
         # (server_id, request_id) — the 2nd arg threads the routing request id
         # so the collector can attribute the release (turn / token subtraction).
         balancer.callbacks["on_release"][0]("s0", "r1")
         assert received == [
-            StatisticEvent("on_release", replica_id="s0", request_id="r1"),
+            TransportMessage(StatisticEvent("on_release", replica_id="s0", request_id="r1"), ""),
         ]
 
     def test_stop_unregisters_all(self):
         balancer = _FakeBalancer()
         transport = CallbackTransport(balancer)
-        _run(transport.subscribe(lambda raw, nid: None))
+        _run(transport.subscribe(lambda message: None))
         transport.stop()
         assert all(not lst for lst in balancer.callbacks.values())
 
@@ -266,6 +272,79 @@ class TestCollectorCallbackIntegration:
         PerReplicaStore._instance = None
         PerRequestStore._instance = None
         KVCacheStore._instance = None
+
+    def test_duplicate_start_preserves_one_hook_and_clean_restart(self):
+        from uni_agent.agent_aware_router.collectors.collector import Collector
+
+        balancer = _FakeBalancer()
+        collector = Collector(CallbackTransport(balancer), StickyParser())
+        try:
+            for _ in range(2):
+                collector.start()
+                assert set(balancer.callbacks) == {"on_acquire", "on_release", "on_servers_removed"}
+                with pytest.raises(RuntimeError, match="stop the collector"):
+                    collector.start()
+                assert all(len(callbacks) == 1 for callbacks in balancer.callbacks.values())
+                collector.stop()
+                assert all(not callbacks for callbacks in balancer.callbacks.values())
+        finally:
+            collector.stop()
+
+    def test_partial_callback_registration_requires_cleanup_before_retry(self, monkeypatch):
+        from uni_agent.agent_aware_router.collectors.collector import Collector
+
+        balancer = _FakeBalancer()
+        collector = Collector(CallbackTransport(balancer), StickyParser())
+        register = balancer.register_call_back
+
+        def partial_registration(event, callback):
+            if event == "on_release":
+                raise RuntimeError("registration failed")
+            register(event, callback)
+
+        try:
+            with monkeypatch.context() as patch:
+                patch.setattr(balancer, "register_call_back", partial_registration)
+                with pytest.raises(RuntimeError, match="registration failed"):
+                    collector.start()
+                with pytest.raises(RuntimeError, match="stop the collector"):
+                    collector.start()
+                assert len(balancer.callbacks["on_acquire"]) == 1
+            collector.stop()
+            assert all(not callbacks for callbacks in balancer.callbacks.values())
+            collector.start()
+            assert all(len(callbacks) == 1 for callbacks in balancer.callbacks.values())
+        finally:
+            collector.stop()
+
+    def test_failed_callback_cleanup_blocks_start_until_retry(self, monkeypatch):
+        from uni_agent.agent_aware_router.collectors.collector import Collector
+
+        balancer = _FakeBalancer()
+        collector = Collector(CallbackTransport(balancer), StickyParser())
+        unregister = balancer.un_register_call_back
+
+        def partial_cleanup(event, callback):
+            if event == "on_release":
+                raise RuntimeError("cleanup failed")
+            unregister(event, callback)
+
+        collector.start()
+        try:
+            with monkeypatch.context() as patch:
+                patch.setattr(balancer, "un_register_call_back", partial_cleanup)
+                with pytest.raises(RuntimeError, match="cleanup failed"):
+                    collector.stop()
+                with pytest.raises(RuntimeError, match="stop the collector"):
+                    collector.start()
+                assert not balancer.callbacks["on_acquire"]
+                assert len(balancer.callbacks["on_release"]) == 1
+            collector.stop()
+            assert all(not callbacks for callbacks in balancer.callbacks.values())
+            collector.start()
+            assert all(len(callbacks) == 1 for callbacks in balancer.callbacks.values())
+        finally:
+            collector.stop()
 
     def test_sticky_collector_writes_binding_on_acquire(self):
         from uni_agent.agent_aware_router.collectors.collector import Collector
@@ -365,9 +444,12 @@ class TestCollectorCallbackIntegration:
         from uni_agent.agent_aware_router.collectors.collector import Collector
 
         collector = Collector(CallbackTransport(_FakeBalancer()), InflightParser())
-        assert collector._inflight_event(b"bytes", "") is None
-        assert collector._inflight_event(StatisticEvent("on_acquire"), "") is None  # no replica
-        assert collector._inflight_event(StatisticEvent("on_servers_removed", server_ids=["s0"]), "") is None
+        assert collector._inflight_event(TransportMessage(b"bytes", "")) is None
+        assert collector._inflight_event(TransportMessage(StatisticEvent("on_acquire"), "")) is None  # no replica
+        assert (
+            collector._inflight_event(TransportMessage(StatisticEvent("on_servers_removed", server_ids=["s0"]), ""))
+            is None
+        )
 
 
 class TestInflightBlockPin:

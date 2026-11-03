@@ -25,13 +25,17 @@ No real vLLM service is required.
 
 from __future__ import annotations
 
+import asyncio
 import time
 
+import httpx
 import pytest
 from conftest import NODE_ID, VLLM_METRICS_TEXT, FakeHTTPTransport
 
 from uni_agent.agent_aware_router.collectors.collector import Collector
 from uni_agent.agent_aware_router.collectors.parse.vllm.metrics import VLLMMetricsParser
+from uni_agent.agent_aware_router.collectors.transport import http as http_transport_module
+from uni_agent.agent_aware_router.collectors.transport.http import HTTPTransport
 from uni_agent.agent_aware_router.store.data_store import DataStore
 from uni_agent.agent_aware_router.types import MetricKey
 
@@ -54,6 +58,32 @@ def _collect() -> DataStore:
     collector.stop()
 
     return store
+
+
+def test_http_messages_keep_each_endpoints_metrics_and_source(monkeypatch):
+    async def scenario():
+        counts = {"replica-a": 3, "replica-b": 7}
+
+        def respond(request):
+            count = counts[request.url.host]
+            return httpx.Response(200, text=f"vllm:num_requests_running {count}\n")
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+        monkeypatch.setattr(http_transport_module.httpx, "AsyncClient", lambda **kwargs: client)
+        transport = HTTPTransport({node: f"{node}:8000" for node in counts}, interval=60)
+        received = asyncio.Queue()
+        task = asyncio.create_task(transport.subscribe(received.put_nowait))
+        try:
+            messages = [await asyncio.wait_for(received.get(), 1) for _ in counts]
+            updates = [VLLMMetricsParser().parse(message) for message in messages]
+            assert {update.node_id: update.metrics[MetricKey.NUM_REQUESTS_RUNNING] for update in updates} == counts
+            assert all(message.sequence is None and message.status == "ok" for message in messages)
+        finally:
+            task.cancel()
+            await asyncio.wait_for(task, 1)
+        assert client.is_closed
+
+    asyncio.run(scenario())
 
 
 class TestVLLMMetricsCollector:

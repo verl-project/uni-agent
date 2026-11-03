@@ -28,6 +28,7 @@ import msgpack
 
 from ....collectors.parse import KVCacheUpdate, Parser
 from ....collectors.parse.vllm.kv_event import KVCacheEvent
+from ....collectors.transport.base import TransportMessage
 from ....types import Layer
 from ....utils.hash import compute_hash
 
@@ -36,11 +37,16 @@ logger = logging.getLogger(__name__)
 _FILTERED_EVENT_LOG_INTERVAL_S = 30.0
 
 
-class VLLMKVParser(Parser):
+class VLLMKVParser(Parser[bytes]):
     """vLLM KV-cache parser — msgpack payload → KVCacheUpdate.
 
     Each event type has a dedicated handler that folds its blocks into a single
     ``KVCacheUpdate`` accumulator; ``parse`` is pure dispatch.
+
+    Data messages are applied in delivery order; status-only notifications do
+    not produce block updates. ``message.sequence`` identifies the transport's
+    replay position. This parser does not include it in block updates, filter
+    duplicates, or validate sequence continuity.
 
     Attributes:
         remote_to_local_block_hash: Mapping from replica node_id to that
@@ -64,7 +70,7 @@ class VLLMKVParser(Parser):
         """Remote→local hash map for one replica (created on first event)."""
         return self.remote_to_local_block_hash.setdefault(node_id, {})
 
-    def parse(self, raw_data: bytes | str, node_id: str) -> KVCacheUpdate | None:
+    def parse(self, message: TransportMessage[bytes]) -> KVCacheUpdate | None:
         """Parse msgpack payload and return structured update command.
 
         Handles both single batches (real-time) and multiple batches (replay):
@@ -74,15 +80,20 @@ class VLLMKVParser(Parser):
         fields and a ``type`` discriminator.
 
         Args:
-            raw_data: ZMQ payload bytes (msgpack-encoded).
-            node_id: The endpoint that sent this payload.
+            message: Msgpack payload, source endpoint, and transport metadata.
+                ``sequence`` is not consumed by this parser; the transport
+                tracks replay positions independently of the block update.
 
         Returns:
             KVCacheUpdate with operations to apply, or None if parsing failed.
         """
-        if isinstance(raw_data, str):
-            logger.debug("VLLMKVParser received string data, expected bytes — skipping")
+        if not isinstance(message, TransportMessage) or not isinstance(message.payload, bytes):
+            raise TypeError("VLLMKVParser requires a TransportMessage[bytes]")
+        # Protocol status notifications contain no KV batch.
+        if message.status != "ok":
             return None
+        raw_data = message.payload
+        node_id = message.node_id
 
         try:
             raw = msgpack.unpackb(raw_data, raw=False)

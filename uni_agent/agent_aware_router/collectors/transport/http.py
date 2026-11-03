@@ -15,27 +15,27 @@
 """HTTPTransport — Prometheus HTTP polling transport.
 
 Polls ``http://{address}/metrics`` for each endpoint at a fixed interval
-and delivers response text to the handler callback.
+and delivers response text in a source message to the handler callback.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Callable
 
 import httpx
 
-from ...collectors.transport.base import Transport
+from ...collectors.transport.base import Transport, TransportHandler, TransportMessage
 
 logger = logging.getLogger(__name__)
 
 
-class HTTPTransport(Transport):
+class HTTPTransport(Transport[str]):
     """HTTP polling transport — fetches Prometheus metrics from endpoints.
 
     Each endpoint is polled at ``interval`` via ``httpx.AsyncClient``.
-    Response text is delivered to the handler callback for decoding.
+    A ``TransportMessage[str]`` carries the response text and source to the
+    handler callback for decoding.
 
     Args:
         endpoints: ``{node_id: ip:port}`` — each address polls
@@ -55,7 +55,7 @@ class HTTPTransport(Transport):
         self._http_timeout = http_timeout
         self._client: httpx.AsyncClient | None = None
 
-    async def subscribe(self, handler: Callable[[bytes | str, str], None]) -> None:
+    async def subscribe(self, handler: TransportHandler[str]) -> None:
         """Start the HTTP polling loop — delivers response text to handler."""
         self._client = httpx.AsyncClient(timeout=self._http_timeout, trust_env=False)
         try:
@@ -69,7 +69,7 @@ class HTTPTransport(Transport):
                         logger.warning(f"Failed to fetch metrics from {nid}: HTTP {resp.status_code}")
                         continue
                     try:
-                        handler(resp.text, nid)
+                        handler(TransportMessage(resp.text, node_id=nid))
                     except Exception as exc:
                         logger.debug(f"Handler error for node {nid}: {exc}")
                 await asyncio.sleep(self._interval)

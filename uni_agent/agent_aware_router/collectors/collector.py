@@ -22,7 +22,8 @@ import threading
 import time
 from collections import defaultdict
 from concurrent.futures import Future
-from typing import Any
+from concurrent.futures import TimeoutError as FutureTimeoutError
+from typing import Any, Generic, TypeVar, cast
 
 from ..config.collector import CollectorConfig
 from ..debug import get_debug_var, is_debug_enabled
@@ -32,10 +33,12 @@ from ..types import EmitKey, MetricKey
 from ..utils.knob import coerce_knob_value
 from .parse import InflightBlockUpdate, KVCacheUpdate, MetricsUpdate, Parser, StickyUpdate
 from .parse.basic.inflight import InflightParser
-from .transport.base import Transport
+from .transport.base import Transport, TransportMessage
 from .transport.callback import StatisticEvent
 
 logger = logging.getLogger(__name__)
+
+CollectorPayloadT = TypeVar("CollectorPayloadT")
 
 
 DEFAULT_COLLECTOR_KNOBS: dict[str, float | int] = {
@@ -85,7 +88,7 @@ def _ms(value: float) -> str:
     return f"{value * 1000:.1f}" if value == value else "-"
 
 
-class Collector:
+class Collector(Generic[CollectorPayloadT]):
     """Unified collector — composes Transport + Parser.
 
     Args:
@@ -93,13 +96,15 @@ class Collector:
         parser: Parser instance (vLLM KV, vLLM Metrics, Sticky, Inflight).
     """
 
-    def __init__(self, transport: Transport, parser: Parser) -> None:
+    def __init__(self, transport: Transport[CollectorPayloadT], parser: Parser[CollectorPayloadT]) -> None:
         self._transport = transport
         self._parser = parser
         self._data_store = DataStore()
         self._future: Future | None = None
+        self._stop_future: Future | None = None
         self._loop: asyncio.AbstractEventLoop = asyncio.new_event_loop()
         self._loop_thread: threading.Thread | None = None
+        self._sync_started = False
         # Periodic evidence-log state. The parser is stateless (returns
         # MetricsUpdate; merged here), so the log reads a current snapshot.
         self._metrics_poll_count = 0
@@ -125,14 +130,14 @@ class Collector:
             asyncio.set_event_loop(self._loop)
             self._loop.run_forever()
 
-        def handler(raw_data: bytes | str, node_id: str) -> None:
+        def handler(message: TransportMessage[CollectorPayloadT]) -> None:
             """Handler: parse and dispatch each update to the right store write path."""
             if isinstance(self._parser, InflightParser):
                 # The inflight parser is pure — the collector gathers its state
                 # from the store and drives it event by event.
-                result = self._inflight_event(raw_data, node_id)
+                result = self._inflight_event(message)
             else:
-                result = self._parser.parse(raw_data, node_id)
+                result = self._parser.parse(message)
             if result is None:
                 # None is normal for statistic parsers that skip an event
                 # (e.g. StickyParser on_release); demote to debug to avoid per-turn noise.
@@ -152,11 +157,25 @@ class Collector:
                     logger.debug(f"parser.parse returned an unknown update: {update}")
 
         if getattr(self._transport, "is_async", True):
+            if self._loop_thread is not None or self._loop.is_running():
+                raise RuntimeError("stop the collector before starting it again")
+            if not self._loop.is_closed() and any(not task.done() for task in asyncio.all_tasks(self._loop)):
+                raise RuntimeError("finish collector cleanup before starting it again")
+            if self._loop.is_closed():
+                self._loop = asyncio.new_event_loop()
+            ready = threading.Event()
+            self._loop.call_soon(ready.set)
             self._loop_thread = threading.Thread(
                 target=run_loop,
                 daemon=True,
             )
             self._loop_thread.start()
+            if not ready.wait(5):
+                try:
+                    self.stop()
+                except Exception as exc:
+                    raise TimeoutError("collector event loop startup timed out") from exc
+                raise TimeoutError("collector event loop startup timed out")
 
             self._future = asyncio.run_coroutine_threadsafe(
                 self._transport.subscribe(handler),
@@ -165,7 +184,11 @@ class Collector:
         else:
             # CallbackTransport: subscribe only registers callbacks — run it on a
             # throwaway loop; stop() just unregisters.
+            if self._sync_started:
+                raise RuntimeError("stop the collector before starting it again")
             tmp_loop = asyncio.new_event_loop()
+            # A failed subscribe may have registered only some callbacks.
+            self._sync_started = True
             try:
                 tmp_loop.run_until_complete(self._transport.subscribe(handler))
             finally:
@@ -271,7 +294,7 @@ class Collector:
 
     # ── Inflight flow: the collector owns all inflight store access ─────
 
-    def _inflight_event(self, raw_data: bytes | str | Any, node_id: str) -> list | None:
+    def _inflight_event(self, message: TransportMessage[CollectorPayloadT]) -> list | None:
         """Drive the pure ``InflightParser`` for one Balancer callback.
 
         The parser holds no store: this branch reads the per-event state its
@@ -283,16 +306,20 @@ class Collector:
         parser = self._parser
         if not isinstance(parser, InflightParser):
             return None
-        if not isinstance(raw_data, StatisticEvent) or raw_data.replica_id is None:
+        event = message.payload
+        if not isinstance(event, StatisticEvent) or event.replica_id is None:
             return None
-        if raw_data.event == "on_acquire":
-            return self._inflight_acquire(parser, raw_data, node_id)
-        if raw_data.event == "on_release":
-            return self._inflight_release(parser, raw_data, node_id)
+        # The payload check establishes the concrete type for this callback parser.
+        callback_message = cast(TransportMessage[StatisticEvent], message)
+        if event.event == "on_acquire":
+            return self._inflight_acquire(parser, callback_message)
+        if event.event == "on_release":
+            return self._inflight_release(parser, callback_message)
         return None
 
-    def _inflight_acquire(self, parser: InflightParser, event: StatisticEvent, node_id: str) -> list:
+    def _inflight_acquire(self, parser: InflightParser, message: TransportMessage[StatisticEvent]) -> list:
         """Gather the acquire state in the protocol's store order, then decide."""
+        event = message.payload
         rid = event.request_id
         turn = self._data_store.incr_per_request(rid, "turn") if rid else 0
         stale = self._data_store.get_marker(rid) if rid else None
@@ -300,14 +327,15 @@ class Collector:
         if rid:
             self._data_store.set_per_request(rid, _PROMPT_LEN_KEY, len(event.prompt_ids))
         block_size = self._data_store.get_block_size() or 0
-        return parser.parse(event, node_id, turn=turn, stale=stale, block_size=block_size, booked_len=booked_len)
+        return parser.parse(message, turn=turn, stale=stale, block_size=block_size, booked_len=booked_len)
 
-    def _inflight_release(self, parser: InflightParser, event: StatisticEvent, node_id: str) -> list:
+    def _inflight_release(self, parser: InflightParser, message: TransportMessage[StatisticEvent]) -> list:
         """Gather the release folds from the acquire-time rows, then decide."""
+        event = message.payload
         rid = event.request_id
         turn = self._data_store.get_per_request(rid, "turn", 0) if rid else 0
         booked_len = self._data_store.get_per_request(rid, _PROMPT_LEN_KEY, 0) if rid else 0
-        return parser.parse(event, node_id, turn=turn, booked_len=booked_len)
+        return parser.parse(message, turn=turn, booked_len=booked_len)
 
     def _apply_inflight_block_update(self, update: InflightBlockUpdate) -> None:
         """Apply an ``InflightBlockUpdate`` command to the held-block book — mechanically.
@@ -432,37 +460,55 @@ class Collector:
         # Snapshot current cumulative values for next window's delta.
         self._metrics_prev[node_id] = {k: float(snap.get(k, 0) or 0) for k in _CUMULATIVE_KEYS}
 
-    def stop(self) -> None:
+    def stop(self, timeout: float = 15.0) -> None:
         """
         Stop the collector — cancel tasks, drain cleanup, stop event-loop thread.
         """
-        # Transport closes protocol-level resources (sockets/clients);
-        # we own task cancellation and finally-block draining below.
-        self._transport.stop()
-
         if self._loop.is_running():
             # Cancel all tasks and wait for their finally blocks inside the loop
             # so that aclose() runs while the loop is still alive.
             async def _cancel_and_drain() -> None:
-                current = asyncio.current_task()
-                tasks = [t for t in asyncio.all_tasks() if not t.done() and t is not current]
-                for t in tasks:
-                    t.cancel()
-                await asyncio.gather(*tasks, return_exceptions=True)
+                try:
+                    self._transport.stop()
+                finally:
+                    current = asyncio.current_task()
+                    tasks = [t for t in asyncio.all_tasks() if not t.done() and t is not current]
+                    for t in tasks:
+                        t.cancel()
+                    await asyncio.gather(*tasks, return_exceptions=True)
 
-            drain = asyncio.run_coroutine_threadsafe(_cancel_and_drain(), self._loop)
+            if self._stop_future is None:
+                self._stop_future = asyncio.run_coroutine_threadsafe(_cancel_and_drain(), self._loop)
             try:
-                drain.result(timeout=15)
+                self._stop_future.result(timeout=timeout)
+            except FutureTimeoutError as exc:
+                if self._stop_future.done():
+                    self._stop_future = None
+                raise TimeoutError("collector cleanup timed out") from exc
             except Exception as exc:
-                logger.debug(f"Error draining tasks on stop: {exc}")
+                self._stop_future = None
+                raise RuntimeError("collector cleanup did not finish") from exc
 
             self._loop.call_soon_threadsafe(self._loop.stop)
+        else:
+            self._transport.stop()
+            if self._loop_thread is not None and not self._loop.is_closed():
+                self._loop.call_soon_threadsafe(self._loop.stop)
 
         if self._loop_thread is not None:
-            self._loop_thread.join(timeout=10)
+            self._loop_thread.join(timeout=min(10, timeout))
+            if self._loop_thread.is_alive():
+                raise TimeoutError("collector event loop did not stop")
             self._loop_thread = None
-
+        if self._loop.is_running():
+            raise TimeoutError("collector event loop is still running")
+        if not self._loop.is_closed():
+            if any(not task.done() for task in asyncio.all_tasks(self._loop)):
+                raise RuntimeError("collector event loop still has pending tasks")
+            self._loop.close()
         self._future = None
+        self._stop_future = None
+        self._sync_started = False
 
 
 # ── Factory function ───────────────────────────────────────────────────
@@ -485,7 +531,7 @@ def get_collector(
     server_addresses: dict[str, str] | None = None,
     kv_event_endpoints: dict[str, list[str]] | None = None,
     balancer_handler=None,
-) -> Collector:
+) -> Collector[bytes] | Collector[str] | Collector[StatisticEvent]:
     """Create a Collector by name — one place does both composition and config binding.
 
     Connection-type knobs fall back to ``DEFAULT_COLLECTOR_KNOBS``; per-collector
@@ -511,25 +557,25 @@ def get_collector(
         from .parse.vllm.metrics import VLLMMetricsParser
         from .transport.http import HTTPTransport
 
-        transport = HTTPTransport(
+        http_transport = HTTPTransport(
             endpoints=server_addresses or {},
             interval=collectors_config.http_interval,
             http_timeout=_debug_knob("http_timeout"),
         )
-        return Collector(transport, VLLMMetricsParser())
+        return Collector(http_transport, VLLMMetricsParser())
 
     if name == "vllm_zmq":
         from .parse.vllm.kv import VLLMKVParser
         from .transport.zmq import ZMQTransport
 
-        transport = ZMQTransport(
+        kv_transport = ZMQTransport(
             endpoints=kv_event_endpoints or {},
             base_retry_delay=_debug_knob("base_retry_delay"),
             max_retry_delay=_debug_knob("max_retry_delay"),
             max_retry_attempts=_debug_knob("max_retry_attempts"),
             retry_backoff_factor=_debug_knob("retry_backoff_factor"),
         )
-        return Collector(transport, VLLMKVParser())
+        return Collector(kv_transport, VLLMKVParser())
 
     if name == "sticky_stat":
         from .parse.basic.sticky import StickyParser
