@@ -43,13 +43,17 @@ async def test_opencode_cli_routes_tool_turns_through_gateway_and_finalizes_traj
 
         monkeypatch.setattr(typing, "NotRequired", NotRequired, raising=False)
 
-    try:
-        from tests.uni_agent.support import FakeTokenizer, SequencedBackend
-        from uni_agent.gateway.config import GatewayActorConfig
-        from uni_agent.gateway.gateway import _GatewayActor
-        from uni_agent.gateway.session.codec import MessageCodec
-    except ImportError as exc:
-        pytest.skip(f"Gateway CPU dependencies are unavailable: {exc}")
+    # Only absence of these optional dependencies can skip this probe. An import
+    # regression inside installed dependencies or project code must fail it.
+    import importlib.util
+
+    for dependency in ("torch", "ray", "fastapi", "verl"):
+        if importlib.util.find_spec(dependency) is None:
+            pytest.skip(f"Gateway CPU dependency is unavailable: {dependency}")
+    from tests.uni_agent.support import FakeTokenizer, SequencedBackend
+    from uni_agent.gateway.config import GatewayActorConfig
+    from uni_agent.gateway.gateway import _GatewayActor
+    from uni_agent.gateway.session.codec import MessageCodec
 
     def parse_synthetic_tool_call(self, text, tools, parser_name):
         if not text.startswith("<tool_call>\n") or not text.endswith("\n</tool_call>"):

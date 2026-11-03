@@ -1,7 +1,7 @@
 name: OpenCode 1.x integration
 on:
   push:
-    branches: [codex/opencode-1x-integration]
+    branches: [codex/opencode-1x-integration, codex/opencode-review-followup]
   workflow_dispatch:
   pull_request:
     branches: [feat/opencode-recipe]

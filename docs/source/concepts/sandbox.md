@@ -89,6 +89,8 @@ Remote providers should implement `is_alive()` as a non-throwing health probe.
 
 ### Local command termination
 
+LocalSandbox command execution requires POSIX process groups; other platforms
+return an explicit unsupported-platform error before spawning a command.
 The POSIX LocalSandbox starts each command in a new session with stdin connected
 to `/dev/null`. Timeout and cancellation terminate the command's process group.
 Cancellation while spawning uses the same cleanup after the process handle

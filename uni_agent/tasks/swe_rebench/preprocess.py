@@ -33,6 +33,11 @@ def build_swe_rebench(
     data_files: list[str] | None = None,
     instance_ids: list[str] | None = None,
 ):
+    if data_files is not None and not data_files:
+        raise ValueError("data_files must contain at least one parquet file")
+    if instance_ids is not None and (not instance_ids or any(not item.strip() for item in instance_ids)):
+        raise ValueError("instance_ids must contain non-empty instance ids")
+
     def process(example):
         instance_id = example["instance_id"]
 
@@ -67,7 +72,7 @@ def build_swe_rebench(
         }
 
     data_source = "nebius/SWE-rebench"
-    if data_files:
+    if data_files is not None:
         print(f"Loading the {data_source} filtered split from {data_files}...", flush=True)
         dataset = load_dataset("parquet", data_files=data_files, split="train")
     else:
@@ -75,9 +80,15 @@ def build_swe_rebench(
         dataset = load_dataset(data_source, split="filtered")
     print(f"Loaded {len(dataset)} raw instances", flush=True)
 
-    if instance_ids:
+    if instance_ids is not None:
         wanted = list(dict.fromkeys(instance_ids))
-        positions = {instance_id: index for index, instance_id in enumerate(dataset["instance_id"])}
+        wanted_set = set(wanted)
+        positions = {}
+        for index, instance_id in enumerate(dataset["instance_id"]):
+            if instance_id in wanted_set:
+                if instance_id in positions:
+                    raise ValueError(f"duplicate instance id in the dataset: {instance_id}")
+                positions[instance_id] = index
         missing = [instance_id for instance_id in wanted if instance_id not in positions]
         if missing:
             raise ValueError(f"instance ids not found in the dataset: {missing}")
@@ -119,7 +130,9 @@ if __name__ == "__main__":
     os.makedirs(save_dir, exist_ok=True)
 
     instance_ids = (
-        [item.strip() for item in args.instance_ids.split(",") if item.strip()] if args.instance_ids else None
+        [item.strip() for item in args.instance_ids.split(",") if item.strip()]
+        if args.instance_ids is not None
+        else None
     )
     dataset = build_swe_rebench(
         max_instances=args.max_instances,
