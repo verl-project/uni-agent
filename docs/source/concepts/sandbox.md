@@ -87,6 +87,55 @@ The shared lifecycle uses:
 
 Remote providers should implement `is_alive()` as a non-throwing health probe.
 
+### Local command termination
+
+The POSIX LocalSandbox starts each command in a new session with stdin connected
+to `/dev/null`. Timeout and cancellation terminate the command's process group.
+Cancellation while spawning uses the same cleanup after the process handle
+becomes available. Abnormal exec callers wait for signals without waiting indefinitely for
+inherited stdout or stderr pipes. The owning Sandbox retains a separate
+transport drain for `stop()`.
+
+Some harnesses, including OpenCode 1.19.3, create additional sessions for their
+tools. Before terminating a still-active command, LocalSandbox takes a POSIX
+`ps` snapshot and follows PPID ancestry to find those descendant groups. It
+signals the original group and extra groups that still have an observed member.
+Snapshot or signal failures produce warnings; a timeout result or propagated
+cancellation alone is not proof that all descendants exited.
+
+This is best-effort cleanup of an active process tree, not containment. A child
+that was already reparented, a process created after the snapshot, a permission
+failure, or PID/PGID reuse can defeat this mechanism. A normal shell background
+job can be reparented after its shell exits; this limitation does not require
+hostile daemonization. LocalSandbox does not provide container isolation.
+
+The snapshot requires POSIX `ps`, adds a subprocess on abnormal termination, and
+uses a one-second timeout. Snapshot and signalling run in the event loop's default
+executor, so they do not block unrelated event-loop work. The caller waits for
+cleanup even if cancelled again; cancellation received during timeout cleanup is
+propagated after cleanup. Executor queueing adds to the snapshot timeout: this is
+not a one-second end-to-end cancellation bound. Spawn-time cancellation still
+returns before the handle exists; its later cleanup is retained and submitted
+immediately when spawning completes. Owners must cancel/join their exec callers, then await `sandbox.stop()` (or exit
+its async context) before closing the event loop. `stop()` waits for this
+instance's cancelled spawns and transport drains, including through repeated
+cancellation. It does not cancel unrelated active exec calls or wait for other
+Sandbox instances. It is safe to call again after teardown.
+
+Draining the default executor alone, including through `asyncio.run`, does not
+wait for all subprocess pipe and child-exit callbacks. Once signals complete,
+the transport drain reads remaining output and waits for EOF for up to one
+second. If an escaped descendant holds a pipe, it logs a warning, closes local
+transports through asyncio.Process's private transport (there is no public
+Process.close API), and waits up to one further second for the leader's exit.
+This releases local resources without claiming to terminate escaped processes.
+The drain cannot bound unresolved spawning or a permanently saturated executor;
+these must make progress. Abrupt process or custom event-loop shutdown cannot
+guarantee cleanup. Normal completion keeps its
+existing behavior, including redirected background jobs continuing to run. No
+Python dependency or public configuration changes are required. This POSIX
+mechanism does not implement Windows Job Object cleanup.
+
 ## Data Plane
 
 `SandboxBackend` exposes:
