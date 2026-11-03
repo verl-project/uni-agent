@@ -990,3 +990,30 @@ async def test_tree_codec_merges_complete_images_and_stores_only_node_deltas():
         -0.1,
         -0.1,
     ]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_tree_session_passes_through_message_history():
+    """TreeGatewaySession linearizes its own way, so the copy is wired separately."""
+    codec = FakeContinuousCodec(trim_boundary=True)
+    session = TreeGatewaySession(SessionHandle("tree-pass-through"), codec, pass_through_message_history=True)
+    first = [{"role": "user", "content": "task"}]
+    await generate(session, Backend("AB"), first)
+
+    [trajectory] = await session.finalize()
+    assert [message["content"] for message in trajectory.extra_fields["message_history"]] == ["task", "AB"]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_tree_session_does_not_pass_through_by_default():
+    """The tree path stays zero-copy unless asked."""
+    codec = FakeContinuousCodec(trim_boundary=True)
+    session = TreeGatewaySession(SessionHandle("tree-no-pass-through"), codec)
+    await generate(session, Backend("AB"), [{"role": "user", "content": "task"}])
+
+    [trajectory] = await session.finalize()
+    assert "message_history" not in trajectory.extra_fields
