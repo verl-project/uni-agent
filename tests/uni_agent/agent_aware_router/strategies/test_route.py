@@ -24,6 +24,8 @@ from __future__ import annotations
 import pytest
 
 from uni_agent.agent_aware_router.config.strategy import KVCAwareStrategyConfig
+from uni_agent.agent_aware_router.store.cache_registry import CacheRegistryState
+from uni_agent.agent_aware_router.store.group_cache import PrefixEstimate
 from uni_agent.agent_aware_router.strategies import ReplicaInfo, StrategyRegistry, route
 from uni_agent.agent_aware_router.strategies.kvc_aware import KVCacheAwareStrategy
 
@@ -116,8 +118,13 @@ class FakeRouteDataProvider:
     def get_metric(self, replica_id, key):
         return 0.0
 
-    def get_layer_prefix_hit_rate(self, replica_id, prompt_ids, layer):
-        return 0.0
+    cache_registry_state = CacheRegistryState()
+
+    def hash_schema(self):
+        return 0, None
+
+    def estimate_prefixes(self, node_ids, hashes, query_tokens):
+        return {node: PrefixEstimate("unavailable", 0, query_tokens, 0, None) for node in node_ids}
 
     def kv_cache_load(self, replica_id):
         return 0.0

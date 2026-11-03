@@ -23,6 +23,8 @@ from __future__ import annotations
 
 import pytest
 
+from uni_agent.agent_aware_router.store.cache_registry import CacheGroupSpec, CacheRegistry, CacheRegistryState
+from uni_agent.agent_aware_router.store.group_cache import PrefixEstimate
 from uni_agent.agent_aware_router.strategies import route
 from uni_agent.agent_aware_router.strategies.base import ReplicaInfo
 from uni_agent.agent_aware_router.strategies.kvc_aware import (
@@ -87,6 +89,17 @@ class FakeRouteDataProvider:
         self._data = data
         self._sticky = sticky or {}
         self._per_request: dict[str, dict] = {}
+        self.cache_registry_state = CacheRegistryState(
+            status="ok",
+            registry=CacheRegistry(
+                groups=(CacheGroupSpec(0, "full_attention", 16, "full"),),
+                local_hash_unit=16,
+                vllm_version="test",
+                model=None,
+                mamba_cache_mode=None,
+                tensor_parallel_size=1,
+            ),
+        )
 
     def get_sticky_binding(self, request_id: str) -> str | None:
         return self._sticky.get(request_id)
@@ -115,26 +128,32 @@ class FakeRouteDataProvider:
             MetricKey.INFLIGHT_COUNT: entry.get("inflight_count", 0),
         }
 
-    def get_layer_prefix_hit_rate(self, replica_id: str, hash_strs: list[str], layer: str = Layer.GPU) -> float:
-        entry = self._data.get(replica_id, {})
-        if layer == Layer.GPU:
-            return entry.get("gpu_hit_pct", 0) / 100.0
-        return entry.get("tiers", {}).get(layer, 0.0)
+    def estimate_prefixes(self, nodes, hashes, prompt_len):
+        return {
+            node: PrefixEstimate(
+                status="ready",
+                query_tokens=prompt_len,
+                lookup_limit_tokens=prompt_len,
+                local_hash_unit=16,
+                estimated_hit_tokens=int(prompt_len * self._data.get(node, {}).get("gpu_hit_pct", 0) / 100),
+            )
+            for node in nodes
+        }
 
-    def kv_cache_load(self, replica_id: str) -> float | None:
-        # Unit tests key the load signal on kv_cache_usage_perc (no kv-events /
-        # retained blocks simulated); mirror it so the load formula sees it.
-        return self._data.get(replica_id, {}).get("kv_cache_usage_perc", 1.0)
+    def hash_schema(self):
+        return (0, 16)
+
+    def inflight_reserved_blocks(self, node):
+        return self.inflight_block_count(node)
+
+    def request_block_need(self, prompt_tokens, saved_tokens=0):
+        return max(0, prompt_tokens - saved_tokens) / 16
 
     def inflight_block_count(self, replica_id: str) -> int:
         return int(self._data.get(replica_id, {}).get("inflight_blocks", 0))
 
     def get_metric_node_ids(self) -> list[str]:
         return list(self._data.keys())
-
-    def get_block_size(self) -> int | None:
-        # Block size is learned from KV events; tests default to vLLM's 16.
-        return 16
 
     def get_per_request(self, request_id: str, key: str, default=None):
         return self._per_request.get(request_id, {}).get(key, default)
@@ -167,50 +186,21 @@ class RaisingStrategy:
         raise KeyError("boom")
 
 
-# --------------------------------------------------------------------------- #
-# _cache_score: three-layer weighted hit (gpu + cpu + ssd)
-# --------------------------------------------------------------------------- #
 @pytest.mark.cpu
 @pytest.mark.level0
-class TestKVCAwareCacheScore:
-    def test_custom_weights_respected(self):
-        """
-        Feature: _cache_score honors custom layer_weights
-        Description: weights {gpu:0.5,cpu:0.3,ssd:0.2}; all hits = 1.0 (gpu_hit_pct=100)
-        Expectation: 0.5 + 0.3 + 0.2 = 1.0
-        """
-        strat = _strat(layer_weights={"gpu": 0.5, "cpu": 0.3, "ssd": 0.2})
-        provider = FakeRouteDataProvider({"rep": {"gpu_hit_pct": 100, "tiers": {"cpu": 1.0, "ssd": 1.0}}})
-        s_cache, _ = strat._cache_score(provider, ReplicaInfo("rep"), PROMPT_IDS)
-        assert s_cache == pytest.approx(1.0)
-
-
-# --------------------------------------------------------------------------- #
-# Tier weights in the cache term
-# --------------------------------------------------------------------------- #
-@pytest.mark.cpu
-@pytest.mark.level1
-class TestKVCAwareTierWeights:
-    def test_cpu_weight_higher_than_ssd(self):
-        """
-        Feature: cpu tier weight (0.2) > ssd tier weight (0.1) in the cache score
-        Description: two replicas with gpu_hit=0; one has cpu hit, other ssd hit
-        Expectation: cpu-hit replica scores higher
-          cpu_hit: s_cache = 0.2·0.6 = 0.12
-          ssd_hit: s_cache = 0.1·0.8 = 0.08
-        """
-        strat = _strat()
-        provider = FakeRouteDataProvider(
-            {
-                "cpu_hit": {"gpu_hit_pct": 0, "tiers": {"cpu": 0.6, "ssd": 0.0}},
-                "ssd_hit": {"gpu_hit_pct": 0, "tiers": {"cpu": 0.0, "ssd": 0.8}},
-            }
+def test_cache_score_uses_saved_prefill_and_gpu_weight():
+    strat = _strat(layer_weights={"gpu": 0.5, "cpu": 0.3, "ssd": 0.2})
+    estimates = {
+        "rep": PrefixEstimate(
+            status="ready",
+            query_tokens=20,
+            lookup_limit_tokens=16,
+            local_hash_unit=4,
+            estimated_hit_tokens=16,
+            replayed_tokens=8,
         )
-        s_cache_cpu, _ = strat._cache_score(provider, ReplicaInfo("cpu_hit"), PROMPT_IDS)
-        s_cache_ssd, _ = strat._cache_score(provider, ReplicaInfo("ssd_hit"), PROMPT_IDS)
-        assert s_cache_cpu == pytest.approx(0.12)
-        assert s_cache_ssd == pytest.approx(0.08)
-        assert s_cache_cpu > s_cache_ssd
+    }
+    assert strat._cache_score(ReplicaInfo("rep"), estimates) == pytest.approx((0.2, 0.4))
 
 
 # --------------------------------------------------------------------------- #

@@ -22,7 +22,6 @@ vLLM or ZMQ dependency.
 from __future__ import annotations
 
 import asyncio
-import struct
 
 import msgpack
 import pytest
@@ -31,7 +30,6 @@ from uni_agent.agent_aware_router.collectors.transport.base import Transport
 from uni_agent.agent_aware_router.store.kv_cache_store import KVCacheStore
 from uni_agent.agent_aware_router.store.per_replica_store import PerReplicaStore
 from uni_agent.agent_aware_router.store.per_request_store import PerRequestStore
-from uni_agent.agent_aware_router.types import Layer
 
 # ── Shared configuration constants ───────────────────────────────────────
 
@@ -108,13 +106,6 @@ class FakeZMQTransport(Transport):
 # ── KV event payload helpers ────────────────────────────────────────────
 
 
-def _convert_token_ids(raw_ids: list[int], block_size: int) -> bytes:
-    """Encode token IDs as uint32 big-endian bytes (one block)."""
-    if len(raw_ids) != block_size:
-        raise ValueError(f"Expected {block_size} tokens, got {len(raw_ids)}")
-    return struct.pack(f">{block_size}I", *raw_ids)
-
-
 def make_stored_event(
     block_hash: str,
     raw_ids: list[int],
@@ -137,7 +128,19 @@ def kv_payload(*events: list | dict) -> bytes:
 def mapping_event(event: list) -> dict:
     """Convert a positional vLLM event to named fields for mapping tests."""
     field_names = {
-        "BlockStored": ("block_hashes", "parent_block_hash", "token_ids", "block_size", "lora_id", "medium"),
+        "BlockStored": (
+            "block_hashes",
+            "parent_block_hash",
+            "token_ids",
+            "block_size",
+            "lora_id",
+            "medium",
+            "lora_name",
+            "extra_keys",
+            "group_idx",
+            "kv_cache_spec_kind",
+            "kv_cache_spec_sliding_window",
+        ),
         "BlockRemoved": ("block_hashes", "medium", "group_idx"),
         "AllBlocksCleared": (),
     }
@@ -155,12 +158,9 @@ def _reset_store_singletons():
     ``PerRequestStore`` — all singletons — so state would otherwise
     accumulate across test cases.
     """
+    KVCacheStore._instance = None
     yield
-    # KVCacheStore
-    kv = KVCacheStore.singleton()
-    kv.block_size = None
-    kv.replicas_by_block.clear()
-    kv._replica_layer_counts = {Layer.GPU: {}, Layer.CPU: {}, Layer.SSD: {}}
+    KVCacheStore._instance = None
     # PerReplicaStore
     pr = PerReplicaStore.singleton()
     pr._data.clear()

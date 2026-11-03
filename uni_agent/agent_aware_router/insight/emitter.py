@@ -51,7 +51,7 @@ class WriteKind:
     POLL = "poll"  # vLLM /metrics absolute snapshot (refresh_metrics)
     ACQUIRE = "acquire"  # request dispatched (incr_metrics on acquire)
     RELEASE = "release"  # request completed (incr_metrics on release)
-    KV_REMOVED = "kv_removed"  # KV blocks removed (remove_kv_blocks)
+    KV_REMOVED = "kv_removed"  # Reported KV block removals
 
 
 # B-class gauge primitives read from a poll event's ``new_values`` (the 3 vLLM

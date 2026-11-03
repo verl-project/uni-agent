@@ -21,6 +21,9 @@ license-files = ["LICENSE"]
 readme = {file = "README.md", content-type = "text/markdown"}
 requires-python = ">=3.10,<3.13"
 
+[project.entry-points."vllm.general_plugins"]
+uni_agent_native_hash = "uni_agent.vllm_plugins.native_hash:register"
+
 [project.urls]
 Documentation = "https://uni-agent.readthedocs.io/"
 Repository = "https://github.com/verl-project/uni-agent"

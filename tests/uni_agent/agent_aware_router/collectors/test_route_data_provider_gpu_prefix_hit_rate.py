@@ -12,20 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for DataStore.get_layer_prefix_hit_rate via injected KV events.
-
-Test flow:
-1. Create Collector(FakeZMQTransport, VLLMKVParser).
-2. Call start() to begin event processing.
-3. Inject ChainBlocks of a "long" prompt through the fake transport.
-4. Compute the prefix-hash chains of the long and short prompts locally.
-5. Call DataStore().get_layer_prefix_hit_rate(node_id, hash_chain, Layer.GPU)
-   and verify the results.
-
-No real vLLM service is required.
-"""
-
-from __future__ import annotations
+"""Canonical token estimates after unsequenced Stored, Removed, and Clear."""
 
 import time
 
@@ -34,111 +21,69 @@ from conftest import BLOCK_SIZE, NODE_ID, FakeZMQTransport, kv_payload, make_sto
 
 from uni_agent.agent_aware_router.collectors.collector import Collector
 from uni_agent.agent_aware_router.collectors.parse.vllm.kv import VLLMKVParser
+from uni_agent.agent_aware_router.collectors.transport.base import TransportMessage
 from uni_agent.agent_aware_router.store.data_store import DataStore
-from uni_agent.agent_aware_router.types import Layer
 from uni_agent.agent_aware_router.utils.hash import get_prefix_hashes_incremental
 
 pytestmark = [pytest.mark.level0, pytest.mark.cpu]
-
-WAIT = 0.3
-
-# Two full blocks of tokens: a "long" prompt and its strict prefix "short".
 LONG_IDS = list(range(2 * BLOCK_SIZE))
-SHORT_IDS = LONG_IDS[:BLOCK_SIZE]
 
 
-def _make_collector(payloads):
-    return Collector(FakeZMQTransport(payloads, interval=0.05), VLLMKVParser())
+def estimate(store, tokens):
+    hashes = [str(h) for h in get_prefix_hashes_incremental(tokens, BLOCK_SIZE, 0, 0)[0]]
+    return store.estimate_prefixes([NODE_ID], hashes, len(tokens))[NODE_ID]
 
 
-def _inject_long_prompt(store: DataStore):
-    """Inject chained BlockStored events for the long prompt into the KV store.
-
-    The two blocks share a chain: block 1's parent is block 0's remote hash,
-    so the parser computes local hashes identical to
-    ``get_prefix_hashes_incremental`` on the same token IDs.
-    """
-    collector = _make_collector(
-        [
-            kv_payload(make_stored_event("rh0", LONG_IDS[:BLOCK_SIZE], parent=None)),
-            kv_payload(make_stored_event("rh1", LONG_IDS[BLOCK_SIZE:], parent="rh0")),
-        ]
+def test_prefix_estimate_keeps_final_token_computation_boundary():
+    collector = Collector(
+        FakeZMQTransport(
+            [
+                kv_payload(make_stored_event("rh0", LONG_IDS[:BLOCK_SIZE])),
+                kv_payload(make_stored_event("rh1", LONG_IDS[BLOCK_SIZE:], parent="rh0")),
+            ],
+            interval=0.05,
+        ),
+        VLLMKVParser(),
     )
     collector.start()
-    time.sleep(WAIT)
-    collector.stop()
-
-
-def _hash_chain(token_ids: list[int]) -> list[str]:
-    """Compute the full-block prefix hash chain for token IDs."""
-    hashes, _ = get_prefix_hashes_incremental(token_ids, BLOCK_SIZE, 0, 0)
-    return [str(h) for h in hashes]
-
-
-class TestGpuPrefixHitRate:
-    """Unit tests: DataStore.get_layer_prefix_hit_rate with injected KV events."""
-
-    def test_prefix_hit_rate_with_partial_match(self):
-        """
-        Feature: get_layer_prefix_hit_rate returns 100% hit rate for a shorter prompt
-        Description:
-            1. Inject KV cache blocks for a long prompt A.
-            2. Call get_layer_prefix_hit_rate with the hash chain of prompt B
-               that is a strict prefix of A.
-        Expectation:
-            Since B's blocks are a subset of A's cached blocks, all of B's prefix
-            blocks are cached -> hit_rate = 100.
-        """
+    try:
+        time.sleep(0.3)
         store = DataStore()
-        _inject_long_prompt(store)
-
-        short_chain = _hash_chain(SHORT_IDS)
-        assert len(short_chain) < len(_hash_chain(LONG_IDS)), (
-            f"Short prompt should have fewer blocks, got short={len(short_chain)}"
-        )
-        hit = store.get_layer_prefix_hit_rate(NODE_ID, short_chain, Layer.GPU)
-
-        assert hit == 1.0, f"Expected hit_rate=1.0 for prefix match, got {hit}"
-
-    def test_prefix_hit_rate_with_full_match(self):
-        """
-        Feature: get_layer_prefix_hit_rate returns 100% when the whole chain is cached
-        Description:
-            1. Inject KV cache blocks for a long prompt.
-            2. Call get_layer_prefix_hit_rate with the prompt's full hash chain.
-        Expectation:
-            All cached blocks are hit -> hit_rate = 1.0.
-        """
-        store = DataStore()
-        _inject_long_prompt(store)
-
-        long_chain = _hash_chain(LONG_IDS)
-        assert len(long_chain) == 2, f"Expected 2 full blocks, got {len(long_chain)}"
-        hit = store.get_layer_prefix_hit_rate(NODE_ID, long_chain, Layer.GPU)
-
-        assert 0.0 <= hit <= 1.0, f"Hit rate should be in [0.0, 1.0], got {hit}"
-        assert hit == 1.0, f"Expected hit_rate=1.0 for fully cached chain, got {hit}"
+        for query_tokens, hit_tokens in [
+            (BLOCK_SIZE, 0),
+            (2 * BLOCK_SIZE, BLOCK_SIZE),
+            (2 * BLOCK_SIZE + 1, 2 * BLOCK_SIZE),
+        ]:
+            result = estimate(store, list(range(query_tokens)))
+            assert result.estimated_hit_tokens == hit_tokens
+            assert result.hit_rate == pytest.approx(hit_tokens / query_tokens)
+    finally:
+        collector.stop()
 
 
-@pytest.mark.parametrize("removed_hash, expected_hit", [(102, 0.5), (101, 0.0)])
-def test_wire_events_change_prefix_hit_rate(removed_hash, expected_hit):
-    """Removing the first or last full block reduces the contiguous prefix."""
+@pytest.mark.parametrize("removed_hash,expected_hit", [(102, BLOCK_SIZE), (101, 0)])
+@pytest.mark.parametrize("metadata_available", [False, True], ids=["old-untagged", "native-layout"])
+def test_wire_events_change_prefix_hit_rate(removed_hash, expected_hit, metadata_available, layout):
     store = DataStore()
-    collector = _make_collector([])
-    chain = _hash_chain(LONG_IDS)
+    if metadata_available:
+        store.configure_cache_registry(layout((("full_attention", BLOCK_SIZE),), unit=None))
+    collector = Collector(FakeZMQTransport([]), VLLMKVParser())
 
     def apply(event):
-        update = collector._parser.parse(kv_payload(mapping_event(event)), NODE_ID)
-        assert update is not None
+        if metadata_available and event[0] == "BlockStored":
+            event = [*event, None, None, 0, "full_attention"]
+        elif metadata_available and event[0] == "BlockRemoved":
+            event = [*event, 0]
+        update = collector._parser.parse(TransportMessage(kv_payload(mapping_event(event))), NODE_ID)
         collector._write_kv_update(update)
 
     try:
-        apply(["BlockStored", [101], None, SHORT_IDS, BLOCK_SIZE, None, "GPU"])
+        apply(["BlockStored", [101], None, LONG_IDS[:BLOCK_SIZE], BLOCK_SIZE, None, "GPU"])
         apply(["BlockStored", [102], 101, LONG_IDS[BLOCK_SIZE:], BLOCK_SIZE, None, "GPU"])
-        assert store.get_layer_prefix_hit_rate(NODE_ID, chain, Layer.GPU) == 1.0
-        apply(["BlockRemoved", [removed_hash], "GPU", 0])
-        assert store.get_layer_prefix_hit_rate(NODE_ID, chain, Layer.GPU) == expected_hit
+        assert estimate(store, LONG_IDS + [999]).estimated_hit_tokens == len(LONG_IDS)
+        apply(["BlockRemoved", [removed_hash], "GPU"])
+        assert estimate(store, LONG_IDS + [999]).estimated_hit_tokens == expected_hit
         apply(["AllBlocksCleared"])
-        assert store.get_layer_prefix_hit_rate(NODE_ID, chain, Layer.GPU) == 0.0
+        assert estimate(store, LONG_IDS + [999]).estimated_hit_tokens == 0
     finally:
         collector.stop()
