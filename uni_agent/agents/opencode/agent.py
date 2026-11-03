@@ -6,6 +6,7 @@ tools and loop; the Gateway owns protocol translation and trajectory capture.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import uuid
@@ -89,6 +90,8 @@ def _prompt(messages: list[dict[str, Any]]) -> str:
 def _runtime_config(cfg: OpenCodeConfig) -> dict[str, Any]:
     model = cfg.model
     endpoint = urlsplit(model.base_url or "")
+    # urlsplit defers validation of malformed/out-of-range ports until access.
+    _ = endpoint.port
     if (
         endpoint.scheme not in {"http", "https"}
         or not endpoint.hostname
@@ -301,8 +304,17 @@ class OpenCodeAgent(Agent):
         finally:
             # This UUID directory belongs only to this invocation. CancelledError propagates
             # after cleanup; process termination remains the Sandbox provider's contract.
+            cleanup_task = asyncio.create_task(sandbox.exec(["rm", "-rf", "--", root], timeout=30))
+            cancelled = False
             try:
-                cleanup = await sandbox.exec(["rm", "-rf", "--", root], timeout=30)
+                while not cleanup_task.done():
+                    try:
+                        await asyncio.shield(cleanup_task)
+                    except asyncio.CancelledError:
+                        if cleanup_task.cancelled():
+                            raise
+                        cancelled = True
+                cleanup = cleanup_task.result()
                 if cleanup.exit_code != 0:
                     info["cleanup_error"] = "nonzero_exit"
             except Exception as exc:
@@ -310,6 +322,8 @@ class OpenCodeAgent(Agent):
             if info.get("cleanup_error"):
                 finished = False
                 info["error_kind"] = info["error_kind"] or "cleanup_failure"
+            if cancelled:
+                raise asyncio.CancelledError
         transcript = list(messages)
         if output.get("text"):
             transcript.append({"role": "assistant", "content": output["text"]})

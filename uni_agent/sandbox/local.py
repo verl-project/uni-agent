@@ -24,7 +24,8 @@ _cleanup_tasks: set[asyncio.Future[None]] = set()
 class LocalSandbox(Sandbox):
     """Runs commands on the host via ``asyncio`` subprocesses (no container).
 
-    File operations use the host filesystem directly.
+    Command execution requires POSIX process groups. File operations use the
+    host filesystem directly.
     """
 
     def __init__(self) -> None:
@@ -102,6 +103,8 @@ class LocalSandbox(Sandbox):
         workdir: str | None = None,
         env: dict[str, str] | None = None,
     ) -> ExecResult:
+        if os.name != "posix":
+            raise NotImplementedError("LocalSandbox command execution requires POSIX process groups")
         # A new session gives the command its own process group, so a timeout or
         # cancellation also kills its background children.
         spawn = asyncio.ensure_future(
