@@ -21,12 +21,14 @@ from types import SimpleNamespace
 
 import msgpack
 import pytest
-from conftest import mapping_event
+from conftest import FakeZMQTransport, mapping_event
 
+from uni_agent.agent_aware_router.collectors.collector import Collector
 from uni_agent.agent_aware_router.collectors.parse.vllm.kv import VLLMKVParser
 from uni_agent.agent_aware_router.collectors.parse.vllm.kv_event import KVCacheEvent
 from uni_agent.agent_aware_router.store.data_store import DataStore
 from uni_agent.agent_aware_router.types import Layer
+from uni_agent.agent_aware_router.utils.hash import get_prefix_hashes_incremental
 
 
 def _stored_event(block_hash, parent, token_ids, block_size, medium):
@@ -171,6 +173,76 @@ def test_clear_event_sets_clear_all():
 
     assert update is not None
     assert update.clear_all is True
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize("wire_format", ["array", "mapping"])
+@pytest.mark.parametrize("replay", [False, True])
+@pytest.mark.parametrize(
+    "event_order,expected_remote",
+    [
+        (["a", "clear"], set()),
+        (["clear", "b"], {"b"}),
+        (["a", "clear", "b"], {"b"}),
+        (["a", "clear", "b", "clear"], set()),
+    ],
+    ids=["stored-clear", "clear-stored", "stored-clear-stored", "last-clear-wins"],
+)
+def test_clear_keeps_only_later_stores_and_they_remain_removable(wire_format, replay, event_order, expected_remote):
+    parser = VLLMKVParser()
+    collector = Collector(FakeZMQTransport([]), parser)
+    store = DataStore()
+
+    def apply(events):
+        if wire_format == "mapping":
+            events = [mapping_event(event) for event in events]
+        payload = [[index, [event]] for index, event in enumerate(events)] if replay else [0, events]
+        update = parser.parse(msgpack.packb(payload), "replica-a")
+        assert update is not None
+        collector._write_kv_update(update)
+        return update
+
+    try:
+        apply([_stored_event("old", None, [9, 10], 2, "GPU")])
+        events = {
+            "a": _stored_event("a", None, [1, 2], 2, "GPU"),
+            "b": _stored_event("b", None, [3, 4], 2, "GPU"),
+            "clear": ["AllBlocksCleared"],
+        }
+        update = apply([events[name] for name in event_order])
+
+        assert update.clear_all
+        assert update.block_size is None  # Already learned from the earlier batch.
+        assert set(parser.remote_to_local_block_hash.get("replica-a", {})) == expected_remote
+        assert store.per_replica_block_counts().get("replica-a", 0) == len(expected_remote)
+
+        # A late removal for cleared data is harmless; post-clear data remains removable.
+        apply([["BlockRemoved", ["old", "a", "b"], "GPU"]])
+        assert store.per_replica_block_counts().get("replica-a", 0) == 0
+        assert not parser.remote_to_local_block_hash.get("replica-a")
+    finally:
+        collector.stop()
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_clear_discards_earlier_removals_and_preserves_learned_block_size():
+    parser = VLLMKVParser()
+    events = [
+        _stored_event("a", None, [1, 2], 2, "GPU"),
+        ["BlockRemoved", ["a"], "GPU"],
+        ["AllBlocksCleared"],
+        _stored_event("b", None, [3, 4], 2, "GPU"),
+    ]
+
+    update = parser.parse(msgpack.packb([0, events]), "replica-a")
+
+    assert update is not None and update.clear_all
+    assert not update.remove_blocks
+    assert update.block_size == 2
+    assert len(update.add_blocks[Layer.GPU]) == 1
+    assert set(parser.remote_to_local_block_hash["replica-a"]) == {"b"}
 
 
 @pytest.mark.cpu
@@ -404,3 +476,109 @@ def test_hash_map_is_per_replica_and_survives_sibling_eviction():
     assert len(update.remove_blocks[Layer.GPU]) == 3, "sibling eviction must not eat this replica's mapping"
     assert store.per_replica_block_counts()["nodeB"] == 0, "nodeB must not retain blocks its engine freed"
     assert parser.stats["removed_unmapped"] == 0
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize("wire_format", ["array", "mapping"])
+def test_missing_parent_skips_the_entire_chain_and_keeps_valid_siblings(wire_format):
+    """A retained suffix must not be reinterpreted as a prefix beginning at seed zero."""
+    parser = VLLMKVParser()
+    events = [
+        ["BlockStored", ["orphan0", "orphan1"], "missing", [1, 2, 3, 4], 2, None, "GPU"],
+        _stored_event("descendant", "orphan1", [5, 6], 2, "GPU"),
+        _stored_event("root", None, [7, 8], 2, "GPU"),
+    ]
+    if wire_format == "mapping":
+        events = [mapping_event(event) for event in events]
+
+    update = parser.parse(msgpack.packb([0, events]), "replica-a")
+
+    expected = VLLMKVParser().parse(msgpack.packb([0, [_stored_event("root", None, [7, 8], 2, "GPU")]]), "replica-a")
+    assert update is not None and update.add_blocks == expected.add_blocks
+    assert parser.stats["parent_unresolved"] == 2
+    assert parser.remote_to_local_block_hash["replica-a"] == {"root": update.add_blocks[Layer.GPU][0]}
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize("reset_kind", ["transport-reset", "clear-event"])
+def test_reset_rebuilds_one_replica_without_reusing_its_old_parent(reset_kind):
+    parser = VLLMKVParser()
+
+    def parse(replica_id, *events):
+        return parser.parse(msgpack.packb([0, list(events)]), replica_id)
+
+    original_events = [
+        _stored_event("parent", None, [1, 2], 2, "GPU"),
+        _stored_event("child", "parent", [3, 4], 2, "GPU"),
+    ]
+    parse("replica-a", *original_events)
+    parse("replica-b", *original_events)
+    sibling_map = parser.remote_to_local_block_hash["replica-b"].copy()
+
+    if reset_kind == "transport-reset":
+        parser.reset_replica("replica-a")
+        parser.reset_replica("replica-a")
+    else:
+        clear_update = parse("replica-a", ["AllBlocksCleared"])
+        assert clear_update is not None and clear_update.clear_all
+    assert "replica-a" not in parser.remote_to_local_block_hash
+    assert parser.remote_to_local_block_hash["replica-b"] == sibling_map
+
+    orphan_update = parse("replica-a", _stored_event("child", "parent", [3, 4], 2, "GPU"))
+    assert orphan_update is not None and not orphan_update.add_blocks
+    assert parser.stats["parent_unresolved"] == 1
+    assert not parser.remote_to_local_block_hash["replica-a"]
+
+    rebuilt_update = parse(
+        "replica-a",
+        _stored_event("parent", None, [5, 6], 2, "GPU"),
+        _stored_event("child", "parent", [7, 8], 2, "GPU"),
+    )
+    assert rebuilt_update is not None and len(rebuilt_update.add_blocks[Layer.GPU]) == 2
+    assert parser.remote_to_local_block_hash["replica-a"] != sibling_map
+    assert parser.remote_to_local_block_hash["replica-b"] == sibling_map
+    removal = parse("replica-b", ["BlockRemoved", ["parent", "child"], "GPU"])
+    assert removal is not None and removal.remove_blocks[Layer.GPU] == list(sibling_map.values())
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize("recovery", ["related-events", "dispatch"])
+def test_truncated_replay_ready_keeps_missing_prefix_unknown_until_rebuilt(recovery):
+    parser = VLLMKVParser()
+    collector = Collector(FakeZMQTransport([]), parser)
+    store = DataStore()
+    hashes, _ = get_prefix_hashes_incremental([1, 2, 3, 4], 2, 0, 0)
+    hashes = [str(value) for value in hashes]
+    chain = [
+        _stored_event("parent", None, [1, 2], 2, "GPU"),
+        _stored_event("child", "parent", [3, 4], 2, "GPU"),
+    ]
+
+    def apply(events):
+        update = parser.parse(msgpack.packb([0, events]), "replica-a")
+        assert update is not None
+        collector._write_kv_update(update)
+
+    try:
+        apply(chain)
+        assert store.get_layer_prefix_hit_rate("replica-a", hashes) == 1.0
+        store.invalidate_kv_replica("replica-a")
+        parser.reset_replica("replica-a")
+        apply(chain[1:])
+        assert parser.stats["parent_unresolved"] == 1
+        assert store.record_dispatch_blocks("replica-a", hashes) == 0
+        store.mark_kv_replica_ready("replica-a")
+        assert store.get_layer_prefix_hit_rate("replica-a", hashes) == 0.0
+
+        apply([_stored_event("unrelated", None, [9, 10], 2, "GPU")])
+        assert store.get_layer_prefix_hit_rate("replica-a", hashes) == 0.0
+        if recovery == "related-events":
+            apply(chain)
+        else:
+            assert store.record_dispatch_blocks("replica-a", hashes) == 2
+        assert store.get_layer_prefix_hit_rate("replica-a", hashes) == 1.0
+    finally:
+        collector.stop()

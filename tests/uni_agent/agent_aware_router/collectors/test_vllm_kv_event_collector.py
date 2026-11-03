@@ -114,22 +114,6 @@ class TestVLLMKVEventCollector:
 
     @pytest.mark.cpu
     @pytest.mark.level0
-    def test_clear_kv_replica_removes_all_blocks(self):
-        """
-        Feature: DataStore.clear_kv_replica removes all blocks for a node
-        Expectation:
-            After clear_kv_replica, REPLICA_ID no longer appears in any cached block.
-        """
-        store, _ = _run([kv_payload(make_stored_event("rh0", _block_ids(0)))])
-
-        assert store.get_kv_block_count() > 0, "Precondition: blocks should exist before clear"
-        store.clear_kv_replica(REPLICA_ID)
-        assert not store.kv_replica_has_blocks(REPLICA_ID), (
-            f"REPLICA_ID '{REPLICA_ID}' should not appear in any block after clear_kv_replica"
-        )
-
-    @pytest.mark.cpu
-    @pytest.mark.level0
     def test_parser_hash_mapping_populated(self):
         """
         Feature: VLLMKVParser.remote_to_local_block_hash is populated after events
