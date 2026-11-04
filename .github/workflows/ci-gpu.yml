@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
-  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:vllm018.dev1"
+  IMAGE: "verl-ci-cn-beijing.cr.volces.com/verlai/verl:uv.cu130"
   DYNAMIC_RUNNER_ENDPOINT: "https://sh6mtrbg8demerkmc1uhk.apigateway-cn-beijing.volceapi.com/runner/create/runner"
 
 jobs:
@@ -47,6 +47,15 @@ jobs:
       matrix:
         python-version: [ "3.12" ]
 
+    env:
+      # Same public egress proxy used by verl's UV GPU runners. Cache misses
+      # must also work for fork PRs, where repository secrets are unavailable.
+      HTTP_PROXY: "http://100.68.174.87:3128"
+      HTTPS_PROXY: "http://100.68.174.87:3128"
+      NO_PROXY: "localhost,127.0.0.1"
+      UV_PYTHON: "3.12"
+      UV_RUN: "uv run --locked --all-packages --extra vllm --extra megatron --extra swebench"
+
     steps:
       # 1. git clone code
       - name: Checkout code
@@ -54,29 +63,26 @@ jobs:
         with:
           submodules: true
 
-      # 2. set up python
+      # Use the image's UV cache; all Python packages come from the root lock.
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-          cache: 'pip'
-
-      # 3. install dependencies
-      - name: Install dependencies
+      - name: Configure UV cache
         run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements-test.txt -i https://pypi.org/simple
+          echo "UV_CACHE_DIR=${HOME}/.cache/uv" >> "${GITHUB_ENV}"
+          uv --version
 
-          git clone --branch v4.1.0 https://github.com/princeton-nlp/SWE-bench.git
-          cd SWE-bench
-          pip install -e .
+      - name: Sync locked GPU environment
+        run: |
+          uv sync --locked --all-packages --extra vllm --extra megatron --extra swebench
+          $UV_RUN python scripts/refresh_uv.py --check
 
       # 4. Test with pytest
       - name: Test with pytest
         run: |
-          pip install pytest pytest-cov pytest-custom_exit_code
           export PYTHONPATH="${PYTHONPATH}:${GITHUB_WORKSPACE}"
-          pytest tests/uni_agent/ -m="gpu and level0" --suppress-no-test-exit-code --cov=./uni_agent/ --cov-report=xml --cov-report=term
+          $UV_RUN pytest -s tests/uni_agent/ -m="gpu and level0" --cov=./uni_agent/ --cov-report=xml --cov-report=term
 
       - name: Upload GPU coverage
         uses: codecov/codecov-action@v4
@@ -93,7 +99,15 @@ jobs:
     steps:
       - name: Report result
         run: |
-          if [[ "${{ needs.run.result }}" == "failure" ]]; then
+          if [[ "${{ needs.changes.result }}" != "success" ]]; then
+            echo "GPU change detection failed"
+            exit 1
+          fi
+          if [[ "${{ needs.changes.outputs.gpu }}" != "true" ]]; then
+            echo "GPU CI not required for these changes"
+            exit 0
+          fi
+          if [[ "${{ needs.setup.result }}" != "success" || "${{ needs.run.result }}" != "success" ]]; then
             echo "GPU CI FAILED"
             exit 1
           fi
@@ -102,7 +116,7 @@ jobs:
   cleanup:
     runs-on: ubuntu-latest
     needs: [ setup, run, gpu-gate ]
-    if: always()
+    if: always() && needs.setup.outputs.mlp-task-id != ''
     steps:
       - id: destroy-runner
         uses: volcengine/vemlp-github-runner@v1

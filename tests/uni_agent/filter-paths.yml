@@ -6,6 +6,12 @@
 
 gpu:
   - '.github/workflows/ci-gpu.yml'
+  - 'tests/uni_agent/filter-paths.yml'
+  - 'pyproject.toml'
+  - 'uv.lock'
+  - 'verl'
+  - 'scripts/refresh_uv.py'
+  - 'tests/uni_agent/test_uv_gpu.py'
   - 'examples/agent_aware_router/multi-node.sh'
   - 'examples/agent_aware_router/single-node.sh'
 npu:
