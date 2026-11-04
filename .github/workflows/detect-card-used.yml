@@ -1,0 +1,175 @@
+name: Detect Card Used
+
+on:
+  workflow_call:
+    outputs:
+      one:
+        value: ${{ jobs.detect.outputs.one }}
+      two:
+        value: ${{ jobs.detect.outputs.two }}
+      four:
+        value: ${{ jobs.detect.outputs.four }}
+      eight:
+        value: ${{ jobs.detect.outputs.eight }}
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      one: ${{ steps.scan.outputs.one }}
+      two: ${{ steps.scan.outputs.two }}
+      four: ${{ steps.scan.outputs.four }}
+      eight: ${{ steps.scan.outputs.eight }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Scan the test source for pytest markers. For each test that carries both
+      # ``npu`` and ``level0`` markers, record which ``card_*`` marker it also
+      # carries. The result is exposed as one/two/four/eight outputs so that the
+      # caller can skip card runs that have no matching tests.
+      #
+      # Each ``npu + level0`` test must carry exactly one ``card_*`` marker:
+      #   - none  -> the test would never run on any card runner (missing tag)
+      #   - more  -> the test would run on multiple card runners, double-counting
+      #     coverage (extra tag)
+      # A total of zero ``npu + level0`` tests is NOT an error; it just yields
+      # all-false outputs.
+      - name: Scan card markers
+        id: scan
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import ast
+          import os
+          import sys
+          from pathlib import Path
+
+          CARD_MARKERS = ("card_one", "card_two", "card_four", "card_eight")
+          OUTPUT_NAMES = {
+              "card_one": "one",
+              "card_two": "two",
+              "card_four": "four",
+              "card_eight": "eight",
+          }
+
+
+          def marker_name(node):
+              """Return the marker name of a ``pytest.mark.<name>`` expression."""
+              if isinstance(node, ast.Call):
+                  return marker_name(node.func)
+              if (
+                  isinstance(node, ast.Attribute)
+                  and isinstance(node.value, ast.Attribute)
+                  and node.value.attr == 'mark'
+                  and isinstance(node.value.value, ast.Name)
+                  and node.value.value.id == 'pytest'
+              ):
+                  return node.attr
+              return None
+
+
+          def decorator_markers(decorator_list):
+              markers = set()
+              for dec in decorator_list:
+                  name = marker_name(dec)
+                  if name:
+                      markers.add(name)
+              return markers
+
+
+          def pytestmark_markers(node):
+              """Extract marker names from the value assigned to ``pytestmark``."""
+              markers = set()
+              if isinstance(node, (ast.List, ast.Tuple)):
+                  for elt in node.elts:
+                      name = marker_name(elt)
+                      if name:
+                          markers.add(name)
+              else:
+                  name = marker_name(node)
+                  if name:
+                      markers.add(name)
+              return markers
+
+
+          def collect_tests(root):
+              """Return a list of (file, line, func, markers) for all test functions."""
+              records = []
+              for path in sorted(Path(root).rglob("*.py")):
+                  if not (path.name.startswith("test_") or path.name.endswith("_test.py")):
+                      continue
+                  try:
+                      tree = ast.parse(path.read_text(encoding="utf-8"))
+                  except (SyntaxError, UnicodeDecodeError, OSError):
+                      continue
+
+                  # Module-level pytestmark applies to every test in the file.
+                  module_markers = set()
+                  for node in tree.body:
+                      if isinstance(node, ast.Assign):
+                          for target in node.targets:
+                              if isinstance(target, ast.Name) and target.id == "pytestmark":
+                                  module_markers |= pytestmark_markers(node.value)
+
+                  for node in tree.body:
+                      if isinstance(node, ast.ClassDef):
+                          class_markers = set(module_markers)
+                          for sub in node.body:
+                              if isinstance(sub, ast.Assign):
+                                  for target in sub.targets:
+                                      if isinstance(target, ast.Name) and target.id == "pytestmark":
+                                          class_markers |= pytestmark_markers(sub.value)
+                          for sub in node.body:
+                              if isinstance(sub, ast.FunctionDef) and sub.name.startswith("test"):
+                                  markers = class_markers | decorator_markers(sub.decorator_list)
+                                  records.append((path, sub.lineno, sub.name, markers))
+                      elif isinstance(node, ast.FunctionDef) and node.name.startswith("test"):
+                          markers = set(module_markers) | decorator_markers(node.decorator_list)
+                          records.append((path, node.lineno, node.name, markers))
+              return records
+
+
+          records = collect_tests("tests/uni_agent")
+
+          used_cards = set()
+          errors = []
+
+          for path, lineno, func, markers in records:
+              if "npu" not in markers or "level0" not in markers:
+                  continue
+
+              card_tags = [c for c in CARD_MARKERS if c in markers]
+              location = f"{path}:{lineno} ({func})"
+
+              if not card_tags:
+                  errors.append(
+                      f"{location}: missing card tag "
+                      f"(npu+level0 tests must carry one of card_one/card_two/card_four/card_eight)"
+                  )
+              elif len(card_tags) > 1:
+                  errors.append(
+                      f"{location}: too many card tags {sorted(card_tags)} "
+                      f"(npu+level0 tests must carry exactly one card_* tag)"
+                  )
+              else:
+                  used_cards.add(card_tags[0])
+
+          if errors:
+              print("::group::Card marker validation failed")
+              for e in errors:
+                  print(f"::error::{e}")
+              print("::endgroup::")
+              sys.exit(
+                  f"Card marker validation failed: {len(errors)} test(s) have "
+                  "missing or duplicate card_* tags. See errors above."
+              )
+
+          print(f"Detected card markers among npu+level0 tests: {sorted(used_cards) or 'none'}")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+              for card in CARD_MARKERS:
+                  value = "true" if card in used_cards else "false"
+                  f.write(f"{OUTPUT_NAMES[card]}={value}\n")
+                  print(f"{OUTPUT_NAMES[card]}={value}")
+          PY
