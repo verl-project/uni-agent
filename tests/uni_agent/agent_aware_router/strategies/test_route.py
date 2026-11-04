@@ -150,10 +150,8 @@ PROMPT_IDS = [1, 2, 3]
 
 def _strat(**kwargs):
     defaults = dict(
-        alpha=0.7,
         load_threshold=0.9,
         layer_weights={"gpu": 0.7, "cpu": 0.2, "ssd": 0.1},
-        load_weights=(0.4, 0.2, 0.1, 0.3),
     )
     defaults.update(kwargs)
     strat = KVCacheAwareStrategy(**defaults)

@@ -271,6 +271,48 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
     )
     ```
 
+=== "OpenJiuwen agent-dx"
+
+    **Self-hosted Environment service.** Install the verified agent-dx
+    Environment SDK and configure authentication on each execution worker:
+
+    ```bash
+    pip install /path/to/agent-dx/platform/sdk/environment/python
+    export ADX_SERVER_ADDRESS="<adx-api-host>:<port>"
+    export ADX_TOKEN="<token>"
+    export ADX_TLS="1"
+    export ADX_TLS_VERIFY="1"
+    ```
+
+    ```python
+    from uni_agent.sandbox import SandboxConfig
+
+    config = SandboxConfig(
+        provider="agent_dx",
+        image="python:3.12",
+        runtime_timeout=3600,
+        image_mounts=[
+            {"image": "<tool-image>", "mount_path": "/opt/tool"},
+        ],
+        executable_paths={"tool": "/opt/tool/bin/tool"},
+        sandbox_kwargs={
+            "cpu": 1000,
+            "memory": 2048,
+            "cpu_limit": 4000,
+            "mem_limit": 8192,
+            "idle_timeout": 7200,
+            # Reverse tunnel: let the sandbox reach a local gateway via 127.0.0.1:<proxy_port>.
+            "upstream": "<gateway-host>:<gateway-port>",
+            "proxy_port": 38197,
+            # Forward sandbox ports to the host.
+            "port_forwardings": [8080],
+        },
+    )
+    ```
+
+    For in-sandbox model calls, set `sandbox_kwargs.proxy_port: 38197` in a Task
+    Config; `run_task` configures the reverse tunnel from the live Gateway Session.
+
 `image_mounts` allows Uni-Agent to attach self-contained runtime images for black-box
 agent harnesses to task sandboxes while keeping harness dependencies isolated
 from task images; `executable_paths` exposes selected runtime commands.
@@ -410,6 +452,13 @@ After configuring a supported backend above, run the complete connectivity and p
 
     ```bash
     DEBUG_MODE=1 SANDBOX_PROVIDER=openyuanrong python examples/quickstart/sandbox/demo.py
+    ```
+
+=== "OpenJiuwen agent-dx"
+
+    ```bash
+    DEBUG_MODE=1 SANDBOX_PROVIDER=agent_dx IMAGE=python:3.12 \
+      python examples/quickstart/sandbox/demo.py
     ```
 
 Next, [verify task oracle solutions](oracle-verification.md) against the configured sandbox before running agent inference or training.

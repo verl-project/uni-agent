@@ -15,7 +15,7 @@
 """Strategy slow-path (fallback) scoring mode.
 
 The mode selected when the sticky short-circuit misses. Canonical YAML strings
-(``prefix-load-aware`` / ``least-inflight``) are mapped to these constants at
+(``least-inflight`` / ``capacity-token-aware``) are mapped to these constants at
 the config boundary (``KVCAwareStrategyConfig``), so downstream strategy code
 references members — never raw strings.
 """
@@ -29,10 +29,9 @@ class SlowCut(str, Enum):
     """Fallback scoring mode (used after the sticky short-circuit misses).
 
     Inherits ``str`` so members interoperate with plain strings: a YAML-loaded
-    ``slow_cut: prefix-load-aware`` compares equal to ``SlowCut.PREFIX_LOAD_AWARE``
-    and is accepted by ``SlowCut("prefix-load-aware")`` at the config boundary.
+    ``slow_cut: least-inflight`` compares equal to ``SlowCut.LEAST_INFLIGHT``
+    and is accepted by ``SlowCut("least-inflight")`` at the config boundary.
     """
 
-    PREFIX_LOAD_AWARE = "prefix-load-aware"  # S = α·S_cache + (1-α)·S_load
     LEAST_INFLIGHT = "least-inflight"  # -INFLIGHT_COUNT (verl GlobalRequestLoadBalancer-style)
     CAPACITY_TOKEN_AWARE = "capacity-token-aware"  # token capacity gate + prefill increment (discrete)

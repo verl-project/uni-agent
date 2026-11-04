@@ -123,6 +123,22 @@ class DataStore:
         """
         self._kv.add_blocks(node_id, block_hashes, layer=layer)
 
+    def record_dispatch_blocks(self, node_id: str, block_hashes: list[str]) -> int:
+        """Mark a dispatched request's prefix blocks resident on a node (GPU).
+
+        The acquire path calls this so the resident index learns the prefix
+        immediately instead of waiting for the engine's kv-events; idempotent
+        against the later ``BlockStored``.
+
+        Args:
+            node_id: The replica the request was dispatched to.
+            block_hashes: The request's full-block chained prefix hashes.
+
+        Returns:
+            Number of blocks this call newly made resident (0 for a full hit).
+        """
+        return self._kv.record_dispatch_blocks(node_id, block_hashes)
+
     def remove_kv_blocks(self, node_id: str, block_hashes: list[str], layer: Layer = Layer.GPU) -> None:
         """Remove KV cache blocks from a node.
 
@@ -134,7 +150,7 @@ class DataStore:
         self._kv.remove_blocks(node_id, block_hashes, layer=layer)
 
     def clear_kv_node(self, node_id: str) -> None:
-        """Clear all KV cache blocks for a node.
+        """Clear all KV cache state for a node: resident blocks, block refs, markers.
 
         Args:
             node_id: Target node.
@@ -203,6 +219,35 @@ class DataStore:
         tally log to surface retained-block counts per replica.
         """
         return self._kv.per_replica_block_counts()
+
+    # ── Block reference counts and per-request markers ──────────────────
+
+    def incr_block_refs(self, replica_id: str, hash_strs: list[str]) -> None:
+        """Add one reference to every hash on a replica (multiset insert).
+
+        Thin pass-through to ``KVCacheStore`` (see :meth:`KVCacheStore.incr_block_refs`).
+        """
+        self._kv.incr_block_refs(replica_id, hash_strs)
+
+    def decr_block_refs(self, replica_id: str, hash_strs: list[str]) -> None:
+        """Drop one reference to every hash on a replica (multiset remove)."""
+        self._kv.decr_block_refs(replica_id, hash_strs)
+
+    def inflight_block_count(self, replica_id: str) -> int:
+        """Number of distinct hashes currently referenced on ``replica_id``."""
+        return self._kv.inflight_block_count(replica_id)
+
+    def put_marker(self, request_id: str, replica_id: str, hash_strs: list[str]) -> None:
+        """Store a per-request snapshot row (see :meth:`KVCacheStore.put_marker`)."""
+        self._kv.put_marker(request_id, replica_id, hash_strs)
+
+    def get_marker(self, request_id: str) -> dict[str, Any] | None:
+        """Return a copy of a request's marker row without clearing it (``None`` if absent)."""
+        return self._kv.get_marker(request_id)
+
+    def pop_marker(self, request_id: str) -> dict[str, Any] | None:
+        """Remove and return a request's marker row (``None`` if absent)."""
+        return self._kv.pop_marker(request_id)
 
     # ── PerReplicaStore incremental write ──────────────────────────────────
 
