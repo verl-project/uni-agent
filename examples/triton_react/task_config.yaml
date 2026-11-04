@@ -1,0 +1,22 @@
+# ATRL recipe on the stock KernelBench task.
+# Set algorithm.adv_estimator=grpo_segment and actor.loss_agg_mode=seg-mean-token-mean.
+- name: npu_triton_kernel
+  sandbox:
+    provider: triton_remote_docker
+    image: triton-claude-code-env:latest
+    runtime_timeout: 14400
+    sandbox_kwargs:
+      cwd: /workspace
+      pull_policy: never
+      run_args:
+        - --privileged
+        - --ipc=host
+        - --network=host
+  agent:
+    name: triton_react
+    max_steps: 100
+    action_timeout: 900
+    workspace_dir: /workspace
+  workspace_dir: /workspace
+  template_dir: /opt/triton-agent-template
+  npu_lease_required: true
