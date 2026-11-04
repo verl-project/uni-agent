@@ -12,6 +12,8 @@ import pytest
 from uni_agent.sandbox.base import Sandbox
 from uni_agent.sandbox.docker import DockerSandbox
 
+pytestmark = pytest.mark.usefixtures("no_unhandled_asyncio_errors")
+
 
 @asynccontextmanager
 async def docker_sandbox():

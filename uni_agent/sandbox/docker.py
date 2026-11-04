@@ -83,7 +83,19 @@ class DockerSandbox(Sandbox):
         except FileNotFoundError as exc:
             raise RuntimeError(f"Docker executable {self.docker_binary!r} was not found") from exc
 
-        communication = asyncio.create_task(proc.communicate(input=input_data))
+        async def communicate() -> tuple[bytes, bytes]:
+            try:
+                return await proc.communicate(input=input_data)
+            finally:
+                if proc.stdin is not None:
+                    # Python 3.10 communicate() closes stdin without observing its
+                    # close waiter, which can retain a BrokenPipeError after kill.
+                    try:
+                        await proc.stdin.wait_closed()
+                    except (BrokenPipeError, ConnectionResetError):
+                        pass
+
+        communication = asyncio.create_task(communicate())
         try:
             stdout, stderr = await asyncio.wait_for(asyncio.shield(communication), timeout=timeout)
         except (asyncio.TimeoutError, asyncio.CancelledError):

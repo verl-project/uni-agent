@@ -9,7 +9,7 @@ on:
     paths:
       - 'uni_agent/sandbox/**'
       - 'uni_agent/tools/edit_file.py'
-      - 'tests/uni_agent/sandbox/test_docker*.py'
+      - 'tests/uni_agent/sandbox/**'
       - '.github/workflows/docker-write.yml'
 
 permissions:

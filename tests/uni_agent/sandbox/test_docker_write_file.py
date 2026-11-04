@@ -11,6 +11,8 @@ import pytest
 
 from uni_agent.sandbox.docker import DockerSandbox
 
+pytestmark = pytest.mark.usefixtures("no_unhandled_asyncio_errors")
+
 
 @pytest.fixture
 def local_docker(tmp_path):
@@ -84,7 +86,7 @@ def test_write_file_propagates_shell_errors(local_docker, tmp_path, failure):
         target.write_text("original")
         target.chmod(0o400)
     with pytest.raises(RuntimeError, match="write_file .* failed:"):
-        asyncio.run(local_docker.write_file(str(target), b"new"))
+        asyncio.run(local_docker.write_file(str(target), b"new" * (1024 * 1024)))
     if failure == "read_only":
         assert target.read_text() == "original"
 
@@ -156,6 +158,7 @@ def test_repeated_cancellation_waits_for_client_reap(monkeypatch):
         reaped = False
 
         class Process:
+            stdin = None
             returncode = None
 
             def kill(self):
