@@ -19,6 +19,7 @@ import pytest
 
 from uni_agent.agents.base import ModelConfig
 from uni_agent.agents.opencode import OpenCodeAgent, OpenCodeConfig
+from uni_agent.agents.opencode2 import OpenCode2Agent, OpenCode2Config
 from uni_agent.sandbox.local import LocalSandbox
 
 
@@ -27,14 +28,25 @@ from uni_agent.sandbox.local import LocalSandbox
 @pytest.mark.asyncio
 async def test_opencode_cli_routes_tool_turns_through_gateway_and_finalizes_trajectory(tmp_path, monkeypatch):
     """Exercise OpenCode/Gateway with synthetic output when OPENCODE_BIN is explicit."""
-    cli_setting = os.environ.get("OPENCODE_BIN")
+    await exercise_gateway(tmp_path, monkeypatch, "OPENCODE_BIN", OpenCodeAgent, OpenCodeConfig)
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_opencode2_cli_routes_tool_turns_through_gateway_and_finalizes_trajectory(tmp_path, monkeypatch):
+    await exercise_gateway(tmp_path, monkeypatch, "OPENCODE2_BIN", OpenCode2Agent, OpenCode2Config)
+
+
+async def exercise_gateway(tmp_path, monkeypatch, variable, agent_cls, config_cls):
+    cli_setting = os.environ.get(variable)
     if not cli_setting:
-        pytest.skip("set OPENCODE_BIN explicitly to enable the optional OpenCode CLI probe")
+        pytest.skip(f"set {variable} explicitly to enable the optional OpenCode CLI probe")
     cli = shutil.which(cli_setting)
     if cli is None and Path(cli_setting).is_file() and os.access(cli_setting, os.X_OK):
         cli = cli_setting
     if cli is None:
-        pytest.fail(f"OPENCODE_BIN={cli_setting!r} is not an executable command or path")
+        pytest.fail(f"{variable}={cli_setting!r} is not an executable command or path")
 
     # Python 3.10 exposes NotRequired through typing_extensions; one Gateway
     # dependency imports it from typing as though it were standard there.
@@ -89,7 +101,7 @@ async def test_opencode_cli_routes_tool_turns_through_gateway_and_finalizes_traj
     session_id = "opencode-cli-integration"
     try:
         session = await actor.create_session(session_id, metadata={"probe": "synthetic-opencode"})
-        config = OpenCodeConfig(
+        config = config_cls(
             opencode_bin=cli,
             run_timeout=60,
             state_root=str(tmp_path / "opencode-state"),
@@ -99,11 +111,12 @@ async def test_opencode_cli_routes_tool_turns_through_gateway_and_finalizes_traj
                 api_key="synthetic-probe-key",
             ),
         )
-        result = await OpenCodeAgent(config).run(
-            sandbox=LocalSandbox(),
-            messages=[{"role": "user", "content": "Write the probe marker, then finish."}],
-            workdir=str(workspace),
-        )
+        async with LocalSandbox() as sandbox:
+            result = await agent_cls(config).run(
+                sandbox=sandbox,
+                messages=[{"role": "user", "content": "Write the probe marker, then finish."}],
+                workdir=str(workspace),
+            )
         assert result.finished is True, result.info
         assert result.output["text"] == "GATEWAY_PROBE_DONE"
         assert marker.read_text(encoding="utf-8") == "gateway-probe\n"
@@ -116,6 +129,7 @@ async def test_opencode_cli_routes_tool_turns_through_gateway_and_finalizes_traj
         assert trajectories[0].finished is None
         assert trajectories[0].num_turns == 4
         assert any(mask == 1 for mask in trajectories[0].response_mask)
+        assert not list((tmp_path / "opencode-state").iterdir())
     finally:
         if session_id in actor._sessions:
             await actor.abort_session(session_id)

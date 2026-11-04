@@ -181,6 +181,22 @@ tokenizer/parser stack, or real model inference. AgentResult.finished reflects
 OpenCode harness completion; trajectory completion is owned by the Task or
 Framework.
 
+The Gateway integration probe also covers the pinned 2.2.5 adapter. With the
+Gateway CPU dependencies and the checkout's pinned `verl` submodule installed,
+run both probes using explicitly provisioned native CLIs:
+
+```bash
+OPENCODE_BIN=/path/to/opencode-1.19.3 OPENCODE_VERSION=1.19.3 \
+OPENCODE2_BIN=/path/to/opencode-2.2.5 PYTHONPATH=. python -m pytest \
+  tests/uni_agent/agents/test_opencode_gateway_integration.py -q -rs
+```
+
+For 1.18.18, select that binary and set `OPENCODE_VERSION=1.18.18`. Each probe
+checks private-state removal after the Sandbox lifecycle closes. Missing CLI
+opt-in or optional CPU dependencies produces an explicit skip; a passing
+integration result requires no skips. These local probes do not exercise an
+internal E2B template or real model.
+
 The CLI/Gateway probes and real-CLI Task cases are disabled unless OPENCODE_BIN
 is explicitly set. To run them against a provisioned OpenCode 1.19.3 executable (as a command
 on PATH or an executable path):

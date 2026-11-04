@@ -54,6 +54,31 @@ def test_fragmented_readiness_and_eof():
             thread.join()
 
 
+def write_with_deadline(fd, size, timeout):
+    os.set_blocking(fd, False)
+    deadline = time.monotonic() + timeout
+    remaining = size
+    while remaining:
+        if time.monotonic() >= deadline:
+            raise TimeoutError("stdout drain stopped making progress")
+        try:
+            remaining -= os.write(fd, b"x" * min(4096, remaining))
+        except BlockingIOError:
+            time.sleep(0.005)
+
+
+def test_pipe_writer_times_out_when_drain_stalls():
+    reader, writer = os.pipe()
+    started = time.monotonic()
+    try:
+        with pytest.raises(TimeoutError, match="stopped making progress"):
+            write_with_deadline(writer, 1024 * 1024, timeout=0.1)
+        assert time.monotonic() - started < 2
+    finally:
+        os.close(writer)
+        os.close(reader)
+
+
 def test_stdout_drain_uses_bounded_reads_without_newlines(monkeypatch):
     reader, writer = os.pipe()
     stop = threading.Event()
@@ -66,17 +91,16 @@ def test_stdout_drain_uses_bounded_reads_without_newlines(monkeypatch):
 
     monkeypatch.setattr(supervisor.os, "read", read)
     with os.fdopen(reader, "rb", buffering=0) as stream:
-        thread = threading.Thread(target=supervisor.drain_stdout, args=(stream, stop))
+        thread = threading.Thread(target=supervisor.drain_stdout, args=(stream, stop), daemon=True)
         thread.start()
         try:
             # More than pipe capacity: writer completion proves the reader drains
             # continuously even without a newline or EOF.
-            for _ in range(256):
-                os.write(writer, b"x" * 4096)
+            write_with_deadline(writer, 1024 * 1024, timeout=3)
         finally:
+            stop.set()
             os.close(writer)
             thread.join(timeout=3)
-            stop.set()
         assert not thread.is_alive()
     assert sizes and max(sizes) <= 65536
 
@@ -101,5 +125,6 @@ def test_partial_startup_failure_reaps_server_and_does_not_start_client(tmp_path
     )
     result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=5)
     assert result.returncode == 1
-    assert "RuntimeError" in result.stderr
+    assert result.stderr.strip() == "OpenCode private server startup failed: RuntimeError"
+    assert "Traceback" not in result.stderr
     assert not marker.exists()
