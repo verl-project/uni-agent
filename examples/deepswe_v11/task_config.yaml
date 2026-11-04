@@ -1,0 +1,4 @@
+- name: harbor
+  agent:
+    name: mini-swe-agent
+  harbor_env: e2b
