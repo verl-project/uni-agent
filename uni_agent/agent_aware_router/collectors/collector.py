@@ -30,8 +30,10 @@ from ..insight import WriteEvent, WriteKind, emitter
 from ..store.data_store import DataStore
 from ..types import EmitKey, MetricKey
 from ..utils.knob import coerce_knob_value
-from .parse import KVCacheUpdate, MetricsUpdate, Parser, StickyUpdate
+from .parse import InflightBlockUpdate, KVCacheUpdate, MetricsUpdate, Parser, StickyUpdate
+from .parse.basic.inflight import InflightParser
 from .transport.base import Transport
+from .transport.callback import StatisticEvent
 
 logger = logging.getLogger(__name__)
 
@@ -67,10 +69,9 @@ _CUMULATIVE_KEYS: tuple[str, ...] = (
     MetricKey.ESTIMATED_FLOPS_PER_GPU,
 )
 
-# Per-request bookkeeping key: prompt length recorded at dispatch. verl #7115
-# releases carry no token list, so the release-side ``INFLIGHT_TOKENS`` delta
-# is folded from this row — same acquire-record / release-consume shape as the
-# per-request "turn" counter below.
+# Per-request bookkeeping key: prompt length recorded at dispatch (acquire) and
+# folded back out at release — releases carry no token list (verl #7115). All
+# inflight store access lives on the collector; the parser decides and emits.
 _PROMPT_LEN_KEY = "prompt_len"
 
 
@@ -89,7 +90,7 @@ class Collector:
 
     Args:
         transport: Transport instance (ZMQ, HTTP, etc.)
-        parser: Parser instance (vLLM KV, vLLM Metrics, etc.)
+        parser: Parser instance (vLLM KV, vLLM Metrics, Sticky, Inflight).
     """
 
     def __init__(self, transport: Transport, parser: Parser) -> None:
@@ -111,6 +112,9 @@ class Collector:
         self._kv_last_logged_total = 0
         # Last-emit time for the dispatched/completed/inflight_turn_sum snapshot (throttled).
         self._dispatch_last_log: float = 0.0
+        # Resident blocks the router wrote itself at acquire (``record_dispatch_blocks``),
+        # logged in the kv-events tally as ``router_recorded`` (cross-check vs engine-side stored).
+        self._dispatch_recorded_blocks: int = 0
 
     # ── Lifecycle ───────────────────────────────────────────────────────
 
@@ -122,18 +126,30 @@ class Collector:
             self._loop.run_forever()
 
         def handler(raw_data: bytes | str, node_id: str) -> None:
-            """Handler: parse and dispatch to the right store write path."""
-            result = self._parser.parse(raw_data, node_id)
-            if isinstance(result, KVCacheUpdate):
-                self._write_kv_update(result)
-            elif isinstance(result, MetricsUpdate):
-                self._write_metrics_update(result)
-            elif isinstance(result, StickyUpdate):
-                self._write_sticky_update(result)
+            """Handler: parse and dispatch each update to the right store write path."""
+            if isinstance(self._parser, InflightParser):
+                # The inflight parser is pure — the collector gathers its state
+                # from the store and drives it event by event.
+                result = self._inflight_event(raw_data, node_id)
             else:
+                result = self._parser.parse(raw_data, node_id)
+            if result is None:
                 # None is normal for statistic parsers that skip an event
                 # (e.g. StickyParser on_release); demote to debug to avoid per-turn noise.
                 logger.debug(f"parser.parse returned no update: {result}")
+                return
+            updates = result if isinstance(result, list) else [result]
+            for update in updates:
+                if isinstance(update, KVCacheUpdate):
+                    self._write_kv_update(update)
+                elif isinstance(update, MetricsUpdate):
+                    self._write_metrics_update(update)
+                elif isinstance(update, StickyUpdate):
+                    self._write_sticky_update(update)
+                elif isinstance(update, InflightBlockUpdate):
+                    self._apply_inflight_block_update(update)
+                else:
+                    logger.debug(f"parser.parse returned an unknown update: {update}")
 
         if getattr(self._transport, "is_async", True):
             self._loop_thread = threading.Thread(
@@ -189,64 +205,40 @@ class Collector:
         total = sum(self._kv_event_counts.values())
         if total - self._kv_last_logged_total >= _KV_EVENT_LOG_INTERVAL_S:
             self._kv_last_logged_total = total
+            # Parser-side translation failures: non-zero means the event-side
+            # retained count is drifting above the engine's truth.
+            hash_map_stats = getattr(self._parser, "stats", None)
             logger.debug(
                 f"kv-events tally: events={dict(self._kv_event_counts)} "
                 f"blocks={dict(self._kv_block_counts)} (total_events={total}) | "
-                f"retained_blocks/replica={self._data_store.per_replica_block_counts()}"
+                f"retained_blocks/replica={self._data_store.per_replica_block_counts()} | "
+                f"router_recorded={self._dispatch_recorded_blocks} | "
+                f"hash-map={dict(hash_map_stats or {})}"
             )
 
     def _write_metrics_update(self, update: MetricsUpdate) -> None:
         """Write MetricsUpdate via DataStore, then forward to the insight emitter.
 
-        Delta updates (acquire/release) route to ``incr_metrics``; the in-flight
-        turn sum (``INFLIGHT_TURN_SUM``) and the release-side token delta
-        (``INFLIGHT_TOKENS``) are folded into the same locked write from
-        per-request rows recorded at dispatch — acquire records the request's
-        current turn and prompt length, release subtracts both (release changes
-        neither, so it subtracts what acquire recorded). verl #7115 releases
-        carry no token list, which is why the length lives in a per-request row
-        rather than the release event.
-        Both acquire and release refresh the throttled ``router-dispatch``
-        snapshot. Absolute (non-delta) updates are polled gauges, handled
-        below. When rl-insight emit is on, each write also builds a
-        :class:`WriteEvent` from the store's returned post-write values and hands
-        it to the emitter (the 14 B-class signals).
+        Delta updates (acquire/release) route to ``incr_metrics`` — the parser
+        emits fully-netted signed deltas, so all the acquire/release protocol
+        work (turn/token folding, stale re-acquire recovery, held-block
+        pinning) lives in ``InflightParser`` and arrives either as these
+        deltas or as separate ``InflightBlockUpdate`` commands. Absolute
+        (non-delta) updates are polled gauges, handled below. When rl-insight
+        emit is on, each write also builds a :class:`WriteEvent` from the
+        store's returned post-write values and hands it to the emitter (the
+        14 B-class signals).
         """
         if update.is_delta:
-            # Batch the parser's signed deltas in one locked PerReplica write.
-            # Turn lives in PerRequestStore (separate lock); look it up first so
-            # it joins this batch (no second PerReplica lock cycle). Turn fires
-            # only on dispatch/release.
-            deltas = dict(update.metrics)
-            is_acquire = MetricKey.DISPATCHED_COUNT in deltas
-            is_release = MetricKey.COMPLETED_COUNT in deltas
-            if is_acquire:
-                if update.request_id is None:
-                    logger.debug("dispatch (DISPATCHED_COUNT) update missing request_id — skipping turn")
-                else:
-                    deltas[MetricKey.INFLIGHT_TURN_SUM] = self._data_store.incr_per_request(update.request_id, "turn")
-                    self._data_store.set_per_request(
-                        update.request_id, _PROMPT_LEN_KEY, deltas.get(MetricKey.INFLIGHT_TOKENS, 0)
-                    )
-            elif is_release:
-                if update.request_id is None:
-                    logger.debug(
-                        "release (COMPLETED_COUNT) update missing request_id — skipping turn/token subtraction"
-                    )
-                else:
-                    deltas[MetricKey.INFLIGHT_TURN_SUM] = -self._data_store.get_per_request(
-                        update.request_id, "turn", 0
-                    )
-                    deltas[MetricKey.INFLIGHT_TOKENS] = -self._data_store.get_per_request(
-                        update.request_id, _PROMPT_LEN_KEY, 0
-                    )
-            new_values = self._data_store.incr_metrics(update.node_id, deltas)
+            is_acquire = MetricKey.DISPATCHED_COUNT in update.metrics
+            is_release = MetricKey.COMPLETED_COUNT in update.metrics
+            new_values = self._data_store.incr_metrics(update.node_id, update.metrics)
             if is_acquire or is_release:
                 emitter.on_write(
                     WriteEvent(
                         kind=WriteKind.ACQUIRE if is_acquire else WriteKind.RELEASE,
                         node=update.node_id,
-                        deltas=deltas,
+                        deltas=update.metrics,
                         new_values=new_values,
                         turn_sum=new_values.get(MetricKey.INFLIGHT_TURN_SUM),
                         inflight_count=new_values.get(MetricKey.INFLIGHT_COUNT),
@@ -276,6 +268,81 @@ class Collector:
             # ``_metrics_prev`` baseline, so windowed deltas stay correct.
             for nid in self._data_store.get_metric_node_ids():
                 self._log_evidence_window(nid)
+
+    # ── Inflight flow: the collector owns all inflight store access ─────
+
+    def _inflight_event(self, raw_data: bytes | str | Any, node_id: str) -> list | None:
+        """Drive the pure ``InflightParser`` for one Balancer callback.
+
+        The parser holds no store: this branch reads the per-event state its
+        netting needs, performs the acquire's booked-length write-back, and
+        hands the values over as ``parse()`` keyword arguments. Unattributable
+        payloads (no ``StatisticEvent``, no replica) and non-acquire/release
+        events are dropped (``None``).
+        """
+        parser = self._parser
+        if not isinstance(parser, InflightParser):
+            return None
+        if not isinstance(raw_data, StatisticEvent) or raw_data.replica_id is None:
+            return None
+        if raw_data.event == "on_acquire":
+            return self._inflight_acquire(parser, raw_data, node_id)
+        if raw_data.event == "on_release":
+            return self._inflight_release(parser, raw_data, node_id)
+        return None
+
+    def _inflight_acquire(self, parser: InflightParser, event: StatisticEvent, node_id: str) -> list:
+        """Gather the acquire state in the protocol's store order, then decide."""
+        rid = event.request_id
+        turn = self._data_store.incr_per_request(rid, "turn") if rid else 0
+        stale = self._data_store.get_marker(rid) if rid else None
+        booked_len = self._data_store.get_per_request(rid, _PROMPT_LEN_KEY, 0) if rid else 0
+        if rid:
+            self._data_store.set_per_request(rid, _PROMPT_LEN_KEY, len(event.prompt_ids))
+        block_size = self._data_store.get_block_size() or 0
+        return parser.parse(event, node_id, turn=turn, stale=stale, block_size=block_size, booked_len=booked_len)
+
+    def _inflight_release(self, parser: InflightParser, event: StatisticEvent, node_id: str) -> list:
+        """Gather the release folds from the acquire-time rows, then decide."""
+        rid = event.request_id
+        turn = self._data_store.get_per_request(rid, "turn", 0) if rid else 0
+        booked_len = self._data_store.get_per_request(rid, _PROMPT_LEN_KEY, 0) if rid else 0
+        return parser.parse(event, node_id, turn=turn, booked_len=booked_len)
+
+    def _apply_inflight_block_update(self, update: InflightBlockUpdate) -> None:
+        """Apply an ``InflightBlockUpdate`` command to the held-block book — mechanically.
+
+        The acquire/release protocol decisions (when to pin, when a re-acquire
+        must first unwind a stale pin) live in ``InflightParser``; this applier
+        only maps each command to store operations. Unpin sets always come from
+        the request's marker row (``KVCacheStore.pop_marker``) — the ground
+        truth of what that dispatch pinned — so a release whose memo was later
+        replaced still unwinds exactly the original set.
+        """
+        if update.action == "pin":
+            self._data_store.incr_block_refs(update.node_id, update.block_hashes)
+            # Resident record runs after the ref count, on the same chain;
+            # idempotent against the engine's later ``BlockStored``.
+            if update.mark_resident:
+                self._dispatch_recorded_blocks += self._data_store.record_dispatch_blocks(
+                    update.node_id, update.block_hashes
+                )
+            self._data_store.put_marker(update.request_id, update.node_id, update.block_hashes)
+        elif update.action == "unpin":
+            marker = self._data_store.pop_marker(update.request_id)
+            if marker is None:
+                # Nothing was pinned at acquire — the held set never knew about this request.
+                logger.debug(f"release with no pinned blocks request={update.request_id} on {update.node_id}")
+                return
+            self._data_store.decr_block_refs(marker["replica"], marker["hashes"])
+        elif update.action == "stale_unpin":
+            marker = self._data_store.pop_marker(update.request_id)
+            if marker is None:
+                logger.debug(f"stale-unpin found no marker request={update.request_id}")
+                return
+            self._data_store.decr_block_refs(marker["replica"], marker["hashes"])
+        else:
+            logger.warning(f"unknown InflightBlockUpdate action: {update.action}")
 
     def _write_sticky_update(self, update: StickyUpdate) -> None:
         """Apply a StickyUpdate to the per-request store (sticky key) via DataStore."""
@@ -471,7 +538,6 @@ def get_collector(
         return Collector(CallbackTransport(balancer_handler), StickyParser())
 
     if name == "inflight_stat":
-        from .parse.basic.inflight import InflightParser
         from .transport.callback import CallbackTransport
 
         return Collector(CallbackTransport(balancer_handler), InflightParser())

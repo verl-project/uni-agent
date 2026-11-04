@@ -29,14 +29,12 @@ from .base import ConfigError, StrategyConfig, _multiline_repr
 class KVCAwareStrategyConfig(StrategyConfig):
     """Config for KVCache-Aware routing strategy.
 
-    Only the user-tunable knob (``load_threshold``) is persisted; the remaining
-    tuning knobs are attached by the Balancer's default-construction step before
-    the runtime strategy is built from this config.
-
-    S = α × S_cache + (1-α) × S_load
+    Persists the user-tunable knob (``load_threshold``); the remaining tuning
+    knobs fall back to ``DEFAULT_STRATEGY_KNOBS`` inside
+    ``KVCacheAwareStrategy.from_config``.
     """
 
-    load_threshold: float = 0.9
+    load_threshold: float = 0.5
 
     def __post_init__(self) -> None:
         if not 0 < self.load_threshold < 1:
