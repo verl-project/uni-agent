@@ -1,9 +1,11 @@
 # Manage the environment with uv
 
 Uni-Agent and its pinned `verl` submodule share one uv workspace and one root
-`uv.lock`. Python 3.12 on Linux x86_64/aarch64 is supported by the inherited
-backend policy. SGLang 0.5.20 wheels require glibc >=2.34. The lock resolves all backends, but one environment installs
-only the selected, compatible combination.
+`uv.lock`. The commands below target Python 3.12 on Linux x86_64/aarch64,
+following the pinned verl's UV backend policy. Uni-Agent's existing Python
+package requirement (`>=3.10,<3.13`) is unchanged. SGLang 0.5.20 wheels require
+glibc >=2.34. The lock resolves all backends, but one environment installs only
+the selected, compatible combination.
 
 ```bash
 git submodule update --init --recursive
