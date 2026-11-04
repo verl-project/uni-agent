@@ -1,0 +1,58 @@
+name: Docker file writes
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [codex/docker-large-file-write]
+  pull_request:
+    branches: [main]
+    paths:
+      - 'uni_agent/sandbox/**'
+      - 'uni_agent/tools/edit_file.py'
+      - 'tests/uni_agent/sandbox/test_docker*.py'
+      - '.github/workflows/docker-write.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  docker-write:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.10', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install focused test dependencies
+        run: python -m pip install 'pytest==8.4.2' 'pytest-timeout==2.4.0' 'pydantic==2.12.3' 'jsonschema==4.25.1'
+      - name: Verify Linux Docker environment
+        run: |
+          test "$(getconf PAGESIZE)" = 4096
+          docker version
+          docker pull ubuntu:24.04
+          docker image inspect ubuntu:24.04 --format '{{json .RepoDigests}}'
+      - name: Run CPU and real-Docker regressions
+        env:
+          PYTHONPATH: .
+          UNI_AGENT_DOCKER_WRITE_IMAGE: ubuntu:24.04
+        run: |
+          python -m pytest -q --timeout=60 --junitxml=docker-write.xml \
+            tests/uni_agent/sandbox/test_docker_sandbox.py \
+            tests/uni_agent/sandbox/test_docker_write_file.py \
+            tests/uni_agent/sandbox/test_docker_write_integration.py
+          python - <<'PY'
+          import xml.etree.ElementTree as ET
+          root = ET.parse('docker-write.xml').getroot()
+          assert root.findall('.//testcase'), 'no tests executed'
+          assert not root.findall('.//skipped'), 'Docker acceptance must not skip'
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: docker-write-${{ matrix.python-version }}
+          path: docker-write.xml

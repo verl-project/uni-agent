@@ -69,25 +69,36 @@ class DockerSandbox(Sandbox):
             **config.sandbox_kwargs,
         )
 
-    async def _run_docker(self, *args: str, timeout: float | None = None) -> ExecResult:
+    async def _run_docker(
+        self, *args: str, timeout: float | None = None, input_data: bytes | None = None
+    ) -> ExecResult:
         try:
             proc = await asyncio.create_subprocess_exec(
                 self.docker_binary,
                 *args,
+                stdin=asyncio.subprocess.PIPE if input_data is not None else None,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
         except FileNotFoundError as exc:
             raise RuntimeError(f"Docker executable {self.docker_binary!r} was not found") from exc
 
+        communication = asyncio.create_task(proc.communicate(input=input_data))
         try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        except asyncio.TimeoutError:
+            stdout, stderr = await asyncio.wait_for(asyncio.shield(communication), timeout=timeout)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
             try:
                 proc.kill()
             except ProcessLookupError:
                 pass
-            await proc.communicate()
+            # Reap the client even if the caller is cancelled again during cleanup.
+            cleanup = communication
+            while not cleanup.done():
+                try:
+                    await asyncio.shield(cleanup)
+                except asyncio.CancelledError:
+                    continue
+            cleanup.result()
             raise
 
         return ExecResult(
@@ -198,6 +209,28 @@ class DockerSandbox(Sandbox):
         args.append(self._require_container())
         args.extend(argv)
         return await self._run_docker(*args, timeout=timeout)
+
+    async def write_file(self, path: str, content: bytes | str) -> None:
+        """Write through stdin so file contents never consume the host's argv limit.
+
+        Like the base implementation, this overwrites in place and is not atomic.
+        Cancellation reaps the Docker client; the owner must still stop the sandbox
+        to guarantee that container-side work has ended.
+        """
+        data = content.encode("utf-8") if isinstance(content, str) else content
+        result = await self._run_docker(
+            "exec",
+            "-i",
+            self._require_container(),
+            "bash",
+            "-c",
+            'mkdir -p -- "$(dirname -- "$1")" && cat > "$1"',
+            "uni-agent-write-file",
+            path,
+            input_data=data,
+        )
+        if result.exit_code != 0:
+            raise RuntimeError(f"write_file {path!r} failed: {result.stderr.strip() or result.stdout.strip()}")
 
     async def upload_file(self, local_file: Path | str, remote_file: str) -> None:
         container = self._require_container()
