@@ -30,9 +30,25 @@ service setup and environment variables. Development tools are in the default
 ## Updating the verl dependency
 
 Backend dependencies, native-wheel sources and CPU/GPU conflicts stay in
-`verl/pyproject.toml`. uv has no TOML import directive, and root-only policy
-(such as overrides) is not inherited automatically from workspace members.
-After changing the verl submodule pin, regenerate the checked-in root policy:
+`verl/pyproject.toml`. uv natively references the submodule through:
+
+```toml
+[tool.uv.workspace]
+members = ["verl"]
+
+[tool.uv.sources]
+verl = { workspace = true }
+```
+
+This references the dependency; it does not inherit all of its UV configuration.
+For example, uv reads [`override-dependencies`](https://docs.astral.sh/uv/reference/settings/#override-dependencies)
+only from the workspace root and ignores declarations in members.
+
+`scripts/refresh_uv.py` is a maintenance helper, not a UV requirement for using
+workspace dependencies. The root settings could be maintained by hand; this
+repository generates them from the pinned verl configuration to avoid drift.
+Normal `uv sync --locked` installs use the checked-in files and do not run the
+script. After changing the verl submodule pin, regenerate the root policy:
 
 ```bash
 python3.12 scripts/refresh_uv.py

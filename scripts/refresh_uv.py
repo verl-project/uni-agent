@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
 """Import root-only uv settings from the pinned verl pyproject (Python 3.12).
 
-uv has no TOML include. Workspace members keep their sources/extras, but
-root-only policy must be materialized at the workspace root. Run this after
-bumping the verl submodule; --check detects drift without changing files.
+uv natively supports the verl dependency through tool.uv.workspace/sources;
+this script is not needed to reference or install a workspace member. However,
+workspace membership does not inherit all tool.uv settings: overrides, for
+example, are read only from the workspace root, ignoring member declarations.
+See https://docs.astral.sh/uv/reference/settings/#override-dependencies.
+
+The root settings could be maintained by hand. This repository instead copies
+the pinned verl policy with this maintenance helper to avoid configuration
+drift. Run it after bumping verl; --check detects drift without changing files.
+Normal locked installs do not need to run this script.
 """
 
 from __future__ import annotations
