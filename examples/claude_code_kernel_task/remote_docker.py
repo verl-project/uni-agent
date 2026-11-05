@@ -66,10 +66,10 @@ class RemoteDockerSandbox(DockerSandbox):
             **config.sandbox_kwargs,
         )
 
-    async def _run_docker(self, *args: str, timeout: float | None = None) -> ExecResult:
+    async def _run_docker(self, *args: str, timeout: float | None = None, input: bytes | None = None) -> ExecResult:
         if timeout is None and (args[:2] == ("image", "inspect") or args[:1] == ("rm",)):
             timeout = 30
-        return await super()._run_docker("--host", self.docker_host, *args, timeout=timeout)
+        return await super()._run_docker("--host", self.docker_host, *args, timeout=timeout, input=input)
 
 
 def _copy_sandbox_kwargs(tools_kwargs: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:

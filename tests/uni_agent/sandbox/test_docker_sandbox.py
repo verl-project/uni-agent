@@ -433,3 +433,22 @@ def test_upload_and_download_use_docker_cp(monkeypatch, tmp_path: Path):
         ("cp", "agent-test:/workspace/data/result.bin", str(destination)),
     ]
     assert destination.parent.is_dir()
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_write_file_passes_content_over_stdin(monkeypatch):
+    sandbox = DockerSandbox(image="example:local")
+    sandbox._container_name = "agent-test"
+    data = b"x" * (256 * 1024)  # base64 of this exceeds the kernel's 128 KiB single-argument limit
+    calls: list[tuple[tuple[str, ...], bytes | None]] = []
+
+    async def fake_run(*args: str, timeout=None, input=None):
+        calls.append((args, input))
+        return _ok()
+
+    monkeypatch.setattr(sandbox, "_run_docker", fake_run)
+    asyncio.run(sandbox.write_file("/workspace/out dir/big.bin", data))
+
+    script = "mkdir -p \"$(dirname '/workspace/out dir/big.bin')\" && cat > '/workspace/out dir/big.bin'"
+    assert calls == [(("exec", "-i", "agent-test", "bash", "-c", script), data)]

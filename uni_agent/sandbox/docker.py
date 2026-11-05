@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import shlex
 import uuid
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING
@@ -69,11 +70,12 @@ class DockerSandbox(Sandbox):
             **config.sandbox_kwargs,
         )
 
-    async def _run_docker(self, *args: str, timeout: float | None = None) -> ExecResult:
+    async def _run_docker(self, *args: str, timeout: float | None = None, input: bytes | None = None) -> ExecResult:
         try:
             proc = await asyncio.create_subprocess_exec(
                 self.docker_binary,
                 *args,
+                stdin=asyncio.subprocess.PIPE if input is not None else None,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -81,7 +83,7 @@ class DockerSandbox(Sandbox):
             raise RuntimeError(f"Docker executable {self.docker_binary!r} was not found") from exc
 
         try:
-            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            stdout, stderr = await asyncio.wait_for(proc.communicate(input), timeout=timeout)
         except asyncio.TimeoutError:
             try:
                 proc.kill()
@@ -198,6 +200,15 @@ class DockerSandbox(Sandbox):
         args.append(self._require_container())
         args.extend(argv)
         return await self._run_docker(*args, timeout=timeout)
+
+    async def write_file(self, path: str, content: bytes | str) -> None:
+        # Pass over stdin, not argv: the base floor puts base64 in one argv string, capped at 128 KiB by the kernel.
+        data = content.encode("utf-8") if isinstance(content, str) else content
+        q = shlex.quote(path)
+        script = f'mkdir -p "$(dirname {q})" && cat > {q}'
+        res = await self._run_docker("exec", "-i", self._require_container(), "bash", "-c", script, input=data)
+        if res.exit_code != 0:
+            raise RuntimeError(f"write_file {path!r} failed: {res.stderr.strip()}")
 
     async def upload_file(self, local_file: Path | str, remote_file: str) -> None:
         container = self._require_container()
