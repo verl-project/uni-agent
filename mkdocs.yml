@@ -52,6 +52,7 @@ nav:
       - Installation: quickstart/installation.md
       - Launch a Sandbox: quickstart/launch-sandbox.md
       - Verify Oracle Solutions: quickstart/oracle-verification.md
+      - Diagnose SWE-rebench: quickstart/swe-rebench-diagnostics.md
       - Run Agent Inference: quickstart/agent-inference.md
       - Run the Agent Aware Router: quickstart/agent-aware-router.md
       - Harbor Integration: quickstart/harbor-integration.md
