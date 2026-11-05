@@ -27,7 +27,7 @@ TRAJECTORY_SELECTION=${TRAJECTORY_SELECTION:-all}  # all | longest; Claude Code 
 rollout_mode=${ROLLOUT_MODE:-"async"}
 rollout_name=${ROLLOUT_NAME:-"vllm"} # sglang or vllm
 
-# Use the same locked environment for the submitting CLI, driver and Ray workers.
+# Lock the remote training driver and Ray workers; submission only needs the Ray CLI.
 # The default task uses veFaaS; select modal/e2b when using a different task config.
 UV_RUN=(uv run --locked --all-packages --python 3.12
     --extra "${rollout_name}" --extra megatron --extra swebench
@@ -117,7 +117,7 @@ rollout_rs_threshold=${ROLLOUT_RS_THRESHOLD:-null}
 router_replay_mode=${ROUTER_REPLAY_MODE:-disabled}                    # disabled | R2 | R3
 enable_rollout_routing_replay=${ENABLE_ROLLOUT_ROUTING_REPLAY:-False} # required only for R3
 
-"${UV_RUN[@]}" ray job submit --no-wait --working-dir . --runtime-env "${RUNTIME_ENV}" \
+ray job submit --no-wait --working-dir . --runtime-env "${RUNTIME_ENV}" \
     -- env RAY_OVERRIDE_JOB_RUNTIME_ENV=1 \
     "${UV_RUN[@]}" python -m verl.trainer.main_ppo \
     --config-name=ppo_megatron_trainer \

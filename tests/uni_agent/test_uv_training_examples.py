@@ -16,10 +16,10 @@ ROOT = Path(__file__).resolve().parents[2]
 @pytest.mark.parametrize("recipe", ["train_qwen3_moe.sh", "train_qwen3p5_dense.sh"])
 @pytest.mark.parametrize("backend,sandbox", [("vllm", "vefaas"), ("sglang", "modal")])
 def test_training_submission_preserves_locked_remote_environment(tmp_path, recipe, backend, sandbox):
-    # Intercept the submission before it reaches UV/Ray. Paths with spaces and
+    # Intercept the Ray CLI before it submits a job. Paths with spaces and
     # trailing Hydra arguments must survive both shell command boundaries.
     output = tmp_path / "submission.json"
-    binary = tmp_path / "uv"
+    binary = tmp_path / "ray"
     binary.write_text(
         f"#!{sys.executable}\n"
         "import json, os, sys\n"
@@ -46,18 +46,17 @@ def test_training_submission_preserves_locked_remote_environment(tmp_path, recip
         text=True,
     )
     args = json.loads(output.read_text())
-    split = args.index("ray")
-    prefix = args[:split]
+    assert args[:2] == ["job", "submit"]
+    assert args[args.index("--runtime-env") + 1] == runtime
+    assert args[args.index("--working-dir") + 1] == "."
+    remote = args[args.index("--") + 1 :]
+    assert remote[:3] == ["env", "RAY_OVERRIDE_JOB_RUNTIME_ENV=1", "uv"]
+    prefix = remote[3 : remote.index("python")]
     assert prefix[:2] == ["run", "--locked"]
     assert "--all-packages" in prefix
     assert prefix[prefix.index("--python") + 1] == "3.12"
     extras = [prefix[i + 1] for i, item in enumerate(prefix[:-1]) if item == "--extra"]
     assert set(extras) == {backend, "megatron", "swebench", sandbox}
-    assert args[args.index("--runtime-env") + 1] == runtime
-    assert args[args.index("--working-dir") + 1] == "."
-    remote = args[args.index("--") + 1 :]
-    assert remote[:3] == ["env", "RAY_OVERRIDE_JOB_RUNTIME_ENV=1", "uv"]
-    assert remote[3 : 3 + len(prefix)] == prefix
     assert remote[3 + len(prefix) : 6 + len(prefix)] == ["python", "-m", "verl.trainer.main_ppo"]
     assert args[-1] == "trainer.total_epochs=1"
     assert f"data.train_files={env['DATA_DIR']}/data/uni_agent/swe_rebench_filtered_1150.parquet" in args

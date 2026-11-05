@@ -30,8 +30,9 @@ service setup and environment variables. Development tools are in the default
 ## GPU training examples
 
 The GPU quickstarts `examples/quickstart/training/train_qwen3_moe.sh` and
-`train_qwen3p5_dense.sh` use locked UV commands for both `ray job submit` and
-its remote Python entrypoint. Ray propagates the driver's UV command to its
+`train_qwen3p5_dense.sh` use the plain Ray CLI to submit jobs and a locked UV
+command for the remote Python entrypoint. The submitting machine only needs a
+compatible Ray CLI, not the training GPU dependencies. Ray propagates the driver's UV command to its
 workers, as described in [Ray's UV integration](https://docs.ray.io/en/latest/ray-core/handling-dependencies.html#using-uv-for-package-management).
 The scripts select `megatron`, `swebench`, the `ROLLOUT_NAME` backend (default
 `vllm`), and `UV_SANDBOX_EXTRA` (default `vefaas`, matching the default task).

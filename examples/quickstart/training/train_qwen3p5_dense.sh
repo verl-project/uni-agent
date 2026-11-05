@@ -24,7 +24,7 @@ MASK_UNFINISHED_EPISODE=${MASK_UNFINISHED_EPISODE:-False}  # opt-in: zero the lo
 rollout_mode=${ROLLOUT_MODE:-"async"}
 rollout_name=${ROLLOUT_NAME:-"vllm"}
 
-# Use the same locked environment for the submitting CLI, driver and Ray workers.
+# Lock the remote training driver and Ray workers; submission only needs the Ray CLI.
 # The default task uses veFaaS; select modal/e2b when using a different task config.
 UV_RUN=(uv run --locked --all-packages --python 3.12
     --extra "${rollout_name}" --extra megatron --extra swebench
@@ -132,7 +132,7 @@ else
     mtp_overrides=()
 fi
 
-"${UV_RUN[@]}" ray job submit --no-wait --working-dir . --runtime-env "${RUNTIME_ENV}" \
+ray job submit --no-wait --working-dir . --runtime-env "${RUNTIME_ENV}" \
     -- env RAY_OVERRIDE_JOB_RUNTIME_ENV=1 \
     "${UV_RUN[@]}" python -m verl.trainer.main_ppo \
     --config-name=ppo_megatron_trainer \
