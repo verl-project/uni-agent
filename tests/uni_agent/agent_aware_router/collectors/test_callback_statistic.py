@@ -365,9 +365,9 @@ class TestCollectorCallbackIntegration:
         from uni_agent.agent_aware_router.collectors.collector import Collector
 
         collector = Collector(CallbackTransport(_FakeBalancer()), InflightParser())
-        assert collector._inflight_event(b"bytes", "") is None
-        assert collector._inflight_event(StatisticEvent("on_acquire"), "") is None  # no replica
-        assert collector._inflight_event(StatisticEvent("on_servers_removed", server_ids=["s0"]), "") is None
+        assert collector._parser.parse(b"bytes", "") is None
+        assert collector._parser.parse(StatisticEvent("on_acquire"), "") is None  # no replica
+        assert collector._parser.parse(StatisticEvent("on_servers_removed", server_ids=["s0"]), "") is None
 
 
 class TestInflightBlockPin:
@@ -460,7 +460,7 @@ class TestInflightBlockPin:
             balancer.callbacks["on_acquire"][0]("r1", "s0", prompt)
             assert ds.inflight_block_count("s0") == 4
 
-            collector._write_kv_update(KVCacheUpdate(node_id="s0", clear_all=True))
+            collector._sink.apply_kv(KVCacheUpdate(node_id="s0", clear_all=True))
             assert ds.inflight_block_count("s0") == 0  # the book itself was cleared, no phantom count
 
             balancer.callbacks["on_release"][0]("s0", "r1")  # pre-clear request: no marker, no-op
@@ -585,14 +585,14 @@ class TestInflightBlockPin:
             balancer.callbacks["on_acquire"][0]("r1", "s0", prompt)
             assert ds.get_layer_prefix_hit_rate("s0", chain) == 1.0
             assert ds.per_replica_block_counts() == {"s0": 4}
-            assert collector._dispatch_recorded_blocks == 4
+            assert collector._sink._observer._dispatch_recorded_blocks == 4
 
             balancer.callbacks["on_release"][0]("s0", "r1")
             assert ds.inflight_block_count("s0") == 0  # held drops...
             assert ds.per_replica_block_counts() == {"s0": 4}  # ...resident survives release
 
             balancer.callbacks["on_acquire"][0]("r2", "s0", prompt)
-            assert collector._dispatch_recorded_blocks == 4  # r2's record is a no-op
+            assert collector._sink._observer._dispatch_recorded_blocks == 4  # r2's record is a no-op
         finally:
             collector.stop()
 
@@ -691,7 +691,7 @@ class TestCollectorEmitsToInsight:
         from uni_agent.agent_aware_router.collectors.collector import Collector
 
         collector = Collector(CallbackTransport(_FakeBalancer()), InflightParser())
-        collector._write_metrics_update(
+        collector._sink.apply_metrics(
             MetricsUpdate(
                 node_id="s0",
                 metrics={
@@ -728,6 +728,6 @@ class TestCollectorEmitsToInsight:
         from uni_agent.agent_aware_router.types import Layer
 
         collector = Collector(CallbackTransport(_FakeBalancer()), InflightParser())
-        collector._write_kv_update(KVCacheUpdate(node_id="s0", remove_blocks={Layer.GPU: ["h1", "h2", "h3"]}))
+        collector._sink.apply_kv(KVCacheUpdate(node_id="s0", remove_blocks={Layer.GPU: ["h1", "h2", "h3"]}))
 
         assert self._rl.calls == [("counter", "kv_evictions", 3, {"replica": "s0"})]

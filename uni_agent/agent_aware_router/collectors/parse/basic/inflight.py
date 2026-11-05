@@ -14,7 +14,7 @@
 
 """InflightParser — Balancer acquire/release callbacks → netted metric deltas + block commands.
 
-the collector gathers the per-event state from the store and hands it to :meth:`InflightParser.parse`
+the updater gathers the per-event state from the store and hands it to :meth:`InflightParser.parse`
 as keyword arguments; the parser decides and emits ``InflightBlockUpdate`` pin/unpin/stale_unpin
 commands plus fully-netted ``MetricsUpdate`` deltas.
 """
@@ -40,11 +40,11 @@ class InflightParser(Parser):
             ``StatisticEvent``; anything else is ignored (``None``).
         node_id: Source endpoint id (empty for the callback transport — the
             event carries its own replica).
-        turn: The request's turn after the collector's increment (acquire) or
+        turn: The request's turn after the updater's increment (acquire) or
             its stored turn (release); 0 when unattributable.
         stale: The request's still-held pin marker (``get_marker`` peek), or
             ``None`` — its presence marks the previous release as dropped.
-        block_size: The learned KV block size (store read by the collector);
+        block_size: The learned KV block size (store read by the updater);
             0 = not yet learned → nothing resolvable, nothing pinned.
         booked_len: The request's currently-booked prompt length — the stale
             dispatch's booking netted out on acquire, folded out on release.

@@ -17,7 +17,7 @@
 Fed by ``CallbackTransport``, which packs each Balancer callback into a
 ``StatisticEvent``. The parser is stateless — it dispatches on the event
 type and emits a ``StickyUpdate``; the ``Collector`` applies it to the
-per-request store via ``DataStore``.
+request-state capability via the updater.
 
 Event → action mapping:
 - ``on_acquire(request_id, replica_id)``     → ``put`` (bind/refresh)

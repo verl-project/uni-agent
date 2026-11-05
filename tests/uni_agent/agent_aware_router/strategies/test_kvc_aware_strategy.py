@@ -87,6 +87,9 @@ class FakeRouteDataProvider:
         self._data = data
         self._sticky = sticky or {}
         self._per_request: dict[str, dict] = {}
+        self.metrics = self
+        self.kv = self
+        self.requests = self
 
     def get_sticky_binding(self, request_id: str) -> str | None:
         return self._sticky.get(request_id)
@@ -141,6 +144,12 @@ class FakeRouteDataProvider:
 
     def set_per_request(self, request_id: str, key: str, value) -> None:
         self._per_request.setdefault(request_id, {})[key] = value
+
+    def get_prefix_cache(self, request_id: str):
+        return self.get_per_request(request_id, "prefix_hashes")
+
+    def set_prefix_cache(self, request_id: str, value) -> None:
+        self.set_per_request(request_id, "prefix_hashes", value)
 
 
 class ConstantStrategy:

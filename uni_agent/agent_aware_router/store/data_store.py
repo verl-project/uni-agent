@@ -18,19 +18,19 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..types import Layer, MetricKey
+from ..types import Layer
+from .capabilities import KVState, MetricsState, RequestState
 from .kv_cache_store import KVCacheStore
 from .per_replica_store import PerReplicaStore
 from .per_request_store import PerRequestStore
 
-_STICKY_KEY = "sticky_replica"
-
 
 class DataStore:
-    """Unified data access layer — single entry point for all store operations.
+    """Composition root and compatibility facade for the three store capabilities.
 
-    Wraps the singleton stores and exposes a unified interface for all
-    reads and writes.  Stateless — instantiate once and reuse.
+    New code uses ``metrics``, ``kv`` and ``requests``. Flat methods remain
+    compatibility delegates, including legacy scratch access; production
+    callers use named request operations instead of owning scratch keys.
 
     Usage:
         store = DataStore()
@@ -46,6 +46,9 @@ class DataStore:
         self._metrics = PerReplicaStore.singleton()
         self._kv = KVCacheStore.singleton()
         self._per_request = PerRequestStore.singleton()
+        self.metrics = MetricsState(self._metrics)
+        self.kv = KVState(self._kv, self.metrics)
+        self.requests = RequestState(self._per_request)
 
     # ── PerReplicaStore operations ─────────────────────────────────────────
 
@@ -62,7 +65,7 @@ class DataStore:
         Raises:
             KeyError: If key is not a valid canonical key.
         """
-        return self._metrics.get(node_id, key)
+        return self.metrics.get_metric(node_id, key)
 
     def get_metrics(self, node_id: str) -> dict[str, Any]:
         """Get a node's full metrics snapshot.
@@ -73,11 +76,11 @@ class DataStore:
         Returns:
             Dict of canonical_key → value; empty dict if node is absent.
         """
-        return self._metrics.get(node_id)
+        return self.metrics.get_metrics(node_id)
 
     def get_metric_node_ids(self) -> list[str]:
         """Return all node IDs that have metrics in the store."""
-        return self._metrics.all_ids()
+        return self.metrics.get_metric_node_ids()
 
     def refresh_metrics(self, new_data: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
         """Batch refresh metrics from collectors.
@@ -92,7 +95,7 @@ class DataStore:
         Returns:
             ``{node_id: full_merged_snapshot}`` (see ``PerReplicaStore.refresh``).
         """
-        return self._metrics.refresh(new_data)
+        return self.metrics.refresh_metrics(new_data)
 
     # ── KVCacheStore operations ─────────────────────────────────────────
 
@@ -102,7 +105,7 @@ class DataStore:
         Returns:
             Block size in tokens, or None if not yet learned.
         """
-        return self._kv.block_size
+        return self.kv.get_block_size()
 
     def set_block_size(self, size: int) -> None:
         """Set block size (learned from first BlockStored event).
@@ -110,8 +113,7 @@ class DataStore:
         Args:
             size: Block size in tokens.
         """
-        if self._kv.block_size is None:
-            self._kv.block_size = size
+        return self.kv.set_block_size(size)
 
     def add_kv_blocks(self, node_id: str, block_hashes: list[str], layer: Layer = Layer.GPU) -> None:
         """Add KV cache blocks to a node.
@@ -121,7 +123,7 @@ class DataStore:
             block_hashes: List of local prefix hashes to add.
             layer: Cache layer (``Layer.GPU``/``Layer.CPU``/``Layer.SSD``).
         """
-        self._kv.add_blocks(node_id, block_hashes, layer=layer)
+        return self.kv.add_kv_blocks(node_id, block_hashes, layer)
 
     def record_dispatch_blocks(self, node_id: str, block_hashes: list[str]) -> int:
         """Mark a dispatched request's prefix blocks resident on a node (GPU).
@@ -137,7 +139,7 @@ class DataStore:
         Returns:
             Number of blocks this call newly made resident (0 for a full hit).
         """
-        return self._kv.record_dispatch_blocks(node_id, block_hashes)
+        return self.kv.record_dispatch_blocks(node_id, block_hashes)
 
     def remove_kv_blocks(self, node_id: str, block_hashes: list[str], layer: Layer = Layer.GPU) -> None:
         """Remove KV cache blocks from a node.
@@ -147,7 +149,7 @@ class DataStore:
             block_hashes: List of local prefix hashes to remove.
             layer: Cache layer (``Layer.GPU``/``Layer.CPU``/``Layer.SSD``).
         """
-        self._kv.remove_blocks(node_id, block_hashes, layer=layer)
+        return self.kv.remove_kv_blocks(node_id, block_hashes, layer)
 
     def clear_kv_node(self, node_id: str) -> None:
         """Clear all KV cache state for a node: resident blocks, block refs, markers.
@@ -155,19 +157,19 @@ class DataStore:
         Args:
             node_id: Target node.
         """
-        self._kv.clear_replica(node_id)
+        return self.kv.clear_kv_node(node_id)
 
     def get_kv_block_count(self) -> int:
         """Return the number of unique block hashes currently cached."""
-        return len(self._kv.replicas_by_block)
+        return self.kv.get_kv_block_count()
 
     def kv_node_has_blocks(self, node_id: str) -> bool:
         """Return True if node_id appears in at least one cached block."""
-        return any(node_id in replicas for replicas in self._kv.replicas_by_block.values())
+        return self.kv.kv_node_has_blocks(node_id)
 
     def has_kv_block(self, block_hash: str) -> bool:
         """Return True if block_hash is present in the cache index."""
-        return block_hash in self._kv.replicas_by_block
+        return self.kv.has_kv_block(block_hash)
 
     # ── KV cache prefix hit rate queries ────────────────────────────────
 
@@ -192,7 +194,7 @@ class DataStore:
         Returns:
             Hit rate 0.0–1.0.
         """
-        return self._kv.get_layer_prefix_hit_rate(node_id, hash_strs, layer)
+        return self.kv.get_layer_prefix_hit_rate(node_id, hash_strs, layer)
 
     # ── KV-cache load (load signal) ─────────────────────────────────────
 
@@ -204,13 +206,7 @@ class DataStore:
         LRU eviction. Returns 0.0 when retained blocks or ``num_gpu_blocks`` is
         unavailable (e.g. mc-off groups emit no kv-events).
         """
-        retained = self._kv.per_replica_block_counts().get(node_id, 0)
-        if retained <= 0:
-            return 0.0
-        total = self._metrics.get(node_id, MetricKey.NUM_GPU_BLOCKS)
-        if not total or total <= 0:
-            return 0.0
-        return min(1.0, retained / float(total))
+        return self.kv.kv_cache_load(node_id)
 
     def per_replica_block_counts(self) -> dict[str, int]:
         """Return ``{replica_id: number of distinct prefix blocks it retains}``.
@@ -218,7 +214,7 @@ class DataStore:
         Thin pass-through to ``KVCacheStore``; used by the periodic kv-events
         tally log to surface retained-block counts per replica.
         """
-        return self._kv.per_replica_block_counts()
+        return self.kv.per_replica_block_counts()
 
     # ── Block reference counts and per-request markers ──────────────────
 
@@ -227,27 +223,27 @@ class DataStore:
 
         Thin pass-through to ``KVCacheStore`` (see :meth:`KVCacheStore.incr_block_refs`).
         """
-        self._kv.incr_block_refs(replica_id, hash_strs)
+        return self.kv.incr_block_refs(replica_id, hash_strs)
 
     def decr_block_refs(self, replica_id: str, hash_strs: list[str]) -> None:
         """Drop one reference to every hash on a replica (multiset remove)."""
-        self._kv.decr_block_refs(replica_id, hash_strs)
+        return self.kv.decr_block_refs(replica_id, hash_strs)
 
     def inflight_block_count(self, replica_id: str) -> int:
         """Number of distinct hashes currently referenced on ``replica_id``."""
-        return self._kv.inflight_block_count(replica_id)
+        return self.kv.inflight_block_count(replica_id)
 
     def put_marker(self, request_id: str, replica_id: str, hash_strs: list[str]) -> None:
         """Store a per-request snapshot row (see :meth:`KVCacheStore.put_marker`)."""
-        self._kv.put_marker(request_id, replica_id, hash_strs)
+        return self.kv.put_marker(request_id, replica_id, hash_strs)
 
     def get_marker(self, request_id: str) -> dict[str, Any] | None:
         """Return a copy of a request's marker row without clearing it (``None`` if absent)."""
-        return self._kv.get_marker(request_id)
+        return self.kv.get_marker(request_id)
 
     def pop_marker(self, request_id: str) -> dict[str, Any] | None:
         """Remove and return a request's marker row (``None`` if absent)."""
-        return self._kv.pop_marker(request_id)
+        return self.kv.pop_marker(request_id)
 
     # ── PerReplicaStore incremental write ──────────────────────────────────
 
@@ -261,7 +257,7 @@ class DataStore:
         Returns:
             The new value of ``key``.
         """
-        return self._metrics.incr(node_id, key, delta)
+        return self.metrics.incr_metric(node_id, key, delta)
 
     def incr_metrics(self, node_id: str, deltas: dict[str, int | float]) -> dict[str, int | float]:
         """Apply multiple signed deltas to one node under a single lock.
@@ -273,25 +269,25 @@ class DataStore:
         Returns:
             ``{canonical_key: new_value}`` for every key in ``deltas``.
         """
-        return self._metrics.incr_many(node_id, deltas)
+        return self.metrics.incr_metrics(node_id, deltas)
 
-    # ── Sticky bindings (a per-request value stored under _STICKY_KEY) ───
+    # ── Request-state compatibility delegates ─────────────────────────
 
     def get_sticky_binding(self, request_id: str) -> str | None:
         """Return the bound replica_id for ``request_id`` (None if cold/evicted)."""
-        return self._per_request.get(request_id, _STICKY_KEY)
+        return self.requests.get_sticky_binding(request_id)
 
     def put_sticky_binding(self, request_id: str, replica_id: str) -> None:
         """Bind / refresh ``request_id → replica_id`` (driven by ``on_acquire``)."""
-        self._per_request.set(request_id, _STICKY_KEY, replica_id)
+        return self.requests.put_sticky_binding(request_id, replica_id)
 
     def invalidate_sticky_binding(self, request_id: str) -> None:
         """Drop one request_id's sticky binding."""
-        self._per_request.delete(request_id, _STICKY_KEY)
+        return self.requests.invalidate_sticky_binding(request_id)
 
     def invalidate_sticky_replica(self, replica_id: str) -> None:
         """Drop every sticky binding pointing at a removed replica."""
-        self._per_request.delete_where(_STICKY_KEY, replica_id)
+        return self.requests.invalidate_sticky_replica(replica_id)
 
     def clear_sticky_bindings(self) -> int:
         """Drop every sticky binding regardless of target replica.
@@ -302,13 +298,13 @@ class DataStore:
         Returns:
             Number of request rows a binding was dropped from.
         """
-        return self._per_request.delete_key(_STICKY_KEY)
+        return self.requests.clear_sticky_bindings()
 
     def sticky_status(self) -> dict:
         """Return a debugging snapshot of the sticky bindings."""
-        return {"max_size": self._per_request.max_size, "size": self._per_request.count(_STICKY_KEY)}
+        return self.requests.sticky_status()
 
-    # ── PerRequestStore operations ─────────────────────────────────────
+    # ── Legacy scratch access; new code uses named requests operations ──
 
     def incr_per_request(self, request_id: str, key: str, delta: int | float = 1):
         """Apply a signed delta to one per-request value; return the new value.

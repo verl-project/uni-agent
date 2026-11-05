@@ -30,7 +30,7 @@ from ..utils.prefix_cache import resolve_prefix_hashes
 from .registry import StrategyRegistry
 
 if TYPE_CHECKING:
-    from ..store import DataStore
+    from ..store.contracts import RoutingState
     from .base import ReplicaInfo
 
 logger = logging.getLogger(__name__)
@@ -172,7 +172,7 @@ class KVCacheAwareStrategy:
             seed=kwargs["seed"],
         )
 
-    def is_overloaded(self, store: DataStore, replica: ReplicaInfo) -> bool:
+    def is_overloaded(self, store: RoutingState, replica: ReplicaInfo) -> bool:
         """Return True if ``replica`` is overloaded (``load > load_threshold``).
 
         Used only by the sticky short-circuit to decide whether to send a
@@ -184,7 +184,7 @@ class KVCacheAwareStrategy:
         if self.overload_mode == OverloadMode.NONE:
             return False
         if self.overload_mode == OverloadMode.KV_CACHE_USAGE_PERC:
-            kv_perc = store.get_metric(replica.replica_id, MetricKey.KV_CACHE_USAGE_PERC) or 0.0
+            kv_perc = store.metrics.get_metric(replica.replica_id, MetricKey.KV_CACHE_USAGE_PERC) or 0.0
             logger.info(f"is-overload replica={replica.replica_id} kv_perc={kv_perc:.4f}")
             return kv_perc > self.load_threshold
         if self.overload_mode == OverloadMode.REMAINING_CAP:
@@ -194,8 +194,8 @@ class KVCacheAwareStrategy:
                 # can be evaluated, so never break sticky on missing data.
                 return False
             thresh = cap * (1.0 - self.load_threshold)
-            block_size = store.get_block_size() or 16
-            inflight_blocks = store.inflight_block_count(replica.replica_id)
+            block_size = store.kv.get_block_size() or 16
+            inflight_blocks = store.kv.inflight_block_count(replica.replica_id)
             avail = cap - inflight_blocks * block_size
             if avail >= thresh:
                 return False
@@ -207,14 +207,14 @@ class KVCacheAwareStrategy:
 
     def _sticky_shortcut(
         self,
-        store: DataStore,
+        store: RoutingState,
         replicas: list[ReplicaInfo],
         request_id: str | None,
     ) -> list[float] | None:
         """Return a pre-built score list if a sticky replica should win, else None.
 
         Sticky wins when ``request_id`` is provided and the bound replica (from
-        ``store.get_sticky_binding``) is present in ``replicas`` and NOT
+        ``store.requests.get_sticky_binding``) is present in ``replicas`` and NOT
         overloaded — the overload check is unconditional here; turn it off via
         ``overload_mode=None``. On win, returns a list with
         ``STICKY_TOP_SCORE`` at the bound index and ``0.0`` elsewhere;
@@ -222,7 +222,7 @@ class KVCacheAwareStrategy:
         """
         if not request_id:
             return None
-        sticky_id = store.get_sticky_binding(request_id)
+        sticky_id = store.requests.get_sticky_binding(request_id)
         if sticky_id is None:
             return None
         for idx, replica in enumerate(replicas):
@@ -240,7 +240,7 @@ class KVCacheAwareStrategy:
     def score(
         self,
         prompt_ids: list[int] | None,
-        store: DataStore,
+        store: RoutingState,
         replicas: list[ReplicaInfo],
         request_id: str | None = None,
     ) -> list[float]:
@@ -264,7 +264,7 @@ class KVCacheAwareStrategy:
                 if shortcut is not None:
                     return shortcut
             if self.slow_cut == SlowCut.LEAST_INFLIGHT:
-                return [-store.get_metric(r.replica_id, MetricKey.INFLIGHT_COUNT) for r in replicas]
+                return [-store.metrics.get_metric(r.replica_id, MetricKey.INFLIGHT_COUNT) for r in replicas]
             # Hash-resolving slow_cuts share one resolution across all replicas.
             gpu_hash_strs = resolve_prefix_hashes(prompt_ids or [], request_id, store)
             if self.slow_cut == SlowCut.CAPACITY_TOKEN_AWARE:
@@ -275,7 +275,7 @@ class KVCacheAwareStrategy:
 
     def _cache_score(
         self,
-        store: DataStore,
+        store: RoutingState,
         replica: ReplicaInfo,
         hash_strs: list[str],
     ) -> tuple[float, float]:
@@ -288,9 +288,9 @@ class KVCacheAwareStrategy:
         walk. CPU/SSD return 0.0 today (see ``KVCacheStore.get_layer_prefix_hit_rate``).
         Returns ``(s_cache, gpu_hit)`` so the caller logs gpu_hit without re-querying.
         """
-        gpu_hit = store.get_layer_prefix_hit_rate(replica.replica_id, hash_strs, Layer.GPU)
-        cpu_hit = store.get_layer_prefix_hit_rate(replica.replica_id, hash_strs, Layer.CPU)
-        ssd_hit = store.get_layer_prefix_hit_rate(replica.replica_id, hash_strs, Layer.SSD)
+        gpu_hit = store.kv.get_layer_prefix_hit_rate(replica.replica_id, hash_strs, Layer.GPU)
+        cpu_hit = store.kv.get_layer_prefix_hit_rate(replica.replica_id, hash_strs, Layer.CPU)
+        ssd_hit = store.kv.get_layer_prefix_hit_rate(replica.replica_id, hash_strs, Layer.SSD)
         w = self.layer_weights
         s_cache = w[Layer.GPU] * gpu_hit + w[Layer.CPU] * cpu_hit + w[Layer.SSD] * ssd_hit
         return s_cache, gpu_hit
@@ -307,23 +307,23 @@ class KVCacheAwareStrategy:
             logger.debug(f"soft-pick: candidates={candidates} values={values} tol={tolerance} picked={picked}")
         return picked
 
-    def _total_token_capacity(self, store: DataStore) -> int:
+    def _total_token_capacity(self, store: RoutingState) -> int:
         """Per-replica KV-cache token capacity = ``num_gpu_blocks × block_size``.
 
         ``block_size`` is learned from the first KV event (defaults to 16 if not
         yet seen). Returns 0 when unavailable, in which case the caller ranks by
         in-flight request count.
         """
-        for node_id in store.get_metric_node_ids():
-            nblk = store.get_metric(node_id, MetricKey.NUM_GPU_BLOCKS)
+        for node_id in store.metrics.get_metric_node_ids():
+            nblk = store.metrics.get_metric(node_id, MetricKey.NUM_GPU_BLOCKS)
             if nblk and nblk > 0:
-                block_size = store.get_block_size() or 16
+                block_size = store.kv.get_block_size() or 16
                 return int(nblk) * int(block_size)
         return 0
 
     def _capacity_token_scores(
         self,
-        store: DataStore,
+        store: RoutingState,
         replicas: list[ReplicaInfo],
         prompt_ids: list[int],
         gpu_hash_strs: list[str],
@@ -353,14 +353,14 @@ class KVCacheAwareStrategy:
         cap = self._total_token_capacity(store)
         # Same 16 default as _total_token_capacity, so both stay in the same unit
         # before the first KV event teaches the real block size.
-        block_size = store.get_block_size() or 16
+        block_size = store.kv.get_block_size() or 16
         plen = len(prompt_ids) if prompt_ids else 0
         rows: list[dict] = []
         for replica in replicas:
-            kv_perc = store.get_metric(replica.replica_id, MetricKey.KV_CACHE_USAGE_PERC) or 0.0
-            inflight = store.get_metric(replica.replica_id, MetricKey.INFLIGHT_COUNT) or 0
-            inflight_tokens = store.get_metric(replica.replica_id, MetricKey.INFLIGHT_TOKENS) or 0
-            inflight_blocks = store.inflight_block_count(replica.replica_id)
+            kv_perc = store.metrics.get_metric(replica.replica_id, MetricKey.KV_CACHE_USAGE_PERC) or 0.0
+            inflight = store.metrics.get_metric(replica.replica_id, MetricKey.INFLIGHT_COUNT) or 0
+            inflight_tokens = store.metrics.get_metric(replica.replica_id, MetricKey.INFLIGHT_TOKENS) or 0
+            inflight_blocks = store.kv.inflight_block_count(replica.replica_id)
             s_cache, gpu_hit = self._cache_score(store, replica, gpu_hash_strs)
             avail = cap - inflight_blocks * block_size
             need = plen * (1.0 - gpu_hit)

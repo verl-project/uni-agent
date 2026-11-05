@@ -130,7 +130,7 @@ def test_wire_events_change_prefix_hit_rate(removed_hash, expected_hit):
     def apply(event):
         update = collector._parser.parse(kv_payload(mapping_event(event)), NODE_ID)
         assert update is not None
-        collector._write_kv_update(update)
+        collector._sink.apply_kv(update)
 
     try:
         apply(["BlockStored", [101], None, SHORT_IDS, BLOCK_SIZE, None, "GPU"])

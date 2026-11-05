@@ -275,7 +275,7 @@ class KVCAwareBalancer:
             "provider": type(self._provider).__name__,
             "strategies": [{"type": type(self._strategy).__name__}],  # legacy key; single strategy
             "route_calls": self._route_calls,
-            "sticky_size": self._store.sticky_status()["size"],
+            "sticky_size": self._store.requests.sticky_status()["size"],
             "total_inflight": self.get_total_inflight(),
         }
 
@@ -335,7 +335,7 @@ class KVCAwareBalancer:
 
     def clear_sticky_cache(self) -> dict:
         """Clear sticky bindings while preserving prefix checkpoints."""
-        cleared = self._store.clear_sticky_bindings()
+        cleared = self._store.requests.clear_sticky_bindings()
         loads = dict(self._inflight)
         logger.info("clear_sticky_cache: cleared %s binding(s); server_loads=%s", cleared, loads)
         return {"cleared_entries": cleared, "server_loads": loads}
