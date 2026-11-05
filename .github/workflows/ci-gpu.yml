@@ -78,25 +78,10 @@ jobs:
           uv sync --locked --all-packages --extra vllm --extra megatron --extra swebench
           $UV_RUN python scripts/refresh_uv.py --check
 
-      # Run the framework suite against the locked GPU dependency stack too.
-      # Keep it in a separate pytest process so its session-scoped Ray runtime
-      # is shut down before the GPU smoke creates its own Ray cluster.
-      - name: Test CPU suite in locked GPU environment
-        env:
-          # Avoid Ray's native OTel getenv/setenv startup race during actor tests.
-          RAY_enable_open_telemetry: "0"
-        run: |
-          export PYTHONPATH="${PYTHONPATH}:${GITHUB_WORKSPACE}"
-          # Gateway integration tests address this host by its Ray node IP.
-          # Keep those requests local while preserving proxy access for installs.
-          export NO_PROXY="${NO_PROXY},$($UV_RUN python -c 'from ray.util import get_node_ip_address; print(get_node_ip_address())')"
-          export no_proxy="${NO_PROXY}"
-          $UV_RUN pytest -v -rA tests/uni_agent/ -m="cpu and level0" --cov=./uni_agent/ --cov-report=xml --cov-report=term
-
       - name: Test GPU environment and Ray workers
         run: |
           export PYTHONPATH="${PYTHONPATH}:${GITHUB_WORKSPACE}"
-          $UV_RUN pytest -v -rA -s tests/uni_agent/ -m="gpu and level0" --cov=./uni_agent/ --cov-append --cov-report=xml --cov-report=term
+          $UV_RUN pytest -v -rA -s tests/uni_agent/ -m="gpu and level0" --cov=./uni_agent/ --cov-report=xml --cov-report=term
 
       - name: Upload GPU coverage
         uses: codecov/codecov-action@v4

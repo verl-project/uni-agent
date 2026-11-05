@@ -74,9 +74,12 @@ uv sync --locked --all-packages --extra vllm --extra megatron \
 These names are available through the workspace; they are not all validated
 Uni-Agent training combinations. GPU CI covers `vllm` + `megatron` + `swebench`;
 `veomni-sft` and `torchtitan` do not have Uni-Agent GPU validation in this PR.
-The GPU job first runs the CPU level0 framework suite inside that locked GPU
-environment, then runs the GPU level0 smoke in a separate pytest process. Both
-are required; their coverage is combined and verbose logs identify each case.
+CPU level0 tests run in `tests-cpu`. The GPU job runs GPU level0 environment
+checks, with verbose case names and outcomes. The existing router E2E test
+(`tests/uni_agent/agent_aware_router/e2e/test_router_e2e.py`) is marked GPU
+level1 and is not selected by daily GPU CI. It requires a real model directory
+(`VLLM_MODEL`) and SWE-bench parquet (`SWEBENCH_DATASET`); passing the UV smoke
+does not validate that E2E path or full model training.
 
 `dev` is a **dependency group**, not an extra. It contains Uni-Agent's test/lint
 tools and is installed by default; pass `--no-dev` for runtime-only environments.
