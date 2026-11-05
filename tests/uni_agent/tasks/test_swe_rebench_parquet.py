@@ -67,6 +67,8 @@ def test_preprocess_parquet_round_trip(parquet, tmp_path, selection, limit):
         assert task["metadata"]["patch"] == original["patch"]
         assert task["metadata"]["test_patch"] == original["test_patch"]
         assert task["metadata"]["test_cmd"] == "pytest"
+        assert task["metadata"]["FAIL_TO_PASS"] == original["FAIL_TO_PASS"]
+        assert task["metadata"]["PASS_TO_PASS"] == original["PASS_TO_PASS"]
         assert record["prompt"] == [{"role": "user", "content": original["problem_statement"]}]
         assert "GOLD PATCH" not in str(record["prompt"])
         assert "TEST PATCH" not in str(record["prompt"])

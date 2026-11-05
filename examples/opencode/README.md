@@ -197,9 +197,11 @@ opt-in or optional CPU dependencies produces an explicit skip; a passing
 integration result requires no skips. These local probes do not exercise an
 internal E2B template or real model.
 
-The CLI/Gateway probes and real-CLI Task cases are disabled unless OPENCODE_BIN
-is explicitly set. To run them against a provisioned OpenCode 1.19.3 executable (as a command
-on PATH or an executable path):
+The 1.x CLI/Gateway probes and real-CLI Task cases are disabled unless
+`OPENCODE_BIN` is explicitly set. The OpenCode2 Gateway probe is independently
+enabled by `OPENCODE2_BIN` and does not require `OPENCODE_BIN`. To run the 1.x
+probes against a provisioned OpenCode 1.19.3 executable (as a command on PATH or
+an executable path):
 
 ```bash
 OPENCODE_BIN=/opt/opencode/node_modules/.bin/opencode \

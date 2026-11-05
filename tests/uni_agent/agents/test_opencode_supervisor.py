@@ -2,10 +2,12 @@
 
 import importlib.util
 import os
+import signal
 import subprocess
 import sys
 import threading
 import time
+from contextlib import suppress
 from pathlib import Path
 
 import pytest
@@ -105,13 +107,17 @@ def test_stdout_drain_uses_bounded_reads_without_newlines(monkeypatch):
     assert sizes and max(sizes) <= 65536
 
 
-def test_partial_startup_failure_reaps_server_and_does_not_start_client(tmp_path):
+@pytest.mark.parametrize("ignore_stdin_eof", [False, True], ids=["stdin-lease", "kill-fallback"])
+def test_partial_startup_failure_reaps_server_and_does_not_start_client(tmp_path, ignore_stdin_eof):
     fake = tmp_path / "server.py"
     marker = tmp_path / "client"
+    pid_file = tmp_path / "server.pid"
     fake.write_text(
-        "import sys\nfrom pathlib import Path\n"
+        "import os,sys,time\nfrom pathlib import Path\n"
         "if 'serve' in sys.argv:\n"
+        f" Path({str(pid_file)!r}).write_text(str(os.getpid()))\n"
         " print('{', end='', flush=True)\n sys.stdin.read()\n"
+        f" if {ignore_stdin_eof!r}: time.sleep(60)\n"
         f"else: Path({str(marker)!r}).touch()\n"
     )
     script = (
@@ -119,12 +125,22 @@ def test_partial_startup_failure_reaps_server_and_does_not_start_client(tmp_path
         f"s=importlib.util.spec_from_file_location('supervisor',{str(PATH)!r})\n"
         "m=importlib.util.module_from_spec(s);s.loader.exec_module(m)\n"
         f"m.COMMAND=[sys.executable,{str(fake)!r}]\n"
-        "read=m.read_ready;m.read_ready=lambda stream:read(stream,timeout=0.1)\n"
+        "read=m.read_ready;m.read_ready=lambda stream:read(stream,timeout=0.5)\n"
         "sys.argv=['supervisor','run','--standalone','--','prompt']\n"
         "raise SystemExit(m.main())\n"
     )
-    result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=5)
-    assert result.returncode == 1
-    assert result.stderr.strip() == "OpenCode private server startup failed: RuntimeError"
-    assert "Traceback" not in result.stderr
-    assert not marker.exists()
+    try:
+        result = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=10)
+        assert result.returncode == 1
+        assert result.stderr.strip() == "OpenCode private server startup failed: RuntimeError"
+        assert "Traceback" not in result.stderr
+        assert not marker.exists()
+        # A successful supervisor exit must have reaped the recorded server,
+        # including the fallback for a server that ignores its stdin lease.
+        with pytest.raises(ProcessLookupError):
+            os.kill(int(pid_file.read_text()), 0)
+    finally:
+        # subprocess.run's timeout only kills the supervisor, not its server.
+        # Rescue the exact test-owned PID even if a regression fails assertions.
+        with suppress(FileNotFoundError, ProcessLookupError):
+            os.kill(int(pid_file.read_text()), signal.SIGKILL)
