@@ -82,7 +82,7 @@ jobs:
       - name: Test with pytest
         run: |
           export PYTHONPATH="${PYTHONPATH}:${GITHUB_WORKSPACE}"
-          $UV_RUN pytest -s tests/uni_agent/ -m="gpu and level0" --cov=./uni_agent/ --cov-report=xml --cov-report=term
+          $UV_RUN pytest -v -rA -s tests/uni_agent/ -m="gpu and level0" --cov=./uni_agent/ --cov-report=xml --cov-report=term
 
       - name: Upload GPU coverage
         uses: codecov/codecov-action@v4
