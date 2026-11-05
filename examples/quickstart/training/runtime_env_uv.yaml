@@ -1,6 +1,8 @@
 # Run from the repository root. Ray ships pyproject.toml, uv.lock and verl/;
 # uv creates a project-local environment on the driver and workers.
-# Do not add pip, conda, uv or py_executable here: uv run owns the environment.
+# The scripts pass py_executable via verl's ray.init config because the pinned
+# verl disables Ray's automatic UV hook. Do not add a second py_executable, pip,
+# conda or uv environment here; the scripts select the locked backend extras.
 working_dir: .
 excludes:
   - "/.git/"

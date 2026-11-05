@@ -32,6 +32,10 @@ rollout_name=${ROLLOUT_NAME:-"vllm"} # sglang or vllm
 UV_RUN=(uv run --locked --all-packages --python 3.12
     --extra "${rollout_name}" --extra megatron --extra swebench
     --extra "${UV_SANDBOX_EXTRA:-vefaas}")
+# The pinned verl disables Ray's automatic UV hook, so forward the worker
+# interpreter explicitly through verl's ray.init runtime-env configuration.
+printf -v RAY_PY_EXECUTABLE '%q ' "${UV_RUN[@]}" python
+RAY_PY_EXECUTABLE=${RAY_PY_EXECUTABLE% }
 
 # Algorithm parameters
 adv_estimator=${ADV_ESTIMATOR:-grpo}
@@ -121,6 +125,7 @@ ray job submit --no-wait --working-dir . --runtime-env "${RUNTIME_ENV}" \
     -- env RAY_OVERRIDE_JOB_RUNTIME_ENV=1 \
     "${UV_RUN[@]}" python -m verl.trainer.main_ppo \
     --config-name=ppo_megatron_trainer \
+    "ray_kwargs.ray_init.runtime_env.py_executable='${RAY_PY_EXECUTABLE}'" \
     trainer.use_v1=True \
     trainer.v1.trainer_mode=colocate_async \
     trainer.v1.colocate_async.num_warmup_batches=${num_warmup_batches} \

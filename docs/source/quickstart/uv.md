@@ -86,8 +86,12 @@ tools and is installed by default; pass `--no-dev` for runtime-only environments
 The GPU quickstarts `examples/quickstart/training/train_qwen3_moe.sh` and
 `train_qwen3p5_dense.sh` use the plain Ray CLI to submit jobs and a locked UV
 command for the remote Python entrypoint. The submitting machine only needs a
-compatible Ray CLI, not the training GPU dependencies. Ray propagates the driver's UV command to its
-workers, as described in [Ray's UV integration](https://docs.ray.io/en/latest/ray-core/handling-dependencies.html#using-uv-for-package-management).
+compatible Ray CLI, not the training GPU dependencies. Ray supports propagating
+UV through [`py_executable`](https://docs.ray.io/en/latest/ray-core/handling-dependencies.html#using-uv-for-package-management),
+but this pinned verl disables Ray's automatic UV hook in `verl/__init__.py`.
+The scripts therefore explicitly set
+`ray_kwargs.ray_init.runtime_env.py_executable` to the same locked UV command
+plus `python`, ensuring the worker environment matches the remote driver.
 The scripts select `megatron`, `swebench`, the `ROLLOUT_NAME` backend (default
 `vllm`), and `UV_SANDBOX_EXTRA` (default `vefaas`, matching the default task).
 

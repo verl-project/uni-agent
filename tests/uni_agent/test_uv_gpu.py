@@ -4,6 +4,7 @@ import hashlib
 import importlib.metadata
 import os
 import shlex
+import subprocess
 import sys
 from pathlib import Path
 
@@ -61,7 +62,7 @@ def probe_environment():
     }
 
 
-def test_locked_gpu_environment_reaches_ray_worker():
+def check_locked_gpu_environment(py_executable=None):
     import ray
 
     driver = probe_environment()
@@ -78,20 +79,20 @@ def test_locked_gpu_environment_reaches_ray_worker():
         result["uv_command"] = command
         return result
 
+    runtime_env = {
+        "working_dir": str(ROOT),
+        "env_vars": {"PYTHONPATH": os.pathsep.join([".", "tests/uni_agent"])},
+    }
+    if py_executable is not None:
+        runtime_env["py_executable"] = py_executable
+
     try:
         ray.init(
             address="local",
             num_cpus=2,
             num_gpus=1,
             include_dashboard=False,
-            runtime_env={
-                # Let Ray's native UV hook propagate the driver's locked
-                # command and build an environment in its packaged working_dir.
-                "working_dir": str(ROOT),
-                # pytest imports this file as test_uv_gpu. Make that module
-                # importable when Ray deserializes the probe in a new process.
-                "env_vars": {"PYTHONPATH": os.pathsep.join([".", "tests/uni_agent"])},
-            },
+            runtime_env=runtime_env,
         )
         worker = ray.get(worker_probe.remote(), timeout=180)
         print("UV_GPU_DRIVER", driver)
@@ -100,3 +101,24 @@ def test_locked_gpu_environment_reaches_ray_worker():
         assert worker["gpu_count"] == 1, worker
     finally:
         ray.shutdown()
+
+
+def test_locked_gpu_environment_reaches_ray_worker():
+    check_locked_gpu_environment()
+
+
+def test_verl_import_first_with_explicit_worker_command():
+    # A fresh interpreter is essential: importing Ray earlier during pytest
+    # collection can hide verl's opt-out of Ray's automatic UV integration.
+    command = ["uv", "run", "--locked", "--all-packages", "--python", "3.12"]
+    for extra in EXTRAS:
+        command.extend(["--extra", extra])
+    command.append("python")
+    code = (
+        "import os\n"
+        "os.environ['RAY_ENABLE_UV_RUN_RUNTIME_ENV'] = '0'\n"
+        "import verl\n"
+        "from tests.uni_agent.test_uv_gpu import check_locked_gpu_environment\n"
+        f"check_locked_gpu_environment(py_executable={shlex.join(command)!r})\n"
+    )
+    subprocess.run([sys.executable, "-c", code], cwd=ROOT, check=True, timeout=240)

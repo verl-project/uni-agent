@@ -2,6 +2,7 @@
 
 import json
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -58,6 +59,11 @@ def test_training_submission_preserves_locked_remote_environment(tmp_path, recip
     extras = [prefix[i + 1] for i, item in enumerate(prefix[:-1]) if item == "--extra"]
     assert set(extras) == {backend, "megatron", "swebench", sandbox}
     assert remote[3 + len(prefix) : 6 + len(prefix)] == ["python", "-m", "verl.trainer.main_ppo"]
+    configured = next(
+        arg.split("=", 1)[1] for arg in args if arg.startswith("ray_kwargs.ray_init.runtime_env.py_executable=")
+    )
+    command = shlex.split(configured)[0]
+    assert shlex.split(command) == ["uv", *prefix, "python"]
     assert args[-1] == "trainer.total_epochs=1"
     assert f"data.train_files={env['DATA_DIR']}/data/uni_agent/swe_rebench_filtered_1150.parquet" in args
 
