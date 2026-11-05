@@ -14,7 +14,7 @@ pytestmark = [pytest.mark.cpu, pytest.mark.level0]
 
 
 def test_import_and_disabled_registration_do_not_import_vllm():
-    env = {**os.environ, "UNI_AGENT_ENABLE_NATIVE_HASH_METADATA": "0"}
+    env = {**os.environ, "UNI_AGENT_ENABLE_NATIVE_HASH_METADATA": "0", "UNI_AGENT_ENABLE_CACHE_LIFECYCLE": "0"}
     subprocess.run(
         [
             sys.executable,

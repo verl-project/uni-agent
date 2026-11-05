@@ -16,6 +16,7 @@
 
 import asyncio
 import logging
+import socket
 from contextlib import contextmanager
 
 import pytest
@@ -23,22 +24,31 @@ import zmq
 import zmq.asyncio
 
 from uni_agent.agent_aware_router.collectors.transport.base import TransportMessage
+from uni_agent.agent_aware_router.collectors.transport.lifecycle import LifecycleControlReceiver, notify_lifecycle
 from uni_agent.agent_aware_router.collectors.transport.zmq import ZMQTransport
+from uni_agent.agent_aware_router.types.cache_lifecycle import CacheLifecycleState
 
 pytestmark = [pytest.mark.cpu, pytest.mark.level0]
 END_SEQ = (-1).to_bytes(8, "big", signed=True)
 
 
 @contextmanager
-def _source(replay=True):
+def _source(replay=True, host="127.0.0.1"):
     context = zmq.asyncio.Context()
     pub = context.socket(zmq.XPUB)
     pub.setsockopt(zmq.XPUB_VERBOSE, 1)
-    pub_port = pub.bind_to_random_port("tcp://127.0.0.1")
+    ipv6 = ":" in host
+    if ipv6:
+        pub.setsockopt(zmq.IPV6, 1)
+    authority = f"[{host}]" if ipv6 else host
+    bind_address = f"tcp://{authority}"
+    pub_port = pub.bind_to_random_port(bind_address)
     router = context.socket(zmq.ROUTER) if replay else None
-    replay_address = f"127.0.0.1:{router.bind_to_random_port('tcp://127.0.0.1')}" if router else ""
+    if router is not None and ipv6:
+        router.setsockopt(zmq.IPV6, 1)
+    replay_address = f"{authority}:{router.bind_to_random_port(bind_address)}" if router else ""
     try:
-        yield pub, router, {"a": [f"127.0.0.1:{pub_port}", replay_address, "zmq", "topic"]}
+        yield pub, router, {"a": [f"{authority}:{pub_port}", replay_address, "zmq", "topic"]}
     finally:
         pub.close(0)
         if router is not None:
@@ -441,3 +451,158 @@ def test_consumer_error_is_visible_and_does_not_reconnect(caplog, monkeypatch):
     assert len(records) == 1 and "ZMQ endpoint task failed for a" in records[0].getMessage()
     assert records[0].exc_info[0] is ValueError
     assert "consumer rejected the message" in str(records[0].exc_info[1])
+
+
+@pytest.mark.parametrize("changed_field", [0, 1, 3], ids=["sub", "replay", "topic"])
+def test_cursor_is_discarded_when_source_changes(changed_field):
+    endpoint = ["127.0.0.1:1", "127.0.0.1:2", "zmq", "topic"]
+    original = _transport({"a": endpoint})
+    original._deliver("a", 40, b"old", lambda message, node: None)
+    endpoint[changed_field] = "new-topic" if changed_field == 3 else "127.0.0.1:3"
+
+    replacement = _transport({"a": endpoint}, cursors=original.get_cursors())
+
+    assert replacement.get_cursors() == {}
+
+
+def test_replaced_transport_resumes_source_cursor_and_delivers_duplicate_replay():
+    async def run():
+        with _source() as (_, router, endpoints):
+            original = _transport(endpoints)
+            original._deliver("a", 7, b"old", lambda message, node: None)
+            transport = _transport(endpoints, cursors=original.get_cursors())
+            addresses = endpoints["a"]
+            await transport._connect_zmq_for("a", "tcp://" + addresses[0], "tcp://" + addresses[1])
+            received = []
+            try:
+                for batches in ([(7, b"duplicate"), (8, b"next")], []):
+                    responder = asyncio.create_task(_respond(router, transport._replay_cursors["a"] + 1, batches))
+                    assert await asyncio.wait_for(
+                        transport._replay_historical_data_for("a", lambda message, node: received.append(message)), 3
+                    )
+                    await responder
+                assert received == [TransportMessage(b"duplicate", 7), TransportMessage(b"next", 8)]
+                assert transport.get_cursors()["a"][-1] == 8
+            finally:
+                transport.stop()
+
+    asyncio.run(run())
+
+
+def test_empty_truncated_replay_reports_no_continuity_without_replacing_socket():
+    async def run():
+        with _source() as (_, router, endpoints):
+            transport = _transport(endpoints)
+            transport._replay_cursors["a"] = 40
+            addresses = endpoints["a"]
+            await transport._connect_zmq_for("a", "tcp://" + addresses[0], "tcp://" + addresses[1])
+            socket = transport._endpoint_sockets["a"].replay_socket
+            received = []
+            try:
+                replay = asyncio.create_task(
+                    transport._replay_historical_data_for("a", lambda message, node: received.append(message))
+                )
+                identity = await _request(router, 41)
+                await router.send_multipart([identity, b"", END_SEQ, b"kv_replay_truncated"])
+                assert await asyncio.wait_for(replay, 3)
+                assert received == [TransportMessage(b"", status="no_continuity")]
+                assert transport._replay_cursors == {"a": 40}
+                assert transport._endpoint_sockets["a"].replay_socket is socket
+            finally:
+                transport.stop()
+
+    asyncio.run(run())
+
+
+def test_truncated_replay_consumer_failure_is_not_retried_as_network_error():
+    async def run():
+        with _source() as (_, router, endpoints):
+            transport = _transport(endpoints)
+            addresses = endpoints["a"]
+            await transport._connect_zmq_for("a", "tcp://" + addresses[0], "tcp://" + addresses[1])
+            socket = transport._endpoint_sockets["a"].replay_socket
+
+            def handler(message, node):
+                assert message == TransportMessage(b"", status="no_continuity")
+                raise ValueError("consumer failure")
+
+            try:
+                replay = asyncio.create_task(transport._replay_historical_data_for("a", handler))
+                identity = await _request(router, 0)
+                await router.send_multipart([identity, b"", END_SEQ, b"kv_replay_truncated"])
+                with pytest.raises(ValueError, match="consumer failure"):
+                    await asyncio.wait_for(replay, 3)
+                assert transport._endpoint_sockets["a"].replay_socket is socket
+            finally:
+                transport.stop()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "::1"])
+def test_control_ack_and_capability_check(host):
+    if host == "::1":
+        try:
+            with socket.socket(socket.AF_INET6) as probe:
+                probe.bind((host, 0))
+        except OSError:
+            pytest.skip("IPv6 loopback is unavailable")
+    applied = []
+    receiver = LifecycleControlReceiver(lambda sid, state: applied.append((sid, state)) or {"applied": True}, host)
+
+    async def run():
+        sink = receiver.descriptor("a")
+        assert (await notify_lifecycle(sink, CacheLifecycleState("engine").to_dict()))["applied"]
+        with pytest.raises(RuntimeError, match="capability"):
+            await notify_lifecycle({**sink, "token": "wrong"}, CacheLifecycleState("engine").to_dict())
+
+    try:
+        asyncio.run(run())
+        assert len(applied) == 1 and applied[0][0] == "a"
+    finally:
+        receiver.close()
+
+
+@pytest.mark.parametrize("bracketed", [False, True], ids=["raw-ipv6", "bracketed-ipv6"])
+def test_ipv6_subscription_and_replay_retry_keep_ipv6_socket_family(bracketed):
+    try:
+        with socket.socket(socket.AF_INET6) as probe:
+            probe.bind(("::1", 0))
+    except OSError:
+        pytest.skip("IPv6 loopback is unavailable")
+
+    async def run():
+        with _source(host="::1") as (pub, router, endpoints):
+            if not bracketed:
+                endpoints = {"a": [value.replace("[::1]", "::1") for value in endpoints["a"]]}
+            transport = _transport(endpoints)
+            sub = transport._sub_endpoints["a"]
+            replay_address = transport._replay_endpoints["a"]
+            assert sub.startswith("tcp://[::1]:") and replay_address.startswith("tcp://[::1]:")
+            await transport._connect_zmq_for("a", sub, replay_address)
+            await _subscribed(pub)
+            sockets = transport._endpoint_sockets["a"]
+            received = []
+            callback = lambda message, node: received.append(message)
+            try:
+                for source in (sockets.sub_socket, sockets.replay_socket):
+                    assert source.getsockopt(zmq.IPV6) == 1
+                old = sockets.replay_socket
+                # A failed replay must create an IPv6 replacement DEALER too.
+                transport._replay_failed("a", sockets, callback, TimeoutError())
+                assert old.closed and sockets.replay_socket.getsockopt(zmq.IPV6) == 1
+                responder = asyncio.create_task(_respond(router, 0, [(0, b"replayed")]))
+                assert await asyncio.wait_for(transport._replay_historical_data_for("a", callback), 3)
+                await responder
+                await pub.send_multipart([b"topic", (1).to_bytes(8, "big"), b"live"])
+                frames = await asyncio.wait_for(sockets.sub_socket.recv_multipart(), 3)
+                transport._deliver("a", int.from_bytes(frames[-2], "big"), frames[-1], callback)
+                assert received == [
+                    TransportMessage(b"", status="no_continuity"),
+                    TransportMessage(b"replayed", 0),
+                    TransportMessage(b"live", 1),
+                ]
+            finally:
+                transport.stop()
+
+    asyncio.run(run())

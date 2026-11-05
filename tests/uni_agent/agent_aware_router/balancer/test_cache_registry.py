@@ -52,7 +52,7 @@ def test_each_replica_registers_metadata_before_collectors_start(monkeypatch, me
     balancer.remove_servers(["a", "b"])
     assert DataStore().cache_registry_state is state
     first_call.assert_called_once()
-    second_call.assert_called_once()
+    assert second_call.call_count == 2  # The newly added replica binds its own profile.
 
 
 @pytest.mark.parametrize("failure", [None, TimeoutError("timeout")])

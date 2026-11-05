@@ -25,6 +25,7 @@ from conftest import mapping_event
 from uni_agent.agent_aware_router.collectors.parse.vllm import kv_event as kv_decoder
 from uni_agent.agent_aware_router.collectors.parse.vllm.kv import VLLMKVParser
 from uni_agent.agent_aware_router.collectors.transport.base import TransportMessage
+from uni_agent.agent_aware_router.types.cache_lifecycle import BRIDGE_SCHEMA_KEY, CacheLifecycleState
 
 pytestmark = [pytest.mark.cpu, pytest.mark.level0]
 
@@ -299,3 +300,83 @@ def test_unexpected_decode_error_is_not_swallowed(monkeypatch):
     monkeypatch.setattr("uni_agent.agent_aware_router.collectors.parse.vllm.kv.msgpack.unpackb", broken_unpack)
     with pytest.raises(RuntimeError, match="unexpected decode error"):
         VLLMKVParser().parse(_frame([0, []]), "node1")
+
+
+def _bridge_frame(payload, *, state=None, sequence=9, error=None):
+    envelope = {
+        BRIDGE_SCHEMA_KEY: 1,
+        "state": (state or CacheLifecycleState("engine", epoch=2, revision=3)).to_dict(),
+        "sequence": sequence,
+        "payload": payload,
+        "error": error,
+    }
+    return _frame(envelope, sequence=99)
+
+
+def test_bridge_envelope_preserves_generation_sequence_and_ordered_native_events():
+    payload = msgpack.packb(
+        [0, [_stored_event("before", None, [1, 2], 2, "GPU"), ["AllBlocksCleared"], ["BlockRemoved", ["before"]]]]
+    )
+    state = CacheLifecycleState("replacement-engine", epoch=4, revision=7)
+
+    update = VLLMKVParser().parse(_bridge_frame(payload, state=state, sequence=12), "node1")
+
+    assert update.lifecycle == state and update.sequence == 12
+    assert update.node_id == "node1" and update.stream_error is None
+    assert [event.event_type for event in update.events] == ["stored", "clear", "removed"]
+    assert update.events[0].raw_token_ids == (1, 2)
+    assert update.events[-1].block_hashes == ["before"]
+
+
+@pytest.mark.parametrize("error", [None, "bridge_queue_overflow"])
+def test_bridge_status_only_payload_retains_lifecycle_identity(error):
+    state = CacheLifecycleState("engine", epoch=3, index_state="unknown" if error else "ready")
+
+    update = VLLMKVParser().parse(_bridge_frame(b"", state=state, error=error), "node1")
+
+    assert update.lifecycle == state and update.sequence == 9
+    assert update.stream_error == error and update.events == []
+    assert not update.reset_stream
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [
+        {BRIDGE_SCHEMA_KEY: 2},
+        {"state": {"instance_id": "", "epoch": 1}},
+        {"state": {}},
+        {"sequence": -1},
+        {"sequence": True},
+        {"payload": None},
+        {"payload": b"\xc1"},
+        {"error": {"reason": "invalid"}},
+    ],
+    ids=[
+        "schema",
+        "identity",
+        "missing-identity",
+        "negative-sequence",
+        "bool-sequence",
+        "missing-payload",
+        "bad-native",
+        "bad-error",
+    ],
+)
+def test_invalid_bridge_envelope_reports_invalidation_instead_of_native_data(changed):
+    frame = _bridge_frame(msgpack.packb([0, [["AllBlocksCleared"]]]))
+    envelope = msgpack.unpackb(frame.payload, raw=False)
+    envelope.update(changed)
+
+    update = VLLMKVParser().parse(_frame(envelope, sequence=99), "node1")
+
+    assert update.stream_error == "invalid_bridge_envelope" and update.events == []
+    assert type(update.sequence) is int and update.sequence >= 0
+
+
+def test_bridge_envelope_missing_required_field_reports_invalidation():
+    envelope = {BRIDGE_SCHEMA_KEY: 1, "state": CacheLifecycleState("engine").to_dict(), "sequence": 8}
+
+    update = VLLMKVParser().parse(_frame(envelope), "node1")
+
+    assert update.lifecycle == CacheLifecycleState("engine")
+    assert update.sequence == 8 and update.stream_error == "invalid_bridge_envelope"

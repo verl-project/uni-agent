@@ -21,6 +21,7 @@ import threading
 from collections import Counter
 from collections.abc import Mapping
 
+from ..types.cache_lifecycle import CacheLifecycleState
 from ..types.kv_cache import DispatchSchema, KVCacheUpdate
 from ..types.native_hash import NativeHashCodecFactory
 from .cache_registry import CacheRegistryState, build_cache_registry, legacy_full_registry
@@ -44,6 +45,9 @@ class KVCacheStore:
         self._replica_metadata: Mapping[str, Mapping] = {}
         self._native_indexes: dict[object, PrefixIdentityIndex] = {}
         self._native_by_node: dict[str, PrefixIdentityIndex] = {}
+        self.lifecycle_states: dict[str, CacheLifecycleState] = {}
+        self._retired_instances: dict[str, set[str]] = {}
+        self._removed_nodes: set[str] = set()
         self._stream_errors: dict[str, str] = {}
         self._event_sequences: dict[str, int] = {}
         self._inflight_blocks: dict[str, Counter] = {}
@@ -85,6 +89,9 @@ class KVCacheStore:
             self._configure_native_indexes_locked()
             self.registry_generation += 1
             self.group_caches.clear()
+            self.lifecycle_states.clear()
+            self._retired_instances.clear()
+            self._removed_nodes.clear()
             self._stream_errors.clear()
             self._event_sequences.clear()
         return state
@@ -101,6 +108,11 @@ class KVCacheStore:
     def _configure_native_indexes_locked(self) -> None:
         self._native_indexes.clear()
         self._native_by_node.clear()
+        for node, metadata in self._replica_metadata.items():
+            self._bind_replica_native_index_locked(node, metadata)
+
+    def _bind_replica_native_index_locked(self, node_id, metadata) -> None:
+        self._native_by_node.pop(node_id, None)
         registry = self._registry_state.registry
         factory = self._native_codec_factory
         if registry is None or factory is None:
@@ -108,14 +120,90 @@ class KVCacheStore:
         full_sizes = [group.block_size for group in registry.required_groups if group.match_kind == "full"]
         if not full_sizes or registry.local_hash_unit in full_sizes:
             return
-        for node, metadata in self._replica_metadata.items():
-            codec = factory(metadata, registry.local_hash_unit)
-            if codec is None:
-                continue
-            index = self._native_indexes.get(codec.profile_key)
-            if index is None:
-                index = self._native_indexes[codec.profile_key] = PrefixIdentityIndex(codec)
-            self._native_by_node[node] = index
+        codec = factory(metadata, registry.local_hash_unit)
+        if codec is None:
+            return
+        index = self._native_indexes.get(codec.profile_key)
+        if index is None:
+            index = self._native_indexes[codec.profile_key] = PrefixIdentityIndex(codec)
+        self._native_by_node[node_id] = index
+
+    def configure_replica_metadata(self, node_id: str, metadata) -> None:
+        """Refresh one engine's hash profile while preserving the pool's layout."""
+        with self._lock:
+            self._removed_nodes.discard(node_id)
+            self._configure_replica_metadata_locked(node_id, metadata)
+
+    def _configure_replica_metadata_locked(self, node_id, metadata):
+        previous = self._native_by_node.get(node_id)
+        self._replica_metadata[node_id] = metadata
+        self._bind_replica_native_index_locked(node_id, metadata)
+        if self._native_by_node.get(node_id) is not previous:
+            self.group_caches.pop(node_id, None)
+        self._prune_native_indexes_locked()
+
+    def _prune_native_indexes_locked(self):
+        referenced = set(self._native_by_node.values())
+        self._native_indexes = {
+            profile: index for profile, index in self._native_indexes.items() if index in referenced
+        }
+
+    def lifecycle_state(self, node_id: str) -> CacheLifecycleState | None:
+        with self._lock:
+            return self.lifecycle_states.get(node_id)
+
+    def remove_replica(self, node_id: str) -> None:
+        """Retire an engine and discard its residency and stream progress."""
+        with self._lock:
+            self._removed_nodes.add(node_id)
+            state = self.lifecycle_states.pop(node_id, None)
+            if state is not None:
+                self._retired_instances.setdefault(node_id, set()).add(state.instance_id)
+            self.group_caches.pop(node_id, None)
+            self._clear_inflight_locked(node_id)
+            self._stream_errors.pop(node_id, None)
+            self._event_sequences.pop(node_id, None)
+            self._native_by_node.pop(node_id, None)
+            self._replica_metadata.pop(node_id, None)
+            self._prune_native_indexes_locked()
+
+    def update_lifecycle(self, node_id, state: CacheLifecycleState, *, registration=False, cache_metadata=None) -> bool:
+        with self._lock:
+            previous = self.lifecycle_states.get(node_id)
+            retired = self._retired_instances.setdefault(node_id, set())
+            if state.instance_id in retired and not registration:
+                return False
+            changed_identity = previous is None or previous.instance_id != state.instance_id
+            if previous is not None and (
+                state.revision <= previous.revision or (not changed_identity and state.epoch < previous.epoch)
+            ):
+                if state == previous and cache_metadata is not None:
+                    self._configure_replica_metadata_locked(node_id, cache_metadata)
+                return False
+            if registration:
+                # A different handle is removed before its handshake; within
+                # one producer, revisions also order engine identity changes.
+                retired.discard(state.instance_id)
+            if previous is not None and changed_identity:
+                retired.add(previous.instance_id)
+            changed_epoch = changed_identity or state.epoch != previous.epoch
+            self._removed_nodes.discard(node_id)
+            if cache_metadata is not None or (changed_identity and previous is not None):
+                # A new engine's root must never inherit the previous engine's
+                # profile. Missing optional metadata disables reconstruction.
+                self._configure_replica_metadata_locked(node_id, cache_metadata or {})
+            self.lifecycle_states[node_id] = state
+            if changed_epoch or state.index_state != "ready":
+                self.group_caches.pop(node_id, None)
+            if changed_epoch:
+                self._clear_inflight_locked(node_id)
+                self._stream_errors.pop(node_id, None)
+                self._event_sequences.pop(node_id, None)
+            return True
+
+    def _cache_ready_locked(self, node_id):
+        state = self.lifecycle_states.get(node_id)
+        return node_id not in self._stream_errors and (state is None or state.index_state == "ready")
 
     def _event_registry_locked(self, events):
         state = self._registry_state
@@ -154,14 +242,28 @@ class KVCacheStore:
         return self._registry_state.registry
 
     def apply_update(self, update: KVCacheUpdate) -> bool:
-        """Check stream integrity, adapt old fields, and apply events under one lock."""
+        """Check generation and stream integrity before applying cache events."""
         with self._lock:
             node = update.node_id
+            if node in self._removed_nodes:
+                return False
+            current = self.lifecycle_states.get(node)
+            received = update.lifecycle
+            if received is not None and (
+                current is None or current.instance_id != received.instance_id or current.epoch != received.epoch
+            ):
+                return False  # Bridge identities must first arrive through the control handshake.
             if update.reset_stream:
                 self.group_caches.pop(node, None)
                 self._stream_errors.pop(node, None)
                 self._event_sequences.pop(node, None)
                 return True
+            if (
+                current is not None
+                and not update.stream_error
+                and (received is None or current.index_state != "ready" or received.index_state != "ready")
+            ):
+                return False
             if update.sequence is not None:
                 last = self._event_sequences.get(node)
                 if last is not None and update.sequence <= last:
@@ -179,7 +281,10 @@ class KVCacheStore:
                 if not any(event.is_clear for event in update.events):
                     return False
                 self._stream_errors.pop(node, None)
-            if any(event.is_clear for event in update.events):
+            if current is None and any(event.is_clear for event in update.events):
+                # Managed epochs invalidate old holds through the control
+                # update before reset. Its delayed Clear must preserve requests
+                # admitted after that reset; legacy sources lack this boundary.
                 self._clear_inflight_locked(node)
             registry = self._event_registry_locked(update.events)
             if registry is None:
@@ -192,8 +297,8 @@ class KVCacheStore:
             index.apply([registry.normalize_event(event) for event in update.events])
             while native is not None and native.enabled and revision != native.identity_revision:
                 revision = native.identity_revision
-                for cache in self.group_caches.values():
-                    if cache.native_hashes is native:
+                for cache_node, cache in self.group_caches.items():
+                    if cache.native_hashes is native and self._cache_ready_locked(cache_node):
                         cache.apply([])
             return True
 
@@ -204,8 +309,10 @@ class KVCacheStore:
             for node in node_ids:
                 index = self.group_caches.get(node)
                 unit = state.registry.local_hash_unit if state.registry else None
-                if node in self._stream_errors:
-                    result[node] = PrefixEstimate("warming", 0, query_tokens, 0, unit, self._stream_errors[node])
+                if not self._cache_ready_locked(node):
+                    lifetime = self.lifecycle_states.get(node)
+                    reason = self._stream_errors.get(node) or (lifetime.reason if lifetime else "cache_unknown")
+                    result[node] = PrefixEstimate("warming", 0, query_tokens, 0, unit, reason)
                 elif state.registry is None:
                     result[node] = PrefixEstimate(state.status, 0, query_tokens, 0, None, state.reason)
                 elif index is None:
@@ -225,7 +332,10 @@ class KVCacheStore:
     def per_replica_block_counts(self) -> dict[str, int]:
         """Count reported group/hash identities, including unresolved Stored events."""
         with self._lock:
-            return {node: len(index.retained_hashes) for node, index in self.group_caches.items()}
+            return {
+                node: len(index.retained_hashes) if self._cache_ready_locked(node) else 0
+                for node, index in self.group_caches.items()
+            }
 
     def _replica_index_locked(self, node):
         index = self.group_caches.get(node)
@@ -341,7 +451,7 @@ class KVCacheStore:
             not hashes
             or schema is None
             or schema != self._dispatch_schema_locked()
-            or replica_id in self._stream_errors
+            or not self._cache_ready_locked(replica_id)
         ):
             return 0
         return self._replica_index_locked(replica_id).record_dispatch(hashes)

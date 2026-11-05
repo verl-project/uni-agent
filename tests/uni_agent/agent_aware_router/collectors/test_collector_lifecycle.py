@@ -45,6 +45,31 @@ class NoopParser(Parser):
         return None
 
 
+def test_manager_construction_failure_closes_collectors_created_before_it(monkeypatch):
+    from uni_agent.agent_aware_router.collectors.provider import CollectorManager
+    from uni_agent.agent_aware_router.config.collector import CollectorConfig
+
+    created = []
+
+    def factory(name, *args, **kwargs):
+        if name == "second":
+            raise ValueError("second collector construction failed")
+        collector = Collector(IdleTransport(), NoopParser())
+        created.append(collector)
+        return collector
+
+    monkeypatch.setattr("uni_agent.agent_aware_router.collectors.provider.get_collector", factory)
+    try:
+        with pytest.raises(ValueError, match="second collector"):
+            CollectorManager(CollectorConfig(), ["first", "second"])
+        assert len(created) == 1
+        assert created[0]._loop.is_closed()
+        assert created[0]._transport.stop_calls == 1
+    finally:
+        for collector in created:
+            collector.stop()
+
+
 @pytest.mark.parametrize("loop_running", [False, True], ids=["delayed-loop", "running-loop"])
 def test_startup_timeout_cleans_loop_and_thread_before_restart(monkeypatch, loop_running):
     transport = IdleTransport()

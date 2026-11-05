@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable
@@ -26,6 +27,7 @@ import ray
 from omegaconf import DictConfig, OmegaConf
 
 from .collectors import CollectorManager
+from .collectors.transport.lifecycle import LifecycleControlReceiver
 from .config import KVCAwareConfig
 from .store import DataStore
 from .strategies import (
@@ -33,6 +35,8 @@ from .strategies import (
     StrategyRegistry,
     route,
 )
+from .types.cache_lifecycle import CacheLifecycleState
+from .utils.endpoints import format_host_port
 
 logger = logging.getLogger(__name__)
 
@@ -84,9 +88,191 @@ class KVCAwareBalancer:
             "on_release": [],
             "on_servers_removed": [],
         }
+        self._lifecycle_lock = threading.RLock()
+        self._provider_lock = threading.RLock()
+        self._lifecycle_states = {}
+        self._lifecycle_sources = {}
+        self._lifecycle_registrations = {}
+        self._lifecycle_handshakes = {}
+        self._pending_servers = set()
+        self._lifecycle_receiver = None
+        self._provider = None
         self._store = DataStore()
         self._init_cache_registry()
-        self._init_provider()
+        try:
+            self._register_cache_lifecycles(self._servers)
+            self._init_provider()
+        except BaseException:
+            try:
+                self.close()
+            except Exception:
+                logger.warning("Could not finish failed balancer construction cleanup", exc_info=True)
+            raise
+
+    def update_cache_lifecycle(self, server_id, value, *, registration=False, cache_metadata=None):
+        state = CacheLifecycleState.from_dict(value)
+        with self._lifecycle_lock:
+            if server_id not in self._servers:
+                return {"applied": False, "reason": "server_removed"}
+            accepted = self._store.update_cache_lifecycle(
+                server_id, state, registration=registration, cache_metadata=cache_metadata
+            )
+            current = self._store.cache_lifecycle_state(server_id)
+            if current is not None and current.instance_id == state.instance_id:
+                # An equal revision is valid for the same engine, but a rejected
+                # handshake must never borrow another engine's serving state.
+                self._lifecycle_states[server_id] = current
+            return {"applied": accepted, "revision": self._lifecycle_states.get(server_id, state).revision}
+
+    def _receive_cache_lifecycle(self, server_id, value, *, cache_metadata=None):
+        with self._lifecycle_lock:
+            handle = self._servers.get(server_id)
+            if handle is None or not hasattr(handle, "register_cache_lifecycle_sink"):
+                return {"applied": False, "reason": "lifecycle_sink_removed"}
+            pending = self._lifecycle_handshakes.get(server_id)
+            if pending is not None:
+                state = CacheLifecycleState.from_dict(value)
+                previous = pending.get(state.instance_id)
+                if previous is None or (state.epoch >= previous[0].epoch and state.revision > previous[0].revision):
+                    metadata = cache_metadata
+                    if metadata is None and previous is not None:
+                        metadata = previous[1]
+                    pending[state.instance_id] = state, metadata
+                elif previous[1] is None and cache_metadata is not None:
+                    pending[state.instance_id] = previous[0], cache_metadata
+                return {"applied": False, "reason": "lifecycle_handshake_pending"}
+            if server_id not in self._lifecycle_states:
+                return {"applied": False, "reason": "lifecycle_handshake_pending"}
+            return self.update_cache_lifecycle(server_id, value, cache_metadata=cache_metadata)
+
+    def _register_cache_lifecycles(self, servers):
+        handles = {sid: handle for sid, handle in servers.items() if hasattr(handle, "register_cache_lifecycle_sink")}
+        if not handles:
+            return
+        created = self._lifecycle_receiver is None
+        if created:
+            self._lifecycle_receiver = LifecycleControlReceiver(
+                self._receive_cache_lifecycle,
+                ray.util.get_node_ip_address(),
+                registration_lock=self._lifecycle_lock,
+            )
+        registrations = {}
+        try:
+            for sid, handle in handles.items():
+                with self._lifecycle_lock:
+                    self._lifecycle_handshakes[sid] = {}
+                    before = self._store.cache_lifecycle_state(sid)
+                    before_instance = before.instance_id if before is not None else None
+                    descriptor = self._lifecycle_receiver.descriptor(sid)
+                    registrations[sid] = descriptor
+                    self._lifecycle_registrations[sid] = descriptor
+                response = ray.get(
+                    handle.register_cache_lifecycle_sink.remote(descriptor),
+                    timeout=self._DISCOVERY_TIMEOUT_SECONDS,
+                )
+                state = CacheLifecycleState.from_dict(response["state"])
+                cache_metadata = response.get("cache_metadata")
+                source = self._parse_kv_event_sources(response["sources"])
+                with self._lifecycle_lock:
+                    # The engine may publish after taking the RPC snapshot but
+                    # before it reaches this thread. Revisions remain monotonic
+                    # when this producer replaces its engine; registration
+                    # capabilities exclude notifications from former handles.
+                    pending = self._lifecycle_handshakes.pop(sid)
+                    candidates = [(state, cache_metadata), *pending.values()]
+                    selected, selected_metadata = max(candidates, key=lambda value: value[0].revision)
+                    if selected_metadata is None:
+                        selected_metadata = next(
+                            (
+                                metadata
+                                for candidate, metadata in candidates
+                                if candidate.instance_id == selected.instance_id and metadata is not None
+                            ),
+                            None,
+                        )
+                    state, cache_metadata = selected, selected_metadata
+                    current = self._store.cache_lifecycle_state(sid)
+                    if (
+                        current is not None
+                        and current.instance_id != state.instance_id
+                        and current.instance_id != before_instance
+                    ):
+                        raise RuntimeError(f"cache lifecycle handshake superseded for server {sid!r}")
+                    self.update_cache_lifecycle(sid, state.to_dict(), registration=True, cache_metadata=cache_metadata)
+                    current = self._store.cache_lifecycle_state(sid)
+                    if current is None or current.instance_id != state.instance_id:
+                        raise RuntimeError(f"cache lifecycle handshake rejected for server {sid!r}")
+                    self._lifecycle_sources[sid] = source
+        except Exception:
+            with self._lifecycle_lock:
+                for sid in handles:
+                    self._lifecycle_handshakes.pop(sid, None)
+                    self._lifecycle_receiver.revoke(sid)
+            # A failed constructor/registration must not leave dead control
+            # targets attached to servers that registered successfully.
+            try:
+                self._detach_cache_lifecycles(handles, registrations)
+            except Exception:
+                logger.warning("Could not detach failed cache lifecycle registration", exc_info=True)
+            if created:
+                self._lifecycle_receiver.close()
+                self._lifecycle_receiver = None
+            raise  # Never silently route with an unacknowledged lifecycle handshake.
+
+    def _detach_cache_lifecycles(self, servers, registrations):
+        futures, error = [], None
+        for sid, handle in servers.items():
+            descriptor = registrations.get(sid)
+            if descriptor is not None and hasattr(handle, "unregister_cache_lifecycle_sink"):
+                try:
+                    futures.append(
+                        handle.unregister_cache_lifecycle_sink.remote(
+                            descriptor["token"], generation=descriptor["generation"]
+                        )
+                    )
+                except Exception as exc:
+                    error = error or exc
+        if futures:
+            try:
+                ray.get(futures, timeout=self._DISCOVERY_TIMEOUT_SECONDS)
+            except Exception as exc:
+                error = error or exc
+        if error is not None:
+            raise error
+
+    def close(self):
+        with self._provider_lock:
+            error = None
+            try:
+                if self._provider is not None:
+                    self._provider.stop()
+            except Exception as exc:
+                error = exc
+            receiver = self._lifecycle_receiver
+            if receiver is not None:
+                with self._lifecycle_lock:
+                    servers = dict(self._servers)
+                    registrations = dict(self._lifecycle_registrations)
+                    for sid in servers:
+                        receiver.revoke(sid)
+                detached = False
+                try:
+                    self._detach_cache_lifecycles(servers, registrations)
+                    detached = True
+                except Exception as exc:
+                    logger.warning("Could not detach cache lifecycle sinks", exc_info=True)
+                    error = error or exc
+                try:
+                    receiver.close()
+                except Exception as exc:
+                    logger.warning("Could not close cache lifecycle receiver", exc_info=True)
+                    error = error or exc
+                else:
+                    if detached:
+                        self._lifecycle_receiver = None
+                        self._lifecycle_registrations.clear()
+            if error is not None:
+                raise error
 
     def _init_cache_registry(self) -> None:
         """Install the shared layout and bind each replica's own hash profile."""
@@ -102,9 +288,10 @@ class KVCAwareBalancer:
         with ThreadPoolExecutor(max_workers=min(self._MAX_DISCOVERY_WORKERS, len(self._servers))) as executor:
             values = executor.map(query, self._servers.values())
             metadata_by_node = dict(zip(self._servers, values, strict=True))
-        replica_id, metadata = next(iter(metadata_by_node.items()))
-        state = self._store.configure_cache_registry(metadata, replica_metadata=metadata_by_node)
-        if state.status not in {"registered", "disabled"}:
+        for replica_id, metadata in metadata_by_node.items():
+            state = self._store.configure_cache_registry(metadata, replica_metadata=metadata_by_node)
+            if state.status in {"registered", "disabled"}:
+                return
             logger.warning("Cache registry unavailable (source replica %s): %s", replica_id, state.reason)
 
     def _fetch_rollout_config(self) -> Any | None:
@@ -160,17 +347,20 @@ class KVCAwareBalancer:
         _config.apply_override(self._router_override(rollout_config))
         return _config
 
-    def _init_provider(self) -> None:
+    def _init_provider(self, *, refresh=False, reset_kv_nodes=()) -> None:
         """Resolve per-server endpoints from vLLM HTTP servers, then start collectors.
 
         Non-actor handles (plain strings in unit tests) have no
         ``get_server_address``; discovery is skipped and collectors fall back
         to configured/default endpoints.
         """
+        with self._lifecycle_lock:
+            servers = dict(self._servers)
+            lifecycle_sources = dict(self._lifecycle_sources)
         collection_names = sorted(self._strategy.collection_names)
         address_futures = []
         replica_ids = []
-        for replica_id, handle in self._servers.items():
+        for replica_id, handle in servers.items():
             if not hasattr(handle, "get_server_address"):
                 logger.warning(
                     "server '%s' handle has no get_server_address remote (type=%s); "
@@ -184,11 +374,17 @@ class KVCAwareBalancer:
 
         server_addresses: dict[str, str] = {}
         if replica_ids:
-            addresses = ray.get(address_futures)
+            addresses = ray.get(address_futures, timeout=self._DISCOVERY_TIMEOUT_SECONDS)
             server_addresses = {
-                replica_id: f"{ip}:{port}" for replica_id, (ip, port) in zip(replica_ids, addresses, strict=True)
+                replica_id: format_host_port(ip, port)
+                for replica_id, (ip, port) in zip(replica_ids, addresses, strict=True)
             }
-        kv_event_endpoints = self._discover_kv_event_endpoints(server_addresses)
+        native_addresses = {sid: address for sid, address in server_addresses.items() if sid not in lifecycle_sources}
+        kv_event_endpoints = self._discover_kv_event_endpoints(native_addresses)
+        kv_event_endpoints.update({sid: source for sid, source in lifecycle_sources.items() if source})
+        if refresh:
+            self._provider.update_sources(server_addresses, kv_event_endpoints, reset_kv_nodes=reset_kv_nodes)
+            return
         self._provider = self._provider_factory(
             self._config.collector,
             collection_names,
@@ -297,17 +493,30 @@ class KVCAwareBalancer:
             "route_calls": self._route_calls,
             "sticky_size": self._store.sticky_status()["size"],
             "total_inflight": self.get_total_inflight(),
+            "cache_lifecycles": {sid: state.to_dict() for sid, state in self._lifecycle_states.items()},
         }
 
     def release_server(self, server_id: str, request_id: str | None = None) -> None:
         """Release a server and notify statistic collectors."""
-        if self._inflight.get(server_id, 0) > 0:
-            self._inflight[server_id] -= 1
-        self._fire("on_release", server_id, request_id)
+        with self._lifecycle_lock:
+            if self._inflight.get(server_id, 0) > 0:
+                self._inflight[server_id] -= 1
+                if not self._inflight[server_id] and server_id not in self._servers:
+                    self._inflight.pop(server_id)
+            self._fire("on_release", server_id, request_id)
 
     def acquire_server(self, request_id: str, prompt_ids: list[int] | None = None) -> tuple[str, Any]:
         """Return the highest-ranked server id and handle."""
-        replicas = [ReplicaInfo(replica_id=sid) for sid in self._servers]
+        with self._lifecycle_lock:
+            return self._acquire_server_locked(request_id, prompt_ids)
+
+    def _acquire_server_locked(self, request_id, prompt_ids):
+        replicas = [
+            ReplicaInfo(replica_id=sid)
+            for sid in self._servers
+            if sid not in self._pending_servers
+            and (sid not in self._lifecycle_states or self._lifecycle_states[sid].serving)
+        ]
         self._route_calls += 1
         t0 = time.perf_counter()
         ranking = route(
@@ -365,15 +574,73 @@ class KVCAwareBalancer:
         return sum(self._inflight.values())
 
     def add_servers(self, servers: dict[str, Any]) -> None:
-        """Bulk-add servers to the pool (provider is keyed by init-time addresses, untouched here)."""
-        for sid, handle in servers.items():
-            self._servers[sid] = handle
-            self._inflight.setdefault(sid, 0)
+        """Add servers and refresh network collectors while routing stays available."""
+        with self._provider_lock:
+            with self._lifecycle_lock:
+                reset_nodes = {
+                    sid
+                    for sid, handle in servers.items()
+                    if sid in self._pending_servers or self._servers.get(sid) is not handle
+                }
+                self._pending_servers.update(servers)
+                for sid, handle in servers.items():
+                    previous = self._servers.get(sid)
+                    if previous is not None and previous is not handle:
+                        descriptor = self._lifecycle_registrations.pop(sid, None)
+                        if self._lifecycle_receiver is not None:
+                            self._lifecycle_receiver.revoke(sid)
+                        if descriptor is not None and hasattr(previous, "unregister_cache_lifecycle_sink"):
+                            previous.unregister_cache_lifecycle_sink.remote(
+                                descriptor["token"], generation=descriptor["generation"]
+                            )
+                        self._store.remove_cache_node(sid)
+                        self._lifecycle_states.pop(sid, None)
+                        self._lifecycle_sources.pop(sid, None)
+                        self._lifecycle_handshakes.pop(sid, None)
+                    self._servers[sid] = handle
+                    self._inflight.setdefault(sid, 0)
+            for sid in reset_nodes:
+                handle = servers[sid]
+                metadata = {"status": "unsupported", "reason": "metadata_method_unavailable"}
+                if hasattr(handle, "get_kv_cache_metadata"):
+                    try:
+                        metadata = ray.get(
+                            handle.get_kv_cache_metadata.remote(), timeout=self._DISCOVERY_TIMEOUT_SECONDS
+                        )
+                    except Exception as exc:
+                        metadata = {"status": "error", "reason": f"metadata_query_failed:{type(exc).__name__}"}
+                self._store.configure_replica_cache_metadata(sid, metadata)
+            self._register_cache_lifecycles(servers)
+            if reset_nodes or any(hasattr(handle, "get_server_address") for handle in servers.values()):
+                self._init_provider(refresh=True, reset_kv_nodes=reset_nodes)
+            with self._lifecycle_lock:
+                self._pending_servers.difference_update(servers)
 
     def remove_servers(self, server_ids: list[str]) -> None:
         """Bulk-remove servers; fires ``on_servers_removed`` to invalidate sticky bindings."""
-        for sid in server_ids:
-            self._servers.pop(sid, None)
-            self._inflight.pop(sid, None)
-        if server_ids:
-            self._fire("on_servers_removed", server_ids)
+        with self._provider_lock:
+            with self._lifecycle_lock:
+                for sid in server_ids:
+                    handle = self._servers.pop(sid, None)
+                    descriptor = self._lifecycle_registrations.pop(sid, None)
+                    if self._lifecycle_receiver is not None:
+                        self._lifecycle_receiver.revoke(sid)
+                    if (
+                        handle is not None
+                        and descriptor is not None
+                        and hasattr(handle, "unregister_cache_lifecycle_sink")
+                    ):
+                        handle.unregister_cache_lifecycle_sink.remote(
+                            descriptor["token"], generation=descriptor["generation"]
+                        )
+                    if not self._inflight.get(sid, 0):
+                        self._inflight.pop(sid, None)
+                    self._store.remove_cache_node(sid)
+                    self._lifecycle_states.pop(sid, None)
+                    self._lifecycle_sources.pop(sid, None)
+                    self._lifecycle_handshakes.pop(sid, None)
+                    self._pending_servers.discard(sid)
+                if server_ids:
+                    self._fire("on_servers_removed", server_ids)
+            if server_ids:
+                self._init_provider(refresh=True)

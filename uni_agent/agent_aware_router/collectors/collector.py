@@ -120,6 +120,16 @@ class Collector:
 
     # ── Lifecycle ───────────────────────────────────────────────────────
 
+    def get_kv_cursors(self) -> dict[str, tuple[str, str, str, int]] | None:
+        """Read source-specific KV progress after the collector has stopped."""
+        from .transport.zmq import ZMQTransport
+
+        if not isinstance(self._transport, ZMQTransport):
+            return None
+        if self._loop.is_running():
+            raise RuntimeError("stop the KV collector before reading its progress")
+        return self._transport.get_cursors()
+
     def start(self) -> None:
         """Start the collector — launch event-loop thread and subscribe."""
 
@@ -505,6 +515,7 @@ def get_collector(
     server_addresses: dict[str, str] | None = None,
     kv_event_endpoints: dict[str, list[str]] | None = None,
     balancer_handler=None,
+    kv_cursors: dict[str, tuple[str, str, str, int]] | None = None,
 ) -> Collector:
     """Create a Collector by name — one place does both composition and config binding.
 
@@ -550,6 +561,7 @@ def get_collector(
             max_retry_delay=_debug_knob("max_retry_delay"),
             max_retry_attempts=_debug_knob("max_retry_attempts"),
             retry_backoff_factor=_debug_knob("retry_backoff_factor"),
+            cursors=kv_cursors,
         )
         return Collector(transport, VLLMKVParser())
 

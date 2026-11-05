@@ -112,6 +112,20 @@ class DataStore:
     def hash_schema(self) -> tuple[int, int | None]:
         return self._kv.hash_schema()
 
+    def configure_replica_cache_metadata(self, node_id: str, metadata) -> None:
+        """Bind a replacement engine's native hash profile without resetting the pool."""
+        self._kv.configure_replica_metadata(node_id, metadata)
+
+    def cache_lifecycle_state(self, node_id):
+        return self._kv.lifecycle_state(node_id)
+
+    def update_cache_lifecycle(self, node_id, state, *, registration=False, cache_metadata=None):
+        return self._kv.update_lifecycle(node_id, state, registration=registration, cache_metadata=cache_metadata)
+
+    def remove_cache_node(self, node_id: str) -> None:
+        """Retire a removed server's engine and cache stream."""
+        self._kv.remove_replica(node_id)
+
     def apply_kv_update(self, update: KVCacheUpdate) -> bool:
         return self._kv.apply_update(update)
 

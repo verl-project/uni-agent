@@ -242,6 +242,7 @@ def test_server_enables_plugin_before_parent_initialization_without_changing_all
     from uni_agent.agent_aware_router.server.http_server import vLLMHttpServer
 
     monkeypatch.delenv("UNI_AGENT_ENABLE_NATIVE_HASH_METADATA", raising=False)
+    monkeypatch.delenv("UNI_AGENT_ENABLE_CACHE_LIFECYCLE", raising=False)
     monkeypatch.setenv("VLLM_PLUGINS", "user_plugin")
     initialized = []
 
@@ -249,6 +250,7 @@ def test_server_enables_plugin_before_parent_initialization_without_changing_all
         import os
 
         initialized.append(os.environ["UNI_AGENT_ENABLE_NATIVE_HASH_METADATA"])
+        assert os.environ["UNI_AGENT_ENABLE_CACHE_LIFECYCLE"] == "1"
         assert os.environ["VLLM_PLUGINS"] == "user_plugin"
 
     monkeypatch.setattr(vLLMHttpServer, "__init__", parent_init)

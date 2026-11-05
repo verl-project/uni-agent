@@ -100,12 +100,19 @@ jobs:
     env:
       NATIVE_CONTRACT_VLLM_VERSION: "0.29.0"
       CUDA_VISIBLE_DEVICES: ""
+      PIP_NO_CACHE_DIR: "1"
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           submodules: true
+
+      - name: Free disk space for vLLM dependencies
+        run: |
+          # These preinstalled SDKs are unused by the Python CPU tests.
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          df -h /
 
       - name: Select native contract dependencies
         run: |
@@ -125,11 +132,6 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-          cache: pip
-          cache-dependency-path: |
-            requirements-vllm-native.txt
-            verl/setup.py
-            verl/pyproject.toml
 
       - name: Install dependencies
         run: |

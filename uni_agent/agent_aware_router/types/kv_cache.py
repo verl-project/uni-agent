@@ -19,6 +19,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from .cache_lifecycle import CacheLifecycleState
+
 
 @dataclass(frozen=True)
 class GroupReservationSpec:
@@ -123,6 +125,7 @@ class KVCacheUpdate:
         sequence: Source batch position used to exclude duplicate delivery.
         stream_error: Missing events invalidate this node until Clear or a new source.
         reset_stream: Clear the old index and sequence when replacing an event source.
+        lifecycle: Optional acknowledged engine instance and cache generation.
     """
 
     node_id: str
@@ -130,3 +133,4 @@ class KVCacheUpdate:
     sequence: int | None = None
     stream_error: str | None = None
     reset_stream: bool = False
+    lifecycle: CacheLifecycleState | None = None

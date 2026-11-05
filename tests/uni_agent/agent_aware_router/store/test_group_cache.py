@@ -90,6 +90,32 @@ def test_removing_unknown_sparse_hash_recovers_remaining_checkpoint(index, parse
     assert estimate(cache).estimated_hit_tokens == 16
 
 
+@pytest.mark.parametrize(
+    "kind,removals,hit",
+    [
+        ("full_attention", ["r12"], 8),
+        ("full_attention", ["r12", "r16"], 8),
+        ("mamba", ["r8", "r12"], 16),
+    ],
+)
+def test_partial_removal_preserves_dense_pending_endpoints(kind, removals, hit, index, layout, parse, removed, stored):
+    cache = index(layout(((kind, 4),)))
+    assert cache.native_hashes is None
+    cache.apply(parse([stored(kind=kind, parent="r4", tokens=list(range(4, 16)), hashes=["r8", "r12", "r16"])]))
+    assert cache.pending and not cache.entries
+    for remote in removals:
+        cache.apply(parse([removed(0, [remote])]))
+        assert cache.pending
+    cache.apply(parse([stored(kind=kind, tokens=list(range(4)), hashes=["r4"])]))
+    assert not cache.pending
+    assert estimate(cache).estimated_hit_tokens == hit
+    survivors = {"r4", "r8", "r12", "r16"} - set(removals)
+    assert set(cache.anchors) == survivors
+    assert {remote for _, _, remote in cache.entries} == survivors
+    for remote in survivors:
+        assert cache.anchors[remote].tokens == int(remote[1:])
+
+
 def test_group_remove_keeps_full_chain_and_later_mamba_checkpoint(index, parse, removed, seed):
     cache = index()
     seed(cache)

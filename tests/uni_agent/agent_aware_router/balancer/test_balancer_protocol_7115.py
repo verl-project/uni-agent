@@ -67,10 +67,30 @@ def test_clear_sticky_cache_preserves_prefix_checkpoint_and_reports_load(layout)
 def test_inflight_counter_tolerates_unknown_and_late_releases():
     balancer = _make_balancer({"s0": "h0"})
     balancer.acquire_server("request-1", [1])
+    balancer.acquire_server("request-2", [2])
 
     balancer.release_server("unknown", request_id="request-1")
-    assert balancer.get_status()["total_inflight"] == 1
+    assert balancer.get_status()["total_inflight"] == 2
 
     balancer.remove_servers(["s0"])
+    assert balancer.get_total_inflight() == 2
     balancer.release_server("s0", request_id="request-1")
+    assert balancer.get_total_inflight() == 1
+    balancer.release_server("s0", request_id="request-2")
+    assert balancer.get_total_inflight() == 0
+    assert "s0" not in balancer._inflight
+    balancer.release_server("s0", request_id="request-2")
+    assert balancer.get_total_inflight() == 0
+
+
+def test_readding_server_preserves_outstanding_requests():
+    balancer = _make_balancer({"s0": "h0"})
+    balancer.acquire_server("old-request")
+    balancer.remove_servers(["s0"])
+    balancer.add_servers({"s0": "replacement"})
+    balancer.acquire_server("new-request")
+    assert balancer.get_total_inflight() == 2
+    balancer.release_server("s0", "old-request")
+    assert balancer.get_total_inflight() == 1
+    balancer.release_server("s0", "new-request")
     assert balancer.get_total_inflight() == 0

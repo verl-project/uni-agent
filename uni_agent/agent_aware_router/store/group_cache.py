@@ -84,7 +84,8 @@ class ReplicaCacheIndex:
         self.retained_hashes: Counter[tuple[int, str]] = Counter()
         self.by_group: dict[int, dict[str, set[str]]] = defaultdict(dict)
         self.references: Counter[str] = Counter()
-        self.pending: list[tuple[float, KVCacheEvent]] = []
+        # Preserve original dense token endpoints after Removed filters hashes.
+        self.pending: list[tuple[float, KVCacheEvent, tuple[int, ...] | None]] = []
         self.pending_limit = pending_limit
         self.pending_ttl = pending_ttl
         self.history_limit = history_limit
@@ -264,14 +265,17 @@ class ReplicaCacheIndex:
             return
         if self.status == "unsupported":
             return
-        if not any(pending == event for _, pending in self.pending):
-            self.pending.append((time.monotonic(), event))
+        if not any(pending == event for _, pending, _ in self.pending):
+            offsets = None
+            if len(event.raw_token_ids) == len(event.block_hashes) * event.block_size:
+                offsets = tuple((i + 1) * event.block_size for i in range(len(event.block_hashes)))
+            self.pending.append((time.monotonic(), event, offsets))
         excess = len(self.pending) - self.pending_limit
         if excess > 0:
             del self.pending[:excess]
             self.diagnostics["pending_overflow"] += excess
 
-    def _store(self, event: KVCacheEvent, chains: dict) -> bool | None:
+    def _store(self, event: KVCacheEvent, chains: dict, offsets: tuple[int, ...] | None = None) -> bool | None:
         """Return True if resolved, False if waiting for identities, None if rejected."""
         if not event.block_hashes:
             return True
@@ -280,7 +284,7 @@ class ReplicaCacheIndex:
         resolved = self._resolve_native_endpoints(event)
         native_resolved = resolved is not None
         if not native_resolved:
-            resolved = self._resolve_local_endpoints(event, chains)
+            resolved = self._resolve_local_endpoints(event, chains, offsets)
         if resolved is False or resolved is None:
             return resolved
         # Resolvers validate the complete event before any residency is changed.
@@ -306,7 +310,7 @@ class ReplicaCacheIndex:
         ]
 
     def _resolve_local_endpoints(
-        self, event: KVCacheEvent, chains: dict
+        self, event: KVCacheEvent, chains: dict, offsets: tuple[int, ...] | None = None
     ) -> list[tuple[str, CacheEndpoint]] | Literal[False] | None:
         """Resolve token endpoints; False waits for dependencies and None rejects."""
         unit = self.registry.local_hash_unit
@@ -318,11 +322,11 @@ class ReplicaCacheIndex:
         tokens = event.raw_token_ids
         if not tokens or len(tokens) % unit or parent.tokens % unit:
             return self._reject_event("unrepresentable_event_boundary")
-        dense = len(tokens) == len(event.block_hashes) * event.block_size
+        dense = offsets is not None or len(tokens) == len(event.block_hashes) * event.block_size
         if not dense and any(remote not in self.anchors for remote in event.block_hashes):
             return False
         chain = self._local_hash_chain(parent, tokens, chains)
-        return self._event_endpoints(event, parent, chain, dense)
+        return self._event_endpoints(event, parent, chain, dense, offsets)
 
     def _local_hash_chain(self, parent: CacheEndpoint, tokens, chains: dict) -> dict[int, str]:
         """Reuse token hashing across group events within the current batch."""
@@ -339,14 +343,19 @@ class ReplicaCacheIndex:
         return chain
 
     def _event_endpoints(
-        self, event: KVCacheEvent, parent: CacheEndpoint, chain: dict[int, str], dense: bool
+        self,
+        event: KVCacheEvent,
+        parent: CacheEndpoint,
+        chain: dict[int, str],
+        dense: bool,
+        offsets: tuple[int, ...] | None = None,
     ) -> list[tuple[str, CacheEndpoint]] | Literal[False] | None:
         """Validate dense positions or known sparse positions without writing residency."""
         resolved = []
         previous = parent.tokens
         for i, remote in enumerate(event.block_hashes):
             if dense:
-                end = parent.tokens + (i + 1) * event.block_size
+                end = parent.tokens + (offsets[i] if offsets is not None else (i + 1) * event.block_size)
                 if end not in chain:
                     return self._reject_event("unrepresentable_remote_endpoint")
                 endpoint = CacheEndpoint(chain[end], end)
@@ -421,15 +430,17 @@ class ReplicaCacheIndex:
         # Cancel older unresolved stores so later parent arrivals cannot
         # resurrect an already removed checkpoint.
         pending = []
-        for stamp, event in self.pending:
+        for stamp, event, offsets in self.pending:
             if event.group_idx == group and self._domain(event) == domain:
-                retained = [h for h in event.block_hashes if h not in removed]
-                if retained != event.block_hashes:
-                    event = replace(event, block_hashes=retained)
+                retained = [i for i, remote in enumerate(event.block_hashes) if remote not in removed]
+                if len(retained) != len(event.block_hashes):
+                    event = replace(event, block_hashes=[event.block_hashes[i] for i in retained])
+                    if offsets is not None:
+                        offsets = tuple(offsets[i] for i in retained)
                     if retained:
                         self._retried_revision = None
             if event.block_hashes:
-                pending.append((stamp, event))
+                pending.append((stamp, event, offsets))
         self.pending = pending
 
     def _retry(self, chains: dict) -> None:
@@ -441,11 +452,11 @@ class ReplicaCacheIndex:
             self._retried_revision = revision
             old = self.pending
             self.pending = []
-            for stamp, event in old:
-                if self._store(event, chains) is False:
+            for stamp, event, offsets in old:
+                if self._store(event, chains, offsets) is False:
                     if self.status == "unsupported":
                         return
-                    self.pending.append((stamp, event))
+                    self.pending.append((stamp, event, offsets))
             revision = self._identity_revision + (self.native_hashes.identity_revision if self.native_hashes else 0)
 
     def _expire_pending(self) -> None:
@@ -457,7 +468,9 @@ class ReplicaCacheIndex:
         # Retries and removals preserve enqueue order.
         if now - self.pending[0][0] <= self.pending_ttl:
             return
-        retained = [(stamp, event) for stamp, event in self.pending if now - stamp <= self.pending_ttl]
+        retained = [
+            (stamp, event, offsets) for stamp, event, offsets in self.pending if now - stamp <= self.pending_ttl
+        ]
         self.diagnostics["pending_expired"] += len(self.pending) - len(retained)
         self.pending = retained
 

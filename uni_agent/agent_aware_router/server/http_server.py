@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Native cache metadata on top of the existing verl server."""
+"""Cache metadata and synchronized lifecycle on top of the existing verl server."""
 
 import asyncio
 import json
@@ -23,8 +23,10 @@ import vllm
 
 from verl.workers.rollout.vllm_rollout.vllm_async_server import vLLMHttpServer, vLLMReplica
 
+from .lifecycle_server import CacheLifecycleServerMixin
 
-class KVMetadataHttpServer(vLLMHttpServer):
+
+class KVMetadataHttpServer(CacheLifecycleServerMixin, vLLMHttpServer):
     """Expose native groups and resolved engine configuration to the router.
 
     Install uni-agent in every engine environment (for example, ``pip install
@@ -42,6 +44,7 @@ class KVMetadataHttpServer(vLLMHttpServer):
         # Set this before the parent can create an engine or spawn its process.
         # General-plugin registration never initializes or replaces NONE_HASH.
         os.environ["UNI_AGENT_ENABLE_NATIVE_HASH_METADATA"] = "1"
+        os.environ["UNI_AGENT_ENABLE_CACHE_LIFECYCLE"] = "1"
         super().__init__(*args, **kwargs)
 
     async def _optional_engine_profile(self, engine, method, timeout):

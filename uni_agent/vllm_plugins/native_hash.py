@@ -112,6 +112,10 @@ _get_cache_reservation_profile.__uni_agent_owner__ = _OWNER
 
 def register():
     """Install read-only utilities when a metadata-enabled server opts in."""
+    if os.environ.get("UNI_AGENT_ENABLE_CACHE_LIFECYCLE") == "1":
+        from .lifecycle import register as register_lifecycle
+
+        register_lifecycle()
     if os.environ.get("UNI_AGENT_ENABLE_NATIVE_HASH_METADATA") != "1":
         return
 
