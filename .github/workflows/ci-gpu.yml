@@ -86,6 +86,9 @@ jobs:
 
       - name: Upload GPU coverage
         uses: codecov/codecov-action@v4
+        # Coverage is best-effort, including action/network failures that can
+        # escape Codecov's fail_ci_if_error handling. GPU tests remain required.
+        continue-on-error: true
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           file: ./coverage.xml
