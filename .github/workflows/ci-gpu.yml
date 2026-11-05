@@ -83,6 +83,39 @@ jobs:
           export PYTHONPATH="${PYTHONPATH}:${GITHUB_WORKSPACE}"
           $UV_RUN pytest -v -rA -s tests/uni_agent/ -m="gpu and level0" --cov=./uni_agent/ --cov-report=xml --cov-report=term
 
+      - name: Prepare original GPU router E2E assets
+        env:
+          HF_HUB_OFFLINE: "0"
+          TRANSFORMERS_OFFLINE: "0"
+          HF_HUB_DISABLE_XET: "1"
+        run: |
+          $UV_RUN python - <<'PY'
+          import os
+          from pathlib import Path
+          from huggingface_hub import snapshot_download
+          from uni_agent.tasks.swe_bench.preprocess import build_swe_bench_verified
+
+          model = snapshot_download(
+              "Qwen/Qwen3-4B-Instruct-2507",
+              allow_patterns=["*.json", "*.safetensors", "*.txt", "*.jinja"],
+          )
+          output = Path(os.environ["RUNNER_TEMP"]) / "uni-agent-router-e2e.parquet"
+          build_swe_bench_verified(max_instances=4).to_parquet(output)
+          with open(os.environ["GITHUB_ENV"], "a") as env:
+              env.write(f"VLLM_MODEL={model}\nSWEBENCH_DATASET={output}\n")
+          print(f"Router E2E model snapshot: {model}")
+          print(f"Router E2E dataset: {output}")
+          PY
+
+      - name: Test original GPU router E2E
+        env:
+          RAY_enable_open_telemetry: "0"
+        run: |
+          export PYTHONPATH="${PYTHONPATH}:${GITHUB_WORKSPACE}"
+          export NO_PROXY="${NO_PROXY},$($UV_RUN python -c 'from ray.util import get_node_ip_address; print(get_node_ip_address())')"
+          export no_proxy="${NO_PROXY}"
+          $UV_RUN pytest -v -rA -s tests/uni_agent/agent_aware_router/e2e/test_router_e2e.py -m="gpu and level1" --cov=./uni_agent/ --cov-append --cov-report=xml --cov-report=term
+
       - name: Upload GPU coverage
         uses: codecov/codecov-action@v4
         # Coverage is best-effort, including action/network failures that can

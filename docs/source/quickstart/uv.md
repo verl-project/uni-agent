@@ -74,12 +74,15 @@ uv sync --locked --all-packages --extra vllm --extra megatron \
 These names are available through the workspace; they are not all validated
 Uni-Agent training combinations. GPU CI covers `vllm` + `megatron` + `swebench`;
 `veomni-sft` and `torchtitan` do not have Uni-Agent GPU validation in this PR.
-CPU level0 tests run in `tests-cpu`. The GPU job runs GPU level0 environment
-checks, with verbose case names and outcomes. The existing router E2E test
-(`tests/uni_agent/agent_aware_router/e2e/test_router_e2e.py`) is marked GPU
-level1 and is not selected by daily GPU CI. It requires a real model directory
-(`VLLM_MODEL`) and SWE-bench parquet (`SWEBENCH_DATASET`); passing the UV smoke
-does not validate that E2E path or full model training.
+CPU level0 tests remain in `tests-cpu`. GPU CI runs both the GPU level0 UV
+checks and the original Router E2E in
+`tests/uni_agent/agent_aware_router/e2e/test_router_e2e.py`. The latter retains
+its GPU level1 marker and original assertions; a dedicated CI step selects it
+explicitly. CI prepares its Qwen3-4B-Instruct-2507 model and four SWE-bench
+Verified rows using the existing dataset preprocessor. The original test uses
+real vLLM/router/gateway/TQ components with its simulated sandbox runner;
+it does not validate an external sandbox deployment or model training.
+Verbose logs show case names and outcomes, and both steps are required.
 
 `dev` is a **dependency group**, not an extra. It contains Uni-Agent's test/lint
 tools and is installed by default; pass `--no-dev` for runtime-only environments.
