@@ -196,6 +196,10 @@ class DockerSandbox(Sandbox):
         for key, value in (env or {}).items():
             args.extend(["--env", f"{key}={value}"])
         args.append(self._require_container())
+        if timeout is not None:
+            # Killing the host `docker exec` client on timeout does not signal the process in the
+            # container, so stop it there too. The +2s margin keeps the host timer firing first (callers see -1).
+            args.extend(["timeout", "-k", "10", str(math.ceil(timeout) + 2)])
         args.extend(argv)
         return await self._run_docker(*args, timeout=timeout)
 
