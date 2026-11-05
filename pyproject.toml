@@ -26,6 +26,8 @@ dependencies = [
     "verl", "aiohttp", "cachetools", "fastapi", "httpx", "hydra-core",
     "numpy", "openai", "pillow", "pydantic>=2", "pyyaml", "pyzmq",
     "requests", "uvicorn", "xxhash",
+    # The framework/TQ path stores NonTensorData (verl requires TensorDict >=0.10).
+    "tensordict>=0.10.0",
 ]
 
 [project.optional-dependencies]

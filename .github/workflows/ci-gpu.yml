@@ -87,6 +87,10 @@ jobs:
           RAY_enable_open_telemetry: "0"
         run: |
           export PYTHONPATH="${PYTHONPATH}:${GITHUB_WORKSPACE}"
+          # Gateway integration tests address this host by its Ray node IP.
+          # Keep those requests local while preserving proxy access for installs.
+          export NO_PROXY="${NO_PROXY},$($UV_RUN python -c 'from ray.util import get_node_ip_address; print(get_node_ip_address())')"
+          export no_proxy="${NO_PROXY}"
           $UV_RUN pytest -v -rA tests/uni_agent/ -m="cpu and level0" --cov=./uni_agent/ --cov-report=xml --cov-report=term
 
       - name: Test GPU environment and Ray workers
