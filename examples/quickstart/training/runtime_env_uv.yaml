@@ -1,0 +1,17 @@
+# Run from the repository root. Ray ships pyproject.toml, uv.lock and verl/;
+# uv creates a project-local environment on the driver and workers.
+# Do not add pip, conda, uv or py_executable here: uv run owns the environment.
+working_dir: .
+excludes:
+  - "/.git/"
+  - "/verl/.git"
+  - "/.venv/"
+  - "/verl/.venv/"
+env_vars:
+  TORCH_NCCL_AVOID_RECORD_STREAMS: "1"
+  CUDA_DEVICE_MAX_CONNECTIONS: "1"
+  VLLM_DISABLE_COMPILE_CACHE: "1"
+  # Copy this file to a private location and add the sandbox credentials needed
+  # by your task, e.g. VEFAAS_FUNCTION_ID, VEFAAS_FUNCTION_ROUTE,
+  # VOLCE_ACCESS_KEY and VOLCE_SECRET_KEY, or MODAL_TOKEN_ID/MODAL_TOKEN_SECRET.
+  # Set RUNTIME_ENV to that private file; never commit credentials.

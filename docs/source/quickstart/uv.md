@@ -27,6 +27,35 @@ the [RL-Insight integration guide](../concepts/rl-insight-integration.md) for
 service setup and environment variables. Development tools are in the default
 `dev` group; pass `--no-dev` for runtime-only environments.
 
+## GPU training examples
+
+The GPU quickstarts `examples/quickstart/training/train_qwen3_moe.sh` and
+`train_qwen3p5_dense.sh` use locked UV commands for both `ray job submit` and
+its remote Python entrypoint. Ray propagates the driver's UV command to its
+workers, as described in [Ray's UV integration](https://docs.ray.io/en/latest/ray-core/handling-dependencies.html#using-uv-for-package-management).
+The scripts select `megatron`, `swebench`, the `ROLLOUT_NAME` backend (default
+`vllm`), and `UV_SANDBOX_EXTRA` (default `vefaas`, matching the default task).
+
+Run from the repository root after preparing the model/data and Ray cluster:
+
+```bash
+cp examples/quickstart/training/runtime_env_uv.yaml ~/runtime_env_uv.yaml
+# Add your sandbox credentials to the private copy.
+export DATA_DIR=/path/to/data RUNTIME_DIR=/path/to/output
+export RUNTIME_ENV=~/runtime_env_uv.yaml
+bash examples/quickstart/training/train_qwen3_moe.sh
+# Or: bash examples/quickstart/training/train_qwen3p5_dense.sh
+```
+
+Every cluster node needs `uv`, CUDA support and access to the selected wheels.
+Start Ray using the same locked backend/sandbox extras and Python 3.12, for example
+`uv run --locked --all-packages --python 3.12 --extra vllm --extra megatron --extra swebench --extra vefaas ray start --head`;
+workers must use matching Ray/Python versions. A custom `RUNTIME_ENV` may supply
+sandbox credentials and tuning variables, but must not define `pip`, `conda`,
+`uv` or `py_executable`: dependencies come from `uv.lock`. Select another sandbox
+with `UV_SANDBOX_EXTRA=modal` or `e2b` alongside its corresponding task config.
+Other recipes retain their existing launch environments.
+
 ## Updating the verl dependency
 
 Backend dependencies, native-wheel sources and CPU/GPU conflicts stay in
