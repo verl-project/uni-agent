@@ -14,18 +14,69 @@ uv run --locked --all-packages --extra vllm --extra fsdp \
   python -c 'import uni_agent, verl, ray; print(uni_agent.__file__, verl.__file__)'
 ```
 
-Use `sglang` instead of `vllm`, and/or `megatron` instead of `fsdp`. Use
-`--extra cpu` on its own for verl's CPU test/development slice. The backend
-extras belong to the verl workspace member: keep `--all-packages` on sync/run
-commands so they are selected there. Do not use `--all-extras`, because CPU/GPU
-and inference-engine choices conflict.
+## Available extras
 
-Optional Uni-Agent features are additive: `--extra modal`, `--extra e2b`,
-`--extra vefaas`, `--extra swebench`, and `--extra insight`. The latter installs
-the RL-Insight client; it does not start its server or enable telemetry. Follow
-the [RL-Insight integration guide](../concepts/rl-insight-integration.md) for
-service setup and environment variables. Development tools are in the default
-`dev` group; pass `--no-dev` for runtime-only environments.
+Select extras with repeated `--extra NAME` flags. Keep `--all-packages` on
+sync/run commands so extras declared by the `verl` workspace member are selected
+there as well. The tables below match the pinned submodule, not verl's latest
+upstream revision.
+
+### Backend selection (declared by verl)
+
+| Extra | Purpose |
+| --- | --- |
+| `vllm` | GPU rollout/inference with vLLM, including the core verl dependencies. |
+| `sglang` | GPU rollout/inference with SGLang, including the core verl dependencies. |
+| `fsdp` | GPU training with FSDP, including native training kernels. |
+| `megatron` | GPU training with Megatron-Core/Bridge, Transformer Engine and native kernels. |
+| `cpu` | CPU test/development environment; does not provide a GPU training environment. |
+
+For GPU training, normally select one inference backend (`vllm` or `sglang`)
+and one training backend (`fsdp` or `megatron`). `vllm` and `sglang` conflict;
+`cpu` conflicts with both inference backends and both GPU training extras.
+Do not use `--all-extras`.
+
+### Uni-Agent features
+
+| Extra | Purpose |
+| --- | --- |
+| `vefaas` | veFaaS sandbox client: `volcengine-python-sdk` and `swe-rex`. |
+| `modal` | Modal sandbox client. |
+| `e2b` | E2B sandbox client. |
+| `swebench` | SWE-bench dataset/evaluation utilities. |
+| `insight` | RL-Insight client. Does not start a server or enable telemetry automatically. |
+
+Select the sandbox extra matching your task configuration; installing a client
+does not configure credentials or create the sandbox service. For example, the
+GPU ReAct training quickstarts use `vefaas` by default. For RL-Insight setup,
+see the [integration guide](../concepts/rl-insight-integration.md).
+
+```bash
+# vLLM + Megatron training, veFaaS sandbox, SWE-bench and RL-Insight client.
+uv sync --locked --all-packages --extra vllm --extra megatron \
+  --extra vefaas --extra swebench --extra insight
+# Use the same extras on subsequent uv run commands.
+```
+
+### Other extras declared by the pinned verl
+
+| Extra | Purpose |
+| --- | --- |
+| `test` | Upstream verl test/debug tools. |
+| `math` | Math verification utility (`math-verify`). |
+| `ci` | Upstream CI helpers, including `hf-transfer` and `sglang-router`. |
+| `verl-core` | Shared verl runtime dependencies; included by the main backend extras. |
+| `flash-attn-cu130torch213` | FlashAttention for the pinned CUDA/PyTorch stack; included by `fsdp`/`megatron`. |
+| `cupy-cu130` | CUDA 13 CuPy; included by `fsdp`/`megatron`. |
+| `veomni-sft` | Upstream VeOmni SFT integration. |
+| `torchtitan` | Upstream TorchTitan integration. |
+
+These names are available through the workspace; they are not all validated
+Uni-Agent training combinations. GPU CI covers `vllm` + `megatron` + `swebench`;
+`veomni-sft` and `torchtitan` do not have Uni-Agent GPU validation in this PR.
+
+`dev` is a **dependency group**, not an extra. It contains Uni-Agent's test/lint
+tools and is installed by default; pass `--no-dev` for runtime-only environments.
 
 ## GPU training examples
 
