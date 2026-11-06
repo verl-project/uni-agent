@@ -8,7 +8,7 @@ MODEL_PATH=${MODEL_PATH:-"${DATA_DIR}/models/Qwen3-Coder-30B-A3B-Instruct"}
 TRAIN_FILE=${TRAIN_FILE:-"${DATA_DIR}/data/uni_agent/swe_rebench_filtered_1150.parquet"}
 TEST_FILE=${TEST_FILE:-"${DATA_DIR}/data/uni_agent/swe_bench_verified.parquet"}
 
-RUNTIME_ENV=${RUNTIME_ENV:-"${RUNTIME_DIR}/data/uni_agent/runtime_env.yaml"}
+RUNTIME_ENV=${RUNTIME_ENV:-"examples/quickstart/training/runtime_env_uv.yaml"}
 CKPTS_DIR=${CKPTS_DIR:-"${RUNTIME_DIR}/ckpts/${project_name}/${exp_name}"}
 AGENT_LOG_DIR=${AGENT_LOG_DIR:-"${RUNTIME_DIR}/logs/${project_name}/${exp_name}"}
 # Must be launched from the repository root so Ray packages both `verl/` and `uni_agent/`.
@@ -26,6 +26,16 @@ TRAJECTORY_SELECTION=${TRAJECTORY_SELECTION:-all}  # all | longest; Claude Code 
 
 rollout_mode=${ROLLOUT_MODE:-"async"}
 rollout_name=${ROLLOUT_NAME:-"vllm"} # sglang or vllm
+
+# Lock the remote training driver and Ray workers; submission only needs the Ray CLI.
+# The default task uses veFaaS; select modal/e2b when using a different task config.
+UV_RUN=(uv run --locked --all-packages --python 3.12
+    --extra "${rollout_name}" --extra megatron --extra swebench
+    --extra "${UV_SANDBOX_EXTRA:-vefaas}")
+# The pinned verl disables Ray's automatic UV hook, so forward the worker
+# interpreter explicitly through verl's ray.init runtime-env configuration.
+printf -v RAY_PY_EXECUTABLE '%q ' "${UV_RUN[@]}" python
+RAY_PY_EXECUTABLE=${RAY_PY_EXECUTABLE% }
 
 # Algorithm parameters
 adv_estimator=${ADV_ESTIMATOR:-grpo}
@@ -111,10 +121,11 @@ rollout_rs_threshold=${ROLLOUT_RS_THRESHOLD:-null}
 router_replay_mode=${ROUTER_REPLAY_MODE:-disabled}                    # disabled | R2 | R3
 enable_rollout_routing_replay=${ENABLE_ROLLOUT_ROUTING_REPLAY:-False} # required only for R3
 
-ray job submit --no-wait --runtime-env $RUNTIME_ENV \
+ray job submit --no-wait --working-dir . --runtime-env "${RUNTIME_ENV}" \
     -- env RAY_OVERRIDE_JOB_RUNTIME_ENV=1 \
-    python3 -m verl.trainer.main_ppo \
+    "${UV_RUN[@]}" python -m verl.trainer.main_ppo \
     --config-name=ppo_megatron_trainer \
+    "ray_kwargs.ray_init.runtime_env.py_executable='${RAY_PY_EXECUTABLE}'" \
     trainer.use_v1=True \
     trainer.v1.trainer_mode=colocate_async \
     trainer.v1.colocate_async.num_warmup_batches=${num_warmup_batches} \
@@ -260,4 +271,5 @@ ray job submit --no-wait --runtime-env $RUNTIME_ENV \
     trainer.default_local_dir="${CKPTS_DIR}" \
     trainer.nnodes="${NNODES}" \
     trainer.n_gpus_per_node="${NGPUS_PER_NODE}" \
-    trainer.test_freq="${test_freq}"
+    trainer.test_freq="${test_freq}" \
+    "$@"
