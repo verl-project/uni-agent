@@ -2,6 +2,10 @@
 
 Before large-scale training or inference, run each task's solution through its normal verifier.
 
+For a single SWE-rebench Docker instance with missing imports or a failed oracle,
+see [SWE-rebench diagnostics](swe-rebench-diagnostics.md) for recorded gold/no-patch
+controls and per-instance installation checks.
+
 This validates two prerequisites:
 
 1. **Sandbox scalability.** RL training requires many sandboxed tasks to run in parallel. This can be estimated from `batch_size × group_size` plus asynchronous in-flight or stale samples.
