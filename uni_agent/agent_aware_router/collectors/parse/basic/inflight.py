@@ -25,6 +25,7 @@ import logging
 from typing import Any
 
 from ....collectors.parse import InflightBlockUpdate, MetricsUpdate, Parser
+from ....collectors.transport.base import TransportMessage
 from ....collectors.transport.callback import StatisticEvent
 from ....types import MetricKey
 from ....utils.hash import get_prefix_hashes_incremental
@@ -32,14 +33,12 @@ from ....utils.hash import get_prefix_hashes_incremental
 logger = logging.getLogger(__name__)
 
 
-class InflightParser(Parser):
+class InflightParser(Parser[StatisticEvent]):
     """Pure acquire/release protocol decisions → netted deltas + block commands.
 
     Args:
-        raw_data: The raw callback payload — an ``on_acquire`` / ``on_release``
-            ``StatisticEvent``; anything else is ignored (``None``).
-        node_id: Source endpoint id (empty for the callback transport — the
-            event carries its own replica).
+        message: Callback message carrying an ``on_acquire`` / ``on_release``
+            ``StatisticEvent``; other events are ignored (``None``).
         turn: The request's turn after the collector's increment (acquire) or
             its stored turn (release); 0 when unattributable.
         stale: The request's still-held pin marker (``get_marker`` peek), or
@@ -52,8 +51,7 @@ class InflightParser(Parser):
 
     def parse(
         self,
-        raw_data: bytes | str | Any,
-        node_id: str,
+        message: TransportMessage[StatisticEvent],
         *,
         turn: int = 0,
         stale: dict[str, Any] | None = None,
@@ -61,10 +59,10 @@ class InflightParser(Parser):
         booked_len: int = 0,
     ) -> list | None:
         """Dispatch on acquire/release; ignore other events / non-event payloads."""
-        if not isinstance(raw_data, StatisticEvent):
+        if not isinstance(message.payload, StatisticEvent):
             return None
 
-        event = raw_data
+        event = message.payload
         if event.replica_id is None:
             return None
 

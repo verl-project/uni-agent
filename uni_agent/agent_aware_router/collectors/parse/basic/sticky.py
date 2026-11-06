@@ -27,23 +27,23 @@ Event → action mapping:
 from __future__ import annotations
 
 import logging
-from typing import Any
 
 from ....collectors.parse import Parser, StickyUpdate
+from ....collectors.transport.base import TransportMessage
 from ....collectors.transport.callback import StatisticEvent
 
 logger = logging.getLogger(__name__)
 
 
-class StickyParser(Parser):
+class StickyParser(Parser[StatisticEvent]):
     """Parse ``StatisticEvent`` → ``StickyUpdate`` for sticky bindings."""
 
-    def parse(self, raw_data: bytes | str | Any, node_id: str) -> StickyUpdate | None:
+    def parse(self, message: TransportMessage[StatisticEvent]) -> StickyUpdate | None:
         """Dispatch on the event type; ignore non-event payloads."""
-        if not isinstance(raw_data, StatisticEvent):
+        if not isinstance(message.payload, StatisticEvent):
             return None
 
-        event = raw_data
+        event = message.payload
         if event.event == "on_acquire":
             if event.request_id is None or event.replica_id is None:
                 logger.debug("on_acquire event missing request_id/replica_id — skipping")

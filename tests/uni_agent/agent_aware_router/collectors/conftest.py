@@ -27,7 +27,7 @@ import struct
 import msgpack
 import pytest
 
-from uni_agent.agent_aware_router.collectors.transport.base import Transport
+from uni_agent.agent_aware_router.collectors.transport.base import Transport, TransportHandler, TransportMessage
 from uni_agent.agent_aware_router.store.kv_cache_store import KVCacheStore
 from uni_agent.agent_aware_router.store.per_replica_store import PerReplicaStore
 from uni_agent.agent_aware_router.store.per_request_store import PerRequestStore
@@ -53,10 +53,10 @@ vllm:num_requests_waiting 7
 # ── Fake transports ──────────────────────────────────────────────────────
 
 
-class FakeHTTPTransport(Transport):
+class FakeHTTPTransport(Transport[str]):
     """Fake HTTP transport — injects pre-canned Prometheus text.
 
-    ``subscribe(handler)`` feeds ``handler(text, NODE_ID)`` periodically
+    ``subscribe(handler)`` feeds ``TransportMessage(text, NODE_ID)`` periodically
     until cancelled, simulating the real HTTP polling loop.
     """
 
@@ -66,10 +66,10 @@ class FakeHTTPTransport(Transport):
         self._text = text
         self._interval = interval
 
-    async def subscribe(self, handler):
+    async def subscribe(self, handler: TransportHandler[str]) -> None:
         try:
             while True:
-                handler(self._text, NODE_ID)
+                handler(TransportMessage(self._text, node_id=NODE_ID))
                 await asyncio.sleep(self._interval)
         except (asyncio.CancelledError, GeneratorExit):
             pass
@@ -78,7 +78,7 @@ class FakeHTTPTransport(Transport):
         pass
 
 
-class FakeZMQTransport(Transport):
+class FakeZMQTransport(Transport[bytes]):
     """Fake ZMQ transport — injects pre-canned msgpack KV-events payloads.
 
     ``subscribe(handler)`` replays all payloads in order, then idles until
@@ -91,10 +91,10 @@ class FakeZMQTransport(Transport):
         self._payloads = list(payloads)
         self._interval = interval
 
-    async def subscribe(self, handler):
+    async def subscribe(self, handler: TransportHandler[bytes]) -> None:
         try:
             for p in self._payloads:
-                handler(p, NODE_ID)
+                handler(TransportMessage(p, node_id=NODE_ID))
                 await asyncio.sleep(self._interval)
             while True:
                 await asyncio.sleep(self._interval)

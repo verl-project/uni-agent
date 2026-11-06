@@ -25,6 +25,7 @@ from conftest import mapping_event
 
 from uni_agent.agent_aware_router.collectors.parse.vllm.kv import VLLMKVParser
 from uni_agent.agent_aware_router.collectors.parse.vllm.kv_event import KVCacheEvent
+from uni_agent.agent_aware_router.collectors.transport.base import TransportMessage
 from uni_agent.agent_aware_router.store.data_store import DataStore
 from uni_agent.agent_aware_router.types import Layer
 
@@ -32,6 +33,40 @@ from uni_agent.agent_aware_router.types import Layer
 def _stored_event(block_hash, parent, token_ids, block_size, medium):
     """A stored event entry: [tag, block_hashes, parent, token_ids, block_size, <unused>, medium]."""
     return ["BlockStored", [block_hash], parent, token_ids, block_size, None, medium]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_transport_message_supplies_payload_and_node_id():
+    payload = msgpack.packb([0, [_stored_event("parent", None, [1, 2], 2, "GPU")]])
+    parser = VLLMKVParser()
+
+    update = parser.parse(TransportMessage(payload, "node1", sequence=7))
+
+    assert update is not None and update.node_id == "node1"
+    assert update.block_size == 2 and len(update.add_blocks[Layer.GPU]) == 1
+    assert parser.remote_to_local_block_hash == {"node1": {"parent": update.add_blocks[Layer.GPU][0]}}
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize("raw_data", [b"payload", "payload"], ids=["bytes", "str"])
+def test_unwrapped_payloads_are_rejected(raw_data):
+    parser = VLLMKVParser()
+
+    with pytest.raises(TypeError, match="TransportMessage"):
+        parser.parse(raw_data)
+
+    assert parser._block_size is None and not parser.remote_to_local_block_hash
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize("status", ["new_stream", "no_continuity", "unreachable"])
+def test_protocol_status_notifications_are_not_kv_payloads(status):
+    parser = VLLMKVParser()
+    assert parser.parse(TransportMessage(b"", "node1", status=status)) is None
+    assert not parser.remote_to_local_block_hash
 
 
 @pytest.mark.cpu
@@ -47,7 +82,7 @@ def test_non_gpu_events_do_not_change_gpu_state(non_gpu_medium, wire_format, rep
         if wire_format == "mapping":
             events = [mapping_event(event) for event in events]
         batch = [0, events]
-        return parser.parse(msgpack.packb([batch] if replay else batch), "node1")
+        return parser.parse(TransportMessage(msgpack.packb([batch] if replay else batch), "node1"))
 
     # Intentionally different sizes diagnose isolation; not a real Mooncake layout claim.
     excluded_only = parse(_stored_event("rh_gpu", None, [9, 8, 7, 6], 4, non_gpu_medium))
@@ -63,16 +98,18 @@ def test_non_gpu_events_do_not_change_gpu_state(non_gpu_medium, wire_format, rep
     )
     assert update is not None
     gpu_only = VLLMKVParser().parse(
-        msgpack.packb(
-            [
-                0,
+        TransportMessage(
+            msgpack.packb(
                 [
-                    _stored_event("parent", None, [1, 2], 2, "GPU"),
-                    _stored_event("child", "parent", [3, 4], 2, "GPU"),
-                ],
-            ]
-        ),
-        "node1",
+                    0,
+                    [
+                        _stored_event("parent", None, [1, 2], 2, "GPU"),
+                        _stored_event("child", "parent", [3, 4], 2, "GPU"),
+                    ],
+                ]
+            ),
+            "node1",
+        )
     )
     assert update.add_blocks == gpu_only.add_blocks
     assert not update.remove_blocks
@@ -104,7 +141,7 @@ def test_filtered_counts_and_summary_are_per_node_medium_and_throttled(caplog, m
     module_logger.addHandler(caplog.handler)
 
     def parse(node_id, event):
-        update = parser.parse(msgpack.packb([0, [event]]), node_id)
+        update = parser.parse(TransportMessage(msgpack.packb([0, [event]]), node_id))
         assert update is not None and not update.add_blocks and not update.remove_blocks
 
     try:
@@ -151,12 +188,12 @@ def test_legacy_and_gpu_medium_preserve_gpu_updates(medium):
     parser = VLLMKVParser()
     payload = [0, [_stored_event("rh", None, [1, 2], 2, medium)]]
 
-    update = parser.parse(msgpack.packb(payload), "node1")
+    update = parser.parse(TransportMessage(msgpack.packb(payload), "node1"))
 
     assert update is not None
     assert Layer.GPU in update.add_blocks
     assert Layer.CPU not in update.add_blocks
-    removed = parser.parse(msgpack.packb([0, [["BlockRemoved", ["rh"], medium]]]), "node1")
+    removed = parser.parse(TransportMessage(msgpack.packb([0, [["BlockRemoved", ["rh"], medium]]]), "node1"))
     assert removed is not None and removed.remove_blocks == {Layer.GPU: update.add_blocks[Layer.GPU]}
 
 
@@ -167,7 +204,7 @@ def test_clear_event_sets_clear_all():
     parser = VLLMKVParser()
     payload = [0, [["clear"]]]
 
-    update = parser.parse(msgpack.packb(payload), "node1")
+    update = parser.parse(TransportMessage(msgpack.packb(payload), "node1"))
 
     assert update is not None
     assert update.clear_all is True
@@ -194,7 +231,7 @@ def test_parse_failure_surfaces_exception_not_swallowed():
     module_logger = logging.getLogger(VLLMKVParser.__module__)
     module_logger.addHandler(capture)
     try:
-        update = parser.parse(garbage, "node1")
+        update = parser.parse(TransportMessage(garbage, "node1"))
     finally:
         module_logger.removeHandler(capture)
 
@@ -251,16 +288,18 @@ def test_wire_events_update_hash_mapping_and_remove(replay):
     payloads = [batches] if replay else batches
     added = []
     for payload in payloads:
-        update = parser.parse(msgpack.packb(payload), "node1")
+        update = parser.parse(TransportMessage(msgpack.packb(payload), "node1"))
         assert update is not None
         added.extend(update.add_blocks[Layer.GPU])
     assert len(added) == 3
     assert list(parser.remote_to_local_block_hash["node1"].values()) == added
-    removed = parser.parse(msgpack.packb([2, [mapping_event(["BlockRemoved", [102], "GPU", 0])], 0]), "node1")
+    removed = parser.parse(
+        TransportMessage(msgpack.packb([2, [mapping_event(["BlockRemoved", [102], "GPU", 0])], 0]), "node1")
+    )
     assert removed is not None
     assert removed.remove_blocks[Layer.GPU] == [added[1]]
     assert set(parser.remote_to_local_block_hash["node1"]) == {"101", "103"}
-    cleared = parser.parse(msgpack.packb([3, [mapping_event(["AllBlocksCleared"])]]), "node1")
+    cleared = parser.parse(TransportMessage(msgpack.packb([3, [mapping_event(["AllBlocksCleared"])]]), "node1"))
     assert cleared is not None and cleared.clear_all
 
 
@@ -328,7 +367,7 @@ def test_bad_hash_collection_preserves_gpu_state_and_valid_sibling(event_type, w
     def parse(*events):
         if wire_format == "mapping":
             events = [mapping_event(event) for event in events]
-        return parser.parse(msgpack.packb([0, list(events)]), "node1")
+        return parser.parse(TransportMessage(msgpack.packb([0, list(events)]), "node1"))
 
     initial = ["BlockStored", [1, 0, 101, 49, 48], None, list(range(10)), 2, None, "GPU"]
     assert parse(initial) is not None
@@ -362,7 +401,7 @@ def _removed(hashes, medium="GPU"):
 
 
 def _apply(parser, payload, node_id, store):
-    update = parser.parse(msgpack.packb(payload), node_id)
+    update = parser.parse(TransportMessage(msgpack.packb(payload), node_id))
     assert update is not None
     for layer, hashes in update.remove_blocks.items():
         if hashes:
@@ -373,6 +412,8 @@ def _apply(parser, payload, node_id, store):
     return update
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_hash_map_is_per_replica_and_survives_sibling_eviction():
     """A sibling replica's eviction must not break this replica's translation.
 

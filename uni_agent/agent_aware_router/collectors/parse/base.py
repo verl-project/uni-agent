@@ -14,7 +14,7 @@
 
 """Parser abstract base and its update return types.
 
-A ``Parser`` turns a raw transport payload (bytes/str) into a structured
+A ``Parser`` turns a typed transport message into a structured
 update that the ``Collector`` applies to the store.  The update types
 (``KVCacheUpdate``, ``MetricsUpdate``) live here, next to the base, because
 they are the parser's output contract — the layer that both produces and
@@ -25,9 +25,12 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Generic, TypeVar
 
+from ...collectors.transport.base import TransportMessage
 from ...types import Layer
+
+ParserPayloadT = TypeVar("ParserPayloadT", contravariant=True)
 
 
 @dataclass
@@ -147,7 +150,7 @@ class StickyUpdate:
     replica_ids: tuple[str, ...] = ()
 
 
-class Parser(ABC):
+class Parser(ABC, Generic[ParserPayloadT]):
     """Abstract base for data parsers.
 
     Subclasses implement ``parse()`` with their backend-specific parsing logic,
@@ -159,16 +162,14 @@ class Parser(ABC):
 
     @abstractmethod
     def parse(
-        self, raw_data: bytes | str | Any, node_id: str
+        self, message: TransportMessage[ParserPayloadT]
     ) -> KVCacheUpdate | MetricsUpdate | StickyUpdate | InflightBlockUpdate | list | None:
-        """Parse raw data and return a structured update (or list of them).
+        """Parse a source message and return a structured update (or list of them).
 
         Args:
-            raw_data: Raw payload — ``bytes`` (from ZMQ) / ``str`` (from HTTP
-                response text) for network transports, or a ``StatisticEvent``
-                for the callback transport (sticky / inflight parsers).
-            node_id: Source endpoint identifier (empty string for the callback
-                transport — the event carries its own request/replica ids).
+            message: Payload, source identifier, and protocol metadata. The
+                payload type is fixed by the transport/parser pair: ``bytes``
+                for ZMQ, ``str`` for HTTP, or ``StatisticEvent`` for callbacks.
 
         Returns:
             A single update, a list of updates (applied in order), or ``None``

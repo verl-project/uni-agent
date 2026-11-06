@@ -29,15 +29,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from ...collectors.transport.base import Transport
+from ...collectors.transport.base import Transport, TransportHandler, TransportMessage
 
 
 @dataclass(frozen=True)
 class StatisticEvent:
     """Packed Balancer callback — the payload the callback transport delivers.
 
-    The three Balancer hook points do not share a stable ``node_id`` and differ
-    in arity, so they cannot be forced into ``(raw, node_id)``:
+    The three Balancer hook points differ in arity and may refer to multiple
+    nodes, so their arguments are carried in an event payload:
 
     - ``on_acquire(request_id, chosen, prompt_ids)``  → two strings + a token list
     - ``on_release(server_id, request_id)``           → string + optional id
@@ -65,7 +65,7 @@ class StatisticEvent:
     prompt_ids: tuple[int, ...] = ()
 
 
-class CallbackTransport(Transport):
+class CallbackTransport(Transport[StatisticEvent]):
     """Pure-forwarder Transport backed by Balancer callbacks.
 
     Args:
@@ -81,38 +81,41 @@ class CallbackTransport(Transport):
         self._balancer = balancer_handler
         self._registered: list[tuple[str, Callable]] = []
 
-    async def subscribe(self, handler: Callable[[bytes | str, str], None]) -> None:
+    async def subscribe(self, handler: TransportHandler[StatisticEvent]) -> None:
         """Register three callbacks on the Balancer; no loop, returns at once.
 
-        Each callback packs its arguments into a ``StatisticEvent`` and hands
-        it to ``handler`` with an empty ``node_id`` (the event carries its own
-        ids; the sticky/inflight parsers ignore ``node_id``).
+        Each callback packs its arguments into a ``StatisticEvent`` payload
+        with an empty source ``node_id`` (the event carries its own ids).
         """
         balancer = self._balancer
 
         def _on_acquire(request_id: str, chosen: str, prompt_ids: list[int] | None = None) -> None:
             handler(
-                StatisticEvent(
-                    "on_acquire",
-                    request_id=request_id,
-                    replica_id=chosen,
-                    prompt_ids=tuple(prompt_ids) if prompt_ids else (),
+                TransportMessage(
+                    StatisticEvent(
+                        "on_acquire",
+                        request_id=request_id,
+                        replica_id=chosen,
+                        prompt_ids=tuple(prompt_ids) if prompt_ids else (),
+                    ),
+                    node_id="",
                 ),
-                "",
             )
 
         def _on_release(server_id: str, request_id: str | None = None) -> None:
             handler(
-                StatisticEvent(
-                    "on_release",
-                    replica_id=server_id,
-                    request_id=request_id,
+                TransportMessage(
+                    StatisticEvent(
+                        "on_release",
+                        replica_id=server_id,
+                        request_id=request_id,
+                    ),
+                    node_id="",
                 ),
-                "",
             )
 
         def _on_servers_removed(server_ids: list[str]) -> None:
-            handler(StatisticEvent("on_servers_removed", server_ids=tuple(server_ids)), "")
+            handler(TransportMessage(StatisticEvent("on_servers_removed", server_ids=tuple(server_ids)), node_id=""))
 
         self._registered = [
             ("on_acquire", _on_acquire),

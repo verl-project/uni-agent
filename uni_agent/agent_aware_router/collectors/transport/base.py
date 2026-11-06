@@ -21,10 +21,34 @@ and delivers it to a handler callback.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Callable
+from dataclasses import dataclass
+from typing import Callable, Generic, Literal, TypeAlias, TypeVar
+
+PayloadT = TypeVar("PayloadT", covariant=True)
 
 
-class Transport(ABC):
+@dataclass(frozen=True)
+class TransportMessage(Generic[PayloadT]):
+    """Uninterpreted payload and ordered facts about its network source.
+
+    ``new_stream`` announces an attachment without a replay cursor;
+    ``no_continuity`` reports an interrupted subscription or incomplete replay;
+    ``unreachable`` reports exhausted connection attempts. ZMQ status-only
+    messages have an empty byte payload and precede subsequent source data.
+    ``node_id`` identifies the source; callback payloads carry their own event
+    identifiers and use an empty source id.
+    """
+
+    payload: PayloadT
+    node_id: str
+    sequence: int | None = None
+    status: Literal["ok", "new_stream", "no_continuity", "unreachable"] = "ok"
+
+
+TransportHandler: TypeAlias = Callable[[TransportMessage[PayloadT]], None]
+
+
+class Transport(ABC, Generic[PayloadT]):
     """Abstract base for data transport layers.
 
     Subclasses implement ``subscribe()`` with their protocol-specific
@@ -42,14 +66,12 @@ class Transport(ABC):
     is_async: bool = True
 
     @abstractmethod
-    async def subscribe(self, handler: Callable[[bytes | str, str], None]) -> None:
+    async def subscribe(self, handler: TransportHandler[PayloadT]) -> None:
         """Start data acquisition and deliver each item to handler.
 
         Args:
-            handler: Callback that receives (raw_data, node_id).
-                raw_data is ``bytes`` (ZMQ) / ``str`` (HTTP response text),
-                or a ``StatisticEvent`` (callback transport).
-                node_id identifies the source endpoint/node (empty for the
+            handler: Callback that receives a ``TransportMessage`` with the
+                transport's payload type and source endpoint/node id (empty for the
                 callback transport — the event carries its own ids).
         """
 

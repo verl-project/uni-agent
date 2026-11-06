@@ -24,12 +24,13 @@ import logging
 from typing import Any
 
 from ....collectors.parse import MetricsUpdate, Parser
+from ....collectors.transport.base import TransportMessage
 from ....types import METRIC_SPECS, MetricKey
 
 logger = logging.getLogger(__name__)
 
 
-class VLLMMetricsParser(Parser):
+class VLLMMetricsParser(Parser[str]):
     """vLLM Prometheus metrics parser — parses HTTP response text.
 
     Returns structured metrics.
@@ -71,19 +72,19 @@ class VLLMMetricsParser(Parser):
         # separately in ``parse`` (label-as-value).
     }
 
-    def parse(self, raw_data: bytes | str, node_id: str) -> MetricsUpdate | None:
+    def parse(self, message: TransportMessage[str]) -> MetricsUpdate | None:
         """Parse Prometheus text and return structured metrics.
 
         Args:
-            raw_data: HTTP response text (Prometheus exposition format).
-            node_id: Source endpoint identifier.
+            message: HTTP response text (Prometheus exposition format) and
+                its source endpoint identifier.
 
         Returns:
             MetricsUpdate with parsed metrics, or None if parsing failed.
         """
-        # HTTP delivers str; ignore bytes data
-        if isinstance(raw_data, bytes):
-            logger.debug("VLLMMetricsParser received bytes data, expected str — skipping")
+        raw_data = message.payload
+        node_id = message.node_id
+        if not isinstance(raw_data, str):
             return None
 
         result: dict[str, Any] = {}

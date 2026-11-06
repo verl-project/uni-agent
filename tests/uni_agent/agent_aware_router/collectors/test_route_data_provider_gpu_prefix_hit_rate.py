@@ -34,6 +34,7 @@ from conftest import BLOCK_SIZE, NODE_ID, FakeZMQTransport, kv_payload, make_sto
 
 from uni_agent.agent_aware_router.collectors.collector import Collector
 from uni_agent.agent_aware_router.collectors.parse.vllm.kv import VLLMKVParser
+from uni_agent.agent_aware_router.collectors.transport.base import TransportMessage
 from uni_agent.agent_aware_router.store.data_store import DataStore
 from uni_agent.agent_aware_router.types import Layer
 from uni_agent.agent_aware_router.utils.hash import get_prefix_hashes_incremental
@@ -128,7 +129,7 @@ def test_wire_events_change_prefix_hit_rate(removed_hash, expected_hit):
     chain = _hash_chain(LONG_IDS)
 
     def apply(event):
-        update = collector._parser.parse(kv_payload(mapping_event(event)), NODE_ID)
+        update = collector._parser.parse(TransportMessage(kv_payload(mapping_event(event)), NODE_ID))
         assert update is not None
         collector._write_kv_update(update)
 
