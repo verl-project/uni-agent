@@ -44,6 +44,45 @@ export OPENYUANRONG_TUNNEL_SSL_VERIFY="0"   # optional, defaults to 0
 
 > For the platform itself, see the [OpenYuanRong docs](https://docs.openyuanrong.org/zh-cn/latest/index.html). The sandbox is backed by [AKernel](https://github.com/inclusionAI/AKernel/blob/main/AGENTS.md) (`akernel_sdk`), which is where `<server-address>` / `<token>` come from.
 
+## Cache lifecycle synchronization
+
+The vLLM inference entry point registers the router's metadata and lifecycle
+adapter automatically. Custom entry points must register it in the process
+that creates rollout replicas, before creating `LLMServerManager`:
+
+```python
+from uni_agent.agent_aware_router.server.bootstrap import register_vllm_metadata_replica
+
+register_vllm_metadata_replica()
+```
+
+Use prefix caching and native ZMQ KV events, with one DP event source per
+rollout server. The adapter synchronizes router state with the cache operations
+used by verl: clear, pause, sleep/wake, KV release/resume and request reopening.
+It invalidates the affected replica's index before a cache reset and accepts
+cache events only from its current engine instance and cache epoch. Pausing
+without clearing preserves cache residency. Existing routing configuration and
+lifecycle method signatures remain unchanged.
+
+During these operations the replica stops accepting new requests. A failed
+lifecycle notification or reset keeps it closed. After repairing the failure,
+call `recover_cache_lifecycle()` on the server, then `open_submission_gate()` if
+it was already paused. A missing event or an unmanaged Clear disables cache
+estimates until a controlled clear or recovery observes its checked native reset
+boundary. Recovery keeps the engine instance and rejects late events and reset
+markers from earlier attempts. A recovery timeout keeps request admission closed.
+
+Checked sleep and recovery use the native utilities installed by the
+`uni_agent_native_hash` plugin. Include it in an explicit `VLLM_PLUGINS`
+allowlist. These utilities preserve the native event format and publish the
+recovery marker as an optional trailing batch field, which standard vLLM event
+decoders ignore.
+
+The adapter preserves verl's `reset_connector=True` behavior. With the current
+Mooncake Store connector, this can clear the entire shared Store. The caller
+must coordinate all shared replicas' writers and transfers before resetting it;
+this adapter does not provide a global Store barrier or weight-version namespace.
+
 ## Grafana dashboard
 
 The kvc-router metrics dashboard (`verl_agentic_rollout.json`) ships in `uni_agent/agent_aware_router/insight/`. Both drivers pass that directory to `rl-insight server start --extra-dashboard-dir` ([rl-insight #183](https://github.com/verl-project/rl-insight/pull/183)), so the installed rl-insight package stays untouched and json updates apply on every restart. This requires an rl-insight build with the flag; older builds fail at startup.

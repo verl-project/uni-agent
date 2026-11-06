@@ -15,7 +15,7 @@
 """ZMQTransport — ZMQ replay + sub dual socket transport.
 
 Connects to per-endpoint ZMQ addresses (sub + replay), subscribes to
-live events, and delivers raw payloads to the handler callback.
+live events, and delivers uninterpreted messages to the handler callback.
 """
 
 from __future__ import annotations
@@ -28,9 +28,25 @@ from typing import Callable
 import zmq
 import zmq.asyncio
 
-from ...collectors.transport.base import Transport
+from ...collectors.transport.base import Transport, TransportMessage
+from ...utils.endpoints import format_host_port, is_ipv6_host
 
 logger = logging.getLogger(__name__)
+
+
+def _tcp_endpoint(address: str) -> str:
+    host, _, port = address.rpartition(":")
+    if is_ipv6_host(host):
+        address = format_host_port(host, port)
+    return f"tcp://{address}"
+
+
+def _socket(context, kind, endpoint):
+    socket = context.socket(kind)
+    host = endpoint.removeprefix("tcp://").rpartition(":")[0]
+    if is_ipv6_host(host):
+        socket.setsockopt(zmq.IPV6, 1)
+    return socket
 
 
 @dataclass
@@ -56,6 +72,7 @@ class ZMQTransport(Transport):
         max_retry_delay: Maximum retry delay cap in seconds.
         max_retry_attempts: Maximum number of retries per endpoint.
         retry_backoff_factor: Exponential backoff multiplier.
+        cursors: Delivered replay positions, bound to their source addresses and topic.
     """
 
     def __init__(
@@ -65,7 +82,9 @@ class ZMQTransport(Transport):
         max_retry_delay: float = 30.0,
         max_retry_attempts: int = 5,
         retry_backoff_factor: float = 2.0,
+        cursors: dict[str, tuple[str, str, str, int]] | None = None,
     ) -> None:
+        self._replay_cursors: dict[str, int] = {}
         self._base_retry_delay = base_retry_delay
         self._max_retry_delay = max_retry_delay
         self._max_retry_attempts = max_retry_attempts
@@ -84,17 +103,42 @@ class ZMQTransport(Transport):
                 )
             if addrs[2] != "zmq":
                 raise ValueError(f"endpoint '{node_id}' publisher must be 'zmq', got '{addrs[2]}'")
-            self._sub_endpoints[node_id] = f"tcp://{addrs[0]}"
-            self._replay_endpoints[node_id] = f"tcp://{addrs[1]}" if addrs[1] else ""
+            self._sub_endpoints[node_id] = _tcp_endpoint(addrs[0])
+            self._replay_endpoints[node_id] = _tcp_endpoint(addrs[1]) if addrs[1] else ""
             self._topics[node_id] = addrs[3]
+
+        for node_id, (sub, replay, topic, sequence) in (cursors or {}).items():
+            if (
+                self._sub_endpoints.get(node_id) == sub
+                and self._replay_endpoints[node_id] == replay
+                and self._topics[node_id] == topic
+            ):
+                self._replay_cursors[node_id] = sequence
 
         self._stopped = False
         self._endpoint_sockets: dict[str, _EndpointSocketSet] = {}
         self._retry_counts: dict[str, int] = {}
         self._sub_tasks: dict[str, asyncio.Task] = {}
 
-    async def subscribe(self, handler: Callable[[bytes | str, str], None]) -> None:
-        """Spawn per-endpoint subscription tasks, deliver payloads to handler."""
+    def get_cursors(self) -> dict[str, tuple[str, str, str, int]]:
+        """Snapshot delivered progress together with the event source it belongs to."""
+        return {
+            node: (self._sub_endpoints[node], self._replay_endpoints[node], self._topics[node], sequence)
+            for node, sequence in self._replay_cursors.items()
+        }
+
+    async def subscribe(self, handler: Callable[[TransportMessage, str], None]) -> None:
+        """Subscribe until every endpoint task finishes or the subscription stops.
+
+        A handler exception is fatal only to its endpoint: log its node and
+        traceback, close its resources, and do not retry it as a network fault.
+        Other endpoints continue. Completion represents the aggregate lifecycle,
+        not per-endpoint health. Repair a failed consumer, then explicitly stop
+        and restart the subscription to resume that endpoint.
+        """
+        self._stopped = False
+        # A new session gets fresh attempts while retaining delivered replay positions.
+        self._retry_counts.clear()
         sub_tasks = []
         for node_id in self._sub_endpoints:
             sub_addr = self._sub_endpoints[node_id]
@@ -134,19 +178,19 @@ class ZMQTransport(Transport):
     ) -> bool:
         """Create ZMQ context and replay + sub dual socket for a single endpoint.
 
-        If ``replay_addr`` is empty (sub-only mode), the replay REQ socket is
+        If ``replay_addr`` is empty (sub-only mode), the replay DEALER socket is
         skipped — used by the standalone collector which has no replay endpoint.
         """
         try:
             ctx = zmq.asyncio.Context()
 
-            sub_socket = ctx.socket(zmq.SUB)
+            sub_socket = _socket(ctx, zmq.SUB, sub_addr)
             sub_socket.connect(sub_addr)
             sub_socket.setsockopt_string(zmq.SUBSCRIBE, self._topics[node_id])
 
             replay_socket = None
             if replay_addr:
-                replay_socket = ctx.socket(zmq.REQ)
+                replay_socket = _socket(ctx, zmq.DEALER, replay_addr)
                 replay_socket.connect(replay_addr)
 
             self._endpoint_sockets[node_id] = _EndpointSocketSet(
@@ -155,7 +199,6 @@ class ZMQTransport(Transport):
                 sub_socket=sub_socket,
                 replay_socket=replay_socket,
             )
-            self._retry_counts[node_id] = 0
             return True
 
         except zmq.ZMQError as exc:
@@ -203,84 +246,113 @@ class ZMQTransport(Transport):
 
     # ── Per-endpoint subscription ────────────────────────────────────────
 
+    def _deliver(
+        self,
+        node_id: str,
+        sequence: int,
+        payload: bytes,
+        handler: Callable[[TransportMessage, str], None],
+    ) -> None:
+        """Deliver every frame; the cursor only selects future replay ranges."""
+        handler(TransportMessage(payload, sequence), node_id)
+        self._replay_cursors[node_id] = max(sequence, self._replay_cursors.get(node_id, sequence))
+
     async def _subscribe_for_endpoint(
         self,
         node_id: str,
         sub_addr: str,
         replay_addr: str,
-        handler: Callable[[bytes | str, str], None],
+        handler: Callable[[TransportMessage, str], None],
     ) -> None:
-        """Per-endpoint subscription: connect → replay (if available) → subscribe loop."""
         try:
+            if node_id not in self._replay_cursors:
+                handler(TransportMessage(b"", status="new_stream"), node_id)
             if not await self._connect_zmq_for(node_id, sub_addr, replay_addr):
                 if not await self._reconnect_with_backoff_for(node_id, sub_addr, replay_addr):
+                    handler(TransportMessage(b"", status="unreachable"), node_id)
                     return
-
-            # Replay historical events only when a replay socket is connected
-            # (sub-only mode skips this — standalone collector has no replay endpoint).
             if replay_addr:
                 await self._replay_historical_data_for(node_id, handler)
-
-            sockets = self._endpoint_sockets.get(node_id)
-            if sockets is None:
-                return
-
             while not self._stopped:
+                sockets = self._endpoint_sockets.get(node_id)
+                if sockets is None:
+                    return
                 try:
                     parts = await sockets.sub_socket.recv_multipart()
-                    payload = parts[-1]
-                    handler(payload, node_id)
-                except zmq.ZMQError:
+                    if len(parts) < 3 or len(parts[-2]) != 8:
+                        raise ValueError("invalid subscription sequence frame")
+                    sequence = int.from_bytes(parts[-2], "big")
+                except (zmq.ZMQError, ValueError) as exc:
+                    logger.warning("ZMQ subscription error for %s: %s", node_id, exc)
+                    if not replay_addr:
+                        handler(TransportMessage(b"", status="no_continuity"), node_id)
                     self._close_zmq_sockets_for(node_id)
                     if not await self._reconnect_with_backoff_for(node_id, sub_addr, replay_addr):
+                        handler(TransportMessage(b"", status="unreachable"), node_id)
                         break
                     if replay_addr:
                         await self._replay_historical_data_for(node_id, handler)
-
+                    continue
+                self._deliver(node_id, sequence, parts[-1], handler)
+                self._retry_counts[node_id] = 0
         except asyncio.CancelledError:
             pass
+        except Exception:
+            logger.exception("ZMQ endpoint task failed for %s", node_id)
+            raise
         finally:
             self._close_zmq_sockets_for(node_id)
-
-    # ── Replay ──────────────────────────────────────────────────────────
 
     async def _replay_historical_data_for(
         self,
         node_id: str,
-        handler: Callable[[bytes | str, str], None],
-    ) -> None:
-        """Request replay of historical data for a single endpoint.
-
-        vLLM's ROUTER replay socket expects the starting sequence number as an
-        8-byte big-endian integer — the REQ socket adds the empty delimiter frame
-        itself, so the publisher receives ``[client_id, "", start_seq]``. It then
-        streams each retained batch back as ``[seq_bytes, payload]`` frames,
-        terminated by an empty-payload ``END_SEQ`` marker. We start from seq 0 to
-        pull the whole retained buffer. Degrades to subscription-only on failure.
-        """
+        handler: Callable[[TransportMessage, str], None],
+    ) -> bool:
+        """Read every streamed ROUTER reply through END_SEQ using DEALER."""
         sockets = self._endpoint_sockets.get(node_id)
         if sockets is None or sockets.replay_socket is None:
-            return
-
+            return False
+        resume_pending = node_id in self._replay_cursors
         try:
-            await sockets.replay_socket.send((0).to_bytes(8, "big"))
+            start = self._replay_cursors.get(node_id, -1) + 1
+            await sockets.replay_socket.send_multipart([b"", start.to_bytes(8, "big")])
+        except (zmq.ZMQError, ValueError) as exc:
+            return self._replay_failed(node_id, sockets, handler, exc)
+        while not self._stopped:
+            try:
+                frames = await asyncio.wait_for(sockets.replay_socket.recv_multipart(), timeout=5.0)
+                if len(frames) < 3 or len(frames[-2]) != 8:
+                    raise ValueError("invalid replay sequence frame")
+                replay_ended = frames[-2] == (-1).to_bytes(8, "big", signed=True)
+                if replay_ended:
+                    if frames[-1] not in {b"", b"kv_replay_truncated"}:
+                        raise ValueError("unexpected payload on replay end marker")
+                else:
+                    if not frames[-1]:
+                        raise ValueError("unexpected empty replay payload")
+                    sequence = int.from_bytes(frames[-2], "big")
+            except (asyncio.TimeoutError, zmq.ZMQError, ValueError) as exc:
+                return self._replay_failed(node_id, sockets, handler, exc)
+            if replay_ended:
+                if frames[-1]:
+                    handler(TransportMessage(b"", status="no_continuity"), node_id)
+                return True
+            if resume_pending and sequence >= start:
+                resume_pending = False
+                if sequence > start:
+                    handler(TransportMessage(b"", status="no_continuity"), node_id)
+            self._deliver(node_id, sequence, frames[-1], handler)
+        return False
 
-            # Drain streamed replay frames until the empty-payload end marker
-            # (or a timeout / socket error) — then degrade to subscription-only.
-            while True:
-                try:
-                    frames = await asyncio.wait_for(
-                        sockets.replay_socket.recv_multipart(),
-                        timeout=5.0,
-                    )
-                except asyncio.TimeoutError:
-                    return  # no more frames → degrade to subscription-only
-
-                # REQ delivers each publisher send as [seq_bytes, payload];
-                # an empty payload marks end-of-replay (vLLM END_SEQ marker).
-                if len(frames) < 2 or not frames[-1]:
-                    return
-                handler(frames[-1], node_id)
-
-        except zmq.ZMQError as exc:
-            logger.warning(f"ZMQ replay error for node {node_id}: {exc}")
+    def _replay_failed(self, node_id, sockets, handler, error) -> bool:
+        if self._stopped:
+            return False
+        logger.warning("Replay incomplete for %s: %s", node_id, error)
+        # Retire the old identity before another request: late streamed replies
+        # must not become the next request's response.
+        sockets.replay_socket.close(0)
+        replacement = _socket(sockets.context, zmq.DEALER, self._replay_endpoints[node_id])
+        replacement.connect(self._replay_endpoints[node_id])
+        sockets.replay_socket = replacement
+        handler(TransportMessage(b"", status="no_continuity"), node_id)
+        return False

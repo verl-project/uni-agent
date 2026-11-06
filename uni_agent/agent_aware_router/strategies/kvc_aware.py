@@ -188,16 +188,14 @@ class KVCacheAwareStrategy:
             logger.info(f"is-overload replica={replica.replica_id} kv_perc={kv_perc:.4f}")
             return kv_perc > self.load_threshold
         if self.overload_mode == OverloadMode.REMAINING_CAP:
-            cap = self._total_token_capacity(store)
+            cap = self._total_block_capacity(store)
             if cap <= 0:
                 # No capacity yardstick yet (first NUM_GPU_BLOCKS poll not in): no gate
                 # can be evaluated, so never break sticky on missing data.
                 return False
             thresh = cap * (1.0 - self.load_threshold)
-            block_size = store.get_block_size() or 16
-            inflight_blocks = store.inflight_block_count(replica.replica_id)
-            avail = cap - inflight_blocks * block_size
-            if avail >= thresh:
+            avail = self._available_blocks(store, replica.replica_id, cap)
+            if avail is None or avail >= thresh:
                 return False
             return True
         raise ValueError(
@@ -268,32 +266,19 @@ class KVCacheAwareStrategy:
             # Hash-resolving slow_cuts share one resolution across all replicas.
             gpu_hash_strs = resolve_prefix_hashes(prompt_ids or [], request_id, store)
             if self.slow_cut == SlowCut.CAPACITY_TOKEN_AWARE:
-                return self._capacity_token_scores(store, replicas, prompt_ids or [], gpu_hash_strs)
+                estimates = store.estimate_prefixes(
+                    [replica.replica_id for replica in replicas], gpu_hash_strs, len(prompt_ids or [])
+                )
+                return self._capacity_token_scores(store, replicas, prompt_ids or [], estimates)
             raise ValueError(f"Unknow slowcut type {self.slow_cut}")
         finally:
             emitter.on_route(time.perf_counter() - t0)
 
-    def _cache_score(
-        self,
-        store: DataStore,
-        replica: ReplicaInfo,
-        hash_strs: list[str],
-    ) -> tuple[float, float]:
-        """Three-layer weighted prefix-cache hit score ∈ [0, 1].
-
-            S_cache = w_gpu·gpu_hit + w_cpu·cpu_hit + w_ssd·ssd_hit
-
-        ``hash_strs`` is the caller-computed prefix-hash chain (shared across
-        replicas, per-request cached) so the per-replica cost is just the index
-        walk. CPU/SSD return 0.0 today (see ``KVCacheStore.get_layer_prefix_hit_rate``).
-        Returns ``(s_cache, gpu_hit)`` so the caller logs gpu_hit without re-querying.
-        """
-        gpu_hit = store.get_layer_prefix_hit_rate(replica.replica_id, hash_strs, Layer.GPU)
-        cpu_hit = store.get_layer_prefix_hit_rate(replica.replica_id, hash_strs, Layer.CPU)
-        ssd_hit = store.get_layer_prefix_hit_rate(replica.replica_id, hash_strs, Layer.SSD)
-        w = self.layer_weights
-        s_cache = w[Layer.GPU] * gpu_hit + w[Layer.CPU] * cpu_hit + w[Layer.SSD] * ssd_hit
-        return s_cache, gpu_hit
+    def _cache_score(self, replica: ReplicaInfo, estimates) -> tuple[float, float]:
+        """Use saved prefill work from the common group estimate, including replay."""
+        estimate = estimates.get(replica.replica_id)
+        gpu_hit = estimate.saved_token_rate if estimate else 0.0
+        return self.layer_weights[Layer.GPU] * gpu_hit, gpu_hit
 
     # ── Capacity-gated token routing (CAPACITY_TOKEN_AWARE) ───────────
 
@@ -307,53 +292,40 @@ class KVCacheAwareStrategy:
             logger.debug(f"soft-pick: candidates={candidates} values={values} tol={tolerance} picked={picked}")
         return picked
 
-    def _total_token_capacity(self, store: DataStore) -> int:
-        """Per-replica KV-cache token capacity = ``num_gpu_blocks × block_size``.
-
-        ``block_size`` is learned from the first KV event (defaults to 16 if not
-        yet seen). Returns 0 when unavailable, in which case the caller ranks by
-        in-flight request count.
-        """
-        for node_id in store.get_metric_node_ids():
-            nblk = store.get_metric(node_id, MetricKey.NUM_GPU_BLOCKS)
-            if nblk and nblk > 0:
-                block_size = store.get_block_size() or 16
-                return int(nblk) * int(block_size)
+    def _total_block_capacity(self, store: DataStore) -> int:
+        """All groups draw from one pool; token-capacity metadata is not a pool count."""
+        registry = store.cache_registry_state.registry
+        if registry is None:
+            return 0
+        if registry.pool_blocks is not None:
+            return registry.pool_blocks
+        for node in store.get_metric_node_ids():
+            count = store.get_metric(node, MetricKey.NUM_GPU_BLOCKS)
+            if count and count > 0:
+                return int(count)
         return 0
+
+    def _available_blocks(self, store, node, capacity):
+        reserved = store.inflight_reserved_blocks(node)
+        return capacity - reserved if capacity > 0 and reserved is not None else None
 
     def _capacity_token_scores(
         self,
         store: DataStore,
         replicas: list[ReplicaInfo],
         prompt_ids: list[int],
-        gpu_hash_strs: list[str],
+        estimates,
     ) -> list[float]:
-        """Capacity-gated token routing (discrete: winner=STICKY_TOP_SCORE, rest 0).
+        """Capacity gate and remaining-token ranking with layout-aware cache benefit.
 
-        The load account is the router's own book — the held-block reference
-        counts (``DataStore.inflight_block_count``, written by the inflight
-        collector's pin/unpin commands), which is occupancy, unlike the polled
-        ``kv_perc`` or the raw ``INFLIGHT_TOKENS`` sum (both logged as
-        cross-checks only)::
-
-            avail[i]     = cap - inflight_blocks[i] × block_size   # free capacity (tokens)
-            need[i]      = len(prompt_ids) × (1 - gpu_hit[i])      # prefill this req adds
-            remaining[i] = avail[i] - need[i]                      # free capacity after assign
-            eligible[i]  = avail[i] >= cap × (1 - load_threshold)      # pure capacity gate
-
-        ``need`` keeps the prefill-work estimate (not the held blocks) so the
-        ranking still sees how much work each candidate adds. ``cap == 0``
-        (first KV event not in) falls back to min in-flight count; a no-eligible
-        pool (all replicas under water) falls back to min ``need`` — deficit
-        magnitudes would drown the cache signal in a max-``remaining`` ranking,
-        so the saturated pick is the cheapest assignment instead. The pick goes
-        through :meth:`_soft_pick` (random within ``tie_tolerance``).
+        Extend #257's complete-prefix reservation book to group-qualified refs
+        and request-private group budgets. Capacity, reservations and prefill
+        cost all use shared-pool block units. The gate, remaining ranking,
+        min-need saturation fallback and unknown-capacity least-inflight rule
+        are the same for every layout. This remains a dispatch-time estimate.
         """
         n = len(replicas)
-        cap = self._total_token_capacity(store)
-        # Same 16 default as _total_token_capacity, so both stay in the same unit
-        # before the first KV event teaches the real block size.
-        block_size = store.get_block_size() or 16
+        cap = self._total_block_capacity(store)
         plen = len(prompt_ids) if prompt_ids else 0
         rows: list[dict] = []
         for replica in replicas:
@@ -361,12 +333,17 @@ class KVCacheAwareStrategy:
             inflight = store.get_metric(replica.replica_id, MetricKey.INFLIGHT_COUNT) or 0
             inflight_tokens = store.get_metric(replica.replica_id, MetricKey.INFLIGHT_TOKENS) or 0
             inflight_blocks = store.inflight_block_count(replica.replica_id)
-            s_cache, gpu_hit = self._cache_score(store, replica, gpu_hash_strs)
-            avail = cap - inflight_blocks * block_size
-            need = plen * (1.0 - gpu_hit)
-            remaining = avail - need
+            s_cache, gpu_hit = self._cache_score(replica, estimates)
+            avail = self._available_blocks(store, replica.replica_id, cap)
+            estimate = estimates.get(replica.replica_id)
+            need = store.request_block_need(plen, estimate.estimated_saved_tokens if estimate else 0)
+            if need is None:
+                cap = 0
+                need = 0.0
+                avail = None
+            remaining = avail - need if avail is not None else None
             # Emit as fractions of capacity (default-bucket friendly); skip when cap unknown.
-            if cap > 0:
+            if cap > 0 and avail is not None:
                 emitter.on_score(
                     replica.replica_id,
                     {
@@ -391,45 +368,39 @@ class KVCacheAwareStrategy:
             )
 
         if cap <= 0:
-            # No token yardstick yet (first KV event not in) → rank by in-flight count.
-            top = self._soft_pick([rows[i]["inflight"] for i in range(n)], maximize=False, tolerance=0)
-            logger.info("score(): CAPACITY_TOKEN_AWARE cap unknown → soft-pick min inflight")
+            top = self._soft_pick([row["inflight"] for row in rows], maximize=False, tolerance=0)
+            logger.info("score(): capacity unknown → soft-pick min inflight")
         else:
-            thresh = cap * (1.0 - self.load_threshold)
-            eligible = [i for i in range(n) if rows[i]["avail"] >= thresh]
+            threshold = cap * (1.0 - self.load_threshold)
+            eligible = [i for i, row in enumerate(rows) if row["avail"] is not None and row["avail"] >= threshold]
             if eligible:
                 top = eligible[
                     self._soft_pick(
                         [rows[i]["remaining"] for i in eligible], maximize=True, tolerance=self.tie_tolerance
                     )
                 ]
-                logger.info("score(): CAPACITY_TOKEN_AWARE eligible → soft-pick max remaining")
             else:
-                # Nobody passes the gate — every replica under water. remaining would be
-                # deficit-dominated (|avail| ≫ plen) and drown the cache signal, so pick
-                # the cheapest assignment instead: min need = max cache reuse.
-                top = self._soft_pick([rows[i]["need"] for i in range(n)], maximize=False, tolerance=0)
-                logger.info("score(): CAPACITY_TOKEN_AWARE no eligible → soft-pick min need")
+                top = self._soft_pick([row["need"] for row in rows], maximize=False, tolerance=0)
 
         for i, row in enumerate(rows):
             tag = " ← WINNER" if i == top else ""
             logger.debug(
                 f"score(): replica={row['replica'].replica_id} kv_perc={row['kv_perc']:.3f} "
                 f"gpu_hit={row['gpu_hit']:.3f} inflight={row['inflight']} "
-                f"avail={row['avail']:.0f} need={row['need']:.0f} "
+                f"avail={row['avail']} need={row['need']:.0f} "
                 f"max_num_batched_tokens={self._max_num_batched_tokens} inflight_tokens={row['inflight_tokens']:} "
                 f"inflight_blocks={row['inflight_blocks']} "
-                f"remaining={row['remaining']:.0f}{tag}"
+                f"remaining={row['remaining']} capacity_source=dispatch_book{tag}"
             )
         winner = rows[top]["replica"].replica_id
         logger.info(
             f"score(): CAPACITY_TOKEN_AWARE winner={winner} "
-            f"(avail={rows[top]['avail']:.0f}, need={rows[top]['need']:.0f}, "
-            f"remaining={rows[top]['remaining']:.0f}, inflight_blocks={rows[top]['inflight_blocks']}, "
+            f"(avail={rows[top]['avail']}, need={rows[top]['need']:.0f}, "
+            f"remaining={rows[top]['remaining']}, inflight_blocks={rows[top]['inflight_blocks']}, "
             f"inflight_tokens={rows[top]['inflight_tokens']}, kv_perc={rows[top]['kv_perc']:.3f})"
         )
         # Per-replica capacity signal for the plot (mirrors route-load in least-inflight).
-        cap_loads = {row["replica"].replica_id: row["remaining"] for row in rows}
+        cap_loads = {row["replica"].replica_id: row["remaining"] for row in rows if row["remaining"] is not None}
         logger.info(f"route-capacity remaining={cap_loads}")
         scores = [0.0] * n
         scores[top] = STICKY_TOP_SCORE
