@@ -14,7 +14,7 @@
 
 """InflightParser — Balancer acquire/release callbacks → netted metric deltas + block commands.
 
-the collector gathers the per-event state from the store and hands it to :meth:`InflightParser.parse`
+the updater gathers the per-event state from the store and hands it to :meth:`InflightParser.parse`
 as keyword arguments; the parser decides and emits ``InflightBlockUpdate`` pin/unpin/stale_unpin
 commands plus fully-netted ``MetricsUpdate`` deltas.
 """
@@ -40,11 +40,11 @@ class InflightParser(Parser):
             ``StatisticEvent``; anything else is ignored (``None``).
         node_id: Source endpoint id (empty for the callback transport — the
             event carries its own replica).
-        turn: The request's turn after the collector's increment (acquire) or
+        turn: The request's prospective next turn (acquire) or
             its stored turn (release); 0 when unattributable.
-        stale: The request's still-held pin marker (``get_marker`` peek), or
-            ``None`` — its presence marks the previous release as dropped.
-        block_size: The learned KV block size (store read by the collector);
+        stale: The previous active dispatch's replica and turn, or ``None``.
+            Its presence marks a dropped release, even without pinned blocks.
+        block_size: The learned KV block size (store read by the updater);
             0 = not yet learned → nothing resolvable, nothing pinned.
         booked_len: The request's currently-booked prompt length — the stale
             dispatch's booking netted out on acquire, folded out on release.
@@ -101,9 +101,8 @@ class InflightParser(Parser):
             return [MetricsUpdate(node_id=event.replica_id, metrics=metrics, is_delta=True)]
 
         metrics[MetricKey.INFLIGHT_TURN_SUM] = turn
-        # A still-held marker means the previous dispatch never released (a
-        # dropped COMPLETED_COUNT) — emit the unwind and net its still-booked
-        # tokens out of this acquire.
+        # Reverse the previous dispatch on its own replica, including its turn.
+        # This also works when no prefix was resolvable at acquire time.
         if stale is not None:
             logger.warning(
                 f"re-acquire without release request={event.request_id} on {stale['replica']} "
@@ -112,11 +111,18 @@ class InflightParser(Parser):
             updates.append(
                 InflightBlockUpdate(node_id=event.replica_id, request_id=event.request_id, action="stale_unpin")
             )
-            metrics[MetricKey.INFLIGHT_TOKENS] = plen - booked_len
-            # The dropped release's INFLIGHT_COUNT -1 never arrived either; fold
-            # it into this acquire so the gauge nets to the one turn genuinely
-            # in flight.
-            metrics[MetricKey.INFLIGHT_COUNT] = metrics.get(MetricKey.INFLIGHT_COUNT, 0) - 1
+            updates.append(
+                MetricsUpdate(
+                    node_id=stale["replica"],
+                    metrics={
+                        MetricKey.INFLIGHT_COUNT: -1,
+                        MetricKey.INFLIGHT_TOKENS: -booked_len,
+                        MetricKey.INFLIGHT_TURN_SUM: -stale["turn"],
+                    },
+                    is_delta=True,
+                    request_id=event.request_id,
+                )
+            )
 
         # Resolve the dispatch's prefix chain, computed fresh (the chain is
         # deterministic — no memo). Nothing resolvable (no prompt, block size

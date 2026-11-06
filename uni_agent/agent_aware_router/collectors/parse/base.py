@@ -15,7 +15,7 @@
 """Parser abstract base and its update return types.
 
 A ``Parser`` turns a raw transport payload (bytes/str) into a structured
-update that the ``Collector`` applies to the store.  The update types
+update that the application sink applies to the store.  The update types
 (``KVCacheUpdate``, ``MetricsUpdate``) live here, next to the base, because
 they are the parser's output contract — the layer that both produces and
 consumes them.
@@ -35,7 +35,7 @@ class KVCacheUpdate:
     """Mutable accumulator for KVCacheStore updates, built by the parser.
 
     The parser dispatches each event to a handler that calls ``add``/``remove``
-    to fold blocks in; the collector then reads ``add_blocks``/``remove_blocks``
+    to fold blocks in; the updater then reads ``add_blocks``/``remove_blocks``
     to write the store.
 
     Attributes:
@@ -99,7 +99,7 @@ class InflightBlockUpdate:
     Emitted by ``InflightParser`` from the Balancer's ``on_acquire`` /
     ``on_release`` callbacks. The parser owns the acquire/release protocol
     decisions (when to pin, when a re-acquire must first unwind a stale pin);
-    the collector applies each command mechanically — pin/unpin sets for
+    the updater applies each command mechanically — pin/unpin sets for
     ``unpin`` / ``stale_unpin`` come from the per-request marker row
     (``KVCacheStore.pop_marker``), which is the ground truth of what the
     dispatch pinned.
@@ -151,7 +151,7 @@ class Parser(ABC):
     """Abstract base for data parsers.
 
     Subclasses implement ``parse()`` with their backend-specific parsing logic,
-    returning a structured update the ``Collector`` applies to the store — a
+    returning a structured update the application sink applies to the store — a
     single ``KVCacheUpdate`` / ``MetricsUpdate`` / ``StickyUpdate``, a
     ``list`` of them (mixed with ``InflightBlockUpdate``), or ``None`` on
     failure/skip.

@@ -19,21 +19,16 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-import time
-from collections import defaultdict
 from concurrent.futures import Future
 from typing import Any
 
 from ..config.collector import CollectorConfig
 from ..debug import get_debug_var, is_debug_enabled
-from ..insight import WriteEvent, WriteKind, emitter
-from ..store.data_store import DataStore
-from ..types import EmitKey, MetricKey
 from ..utils.knob import coerce_knob_value
 from .parse import InflightBlockUpdate, KVCacheUpdate, MetricsUpdate, Parser, StickyUpdate
 from .parse.basic.inflight import InflightParser
+from .sink import ContextualInflightParser, InflightBookingUpdate, UpdateSink
 from .transport.base import Transport
-from .transport.callback import StatisticEvent
 
 logger = logging.getLogger(__name__)
 
@@ -47,76 +42,21 @@ DEFAULT_COLLECTOR_KNOBS: dict[str, float | int] = {
 }
 
 
-_METRICS_LOG_INTERVAL_S = 30
-_DISPATCH_LOG_INTERVAL_S = 5.0
-_KV_EVENT_LOG_INTERVAL_S = 500
-
-
-# Cumulative metrics tracked for windowed deltas in the evidence log. Single
-# source of truth — ``_delta`` consumers below read these by key, and the
-# per-replica prev-snapshot iterates the same tuple.
-_CUMULATIVE_KEYS: tuple[str, ...] = (
-    MetricKey.TTFT_SECONDS_SUM,
-    MetricKey.TTFT_COUNT,
-    MetricKey.QUEUE_TIME_SECONDS_SUM,
-    MetricKey.QUEUE_TIME_COUNT,
-    MetricKey.TPOT_SECONDS_SUM,
-    MetricKey.TPOT_COUNT,
-    MetricKey.PROMPT_TOKENS,
-    MetricKey.PROMPT_TOKENS_CACHED,
-    MetricKey.GENERATION_TOKENS,
-    MetricKey.EXTERNAL_PREFIX_CACHE_HITS,
-    MetricKey.ESTIMATED_FLOPS_PER_GPU,
-)
-
-# Per-request bookkeeping key: prompt length recorded at dispatch (acquire) and
-# folded back out at release — releases carry no token list (verl #7115). All
-# inflight store access lives on the collector; the parser decides and emits.
-_PROMPT_LEN_KEY = "prompt_len"
-
-
-def _avg(delta_sum: float, delta_cnt: float) -> float:
-    """Windowed average = delta_sum / delta_cnt, or NaN if no samples."""
-    return delta_sum / delta_cnt if delta_cnt > 0 else float("nan")
-
-
-def _ms(value: float) -> str:
-    """Format a seconds value as millis for the evidence log ('-' if NaN)."""
-    return f"{value * 1000:.1f}" if value == value else "-"
-
-
 class Collector:
-    """Unified collector — composes Transport + Parser.
+    """Transport lifecycle and typed parse dispatch, with an injectable application sink."""
 
-    Args:
-        transport: Transport instance (ZMQ, HTTP, etc.)
-        parser: Parser instance (vLLM KV, vLLM Metrics, Sticky, Inflight).
-    """
+    def __init__(self, transport: Transport, parser: Parser, sink: UpdateSink | None = None) -> None:
+        if sink is None:
+            from .updater import default_updater
 
-    def __init__(self, transport: Transport, parser: Parser) -> None:
+            sink = default_updater(lambda: getattr(parser, "stats", None))
         self._transport = transport
-        self._parser = parser
-        self._data_store = DataStore()
+        self._sink = sink
+        self._parser = ContextualInflightParser(parser, sink) if isinstance(parser, InflightParser) else parser
         self._future: Future | None = None
         self._loop: asyncio.AbstractEventLoop = asyncio.new_event_loop()
         self._loop_thread: threading.Thread | None = None
-        # Periodic evidence-log state. The parser is stateless (returns
-        # MetricsUpdate; merged here), so the log reads a current snapshot.
-        self._metrics_poll_count = 0
-        # Previous cumulative snapshot per node — for windowed delta
-        # computation. {node_id: {canonical_key: value}}
-        self._metrics_prev: dict[str, dict[str, float]] = {}
-        # kv-event tallies for periodic summary logging (kv parser only).
-        self._kv_event_counts: dict[str, int] = defaultdict(int)
-        self._kv_block_counts: dict[str, int] = defaultdict(int)
-        self._kv_last_logged_total = 0
-        # Last-emit time for the dispatched/completed/inflight_turn_sum snapshot (throttled).
-        self._dispatch_last_log: float = 0.0
-        # Resident blocks the router wrote itself at acquire (``record_dispatch_blocks``),
-        # logged in the kv-events tally as ``router_recorded`` (cross-check vs engine-side stored).
-        self._dispatch_recorded_blocks: int = 0
-
-    # ── Lifecycle ───────────────────────────────────────────────────────
+        self._dispatch_lock = threading.Lock()
 
     def start(self) -> None:
         """Start the collector — launch event-loop thread and subscribe."""
@@ -126,13 +66,14 @@ class Collector:
             self._loop.run_forever()
 
         def handler(raw_data: bytes | str, node_id: str) -> None:
+            # Callback transports may enter from multiple caller threads. Keep
+            # context reads, parsing and all applications in one ordered unit.
+            with self._dispatch_lock:
+                dispatch(raw_data, node_id)
+
+        def dispatch(raw_data: bytes | str, node_id: str) -> None:
             """Handler: parse and dispatch each update to the right store write path."""
-            if isinstance(self._parser, InflightParser):
-                # The inflight parser is pure — the collector gathers its state
-                # from the store and drives it event by event.
-                result = self._inflight_event(raw_data, node_id)
-            else:
-                result = self._parser.parse(raw_data, node_id)
+            result = self._parser.parse(raw_data, node_id)
             if result is None:
                 # None is normal for statistic parsers that skip an event
                 # (e.g. StickyParser on_release); demote to debug to avoid per-turn noise.
@@ -141,13 +82,15 @@ class Collector:
             updates = result if isinstance(result, list) else [result]
             for update in updates:
                 if isinstance(update, KVCacheUpdate):
-                    self._write_kv_update(update)
+                    self._sink.apply_kv(update)
                 elif isinstance(update, MetricsUpdate):
-                    self._write_metrics_update(update)
+                    self._sink.apply_metrics(update)
                 elif isinstance(update, StickyUpdate):
-                    self._write_sticky_update(update)
+                    self._sink.apply_sticky(update)
                 elif isinstance(update, InflightBlockUpdate):
-                    self._apply_inflight_block_update(update)
+                    self._sink.apply_inflight_blocks(update)
+                elif isinstance(update, InflightBookingUpdate):
+                    self._sink.apply_inflight_booking(update)
                 else:
                     logger.debug(f"parser.parse returned an unknown update: {update}")
 
@@ -170,267 +113,6 @@ class Collector:
                 tmp_loop.run_until_complete(self._transport.subscribe(handler))
             finally:
                 tmp_loop.close()
-
-    def _write_kv_update(self, update: KVCacheUpdate) -> None:
-        """Write KVCacheUpdate via DataStore, then emit a periodic kv-events tally."""
-        if update.block_size is not None:
-            self._data_store.set_block_size(update.block_size)
-        if update.clear_all:
-            self._data_store.clear_kv_node(update.node_id)
-        for layer, hashes in update.remove_blocks.items():
-            if hashes:
-                self._data_store.remove_kv_blocks(update.node_id, hashes, layer=layer)
-        for layer, hashes in update.add_blocks.items():
-            if hashes:
-                self._data_store.add_kv_blocks(update.node_id, hashes, layer=layer)
-
-        # Tally for periodic summary — observe BlockStored/BlockRemoved flow.
-        n_added = sum(len(v) for v in update.add_blocks.values())
-        n_removed = sum(len(v) for v in update.remove_blocks.values())
-        if update.clear_all:
-            self._kv_event_counts["clear"] += 1
-        if n_added:
-            self._kv_event_counts["stored"] += 1
-            self._kv_block_counts["stored"] += n_added
-        if n_removed:
-            self._kv_event_counts["removed"] += 1
-            self._kv_block_counts["removed"] += n_removed
-            emitter.on_write(
-                WriteEvent(
-                    kind=WriteKind.KV_REMOVED,
-                    node=update.node_id,
-                    deltas={EmitKey.KV_EVICTIONS: n_removed},
-                )
-            )
-        total = sum(self._kv_event_counts.values())
-        if total - self._kv_last_logged_total >= _KV_EVENT_LOG_INTERVAL_S:
-            self._kv_last_logged_total = total
-            # Parser-side translation failures: non-zero means the event-side
-            # retained count is drifting above the engine's truth.
-            hash_map_stats = getattr(self._parser, "stats", None)
-            logger.debug(
-                f"kv-events tally: events={dict(self._kv_event_counts)} "
-                f"blocks={dict(self._kv_block_counts)} (total_events={total}) | "
-                f"retained_blocks/replica={self._data_store.per_replica_block_counts()} | "
-                f"router_recorded={self._dispatch_recorded_blocks} | "
-                f"hash-map={dict(hash_map_stats or {})}"
-            )
-
-    def _write_metrics_update(self, update: MetricsUpdate) -> None:
-        """Write MetricsUpdate via DataStore, then forward to the insight emitter.
-
-        Delta updates (acquire/release) route to ``incr_metrics`` — the parser
-        emits fully-netted signed deltas, so all the acquire/release protocol
-        work (turn/token folding, stale re-acquire recovery, held-block
-        pinning) lives in ``InflightParser`` and arrives either as these
-        deltas or as separate ``InflightBlockUpdate`` commands. Absolute
-        (non-delta) updates are polled gauges, handled below. When rl-insight
-        emit is on, each write also builds a :class:`WriteEvent` from the
-        store's returned post-write values and hands it to the emitter (the
-        14 B-class signals).
-        """
-        if update.is_delta:
-            is_acquire = MetricKey.DISPATCHED_COUNT in update.metrics
-            is_release = MetricKey.COMPLETED_COUNT in update.metrics
-            new_values = self._data_store.incr_metrics(update.node_id, update.metrics)
-            if is_acquire or is_release:
-                emitter.on_write(
-                    WriteEvent(
-                        kind=WriteKind.ACQUIRE if is_acquire else WriteKind.RELEASE,
-                        node=update.node_id,
-                        deltas=update.metrics,
-                        new_values=new_values,
-                        turn_sum=new_values.get(MetricKey.INFLIGHT_TURN_SUM),
-                        inflight_count=new_values.get(MetricKey.INFLIGHT_COUNT),
-                    )
-                )
-            self._maybe_log_dispatch_stats()
-            return
-        snapshots = self._data_store.refresh_metrics({update.node_id: update.metrics})
-        emitter.on_write(
-            WriteEvent(
-                kind=WriteKind.POLL,
-                node=update.node_id,
-                new_values=snapshots.get(update.node_id, {}),
-                load=self._data_store.kv_cache_load(update.node_id),
-            )
-        )
-
-        # Periodic visibility into what the collector fed the router — compare
-        # against vllm's own "GPU KV cache usage" engine-stats log line.
-        self._metrics_poll_count += 1
-        if self._metrics_poll_count % _METRICS_LOG_INTERVAL_S == 0:
-            # Emit evidence for ALL known replicas, not just the one that happened
-            # to be polled at this poll-count tick. Metrics polling is serial
-            # (one replica per poll), so emitting only ``update.node_id`` here
-            # sampled ~1/N of replicas per window → some replicas never got an
-            # evidence line (e.g. 4/8 seen). Each replica keeps its own
-            # ``_metrics_prev`` baseline, so windowed deltas stay correct.
-            for nid in self._data_store.get_metric_node_ids():
-                self._log_evidence_window(nid)
-
-    # ── Inflight flow: the collector owns all inflight store access ─────
-
-    def _inflight_event(self, raw_data: bytes | str | Any, node_id: str) -> list | None:
-        """Drive the pure ``InflightParser`` for one Balancer callback.
-
-        The parser holds no store: this branch reads the per-event state its
-        netting needs, performs the acquire's booked-length write-back, and
-        hands the values over as ``parse()`` keyword arguments. Unattributable
-        payloads (no ``StatisticEvent``, no replica) and non-acquire/release
-        events are dropped (``None``).
-        """
-        parser = self._parser
-        if not isinstance(parser, InflightParser):
-            return None
-        if not isinstance(raw_data, StatisticEvent) or raw_data.replica_id is None:
-            return None
-        if raw_data.event == "on_acquire":
-            return self._inflight_acquire(parser, raw_data, node_id)
-        if raw_data.event == "on_release":
-            return self._inflight_release(parser, raw_data, node_id)
-        return None
-
-    def _inflight_acquire(self, parser: InflightParser, event: StatisticEvent, node_id: str) -> list:
-        """Gather the acquire state in the protocol's store order, then decide."""
-        rid = event.request_id
-        turn = self._data_store.incr_per_request(rid, "turn") if rid else 0
-        stale = self._data_store.get_marker(rid) if rid else None
-        booked_len = self._data_store.get_per_request(rid, _PROMPT_LEN_KEY, 0) if rid else 0
-        if rid:
-            self._data_store.set_per_request(rid, _PROMPT_LEN_KEY, len(event.prompt_ids))
-        block_size = self._data_store.get_block_size() or 0
-        return parser.parse(event, node_id, turn=turn, stale=stale, block_size=block_size, booked_len=booked_len)
-
-    def _inflight_release(self, parser: InflightParser, event: StatisticEvent, node_id: str) -> list:
-        """Gather the release folds from the acquire-time rows, then decide."""
-        rid = event.request_id
-        turn = self._data_store.get_per_request(rid, "turn", 0) if rid else 0
-        booked_len = self._data_store.get_per_request(rid, _PROMPT_LEN_KEY, 0) if rid else 0
-        return parser.parse(event, node_id, turn=turn, booked_len=booked_len)
-
-    def _apply_inflight_block_update(self, update: InflightBlockUpdate) -> None:
-        """Apply an ``InflightBlockUpdate`` command to the held-block book — mechanically.
-
-        The acquire/release protocol decisions (when to pin, when a re-acquire
-        must first unwind a stale pin) live in ``InflightParser``; this applier
-        only maps each command to store operations. Unpin sets always come from
-        the request's marker row (``KVCacheStore.pop_marker``) — the ground
-        truth of what that dispatch pinned — so a release whose memo was later
-        replaced still unwinds exactly the original set.
-        """
-        if update.action == "pin":
-            self._data_store.incr_block_refs(update.node_id, update.block_hashes)
-            # Resident record runs after the ref count, on the same chain;
-            # idempotent against the engine's later ``BlockStored``.
-            if update.mark_resident:
-                self._dispatch_recorded_blocks += self._data_store.record_dispatch_blocks(
-                    update.node_id, update.block_hashes
-                )
-            self._data_store.put_marker(update.request_id, update.node_id, update.block_hashes)
-        elif update.action == "unpin":
-            marker = self._data_store.pop_marker(update.request_id)
-            if marker is None:
-                # Nothing was pinned at acquire — the held set never knew about this request.
-                logger.debug(f"release with no pinned blocks request={update.request_id} on {update.node_id}")
-                return
-            self._data_store.decr_block_refs(marker["replica"], marker["hashes"])
-        elif update.action == "stale_unpin":
-            marker = self._data_store.pop_marker(update.request_id)
-            if marker is None:
-                logger.debug(f"stale-unpin found no marker request={update.request_id}")
-                return
-            self._data_store.decr_block_refs(marker["replica"], marker["hashes"])
-        else:
-            logger.warning(f"unknown InflightBlockUpdate action: {update.action}")
-
-    def _write_sticky_update(self, update: StickyUpdate) -> None:
-        """Apply a StickyUpdate to the per-request store (sticky key) via DataStore."""
-        if update.action == "put":
-            self._data_store.put_sticky_binding(update.request_id, update.replica_id)
-        elif update.action == "invalidate":
-            self._data_store.invalidate_sticky_binding(update.request_id)
-        elif update.action == "invalidate_replica":
-            for rid in update.replica_ids:
-                self._data_store.invalidate_sticky_replica(rid)
-        else:
-            logger.warning(f"unknown StickyUpdate action: {update.action}")
-
-    def _maybe_log_dispatch_stats(self) -> None:
-        """Emit per-replica dispatched/completed/inflight_turn_sum/prompt_len_sum counters at most every interval.
-
-        Reads each dispatched replica's cumulative counters from PerReplicaStore and
-        logs them (the ``router-dispatch`` line); the plot derives trailing-5-min
-        dispatched / completed / avg-turn / RPM / avg-prompt-len from their per-replica
-        deltas. Time-throttled so the cadence is load-independent (idle stretches emit nothing).
-        """
-        now = time.monotonic()
-        if now - self._dispatch_last_log < _DISPATCH_LOG_INTERVAL_S:
-            return
-        self._dispatch_last_log = now
-        for rep in self._data_store.get_metric_node_ids():
-            snap = self._data_store.get_metrics(rep)
-            dispatched = snap.get(MetricKey.DISPATCHED_COUNT, 0)
-            if not dispatched:  # skip replicas that never received a dispatch
-                continue
-            completed = snap.get(MetricKey.COMPLETED_COUNT, 0)
-            inflight_turn_sum = snap.get(MetricKey.INFLIGHT_TURN_SUM, 0)
-            prompt_len_sum = snap.get(MetricKey.PROMPT_LEN_SUM, 0)
-            logger.info(
-                f"router-dispatch replica={rep} dispatched={dispatched} completed={completed} "
-                f"inflight_turn_sum={inflight_turn_sum} prompt_len_sum={prompt_len_sum}"
-            )
-
-    def _log_evidence_window(self, node_id: str) -> None:
-        """Emit a windowed evidence summary for one replica.
-
-        Deltas vs the previous snapshot, over ~``_METRICS_LOG_INTERVAL_S``
-        polls (≈30 s). Reads the merged store snapshot (not the per-poll
-        update) so a transiently-missing scrape line doesn't zero a
-        cumulative counter.
-        """
-        snap = self._data_store.get_metrics(node_id)
-        prev = self._metrics_prev.get(node_id, {})
-
-        def _delta(key: str) -> float:
-            cur = float(snap.get(key, 0) or 0)
-            return cur - float(prev.get(key, cur) or 0)
-
-        # kv = retained blocks (cached-freeable + running-with-hash); usage =
-        # vLLM's running-only fraction. Emit both: cache-fill (kv) vs running
-        # pressure (usage).
-        kv = self._data_store.kv_cache_load(node_id)
-        usage_raw = snap.get(MetricKey.KV_CACHE_USAGE_PERC)
-        run = snap.get(MetricKey.NUM_REQUESTS_RUNNING)
-        wait = snap.get(MetricKey.NUM_REQUESTS_WAITING)
-
-        # Windowed TTFT/queue/TPOT averages (delta_sum / delta_count).
-        ttft_avg = _avg(_delta(MetricKey.TTFT_SECONDS_SUM), _delta(MetricKey.TTFT_COUNT))
-        queue_avg = _avg(_delta(MetricKey.QUEUE_TIME_SECONDS_SUM), _delta(MetricKey.QUEUE_TIME_COUNT))
-        # prefill_time = TTFT - queue (TTFT includes the queue wait).
-        prefill_t = (ttft_avg - queue_avg) if (ttft_avg == ttft_avg and queue_avg == queue_avg) else float("nan")
-        tpot_avg = _avg(_delta(MetricKey.TPOT_SECONDS_SUM), _delta(MetricKey.TPOT_COUNT))
-
-        # Token deltas over the window (prefill computed vs cached, decode, external).
-        d_prefill = _delta(MetricKey.PROMPT_TOKENS)
-        d_cached = _delta(MetricKey.PROMPT_TOKENS_CACHED)
-        d_decode = _delta(MetricKey.GENERATION_TOKENS)
-        d_external = _delta(MetricKey.EXTERNAL_PREFIX_CACHE_HITS)
-        d_flops = _delta(MetricKey.ESTIMATED_FLOPS_PER_GPU)
-        cache_hit_pct = 100.0 * d_cached / (d_cached + d_prefill) if (d_cached + d_prefill) > 0 else float("nan")
-
-        kv_str = f"{kv:.3f}" if isinstance(kv, float) else kv
-        usage_str = f"{float(usage_raw):.3f}" if usage_raw is not None else "-"
-        hit_str = f"{cache_hit_pct:.1f}" if cache_hit_pct == cache_hit_pct else "-"
-        logger.debug(
-            f"vllm-evidence replica={node_id} kv={kv_str} usage={usage_str} run={run} wait={wait} | "
-            f"TTFT={_ms(ttft_avg)}ms queue={_ms(queue_avg)}ms prefillT={_ms(prefill_t)}ms TPOT={_ms(tpot_avg)}ms | "
-            f"prefill={int(d_prefill)} cached={int(d_cached)} (hit={hit_str}%) "
-            f"decode={int(d_decode)} external={int(d_external)} flops={int(d_flops)} [poll #{self._metrics_poll_count}]"
-        )
-
-        # Snapshot current cumulative values for next window's delta.
-        self._metrics_prev[node_id] = {k: float(snap.get(k, 0) or 0) for k in _CUMULATIVE_KEYS}
 
     def stop(self) -> None:
         """

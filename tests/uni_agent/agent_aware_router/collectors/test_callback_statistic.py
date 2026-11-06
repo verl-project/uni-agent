@@ -150,16 +150,22 @@ class TestInflightParser:
             StatisticEvent("on_acquire", request_id="r1", replica_id="s0", prompt_ids=tuple(range(32))),
             "",
             turn=2,  # the stale dispatch was turn 1
-            stale={"replica": "s0", "hashes": ["h1", "h2"]},
+            stale={"replica": "s0", "turn": 1},
             booked_len=64,  # its booked tokens
             # block size not learned (default 0) → empty chain → no new pin command
         )
         actions = [u.action for u in updates if isinstance(u, InflightBlockUpdate)]
         assert actions == ["stale_unpin"]
+        assert updates[1].node_id == "s0"
+        assert updates[1].metrics == {
+            MetricKey.INFLIGHT_COUNT: -1,
+            MetricKey.INFLIGHT_TOKENS: -64,
+            MetricKey.INFLIGHT_TURN_SUM: -1,
+        }
         metrics = updates[-1].metrics
-        assert metrics[MetricKey.INFLIGHT_COUNT] == 0  # +1 netted by the dropped release's -1
-        assert metrics[MetricKey.INFLIGHT_TOKENS] == 32 - 64  # stale booking folded out
-        assert metrics[MetricKey.INFLIGHT_TURN_SUM] == 2  # this dispatch is turn 2
+        assert metrics[MetricKey.INFLIGHT_COUNT] == 1
+        assert metrics[MetricKey.INFLIGHT_TOKENS] == 32
+        assert metrics[MetricKey.INFLIGHT_TURN_SUM] == 2
 
     def test_acquire_without_request_id_books_raw_len_only(self):
         updates = self._parser().parse(StatisticEvent("on_acquire", replica_id="s0", prompt_ids=tuple(range(7))), "")
@@ -352,12 +358,10 @@ class TestCollectorCallbackIntegration:
             # per-request turn is global (Nth dispatch of that request_id overall)
             assert ds.get_per_request("r1", "turn", 0) == 3
             assert ds.get_per_request("r2", "turn", 0) == 1
-            # ...but each dispatch's turn is added to the receiving replica's
-            # INFLIGHT_TURN_SUM (per-replica, in PerReplicaStore; no releases here so
-            # the in-flight sum equals the cumulative): s0 got r1's turn-1 + turn-3 = 4;
-            # s1 got r1's turn-2 + r2's turn-1 = 3.
-            assert ds.get_metric("s0", MetricKey.INFLIGHT_TURN_SUM) == 4
-            assert ds.get_metric("s1", MetricKey.INFLIGHT_TURN_SUM) == 3
+            # Re-acquiring replaces the stale dispatch, even without blocks.
+            # Only r1 turn 3 on s0 and r2 turn 1 on s1 remain active.
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_TURN_SUM) == 3
+            assert ds.get_metric("s1", MetricKey.INFLIGHT_TURN_SUM) == 1
         finally:
             collector.stop()
 
@@ -365,9 +369,9 @@ class TestCollectorCallbackIntegration:
         from uni_agent.agent_aware_router.collectors.collector import Collector
 
         collector = Collector(CallbackTransport(_FakeBalancer()), InflightParser())
-        assert collector._inflight_event(b"bytes", "") is None
-        assert collector._inflight_event(StatisticEvent("on_acquire"), "") is None  # no replica
-        assert collector._inflight_event(StatisticEvent("on_servers_removed", server_ids=["s0"]), "") is None
+        assert collector._parser.parse(b"bytes", "") is None
+        assert collector._parser.parse(StatisticEvent("on_acquire"), "") is None  # no replica
+        assert collector._parser.parse(StatisticEvent("on_servers_removed", server_ids=["s0"]), "") is None
 
 
 class TestInflightBlockPin:
@@ -460,7 +464,7 @@ class TestInflightBlockPin:
             balancer.callbacks["on_acquire"][0]("r1", "s0", prompt)
             assert ds.inflight_block_count("s0") == 4
 
-            collector._write_kv_update(KVCacheUpdate(node_id="s0", clear_all=True))
+            collector._sink.apply_kv(KVCacheUpdate(node_id="s0", clear_all=True))
             assert ds.inflight_block_count("s0") == 0  # the book itself was cleared, no phantom count
 
             balancer.callbacks["on_release"][0]("s0", "r1")  # pre-clear request: no marker, no-op
@@ -585,14 +589,14 @@ class TestInflightBlockPin:
             balancer.callbacks["on_acquire"][0]("r1", "s0", prompt)
             assert ds.get_layer_prefix_hit_rate("s0", chain) == 1.0
             assert ds.per_replica_block_counts() == {"s0": 4}
-            assert collector._dispatch_recorded_blocks == 4
+            assert collector._sink._observer._dispatch_recorded_blocks == 4
 
             balancer.callbacks["on_release"][0]("s0", "r1")
             assert ds.inflight_block_count("s0") == 0  # held drops...
             assert ds.per_replica_block_counts() == {"s0": 4}  # ...resident survives release
 
             balancer.callbacks["on_acquire"][0]("r2", "s0", prompt)
-            assert collector._dispatch_recorded_blocks == 4  # r2's record is a no-op
+            assert collector._sink._observer._dispatch_recorded_blocks == 4  # r2's record is a no-op
         finally:
             collector.stop()
 
@@ -691,7 +695,7 @@ class TestCollectorEmitsToInsight:
         from uni_agent.agent_aware_router.collectors.collector import Collector
 
         collector = Collector(CallbackTransport(_FakeBalancer()), InflightParser())
-        collector._write_metrics_update(
+        collector._sink.apply_metrics(
             MetricsUpdate(
                 node_id="s0",
                 metrics={
@@ -728,6 +732,6 @@ class TestCollectorEmitsToInsight:
         from uni_agent.agent_aware_router.types import Layer
 
         collector = Collector(CallbackTransport(_FakeBalancer()), InflightParser())
-        collector._write_kv_update(KVCacheUpdate(node_id="s0", remove_blocks={Layer.GPU: ["h1", "h2", "h3"]}))
+        collector._sink.apply_kv(KVCacheUpdate(node_id="s0", remove_blocks={Layer.GPU: ["h1", "h2", "h3"]}))
 
         assert self._rl.calls == [("counter", "kv_evictions", 3, {"replica": "s0"})]
