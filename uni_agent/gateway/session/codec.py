@@ -347,7 +347,7 @@ class MessageCodec:
         """Merge prepared context and align response metadata.
 
         image_data covers all updated_messages, including history, in block order.
-        Shared VL builders treat None as [] to disable raw-reference fallback.
+        Image-bearing VL contexts treat None as [] to disable raw-reference fallback.
         The session validates appended media first; non-empty video_data is unsupported.
         """
         if video_data:
@@ -364,7 +364,13 @@ class MessageCodec:
             updated_messages, force_system_anchor=force_system_anchor
         )
         builder = self._continuous_token_builder
-        if isinstance(builder, VLContinuousTokenMixin):
+        has_images = bool(image_data) or any(
+            isinstance(block, dict) and block.get("type") in {"image", "image_url"}
+            for message in updated_messages
+            if isinstance(message.get("content"), list)
+            for block in message["content"]
+        )
+        if isinstance(builder, VLContinuousTokenMixin) and has_images:
             merge_result = builder.merge_context_tokens(
                 previous_messages,
                 updated_messages,
@@ -373,7 +379,7 @@ class MessageCodec:
                 images=image_data if image_data is not None else [],
             )
         else:
-            # Preserve legacy merges: historical images are not appended media.
+            # Keep text-only contexts compatible with the legacy CT API.
             merge_result = builder.merge_context_tokens(
                 previous_messages,
                 updated_messages,
