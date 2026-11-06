@@ -304,6 +304,10 @@ class RequestState:
     def get_turn(self, request_id: str) -> int:
         return self._per_request.get(request_id, _TURN_KEY, 0)
 
+    def book_turn(self, request_id: str, turn: int) -> None:
+        """Commit the successfully applied dispatch's prospective turn."""
+        self._per_request.set(request_id, _TURN_KEY, turn)
+
     def get_prompt_length(self, request_id: str) -> int:
         return self._per_request.get(request_id, _PROMPT_LEN_KEY, 0)
 

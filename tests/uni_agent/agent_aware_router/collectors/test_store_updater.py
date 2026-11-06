@@ -22,6 +22,7 @@ from uni_agent.agent_aware_router.collectors.parse import (
     MetricsUpdate,
     StickyUpdate,
 )
+from uni_agent.agent_aware_router.collectors.sink import InflightBookingUpdate
 from uni_agent.agent_aware_router.collectors.transport.callback import StatisticEvent
 from uni_agent.agent_aware_router.collectors.updater import StoreUpdater
 from uni_agent.agent_aware_router.store.capabilities import RequestState
@@ -131,9 +132,12 @@ def test_preparation_preserves_turn_and_stale_booking_without_touching_prefix_me
     store.requests.set_prefix_cache("r", {"hash_strs": ["memo"], "parent_hash": 1})
     first = updater.prepare_inflight(StatisticEvent("on_acquire", "r", "s0", prompt_ids=(1, 2, 3)))
     assert (first.turn, first.booked_len, first.stale) == (1, 0, None)
-    store.put_marker("r", "s0", ["pinned"])
+    assert store.requests.get_turn("r") == 0
+    assert store.requests.get_prompt_length("r") == 0
+    updater.apply_inflight_booking(InflightBookingUpdate("r", "s0", first.turn, 3, True))
     second = updater.prepare_inflight(StatisticEvent("on_acquire", "r", "s1", prompt_ids=(1, 2)))
-    assert (second.turn, second.booked_len, second.stale) == (2, 3, {"replica": "s0", "hashes": ["pinned"]})
+    assert (second.turn, second.booked_len, second.stale) == (2, 3, {"replica": "s0", "turn": 1})
+    updater.apply_inflight_booking(InflightBookingUpdate("r", "s1", second.turn, 2, True))
     release = updater.prepare_inflight(StatisticEvent("on_release", "r", "s1"))
     assert (release.turn, release.booked_len) == (2, 2)
     assert store.get_per_request("r", "turn") == 2

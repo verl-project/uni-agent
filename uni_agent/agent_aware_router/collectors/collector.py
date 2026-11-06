@@ -27,7 +27,7 @@ from ..debug import get_debug_var, is_debug_enabled
 from ..utils.knob import coerce_knob_value
 from .parse import InflightBlockUpdate, KVCacheUpdate, MetricsUpdate, Parser, StickyUpdate
 from .parse.basic.inflight import InflightParser
-from .sink import ContextualInflightParser, UpdateSink
+from .sink import ContextualInflightParser, InflightBookingUpdate, UpdateSink
 from .transport.base import Transport
 
 logger = logging.getLogger(__name__)
@@ -56,6 +56,7 @@ class Collector:
         self._future: Future | None = None
         self._loop: asyncio.AbstractEventLoop = asyncio.new_event_loop()
         self._loop_thread: threading.Thread | None = None
+        self._dispatch_lock = threading.Lock()
 
     def start(self) -> None:
         """Start the collector — launch event-loop thread and subscribe."""
@@ -65,6 +66,12 @@ class Collector:
             self._loop.run_forever()
 
         def handler(raw_data: bytes | str, node_id: str) -> None:
+            # Callback transports may enter from multiple caller threads. Keep
+            # context reads, parsing and all applications in one ordered unit.
+            with self._dispatch_lock:
+                dispatch(raw_data, node_id)
+
+        def dispatch(raw_data: bytes | str, node_id: str) -> None:
             """Handler: parse and dispatch each update to the right store write path."""
             result = self._parser.parse(raw_data, node_id)
             if result is None:
@@ -82,6 +89,8 @@ class Collector:
                     self._sink.apply_sticky(update)
                 elif isinstance(update, InflightBlockUpdate):
                     self._sink.apply_inflight_blocks(update)
+                elif isinstance(update, InflightBookingUpdate):
+                    self._sink.apply_inflight_booking(update)
                 else:
                     logger.debug(f"parser.parse returned an unknown update: {update}")
 

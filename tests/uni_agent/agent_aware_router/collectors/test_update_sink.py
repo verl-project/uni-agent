@@ -25,7 +25,7 @@ from uni_agent.agent_aware_router.collectors.parse import (
     StickyUpdate,
 )
 from uni_agent.agent_aware_router.collectors.parse.basic.inflight import InflightParser
-from uni_agent.agent_aware_router.collectors.sink import InflightContext
+from uni_agent.agent_aware_router.collectors.sink import InflightBookingUpdate, InflightContext
 from uni_agent.agent_aware_router.collectors.transport.base import Transport
 from uni_agent.agent_aware_router.collectors.transport.callback import StatisticEvent
 from uni_agent.agent_aware_router.types import MetricKey
@@ -53,6 +53,9 @@ class RecordingSink:
     def prepare_inflight(self, event):
         self.calls.append(("context", event))
         return self.context
+
+    def apply_inflight_booking(self, update):
+        self.calls.append(("booking", update))
 
 
 class FeedTransport(Transport):
@@ -94,7 +97,7 @@ def run_collector(parser, sink, payloads):
     finally:
         collector.stop()
         collector._loop.close()
-    assert transport.stopped
+        assert transport.stopped
 
 
 def test_dispatch_preserves_single_mixed_and_empty_results(forbid_store):
@@ -128,6 +131,7 @@ def test_inflight_uses_injected_booking_before_ordered_dispatch(forbid_store):
                 request_id="r",
             ),
         ),
+        ("booking", InflightBookingUpdate("r", "node", 3, 0, False)),
     ]
 
 

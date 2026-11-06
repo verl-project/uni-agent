@@ -122,7 +122,6 @@ class CollectorObserver:
                 f"kv-events tally: events={dict(self._kv_event_counts)} "
                 f"blocks={dict(self._kv_block_counts)} (total_events={total}) | "
                 f"retained_blocks/replica={self._kv.per_replica_block_counts()} | "
-                f"router_recorded={self._dispatch_recorded_blocks} | "
                 f"hash-map={dict(hash_map_stats or {})}"
             )
 
@@ -130,7 +129,10 @@ class CollectorObserver:
         if update.is_delta:
             is_acquire = MetricKey.DISPATCHED_COUNT in update.metrics
             is_release = MetricKey.COMPLETED_COUNT in update.metrics
-            if is_acquire or is_release:
+            is_unwind = not is_acquire and update.metrics.get(MetricKey.INFLIGHT_COUNT, 0) < 0
+            if is_acquire or is_release or is_unwind:
+                # Stale-dispatch corrections refresh the old replica's gauges
+                # without inventing a completion counter increment.
                 emitter.on_write(
                     WriteEvent(
                         kind=WriteKind.ACQUIRE if is_acquire else WriteKind.RELEASE,
@@ -177,6 +179,7 @@ class CollectorObserver:
         if now - self._dispatch_last_log < _DISPATCH_LOG_INTERVAL_S:
             return
         self._dispatch_last_log = now
+        logger.debug(f"router-dispatch blocks: router_recorded={self._dispatch_recorded_blocks}")
         for rep in self._metrics.get_metric_node_ids():
             snap = self._metrics.get_metrics(rep)
             dispatched = snap.get(MetricKey.DISPATCHED_COUNT, 0)

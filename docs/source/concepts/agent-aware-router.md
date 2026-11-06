@@ -59,23 +59,42 @@ plus inflight context preparation. Tests can inject a sink without constructing
 - `kv`: cache residency, block references, and acquire-time pin markers.
 - `requests`: sticky bindings, turn/prompt bookings, and the prefix-hash memo.
 
-For inflight callbacks, `ContextualInflightParser` obtains the updater's booking
-context before calling the pure `InflightParser`. The updater preserves the
-existing acquire/read/write order, and the collector applies returned commands
-in order. Unpinning uses the acquire-time marker, even if a later callback names
-a different replica. The existing store locks remain in place; a sequence of
-commands is not an atomic transaction across stores.
+For inflight callbacks, `ContextualInflightParser` reads prospective booking
+context before calling the pure `InflightParser`. It appends a booking command
+only after parsing succeeds; the collector applies that command after the block
+and metric commands. A handler lock serializes context reads through application,
+including callbacks arriving from different threads. Each inflight collector owns
+its updater; this lock does not coordinate separate collectors or processes.
+
+The updater keeps active dispatch bookings (replica, turn and prompt length)
+until release or re-acquire, independently of the request memo LRU and block
+markers. Duplicate/unknown releases are ignored, including releases from a stale
+replica after migration. Re-acquire reverses the old replica's count, tokens and
+turn contribution before charging the new dispatch, even when no blocks were
+pinned. Unpinning still uses the acquire-time block marker. Released bookings
+are removed; a missing release retains the active booking until re-acquire or
+updater teardown. Historical turn counts and other optional request memos remain
+LRU-bounded.
+
+Callbacks carry no dispatch generation: a delayed release from an earlier turn
+on the *same* replica cannot be distinguished from the current turn's release.
+Callers must maintain acquire/release ordering for each request. Unattributed
+callbacks (`request_id=None`) retain the legacy count-only release behavior.
+The existing store locks remain in place; a sequence of commands is not an atomic
+transaction across stores and arbitrary write/observer failures are not rolled
+back.
 
 `CollectorObserver` receives successful applications and post-write metric
 values. It owns `WriteEvent` construction, metric emission and evidence-log
-windows; it only receives read interfaces. Metric names, labels and routing
-configuration are unchanged. Scoring likewise reads metrics/KV state through
+windows; it only receives read interfaces. Router-recorded block totals are logged
+by the inflight observer, separately from the KV-event observer's tally. Metric
+names, labels and routing configuration are unchanged. Scoring likewise reads metrics/KV state through
 `RoutingState`; its only request write is the existing prefix-hash memo.
 
 Flat `DataStore` methods remain compatibility delegates. New production callers
 use the grouped capabilities and named request operations, rather than generic
 scratch keys. The underlying stores, shared singleton identity, request LRU
-lifetime and cache algorithms are unchanged.
+lifetime for optional memos and cache algorithms are unchanged.
 
 ## Routing decision flow
 

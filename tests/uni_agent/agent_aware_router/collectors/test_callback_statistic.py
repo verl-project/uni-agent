@@ -150,16 +150,22 @@ class TestInflightParser:
             StatisticEvent("on_acquire", request_id="r1", replica_id="s0", prompt_ids=tuple(range(32))),
             "",
             turn=2,  # the stale dispatch was turn 1
-            stale={"replica": "s0", "hashes": ["h1", "h2"]},
+            stale={"replica": "s0", "turn": 1},
             booked_len=64,  # its booked tokens
             # block size not learned (default 0) → empty chain → no new pin command
         )
         actions = [u.action for u in updates if isinstance(u, InflightBlockUpdate)]
         assert actions == ["stale_unpin"]
+        assert updates[1].node_id == "s0"
+        assert updates[1].metrics == {
+            MetricKey.INFLIGHT_COUNT: -1,
+            MetricKey.INFLIGHT_TOKENS: -64,
+            MetricKey.INFLIGHT_TURN_SUM: -1,
+        }
         metrics = updates[-1].metrics
-        assert metrics[MetricKey.INFLIGHT_COUNT] == 0  # +1 netted by the dropped release's -1
-        assert metrics[MetricKey.INFLIGHT_TOKENS] == 32 - 64  # stale booking folded out
-        assert metrics[MetricKey.INFLIGHT_TURN_SUM] == 2  # this dispatch is turn 2
+        assert metrics[MetricKey.INFLIGHT_COUNT] == 1
+        assert metrics[MetricKey.INFLIGHT_TOKENS] == 32
+        assert metrics[MetricKey.INFLIGHT_TURN_SUM] == 2
 
     def test_acquire_without_request_id_books_raw_len_only(self):
         updates = self._parser().parse(StatisticEvent("on_acquire", replica_id="s0", prompt_ids=tuple(range(7))), "")
@@ -352,12 +358,10 @@ class TestCollectorCallbackIntegration:
             # per-request turn is global (Nth dispatch of that request_id overall)
             assert ds.get_per_request("r1", "turn", 0) == 3
             assert ds.get_per_request("r2", "turn", 0) == 1
-            # ...but each dispatch's turn is added to the receiving replica's
-            # INFLIGHT_TURN_SUM (per-replica, in PerReplicaStore; no releases here so
-            # the in-flight sum equals the cumulative): s0 got r1's turn-1 + turn-3 = 4;
-            # s1 got r1's turn-2 + r2's turn-1 = 3.
-            assert ds.get_metric("s0", MetricKey.INFLIGHT_TURN_SUM) == 4
-            assert ds.get_metric("s1", MetricKey.INFLIGHT_TURN_SUM) == 3
+            # Re-acquiring replaces the stale dispatch, even without blocks.
+            # Only r1 turn 3 on s0 and r2 turn 1 on s1 remain active.
+            assert ds.get_metric("s0", MetricKey.INFLIGHT_TURN_SUM) == 3
+            assert ds.get_metric("s1", MetricKey.INFLIGHT_TURN_SUM) == 1
         finally:
             collector.stop()
 

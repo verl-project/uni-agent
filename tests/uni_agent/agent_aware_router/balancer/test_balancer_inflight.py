@@ -46,5 +46,9 @@ def test_turn_values_are_attributed_to_the_receiving_replica():
     balancer.acquire_server("request-2", [1])
 
     assert balancer._store.get_per_request("request-1", "turn", 0) == 3
-    assert balancer._store.get_metric("s0", MetricKey.INFLIGHT_TURN_SUM) == 7
+    # Re-acquires replace earlier active turns: request-1 turn 3 + request-2 turn 1.
+    assert balancer._store.get_metric("s0", MetricKey.INFLIGHT_TURN_SUM) == 4
     assert balancer._store.get_metric("s0", MetricKey.DISPATCHED_COUNT) == 4
+    balancer.release_server("s0", request_id="request-1")
+    balancer.release_server("s0", request_id="request-2")
+    assert balancer._store.get_metric("s0", MetricKey.INFLIGHT_TURN_SUM) == 0

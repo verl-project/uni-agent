@@ -36,21 +36,19 @@ def resolve_prefix_hashes(
     if not block_size or block_size <= 0:
         return []
 
-    cached = store.requests.get_prefix_cache(request_id) if request_id else None
+    cached = store.requests.get_prefix_cache(request_id) if request_id is not None else None
     if cached and len(prompt_ids) // block_size >= len(cached["hash_strs"]):
-        # cached is the live store row (get returns a reference, not a copy):
-        # the in-place extend + parent update persist, and get() already touched
-        # LRU recency — no write-back needed.
         tail, new_parent = get_prefix_hashes_incremental(
             prompt_ids, block_size, cached["parent_hash"], len(cached["hash_strs"])
         )
         cached["hash_strs"].extend([str(h) for h in tail])
         cached["parent_hash"] = new_parent
+        store.requests.set_prefix_cache(request_id, cached)
         return cached["hash_strs"]
 
     # full recompute (miss / shrink)
     hashes, parent = get_prefix_hashes_incremental(prompt_ids, block_size, 0, 0)
     hash_strs = [str(h) for h in hashes]
-    if request_id:
+    if request_id is not None:
         store.requests.set_prefix_cache(request_id, {"hash_strs": hash_strs, "parent_hash": parent})
     return hash_strs

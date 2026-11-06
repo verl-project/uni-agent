@@ -24,7 +24,7 @@ from ..insight.collector import CollectorObserver, UpdateObserver
 from ..store.capabilities import KVState, MetricsState, RequestState
 from ..store.data_store import DataStore
 from .parse import InflightBlockUpdate, KVCacheUpdate, MetricsUpdate, StickyUpdate
-from .sink import InflightContext
+from .sink import InflightBookingUpdate, InflightContext
 from .transport.callback import StatisticEvent
 
 logger = logging.getLogger(__name__)
@@ -48,21 +48,36 @@ class StoreUpdater:
         self._kv = kv
         self._requests = requests
         self._observer = observer
+        # Active bookings must survive eviction of optional request memos.
+        # One inflight collector owns this updater and serializes its handlers.
+        # Entries live until release or replacement by a re-acquire.
+        self._active: dict[str, InflightBookingUpdate] = {}
 
     def prepare_inflight(self, event: StatisticEvent) -> InflightContext:
-        """Gather bookings in the original order before the pure parser nets deltas."""
+        """Read prospective context without committing a turn or prompt booking."""
         rid = event.request_id
+        active = self._active.get(rid) if rid is not None else None
         if event.event == "on_acquire":
-            turn = self._requests.next_turn(rid) if rid else 0
-            stale = self._kv.get_marker(rid) if rid else None
-            booked_len = self._requests.get_prompt_length(rid) if rid else 0
-            if rid:
-                self._requests.book_prompt_length(rid, len(event.prompt_ids))
+            turn = max(self._requests.get_turn(rid), active.turn if active else 0) + 1 if rid is not None else 0
+            stale = {"replica": active.replica_id, "turn": active.turn} if active else None
+            booked_len = active.prompt_length if active else 0
             return InflightContext(turn, stale, self._kv.get_block_size() or 0, booked_len)
         return InflightContext(
-            turn=self._requests.get_turn(rid) if rid else 0,
-            booked_len=self._requests.get_prompt_length(rid) if rid else 0,
+            turn=active.turn if active else 0,
+            booked_len=active.prompt_length if active else 0,
+            # Unknown/duplicate releases and late releases from an old replica
+            # must not debit the current dispatch. Unattributed callbacks retain
+            # their legacy count-only behavior.
+            ignore=rid is not None and (active is None or active.replica_id != event.replica_id),
         )
+
+    def apply_inflight_booking(self, update: InflightBookingUpdate) -> None:
+        if update.active:
+            self._requests.book_turn(update.request_id, update.turn)
+            self._requests.book_prompt_length(update.request_id, update.prompt_length)
+            self._active[update.request_id] = update
+        else:
+            self._active.pop(update.request_id, None)
 
     def apply_kv(self, update: KVCacheUpdate) -> None:
         if update.block_size is not None:
