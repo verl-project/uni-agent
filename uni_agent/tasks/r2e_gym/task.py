@@ -120,4 +120,3 @@ class R2EGymTask(Task):
                 finished=finished,
                 extra_info=result,
             )
-

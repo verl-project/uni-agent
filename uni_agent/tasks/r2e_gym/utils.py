@@ -42,10 +42,7 @@ def _parsed_commit_patch(parsed_content: Mapping[str, Any]) -> str:
 
         for hunk in file_diff.get("hunks", []):
             descriptor = hunk["descriptor"]
-            descriptor_line = (
-                f"@@ -{_range_patch(descriptor['old_range'])} "
-                f"+{_range_patch(descriptor['new_range'])} @@"
-            )
+            descriptor_line = f"@@ -{_range_patch(descriptor['old_range'])} +{_range_patch(descriptor['new_range'])} @@"
             if section := descriptor.get("section"):
                 descriptor_line += f" {section}"
             patch.append(f"{descriptor_line}\n")

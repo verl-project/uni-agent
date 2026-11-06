@@ -19,7 +19,6 @@ from datasets import load_dataset
 
 from .utils import get_gold_patch
 
-
 DEFAULT_DATA_SOURCE = "dyyyyyyyy/r2e-gym-subset-filtered"
 
 
@@ -90,4 +89,3 @@ if __name__ == "__main__":
     out_path = f"{save_dir}/r2e_gym_subset.parquet"
     output.to_parquet(out_path)
     print(f"Wrote {len(output)} instances to {out_path}", flush=True)
-

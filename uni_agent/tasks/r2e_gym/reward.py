@@ -88,4 +88,3 @@ async def compute_reward(metadata, sandbox, eval_timeout: float = 300.0) -> dict
         logger.warning(f"no parseable R2E-Gym test output for {instance_id}; marking unresolved")
     logger.info(f"R2E-Gym reward for {instance_id}: resolved={result['resolved']}")
     return result
-
