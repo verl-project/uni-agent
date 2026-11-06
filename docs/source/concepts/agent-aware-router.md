@@ -96,6 +96,17 @@ use the grouped capabilities and named request operations, rather than generic
 scratch keys. The underlying stores, shared singleton identity, request LRU
 lifetime for optional memos and cache algorithms are unchanged.
 
+The balancer's drain counter follows the same one-active-dispatch rule for named
+requests: a replacement acquire moves the count from the previous replica to the
+selected replica. Duplicate releases and releases naming a different replica do
+not decrement it. Removing a replica drops its drain counts and named assignments;
+later releases still reach collectors to clean up their outstanding bookings, but
+cannot debit unrelated requests if that replica is added again. Named callers
+must supply `request_id` on release. The legacy release without an ID remains
+count-only; it cannot identify or retire a named booking. Without a dispatch
+generation, a delayed release from an earlier turn on the same replica is still
+indistinguishable from the current release, so per-request ordering is required.
+
 ## Routing decision flow
 
 On each `acquire_server(request_id, prompt_ids)`, the balancer scores the candidate replicas and dispatches the request to the top-ranked one. The default path goes straight to capacity-token-aware scoring — the sticky short-circuit is disabled by default (`do_shortcut=False`):
