@@ -21,12 +21,18 @@
 - npu: Specifies that the test case runs on the NPU backend
 - level0: Specifies the test case as a gate-level test case, which will run each time the gate is triggered
 - level1: Specifies the test case as a version-level test case, which is only run manually during version verification.
+- card_one: Used only together with `npu` to specify that the test case runs on one NPU card.
+- card_two: Used only together with `npu` to specify that the test case runs on two NPU cards.
+- card_four: Used only together with `npu` to specify that the test case runs on four NPU cards.
+- card_eight: Used only together with `npu` to specify that the test case runs on eight NPU cards.
 
 #### Notes:
 
 - Configure tags at the function granularity. Do not configure tags directly on a class.
 - Both a backend tag and a test case level tag must be specified for the test case to run in the gate.
 - Only one of `level0` and `level1` can be specified for a single test case.
+- The `npu` tag must be configured together with a card tag, and a single test case can only specify one card tag.
+- The number of cards actually used when running NPU test cases should match the configured number of cards as closely as possible.
 - To trigger GPU/NPU backend test cases, configure the corresponding modified file paths in the trigger rules; see Section 4.
 
 #### Test case example
