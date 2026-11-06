@@ -71,6 +71,8 @@ def test_start_requires_local_image_and_builds_detached_run(monkeypatch):
             "sleep",
             "--network",
             "none",
+            "--label",
+            sandbox._cleanup_label,
             "example:local",
             "3600",
         ),
@@ -106,6 +108,8 @@ def test_start_pulls_missing_task_image_before_docker_run(monkeypatch):
             "never",
             "--entrypoint",
             "sleep",
+            "--label",
+            sandbox._cleanup_label,
             "registry.example.com/agent:latest",
             "3600",
         ),
@@ -248,6 +252,8 @@ def test_pull_timeout_pulls_missing_image_separately(monkeypatch):
                 "never",
                 "--entrypoint",
                 "sleep",
+                "--label",
+                sandbox._cleanup_label,
                 "example:local",
                 "3600",
             ),
@@ -319,13 +325,13 @@ def test_start_timeout_removes_partially_created_container(monkeypatch):
         calls.append(args)
         if args[0] == "run":
             raise asyncio.TimeoutError
-        return _ok()
+        return _ok("owned-id\n" if args[0] == "container" else "")
 
     monkeypatch.setattr(sandbox, "_run_docker", fake_run)
 
     with pytest.raises(TimeoutError, match="exceeded start_timeout=120s"):
         asyncio.run(sandbox.start())
-    assert calls[-1] == ("rm", "-f", "agent-test")
+    assert calls[-1] == ("rm", "-f", "owned-id")
     assert sandbox._container_name is None
 
 
@@ -376,13 +382,14 @@ def test_exec_forwards_workdir_environment_and_argv(monkeypatch):
 def test_stop_is_idempotent_and_checks_liveness(monkeypatch):
     sandbox = DockerSandbox(image="example:local")
     sandbox._container_name = "agent-test"
+    sandbox._cleanup_label = "uni-agent.sandbox=test"
     calls: list[tuple[str, ...]] = []
 
     async def fake_run(*args: str, timeout=None):
         calls.append(args)
         if args[0] == "inspect":
             return _ok("true\n")
-        return _ok()
+        return _ok("owned-id\n" if args[0] == "container" else "")
 
     monkeypatch.setattr(sandbox, "_run_docker", fake_run)
 
@@ -395,7 +402,8 @@ def test_stop_is_idempotent_and_checks_liveness(monkeypatch):
     asyncio.run(run())
     assert calls == [
         ("inspect", "--format", "{{.State.Running}}", "agent-test"),
-        ("rm", "-f", "agent-test"),
+        ("container", "ls", "--all", "--quiet", "--no-trunc", "--filter", "label=uni-agent.sandbox=test"),
+        ("rm", "-f", "owned-id"),
     ]
 
 
