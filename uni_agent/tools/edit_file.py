@@ -236,9 +236,14 @@ class EditFileTool(Tool):
     ) -> str:
         if not old_str:
             return "Parameter `old_str` is required for command: str_replace and must be a non-empty string."
-        file_content = (await self._read(sandbox, path)).expandtabs()
-        old_str = old_str.expandtabs()
-        new_str = new_str.expandtabs() if new_str is not None else ""
+        original_content = await self._read(sandbox, path)
+        new_str = new_str if new_str is not None else ""
+        file_content = original_content
+        if old_str not in file_content:
+            # `view` shows tabs as spaces, so old_str may have been copied from that view.
+            file_content = file_content.expandtabs()
+            old_str = old_str.expandtabs()
+            new_str = new_str.expandtabs()
 
         occurrences = file_content.count(old_str)
         if occurrences == 0:
@@ -254,7 +259,7 @@ class EditFileTool(Tool):
 
         new_file_content = file_content.replace(old_str, new_str)
         await sandbox.write_file(path, new_file_content)
-        self._history[path].append(file_content)
+        self._history[path].append(original_content)
 
         replacement_line = file_content.split(old_str)[0].count("\n")
         start_line = max(1, replacement_line - SNIPPET_LINES)
@@ -277,8 +282,7 @@ class EditFileTool(Tool):
         if new_str is None:
             return "Parameter `new_str` is required for command: insert"
 
-        file_text = (await self._read(sandbox, path)).expandtabs()
-        new_str = new_str.expandtabs()
+        file_text = await self._read(sandbox, path)
         file_lines = file_text.split("\n")
         n_lines = len(file_lines)
 
