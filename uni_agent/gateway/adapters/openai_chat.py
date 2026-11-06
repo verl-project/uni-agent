@@ -198,6 +198,28 @@ def _normalize_message(message: Any) -> dict[str, Any]:
     return normalized
 
 
+def _lower_response_format(response_format: Any) -> dict | None:
+    """Lower an OpenAI ``response_format`` into engine structured-outputs params.
+
+    ``json_schema`` lowers to a grammar; ``text`` is the unconstrained default
+    (no-op) and everything else stays rejected.
+    """
+    if response_format is None:
+        return None
+    fmt_type = response_format.get("type") if isinstance(response_format, dict) else None
+    if fmt_type == "text":
+        return None
+    if fmt_type != "json_schema":
+        raise MalformedRequestError(
+            'response_format must be {"type": "json_schema", "json_schema": {...}}; '
+            'got a schema-less or unsupported response_format'
+        )
+    json_schema = response_format.get("json_schema")
+    if not isinstance(json_schema, dict) or not isinstance(json_schema.get("schema"), dict):
+        raise MalformedRequestError("response_format.json_schema.schema must be an object")
+    return {"json": json_schema["schema"]}
+
+
 def openai_to_internal(
     payload: dict,
     *,
@@ -210,8 +232,7 @@ def openai_to_internal(
     n_value = payload.get("n", 1)
     if n_value != 1:
         raise MalformedRequestError(f"n={n_value} is not supported (only n=1)")
-    if payload.get("response_format") is not None:
-        raise MalformedRequestError("response_format is not supported")
+    structured_outputs = _lower_response_format(payload.get("response_format"))
 
     tool_choice_payload = payload.get("tool_choice", "auto")
     if isinstance(tool_choice_payload, str):
@@ -258,6 +279,10 @@ def openai_to_internal(
     for key in allowed_sampling_keys:
         if key in payload:
             sampling_params[key] = payload[key]
+    if structured_outputs is not None:
+        # Grammar lives outside the sampling allowlist: it constrains output
+        # format, not sampling, and is part of the request fingerprint.
+        sampling_params["structured_outputs"] = structured_outputs
 
     return {
         "messages": [_normalize_message(message) for message in messages],
