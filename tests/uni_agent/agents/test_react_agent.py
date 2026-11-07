@@ -301,7 +301,7 @@ async def test_per_turn_cap_truncation_ends_the_episode():
 @pytest.mark.cpu
 @pytest.mark.level0
 @pytest.mark.asyncio
-async def test_tool_images_follow_tool_messages_as_one_user_message():
+async def test_tool_images_ride_in_their_tool_messages():
     agent = _agent()
     cfg: ReActConfig = agent.config  # type: ignore[assignment]
     calls = [
@@ -316,17 +316,17 @@ async def test_tool_images_follow_tool_messages_as_one_user_message():
     )
 
     assert reason == "completed"
-    assert [m["role"] for m in transcript] == ["assistant", "tool", "tool", "user"]
-    assert all(isinstance(m["content"], str) for m in transcript[1:3])
-    parts = transcript[3]["content"]
-    assert [p["type"] for p in parts] == ["text", "image_url", "image_url"]
-    assert parts[1]["image_url"]["url"] == shot
+    assert [m["role"] for m in transcript] == ["assistant", "tool", "tool"]
+    for message in transcript[1:]:
+        assert [p["type"] for p in message["content"]] == ["text", "image_url"]
+        assert message["content"][0]["text"] == "Observation:\nshot"
+        assert message["content"][1]["image_url"]["url"] == shot
 
 
 @pytest.mark.cpu
 @pytest.mark.level0
 @pytest.mark.asyncio
-async def test_text_only_tool_results_add_no_user_message():
+async def test_text_only_tool_results_stay_strings():
     agent = _agent()
     cfg: ReActConfig = agent.config  # type: ignore[assignment]
     model = _StepModel(
@@ -338,6 +338,7 @@ async def test_text_only_tool_results_add_no_user_message():
     await agent.step(cfg, model, _StepToolbox(), transcript, _step_info())
 
     assert [m["role"] for m in transcript] == ["assistant", "tool"]
+    assert isinstance(transcript[1]["content"], str)
 
 
 @pytest.mark.cpu
@@ -360,5 +361,6 @@ async def test_tool_images_survive_timeout_budget_exit():
     )
 
     assert reason == "timeout_limit"
-    assert [m["role"] for m in transcript] == ["assistant", "tool", "tool", "tool", "user"]
-    assert transcript[-1]["content"][1]["image_url"]["url"] == shot
+    assert [m["role"] for m in transcript] == ["assistant", "tool", "tool", "tool"]
+    assert transcript[1]["content"][1]["image_url"]["url"] == shot
+    assert transcript[2]["content"] == transcript[3]["content"] == "Skipped: timeout budget exhausted."

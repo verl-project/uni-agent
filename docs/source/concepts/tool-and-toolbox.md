@@ -26,7 +26,7 @@ ok | format_error | error | timeout
 
 `ToolResult.to_observation()` converts the result into the next-turn observation and clips oversized output.
 
-A result can also carry `images`, a tuple of `data:image/...;base64,...` URLs such as a screenshot. `ToolResult.to_content()` renders the observation text plus one `image_url` part per image. Text clipping applies to the text only; images are never clipped. The built-in ReAct Agent sends images to the model as a single `user` message after the turn's `tool` messages, because OpenAI `tool` messages cannot hold image parts.
+A result can also carry `images`, a tuple of `data:image/...;base64,...` URLs such as a screenshot. `ToolResult.to_observation()` then returns a list of content parts: the observation text followed by one `image_url` part per image. Without images it stays a plain string. Text clipping applies to the text only; images are never clipped. The built-in ReAct Agent uses this as the `tool` message content, so each image stays attached to the call that produced it.
 
 ## Build a Toolbox
 
