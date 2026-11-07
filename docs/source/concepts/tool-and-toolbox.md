@@ -82,7 +82,9 @@ This separation allows implementation names to remain stable while presenting co
 
 Tool state belongs to the Tool instance, not the Sandbox:
 
-- `stateful_shell` owns a persistent tmux channel, so cwd, exports, and background jobs survive between calls.
+- `stateful_shell` owns a shell session, so cwd and exports survive between calls. Providers with `open_shell` use it
+  directly (veFaaS runs each command in a single exec and persists only cwd and exported env); others fall back to a
+  persistent tmux channel, where background jobs also survive.
 - `str_replace_editor` owns host-side edit history while files live in the Sandbox.
 - `submit` and `finish` are stateless control tools.
 
