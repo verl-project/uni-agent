@@ -162,17 +162,18 @@ class ReActAgent(Agent):
             logger.info(f"🎬 ACTION ({name}):\n{fn.get('arguments')}")
             tool_result = await toolbox.call(name, fn.get("arguments"), timeout=cfg.action_timeout)
             observation = tool_result.to_observation()
+            shown = observation  # what we log: the text, never base64 image data
+            if not isinstance(observation, str):
+                shown = f"{observation[0]['text']}\n<{len(tool_result.images)} image(s)>"
             info["num_tool_calls"] += 1
             if tool_result.status == "timeout":  # a tool hit its own timeout (e.g. shell command_timeout)
                 info["timeouts"] += 1
-                logger.warning(
-                    f"⏳ TIMEOUT ({name}): {info['timeouts']}/{cfg.timeout_budget} budget used\n{observation}"
-                )
+                logger.warning(f"⏳ TIMEOUT ({name}): {info['timeouts']}/{cfg.timeout_budget} budget used\n{shown}")
             elif tool_result.status != "ok":
                 info["errors"] += 1
-                logger.warning(f"❌ TOOL {tool_result.status.upper()} ({name}):\n{observation}")
+                logger.warning(f"❌ TOOL {tool_result.status.upper()} ({name}):\n{shown}")
             else:
-                logger.info(f"👀 OBSERVATION ({name}):\n{observation}")
+                logger.info(f"👀 OBSERVATION ({name}):\n{shown}")
 
             transcript.append(
                 {

@@ -172,6 +172,37 @@ training. The Agent Framework owns that policy through
 inference, evaluation, and different training runs without embedding optimizer
 behavior in the Task or dataset.
 
+## GUI Task
+
+The `gui` Task lets a vision-language Agent operate a desktop application in the Sandbox and scores the end state with a shell command. Pair it with an Agent that exposes the [`gui_*` tools](tool-and-toolbox.md#gui-tools) and a Sandbox image with an X server (see [`examples/gui`](https://github.com/verl-project/uni-agent/tree/main/examples/gui)).
+
+```yaml
+- name: gui
+  sandbox:
+    provider: docker
+    image: uni-agent-gui
+  agent:
+    name: react
+    tools:
+      - name: gui_screenshot
+      - name: gui_click
+      - name: gui_type
+      - name: gui_key
+      - name: gui_scroll
+      - name: finish
+  display: ":0"
+  setup_command: "nohup python3 /opt/gui/button_app.py >/tmp/app.log 2>&1 </dev/null & sleep 3"
+  verify_command: "test -f /tmp/gui_button_clicked"
+```
+
+- `setup_command` (optional) runs before the Agent, for example to launch the application. It must exit `0`; a failure raises instead of scoring.
+- `verify_command` (required) runs after the Agent. Exit `0` gives reward `1.0`, anything else `0.0`.
+- The instruction is `metadata["instruction"]`, or the sample's `prompt` messages when present.
+- `TaskResult.extra_info` carries `solved`, `verify_exit_code`, `steps`, and any `agent_error`.
+
+!!! warning "Dataset commands run in the Sandbox"
+    `setup_command` and `verify_command` are shell strings taken from the sample. Run only trusted datasets, and use a real isolated Sandbox such as Docker rather than `local`.
+
 ## Dataset Contract
 
 Preprocessing should serialize the sample-specific Task configuration into each dataset row:
