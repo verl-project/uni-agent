@@ -4,7 +4,7 @@
   <a href="https://uni-agent.readthedocs.io/en/latest/index.html"><img src="https://img.shields.io/badge/Documentation-6D28D9?style=flat-square" alt="Documentation"></a>
   <a href="https://github.com/verl-project/uni-agent/stargazers"><img src="https://img.shields.io/github/stars/verl-project/uni-agent?style=flat-square&logo=github&label=Stars" alt="GitHub Stars"></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-2563EB?style=flat-square" alt="Apache 2.0 License"></a>
-  <a href="https://applink.larkoffice.com/client/chat/chatter/add_by_link?link_token=919ke79f-7314-4fbe-8fa0-6d0bb93eaf6b"><img src="https://img.shields.io/badge/Lark%20Group-Dev%20Community-00B8A9?style=flat-square&labelColor=263238" alt="Join the Dev Community Lark group"></a>
+  <a href="https://applink.larkoffice.com/client/chat/chatter/add_by_link?link_token=919ke79f-7314-4fbe-8fa0-6d0bb93eaf6b"><img src="https://img.shields.io/badge/Lark%20Group-Dev%20Community-00B8A9?style=flat-square" alt="Join the Dev Community Lark group"></a>
 </p>
 
 Uni-Agent is a framework for training long-horizon agents:
