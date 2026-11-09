@@ -93,6 +93,7 @@ class TestPerRequestStore:
 
         if operation == "count":
             assert s.count("sticky") == 1
+            assert s.count("missing") == 0
         elif operation == "delete_where":
             assert s.delete_where("sticky", "s0") == 1
         else:
