@@ -80,12 +80,16 @@ class TestPerRequestStore:
         s.incr("r3", "turn")  # evicts r1 (LRU)
         assert s.incr("r1", "turn") == 1  # cold again after eviction
 
+    @pytest.mark.cpu
+    @pytest.mark.level0
     @pytest.mark.parametrize("operation", ["count", "delete_where", "delete_key"])
-    def test_bulk_operations_preserve_lru_recency(self, operation: str):
+    @pytest.mark.parametrize("match_id", ["hot", "cold"])
+    def test_bulk_operations_preserve_lru_recency(self, operation: str, match_id: str):
         s = PerRequestStore(max_size=2)
         s.set("hot", "turn", 1)
         s.set("cold", "turn", 2)
-        s.set("hot", "sticky", "s0")  # hot was used after cold
+        s.set(match_id, "sticky", "s0")
+        assert s.get("hot", "turn") == 1  # hot was used after cold
 
         if operation == "count":
             assert s.count("sticky") == 1
@@ -125,6 +129,8 @@ class TestDataStorePerRequestDelegation:
     def test_get_per_request_unknown_returns_default(self):
         assert DataStore().get_per_request("ghost", "turn", 0) == 0
 
+    @pytest.mark.cpu
+    @pytest.mark.level0
     def test_sticky_status_does_not_evict_recently_used_binding(self):
         PerRequestStore._instance = PerRequestStore(max_size=2)
         ds = DataStore()
