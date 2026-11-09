@@ -24,9 +24,10 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections.abc import Iterator
 from typing import Any
 
-from cachetools import LRUCache
+from cachetools import Cache, LRUCache
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +106,12 @@ class PerRequestStore:
                 del self._data[request_id]
         return touched
 
+    def _items_without_touch(self) -> Iterator[tuple[str, dict[str, Any]]]:
+        """Iterate under ``_lock`` without changing LRU order."""
+        # LRUCache.items()/values() call __getitem__, making every row recent.
+        for request_id in self._data:
+            yield request_id, Cache.__getitem__(self._data, request_id)
+
     def delete_where(self, key: str, value: Any) -> int:
         """Drop ``key`` from every request whose value for it equals ``value``.
 
@@ -112,7 +119,7 @@ class PerRequestStore:
             Number of request rows the key was dropped from (0 if none).
         """
         with self._lock:
-            picked = [(rid, r) for rid, r in self._data.items() if r.get(key) == value]
+            picked = [(rid, r) for rid, r in self._items_without_touch() if r.get(key) == value]
             return self._drop_from_rows(key, picked)
 
     def delete_key(self, key: str) -> int:
@@ -122,13 +129,13 @@ class PerRequestStore:
             Number of request rows the key was dropped from (0 if none).
         """
         with self._lock:
-            picked = [(rid, r) for rid, r in self._data.items() if key in r]
+            picked = [(rid, r) for rid, r in self._items_without_touch() if key in r]
             return self._drop_from_rows(key, picked)
 
     def count(self, key: str) -> int:
         """Number of requests that currently have ``key`` set."""
         with self._lock:
-            return sum(1 for row in self._data.values() if key in row)
+            return sum(1 for _, row in self._items_without_touch() if key in row)
 
     def reset(self) -> None:
         """Clear all per-request state (test helper; not used on the hot path)."""
