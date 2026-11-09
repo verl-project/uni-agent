@@ -1,7 +1,1 @@
-- name: harbor
-  agent:
-    name: mini-swe-agent
-    timeout_sec: 18000
-    kwargs:
-      version: "2.4.6"
-  harbor_env: e2b
+../deepseek_v4/task_config.yaml

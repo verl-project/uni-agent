@@ -6,9 +6,19 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${REPO_ROOT}"
 
-: "${E2B_API_KEY:?Set E2B_API_KEY before running DeepSWE evaluation}"
-: "${E2B_API_URL:?Set E2B_API_URL before running DeepSWE evaluation}"
-: "${E2B_SANDBOX_URL:?Set E2B_SANDBOX_URL before running DeepSWE evaluation}"
+: "${E2B_API_KEY:?Set E2B_API_KEY before running evaluation}"
+: "${E2B_API_URL:?Set E2B_API_URL before running evaluation}"
+: "${E2B_SANDBOX_URL:?Set E2B_SANDBOX_URL before running evaluation}"
+
+DATASET="${DATASET:-deepswe_v11}"
+case "${DATASET}" in
+    deepswe_v11) DEFAULT_DATA_PATH="${REPO_ROOT}/data/deepswe_v11.parquet" ;;
+    mimo_v26) DEFAULT_DATA_PATH="${REPO_ROOT}/data/harbor_mimo-v26-rl-oss-code-terminal-harbor.parquet" ;;
+    *)
+        echo "Unknown DATASET: ${DATASET}; choose deepswe_v11 or mimo_v26." >&2
+        exit 2
+        ;;
+esac
 
 # Use the installed verl, or an explicitly selected DeepSeek-V4 checkout.
 export PYTHONPATH="${REPO_ROOT}${PYTHONPATH:+:${PYTHONPATH}}"
@@ -26,16 +36,16 @@ export RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO=0
 
 for command in python harbor ray; do
     if ! command -v "${command}" >/dev/null 2>&1; then
-        echo "Missing ${command}; follow examples/deepswe_v11/README.md to prepare the environment." >&2
+        echo "Missing ${command}; follow examples/deepseek_v4/README.md to prepare the environment." >&2
         exit 2
     fi
 done
 
-DATA_PATH="${DATA_PATH:-${REPO_ROOT}/data/deepswe_v11.parquet}"
+DATA_PATH="${DATA_PATH:-${DEFAULT_DATA_PATH}}"
 : "${MODEL_PATH:?Set MODEL_PATH to the DeepSeek-V4-Flash-0731 model directory}"
 TASK_CONFIG="${TASK_CONFIG:-${SCRIPT_DIR}/task_config.yaml}"
 RUN_ID="${RUN_ID:-$(date +%Y%m%d-%H%M%S)}"
-OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/deepswe_v11}"
+OUTPUT_DIR="${OUTPUT_DIR:-${REPO_ROOT}/outputs/${DATASET}}"
 
 for input_file in "${DATA_PATH}" "${TASK_CONFIG}"; do
     if [[ ! -f "${input_file}" ]]; then
@@ -61,12 +71,12 @@ for package, required in expected.items():
     if actual != required:
         raise SystemExit(
             f"Expected {package}=={required}, found {actual}. "
-            "Follow examples/deepswe_v11/README.md to prepare this Python environment."
+            "Follow examples/deepseek_v4/README.md to prepare this Python environment."
         )
 PY
 
 mkdir -p "${OUTPUT_DIR}/${RUN_ID}/logs"
-echo "Run directory: ${OUTPUT_DIR}/${RUN_ID}"
+echo "Dataset: ${DATASET}; run directory: ${OUTPUT_DIR}/${RUN_ID}"
 
 LIMIT_ARGS=()
 if [[ -n "${LIMIT:-}" ]]; then
@@ -84,7 +94,7 @@ python -u examples/inference/parallel_infer_verl.py \
   --nnodes 1 --n-gpus-per-node "${N_GPUS_PER_NODE:-8}" --gateway-count "${GATEWAY_COUNT:-16}" \
   --concurrency "${CONCURRENCY:-64}" \
   --temperature 1.0 --top-p 0.95 --top-k -1 \
-  --prompt-length 4096 --response-length 520192 --n "${N:-4}" \
+  --prompt-length 4096 --response-length 520192 --n "${N:-${N_ROLLOUTS:-4}}" \
   --gpu-memory-utilization 0.9 --kv-cache-dtype fp8 \
   --apply-chat-template-kwargs '{"enable_thinking":true,"reasoning_effort":"max","drop_thinking":false}' \
   --log-dir "${OUTPUT_DIR}/${RUN_ID}/logs" \
