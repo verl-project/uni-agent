@@ -6,9 +6,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 cd "${REPO_ROOT}"
 
-: "${E2B_API_KEY:?Set E2B_API_KEY before running evaluation}"
-: "${E2B_API_URL:?Set E2B_API_URL before running evaluation}"
-: "${E2B_SANDBOX_URL:?Set E2B_SANDBOX_URL before running evaluation}"
+: "${E2B_API_KEY:?Set E2B_API_KEY before running inference}"
+: "${E2B_API_URL:?Set E2B_API_URL before running inference}"
+: "${E2B_SANDBOX_URL:?Set E2B_SANDBOX_URL before running inference}"
 
 DATASET="${DATASET:-deepswe_v11}"
 case "${DATASET}" in
@@ -36,7 +36,7 @@ export RAY_ACCEL_ENV_VAR_OVERRIDE_ON_ZERO=0
 
 for command in python harbor ray; do
     if ! command -v "${command}" >/dev/null 2>&1; then
-        echo "Missing ${command}; follow examples/deepseek_v4/README.md to prepare the environment." >&2
+        echo "Missing ${command}; follow examples/dsv4_rl/README.md to prepare the environment." >&2
         exit 2
     fi
 done
@@ -71,7 +71,7 @@ for package, required in expected.items():
     if actual != required:
         raise SystemExit(
             f"Expected {package}=={required}, found {actual}. "
-            "Follow examples/deepseek_v4/README.md to prepare this Python environment."
+            "Follow examples/dsv4_rl/README.md to prepare this Python environment."
         )
 PY
 
@@ -94,7 +94,7 @@ python -u examples/inference/parallel_infer_verl.py \
   --nnodes 1 --n-gpus-per-node "${N_GPUS_PER_NODE:-8}" --gateway-count "${GATEWAY_COUNT:-16}" \
   --concurrency "${CONCURRENCY:-64}" \
   --temperature 1.0 --top-p 0.95 --top-k -1 \
-  --prompt-length 4096 --response-length 520192 --n "${N:-${N_ROLLOUTS:-4}}" \
+  --prompt-length 4096 --response-length 520192 --n "${N:-4}" \
   --gpu-memory-utilization 0.9 --kv-cache-dtype fp8 \
   --apply-chat-template-kwargs '{"enable_thinking":true,"reasoning_effort":"max","drop_thinking":false}' \
   --log-dir "${OUTPUT_DIR}/${RUN_ID}/logs" \
