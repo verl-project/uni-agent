@@ -51,6 +51,19 @@ python -m pytest tests/uni_agent/framework/test_task_runner.py  # replace with r
 
 Use the smallest relevant test selection locally. CI may run broader checks.
 
+## Vendored CAPE Snapshot
+
+`uni_agent/contrib/cape/` contains the standalone CAPE snapshot from commit
+`6a2ef43954e335b32fcafa802b906f9d25f42dae`, imported without its Git history.
+It includes its own installation instructions, tests, license, and third-party notices.
+This import does not register a Uni-Agent Sandbox backend or change existing defaults.
+
+The Ruff lint and formatting hooks exclude this directory to preserve the source snapshot,
+including third-party examples. The repository-wide mypy and Python compilation hooks still
+include it. When updating the snapshot, retain its notices and run the relevant CAPE tests
+from that directory as described in its README. Changes to Uni-Agent integration code
+outside the snapshot follow the regular hooks and owning-layer rules.
+
 ## Pull Request Title
 
 PR titles are checked in CI and must use:
