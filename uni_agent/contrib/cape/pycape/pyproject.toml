@@ -1,0 +1,23 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pycape"
+version = "0.1.0"
+description = "CAPE: Container-Aware Placement Engine"
+readme = {text = "pycape is the Python implementation of CAPE, the Container-Aware Placement Engine.", content-type = "text/markdown"}
+requires-python = ">=3.8"
+dependencies = ["aiohttp>=3.8"]
+authors = [{name = "NVIDIA Corporation"}]
+license = {text = "Apache-2.0"}
+
+[tool.setuptools]
+packages = ["pycape"]
+package-dir = {pycape = "."}
+
+[project.scripts]
+pycape = "pycape.cli:cape_main"
