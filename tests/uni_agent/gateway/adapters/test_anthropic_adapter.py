@@ -144,6 +144,42 @@ def test_user_tool_result_text_becomes_tool_message():
 
 @pytest.mark.cpu
 @pytest.mark.level0
+def test_parallel_tool_results_follow_assistant_call_order():
+    """Claude Code may return parallel tools in completion order; the model's
+    positional tool-result encoding must follow the tool-use order."""
+    results = [
+        {"type": "tool_result", "tool_use_id": "toolu_b", "content": "result-b"},
+        {"type": "tool_result", "tool_use_id": "toolu_a", "content": "result-a"},
+        {"type": "text", "text": "after results"},
+    ]
+    req = anthropic_to_internal(
+        {
+            "messages": [
+                {"role": "user", "content": "run both"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "tool_use", "id": "toolu_a", "name": "a", "input": {}},
+                        {"type": "tool_use", "id": "toolu_b", "name": "b", "input": {}},
+                    ],
+                },
+                {"role": "user", "content": results},
+            ],
+            "max_tokens": 8,
+        },
+        **BASE,
+    )
+
+    assert [(m["tool_call_id"], m["content"]) for m in req["messages"] if m["role"] == "tool"] == [
+        ("toolu_a", "result-a"),
+        ("toolu_b", "result-b"),
+    ]
+    assert req["messages"][-1] == {"role": "user", "content": "after results"}
+    assert [block["tool_use_id"] for block in results[:2]] == ["toolu_b", "toolu_a"]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_malformed_tool_result_blocks_rejected():
     """Tool results without a usable id or with unsupported nested blocks are
     rejected instead of corrupting tool-return history."""

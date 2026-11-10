@@ -378,6 +378,42 @@ def _assistant_message_from_content(content: Any) -> dict[str, Any]:
     return message
 
 
+def _order_parallel_tool_results(content: Any, tool_calls: list[dict[str, Any]]) -> Any:
+    """Put a batch of tool results in its assistant's tool-call order.
+
+    Claude Code can return parallel results in completion order. Some chat
+    templates encode tool results without their IDs, so their position is the
+    only way for the model to associate each result with a call.
+    """
+    if not isinstance(content, list) or len(tool_calls) < 2:
+        return content
+
+    positions = {call.get("id"): index for index, call in enumerate(tool_calls)}
+    if len(positions) != len(tool_calls):
+        return content
+
+    ordered = list(content)
+    index = 0
+    while index < len(ordered):
+        block = ordered[index]
+        if not isinstance(block, dict) or block.get("type") != "tool_result":
+            index += 1
+            continue
+        end = index + 1
+        while end < len(ordered) and isinstance(ordered[end], dict) and ordered[end].get("type") == "tool_result":
+            end += 1
+        batch = ordered[index:end]
+        ids = [item.get("tool_use_id") for item in batch]
+        if (
+            len(batch) > 1
+            and all(isinstance(tool_id, str) and tool_id in positions for tool_id in ids)
+            and len(set(ids)) == len(ids)
+        ):
+            ordered[index:end] = sorted(batch, key=lambda item: positions[item["tool_use_id"]])
+        index = end
+    return ordered
+
+
 def _fold_reminder_into_user(message: dict[str, Any], text: str, *, prepend: bool = False) -> None:
     """Fold a system-text reminder into an existing user message in place.
 
@@ -461,15 +497,18 @@ def _messages_to_internal(messages: Any) -> list[dict[str, Any]]:
         raise MalformedRequestError("messages must be non-empty")
 
     result: list[dict[str, Any]] = []
+    latest_tool_calls: list[dict[str, Any]] = []
     for message in messages:
         if not isinstance(message, dict):
             raise MalformedRequestError("messages entries must be objects")
         role = message.get("role")
         content = message.get("content", "")
         if role == "user":
-            result.extend(_user_messages_from_content(content))
+            result.extend(_user_messages_from_content(_order_parallel_tool_results(content, latest_tool_calls)))
         elif role == "assistant":
-            result.append(_assistant_message_from_content(content))
+            assistant = _assistant_message_from_content(content)
+            result.append(assistant)
+            latest_tool_calls = assistant.get("tool_calls", [])
         else:
             raise MalformedRequestError(f"Unsupported message role: {role}")
     return result
