@@ -88,10 +88,29 @@ def _maybe_truncate(content: str, truncate_after: int | None = MAX_RESPONSE_LEN)
     return content[:truncate_after] + TRUNCATED_MESSAGE
 
 
+def _line_ending(text: str) -> str:
+    """The line ending of a file: ``\\r\\n`` if it has any, otherwise ``\\n``."""
+    return "\r\n" if "\r\n" in text else "\n"
+
+
+def _with_line_ending(text: str, line_ending: str) -> str:
+    """Give the newlines in ``text`` the line ending of the file it is matched against or put into.
+
+    The editor shows a file with ``\\n`` newlines only, so the model writes ``\\n`` even for a CRLF file.
+    """
+    if line_ending == "\n":
+        return text
+    return text.replace("\r\n", "\n").replace("\n", line_ending)
+
+
 def _make_output(file_content: str, file_descriptor: str, init_line: int = 1) -> str:
-    """``cat -n`` style numbering (1-based ``init_line``), truncated if huge."""
-    file_content = _maybe_truncate(file_content).expandtabs()
-    lines = file_content.split("\n")
+    """``cat -n`` style numbering (1-based ``init_line``), truncated if huge.
+
+    Tabs are shown as they are, so what is shown can be used as ``old_str``. The ``\\r`` of a CRLF
+    line ending is not shown.
+    """
+    file_content = _maybe_truncate(file_content)
+    lines = [line.removesuffix("\r") for line in file_content.split("\n")]
     numbered = "\n".join(f"{i + init_line:6}\t{line}" for i, line in enumerate(lines))
     return f"Here's the result of running `cat -n` on {file_descriptor}:\n{numbered}\n"
 
@@ -119,12 +138,12 @@ class EditFileTool(Tool):
 
     @staticmethod
     async def _read(sandbox: SandboxBackend, path: str) -> str:
+        """The text of the file as it is: tabs, line endings and the final newline are kept."""
         data = await sandbox.read_file(path)
         try:
-            text = data.decode("utf-8")
+            return data.decode("utf-8")
         except UnicodeDecodeError as exc:
             raise ToolError(f"The file `{path}` is not valid UTF-8 text.") from exc
-        return text.replace("\r\n", "\n").replace("\r", "\n")
 
     # ----- dispatch -----
     async def run(self, args: dict[str, Any], *, timeout: float | None = None) -> ToolResult:
@@ -236,35 +255,38 @@ class EditFileTool(Tool):
     ) -> str:
         if not old_str:
             return "Parameter `old_str` is required for command: str_replace and must be a non-empty string."
-        original_content = await self._read(sandbox, path)
-        new_str = new_str if new_str is not None else ""
-        file_content = original_content
-        if old_str not in file_content:
-            # `view` shows tabs as spaces, so old_str may have been copied from that view.
-            file_content = file_content.expandtabs()
-            old_str = old_str.expandtabs()
-            new_str = new_str.expandtabs()
+        file_content = await self._read(sandbox, path)
+        line_ending = _line_ending(file_content)
+        # Matched and written as given; only the newlines take the file's line ending.
+        target = _with_line_ending(old_str, line_ending)
+        replacement = _with_line_ending(new_str, line_ending) if new_str is not None else ""
 
-        occurrences = file_content.count(old_str)
+        occurrences = file_content.count(target)
         if occurrences == 0:
-            return f"No replacement was performed, old_str `{old_str}` did not appear verbatim in {path}."
+            message = f"No replacement was performed, old_str `{old_str}` did not appear verbatim in {path}."
+            if target.expandtabs() in file_content.expandtabs():
+                message += (
+                    " It does match when tabs are expanded to spaces, so the tabs and spaces in old_str "
+                    "differ from those in the file. Use the same whitespace as in the file."
+                )
+            return message
         if occurrences > 1:
-            lines = [idx + 1 for idx, line in enumerate(file_content.split("\n")) if old_str in line]
+            lines = [idx + 1 for idx, line in enumerate(file_content.split("\n")) if target in line]
             return (
                 f"No replacement was performed. Multiple occurrences of old_str `{old_str}` "
                 f"in lines {lines}. Please ensure it is unique"
             )
-        if new_str == old_str:
+        if replacement == target:
             return f"No replacement was performed, old_str `{old_str}` is the same as new_str `{new_str}`."
 
-        new_file_content = file_content.replace(old_str, new_str)
+        new_file_content = file_content.replace(target, replacement)
         await sandbox.write_file(path, new_file_content)
-        self._history[path].append(original_content)
+        self._history[path].append(file_content)
 
-        replacement_line = file_content.split(old_str)[0].count("\n")
+        replacement_line = file_content.split(target)[0].count("\n")
         start_line = max(1, replacement_line - SNIPPET_LINES)
         end_line = min(
-            replacement_line + SNIPPET_LINES + new_str.count("\n"),
+            replacement_line + SNIPPET_LINES + replacement.count("\n"),
             len(new_file_content.splitlines()),
         )
         snippet = "\n".join(new_file_content.split("\n")[start_line - 1 : end_line])
@@ -292,7 +314,11 @@ class EditFileTool(Tool):
                 f"It should be within the range of lines of the file: {[0, n_lines]}"
             )
 
-        new_str_lines = new_str.split("\n")
+        # Lines are split at "\n" like `view` does, so a CRLF line keeps its "\r" and so do the new lines.
+        line_ending = _line_ending(file_text)
+        new_str_lines = _with_line_ending(new_str, line_ending).split("\n")
+        if line_ending == "\r\n" and insert_line < n_lines:
+            new_str_lines[-1] += "\r"
         new_file_lines = file_lines[:insert_line] + new_str_lines + file_lines[insert_line:]
         snippet_lines = (
             file_lines[max(0, insert_line - SNIPPET_LINES) : insert_line]
