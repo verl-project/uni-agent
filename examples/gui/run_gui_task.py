@@ -61,8 +61,7 @@ def build_task_config(args: argparse.Namespace) -> dict:
         },
         "display": args.display,
         "setup_command": (
-            f"{desktop_setup}rm -f /tmp/gui_button_clicked; "
-            f"nohup {button_app} >/tmp/app.log 2>&1 </dev/null & sleep 3"
+            f"{desktop_setup}rm -f /tmp/gui_button_clicked; nohup {button_app} >/tmp/app.log 2>&1 </dev/null & sleep 3"
         ),
         "verify_command": "test -f /tmp/gui_button_clicked",
         "prompt": [
