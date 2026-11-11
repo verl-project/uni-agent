@@ -12,207 +12,78 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""VLLMKVParser — vLLM KV-cache event parser.
-
-Parses msgpack payloads from ZMQ and returns structured update commands.
-Store writes are handled by Collector via DataStore.
-"""
+"""Decode native KV messages without keeping cache identity state."""
 
 from __future__ import annotations
 
 import logging
-import time
-from collections import Counter, defaultdict
 
 import msgpack
 
-from ....collectors.parse import KVCacheUpdate, Parser
-from ....collectors.parse.vllm.kv_event import KVCacheEvent
-from ....types import Layer
-from ....utils.hash import compute_hash
+from ....collectors.parse import Parser
+from ....collectors.parse.vllm.kv_event import decode_kv_events
+from ....collectors.transport.base import TransportMessage
+from ....types.cache_lifecycle import BRIDGE_SCHEMA_KEY, CacheLifecycleState
+from ....types.kv_cache import KVCacheUpdate
 
 logger = logging.getLogger(__name__)
 
-_FILTERED_EVENT_LOG_INTERVAL_S = 30.0
-
 
 class VLLMKVParser(Parser):
-    """vLLM KV-cache parser — msgpack payload → KVCacheUpdate.
+    """Normalize native array and mapping batches into one ordered event list.
 
-    Each event type has a dedicated handler that folds its blocks into a single
-    ``KVCacheUpdate`` accumulator; ``parse`` is pure dispatch.
-
-    Attributes:
-        remote_to_local_block_hash: Mapping from replica node_id to that
-            replica's {vLLM remote block_hash → locally-computed prefix hash
-            (str)}.  Used for chained hash computation.
-        _block_size: Learned block size from first eligible GPU stored event.
+    Transport metadata arrives in ``TransportMessage``. Cache layout, parent hashes
+    and replica residency are interpreted by the store.
     """
 
-    # vLLM BlockStored/BlockRemoved ``medium`` → canonical layer.
-    # Only None (older vLLM) defaults to GPU; unknown media remain unclassified.
-    _MEDIUM_TO_LAYER: dict[str, Layer] = {"GPU": Layer.GPU, "CPU": Layer.CPU, "SSD": Layer.SSD}
+    def parse(self, message: TransportMessage, node_id: str) -> KVCacheUpdate:
+        """Translate protocol status and decode one ordered native event batch."""
+        if not isinstance(message, TransportMessage):
+            raise TypeError("VLLMKVParser requires a TransportMessage")
+        if message.status == "new_stream":
+            return KVCacheUpdate(node_id=node_id, sequence=message.sequence, reset_stream=True)
+        if message.status in {"no_continuity", "unreachable"}:
+            return KVCacheUpdate(
+                node_id=node_id, sequence=message.sequence, stream_error=f"event_stream_{message.status}"
+            )
 
-    def __init__(self) -> None:
-        self.remote_to_local_block_hash: dict[str, dict[str, str]] = {}
-        self.stats: dict[str, int] = {"removed_unmapped": 0, "parent_unresolved": 0}
-        self._block_size: int | None = None
-        self._filtered_event_counts: dict[tuple[str, str], Counter[str]] = defaultdict(Counter)
-        self._filter_last_logged: dict[tuple[str, str], float] = {}
-
-    def _node_map(self, node_id: str) -> dict[str, str]:
-        """Remote→local hash map for one replica (created on first event)."""
-        return self.remote_to_local_block_hash.setdefault(node_id, {})
-
-    def parse(self, raw_data: bytes | str, node_id: str) -> KVCacheUpdate | None:
-        """Parse msgpack payload and return structured update command.
-
-        Handles both single batches (real-time) and multiple batches (replay):
-          - Single: [timestamp, [event, ...], ...]
-          - Multiple: [[timestamp, [...], ...], [timestamp, [...], ...]]
-        Each event may be a legacy positional array or a mapping with named
-        fields and a ``type`` discriminator.
-
-        Args:
-            raw_data: ZMQ payload bytes (msgpack-encoded).
-            node_id: The endpoint that sent this payload.
-
-        Returns:
-            KVCacheUpdate with operations to apply, or None if parsing failed.
-        """
-        if isinstance(raw_data, str):
-            logger.debug("VLLMKVParser received string data, expected bytes — skipping")
-            return None
-
+        bridged = False
+        lifetime = None
+        sequence = message.sequence
         try:
-            raw = msgpack.unpackb(raw_data, raw=False)
-
-            if not isinstance(raw, list) or len(raw) == 0:
-                logger.warning(f"Unexpected msgpack format from node {node_id} (type={type(raw).__name__})")
-                return None
-            event_payloads = raw if isinstance(raw[0], list) else [raw]
-
-            update = KVCacheUpdate(node_id=node_id)
-            for payload in event_payloads:
-                events = KVCacheEvent.from_raw(payload, default_node_id=node_id)
-                for event in events:
-                    if event.event_type == "stored":
-                        self._on_block_stored(event, update)
-                    elif event.event_type == "removed":
-                        self._on_block_removed(event, update)
-                    elif event.event_type == "clear":
-                        self._on_all_blocks_cleared(event, update)
-                    else:
-                        raise ValueError(f"Unknow event.event_type {event.event_type}.")
-            return update
-
-        except (msgpack.UnpackException, ValueError, TypeError) as exc:
-            preview = bytes(raw_data[:32]).hex() if isinstance(raw_data, bytes | bytearray) else str(raw_data)[:64]
-            logger.warning(
-                f"Failed to parse msgpack payload from node {node_id}: {exc!r} (len={len(raw_data)}, head={preview})"
+            raw = msgpack.unpackb(message.payload, raw=False)
+            if isinstance(raw, dict) and BRIDGE_SCHEMA_KEY in raw:
+                bridged = True
+                if type(raw[BRIDGE_SCHEMA_KEY]) is not int or raw[BRIDGE_SCHEMA_KEY] != 1:
+                    raise ValueError("unsupported cache event bridge schema")
+                lifetime = CacheLifecycleState.from_dict(raw["state"])
+                bridge_sequence = raw["sequence"]
+                if type(bridge_sequence) is not int or bridge_sequence < 0:
+                    raise ValueError("invalid cache event bridge sequence")
+                sequence = bridge_sequence
+                error = raw.get("error")
+                if error is not None and not isinstance(error, str):
+                    raise ValueError("invalid cache event bridge error")
+                if error:
+                    return KVCacheUpdate(node_id=node_id, lifecycle=lifetime, sequence=sequence, stream_error=error)
+                payload = raw["payload"]
+                if not isinstance(payload, bytes):
+                    raise ValueError("invalid cache event bridge payload")
+                raw = msgpack.unpackb(payload, raw=False) if payload else [0, []]
+            if not isinstance(raw, list | dict) or not raw:
+                raise ValueError(f"Unexpected msgpack format (type={type(raw).__name__})")
+            # A native batch is [timestamp, events, ...] or a mapping. Older
+            # callers may encode a list of batches; flatten it in wire order.
+            batches = raw if isinstance(raw, list) and isinstance(raw[0], list | dict) else [raw]
+            events = [event for batch in batches for event in decode_kv_events(batch, default_node_id=node_id)]
+            return KVCacheUpdate(node_id=node_id, events=events, lifecycle=lifetime, sequence=sequence)
+        except (msgpack.UnpackException, ValueError, TypeError, KeyError) as exc:
+            payload = message.payload
+            preview = bytes(payload[:32]).hex() if isinstance(payload, bytes | bytearray) else str(payload)[:64]
+            logger.warning("Failed to parse KV payload from node %s: %r (head=%s)", node_id, exc, preview)
+            return KVCacheUpdate(
+                node_id=node_id,
+                lifecycle=lifetime,
+                sequence=sequence,
+                stream_error="invalid_bridge_envelope" if bridged else "invalid_kv_event_payload",
             )
-            return None
-
-    @classmethod
-    def _medium_to_layer(cls, medium: str | None) -> Layer | None:
-        """Classify a medium; legacy None means GPU, unknown strings return None."""
-        if medium is None:
-            return Layer.GPU
-        return cls._MEDIUM_TO_LAYER.get(medium.upper())
-
-    # ── Event handlers ──────────────────────────────────────────────────
-
-    def _record_filtered_event(self, event: KVCacheEvent, layer: Layer | None) -> None:
-        """Count excluded media without mutating the GPU routing cache view."""
-        assert event.medium is not None
-        medium = event.medium.upper()
-        key = (event.node_id, medium)
-        counts = self._filtered_event_counts[key]
-        counts[f"{event.event_type}_events"] += 1
-        counts[f"{event.event_type}_blocks"] += len(event.block_hashes)
-        now = time.monotonic()
-        last_logged = self._filter_last_logged.get(key)
-        if last_logged is not None and now - last_logged < _FILTERED_EVENT_LOG_INTERVAL_S:
-            return
-        self._filter_last_logged[key] = now
-        logger.log(
-            logging.WARNING if layer is None else logging.INFO,
-            "KV events excluded from router cache view (node=%s, medium=%r, reason=%s): "
-            "stored_events=%d removed_events=%d stored_blocks=%d removed_blocks=%d; "
-            "only GPU residency is tracked",
-            event.node_id,
-            medium,
-            "unknown medium" if layer is None else "non-GPU medium",
-            counts["stored_events"],
-            counts["removed_events"],
-            counts["stored_blocks"],
-            counts["removed_blocks"],
-        )
-
-    def _on_block_stored(self, event: KVCacheEvent, update: KVCacheUpdate) -> None:
-        """Handle BlockStored: learn block_size, compute local hashes, fold into update."""
-        layer = self._medium_to_layer(event.medium)
-        if layer != Layer.GPU:
-            self._record_filtered_event(event, layer)
-            return
-        if event.token_ids is None:
-            logger.debug("Stored event has no token_ids — skipping")
-            return
-
-        if self._block_size is None and event.block_size is not None:
-            self._block_size = event.block_size
-            update.set_block_size(event.block_size)
-
-        node_map = self._node_map(event.node_id)
-        seed = 0
-        local_parent_hash = seed
-        if event.parent_block_hash is not None:
-            local_parent_str = node_map.get(event.parent_block_hash)
-            if local_parent_str is not None:
-                local_parent_hash = int(local_parent_str)
-            else:
-                # Parent unknown (replay gap / earlier parse failure) → chain restarts at seed.
-                self.stats["parent_unresolved"] += 1
-
-        local_hashes: list[str] = []
-        for i, block_bytes in enumerate(event.token_ids):
-            if i >= len(event.block_hashes):
-                break
-            local_hash_int = compute_hash(
-                local_parent_hash,
-                block_bytes,
-                seed=seed,
-            )
-            local_hash_str = str(local_hash_int)
-            bh = event.block_hashes[i]
-            node_map[bh] = local_hash_str
-            local_hashes.append(local_hash_str)
-            local_parent_hash = local_hash_int  # chain
-
-        update.add(Layer.GPU, local_hashes)
-
-    def _on_block_removed(self, event: KVCacheEvent, update: KVCacheUpdate) -> None:
-        """Handle BlockRemoved: convert remote hashes to local, fold into update.
-
-        Only touches ``event.node_id``'s own map; the ``pop`` keeps the map
-        bounded by the resident set.
-        """
-        layer = self._medium_to_layer(event.medium)
-        if layer != Layer.GPU:
-            self._record_filtered_event(event, layer)
-            return
-        node_map = self._node_map(event.node_id)
-        local_hashes: list[str] = []
-        for bh in event.block_hashes:
-            local_hash = node_map.pop(bh, None)
-            if local_hash is None:
-                # Untranslatable removal — retained keeps the block (surfaced via stats).
-                self.stats["removed_unmapped"] += 1
-                continue
-            local_hashes.append(local_hash)
-
-        update.remove(Layer.GPU, local_hashes)
-
-    def _on_all_blocks_cleared(self, event: KVCacheEvent, update: KVCacheUpdate) -> None:
-        """Handle AllBlocksCleared: mark the replica for a full clear."""
-        update.clear()

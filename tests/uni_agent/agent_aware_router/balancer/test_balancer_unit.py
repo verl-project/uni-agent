@@ -133,7 +133,7 @@ class TestKVEventSourceDiscovery:
         assert requests[0].url == httpx.URL("http://10.0.0.1:8000/kv_event_sources")
 
     def test_provider_discovers_sources_in_parallel_and_tolerates_unavailable_servers(self, monkeypatch):
-        monkeypatch.setattr(balancer_module.ray, "get", lambda value: value)
+        monkeypatch.setattr(balancer_module.ray, "get", lambda value, timeout=None: value)
         concurrent_fetches = Barrier(3, timeout=5)
 
         def fetch(_cls, address):
@@ -181,7 +181,7 @@ class TestConstruction:
             KVCAwareBalancer({"s0": "h0"}, OmegaConf.create({}))
 
     def test_fetches_rollout_config_once(self, monkeypatch):
-        monkeypatch.setattr(balancer_module.ray, "get", lambda value: value)
+        monkeypatch.setattr(balancer_module.ray, "get", lambda value, timeout=None: value)
         monkeypatch.setattr(KVCAwareBalancer, "_fetch_kv_event_endpoints", classmethod(lambda _cls, _addr: None))
         server = _RolloutServerHandle(_rollout_config())
 
@@ -194,7 +194,7 @@ class TestConstruction:
         assert balancer._strategy._max_num_batched_tokens == 4096
 
     def test_uses_next_server_when_rollout_config_rpc_fails(self, monkeypatch):
-        monkeypatch.setattr(balancer_module.ray, "get", lambda value: value)
+        monkeypatch.setattr(balancer_module.ray, "get", lambda value, timeout=None: value)
         monkeypatch.setattr(KVCAwareBalancer, "_fetch_kv_event_endpoints", classmethod(lambda _cls, _addr: None))
         failed = _RolloutServerHandle(RuntimeError("actor unavailable"), ("10.0.0.1", 8000))
         healthy = _RolloutServerHandle(_rollout_config(max_num_seqs=32), ("10.0.0.1", 8001))
@@ -209,8 +209,42 @@ class TestConstruction:
         assert healthy.get_rollout_config.calls == 1
         assert balancer._strategy._max_num_seqs == 32
 
+    @pytest.mark.parametrize("first_metadata", [None, {"status": "not_ready"}, TimeoutError("not ready")])
+    @pytest.mark.parametrize("disabled", [False, True])
+    def test_cache_metadata_selects_first_valid_layout_and_discovers_each_profile(
+        self, monkeypatch, layout, first_metadata, disabled
+    ):
+        monkeypatch.setattr(balancer_module.ray, "get", lambda value, timeout=None: value)
+
+        def first_query():
+            if isinstance(first_metadata, Exception):
+                raise first_metadata
+            return first_metadata
+
+        first = SimpleNamespace()
+        if first_metadata is not None:
+            first.get_kv_cache_metadata = _RemoteMethod(first_query)
+        metadata = layout()
+        metadata["cache_config"]["enable_prefix_caching"] = not disabled
+        healthy = SimpleNamespace(get_kv_cache_metadata=_RemoteMethod(lambda: metadata))
+        other_metadata = layout()
+        other = SimpleNamespace(get_kv_cache_metadata=_RemoteMethod(lambda: other_metadata))
+        balancer = KVCAwareBalancer(
+            {"first": first, "healthy": healthy, "other": other},
+            _router_config(),
+            provider_factory=_FakeCollectorManager,
+        )
+        try:
+            assert balancer._store.cache_registry_state.status == ("disabled" if disabled else "registered")
+            assert healthy.get_kv_cache_metadata.calls == 1
+            assert other.get_kv_cache_metadata.calls == 1
+            assert balancer._store._kv._replica_metadata["healthy"] == metadata
+            assert balancer._store._kv._replica_metadata["other"] == other_metadata
+        finally:
+            balancer.close()
+
     def test_invalid_capacity_values_use_defaults(self, monkeypatch):
-        monkeypatch.setattr(balancer_module.ray, "get", lambda value: value)
+        monkeypatch.setattr(balancer_module.ray, "get", lambda value, timeout=None: value)
         monkeypatch.setattr(KVCAwareBalancer, "_fetch_kv_event_endpoints", classmethod(lambda _cls, _addr: None))
         server = _RolloutServerHandle(_rollout_config(max_num_seqs=0, max_num_batched_tokens="invalid"))
 
@@ -262,6 +296,7 @@ class TestBalancerProtocol:
             "route_calls": 0,
             "sticky_size": 0,
             "total_inflight": 0,
+            "cache_lifecycles": {},
         }
 
     def test_acquire_delegates_and_maps_selected_handle(self, monkeypatch):

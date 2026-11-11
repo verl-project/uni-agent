@@ -27,6 +27,7 @@ from typing import Any
 from ....collectors.parse import InflightBlockUpdate, MetricsUpdate, Parser
 from ....collectors.transport.callback import StatisticEvent
 from ....types import MetricKey
+from ....types.kv_cache import DispatchSchema, GroupReservation
 from ....utils.hash import get_prefix_hashes_incremental
 
 logger = logging.getLogger(__name__)
@@ -44,8 +45,8 @@ class InflightParser(Parser):
             its stored turn (release); 0 when unattributable.
         stale: The request's still-held pin marker (``get_marker`` peek), or
             ``None`` — its presence marks the previous release as dropped.
-        block_size: The learned KV block size (store read by the collector);
-            0 = not yet learned → nothing resolvable, nothing pinned.
+        schema: Hash identity and reservation units captured by the collector;
+            None means the layout is not yet known, so nothing is pinned.
         booked_len: The request's currently-booked prompt length — the stale
             dispatch's booking netted out on acquire, folded out on release.
     """
@@ -57,7 +58,7 @@ class InflightParser(Parser):
         *,
         turn: int = 0,
         stale: dict[str, Any] | None = None,
-        block_size: int = 0,
+        schema: DispatchSchema | None = None,
         booked_len: int = 0,
     ) -> list | None:
         """Dispatch on acquire/release; ignore other events / non-event payloads."""
@@ -69,7 +70,7 @@ class InflightParser(Parser):
             return None
 
         if event.event == "on_acquire":
-            return self._parse_acquire(event, turn=turn, stale=stale, block_size=block_size, booked_len=booked_len)
+            return self._parse_acquire(event, turn=turn, stale=stale, schema=schema, booked_len=booked_len)
         if event.event == "on_release":
             return self._parse_release(event, turn=turn, booked_len=booked_len)
         return None
@@ -82,7 +83,7 @@ class InflightParser(Parser):
         *,
         turn: int,
         stale: dict[str, Any] | None,
-        block_size: int,
+        schema: DispatchSchema | None,
         booked_len: int,
     ) -> list:
         """Netted acquire: optional stale unwind + pin command + metric deltas."""
@@ -121,8 +122,9 @@ class InflightParser(Parser):
         # Resolve the dispatch's prefix chain, computed fresh (the chain is
         # deterministic — no memo). Nothing resolvable (no prompt, block size
         # not yet learned, or a sub-block prompt) pins nothing.
-        hash_strs = self._resolve_chain(event, block_size)
-        if hash_strs:
+        hash_strs = self._resolve_chain(event, schema)
+        reservations = self._resolve_reservations(event, schema, hash_strs)
+        if hash_strs or reservations:
             updates.append(
                 InflightBlockUpdate(
                     node_id=event.replica_id,
@@ -130,6 +132,8 @@ class InflightParser(Parser):
                     action="pin",
                     block_hashes=hash_strs,
                     mark_resident=True,
+                    schema=schema,
+                    reservations=reservations,
                 )
             )
         updates.append(
@@ -159,15 +163,24 @@ class InflightParser(Parser):
 
     # ── helpers ──────────────────────────────────────────────────────────
 
-    def _resolve_chain(self, event: StatisticEvent, block_size: int) -> list[str]:
-        """Resolve the event prompt's full-block prefix hash chain, computed fresh.
-
-        Stateless sibling of ``resolve_prefix_hashes`` (which memoizes the
-        per-request checkpoint in the store): the chain is deterministic, so it
-        is simply recomputed per dispatch. Returns ``[]`` when there is no
-        prompt or no learned block size.
-        """
-        if not event.prompt_ids or block_size <= 0:
+    def _resolve_chain(self, event: StatisticEvent, schema: DispatchSchema | None) -> list[str]:
+        """Hash once at the registry unit, then select reservation endpoints."""
+        if not event.prompt_ids or schema is None:
             return []
-        hashes, _ = get_prefix_hashes_incremental(list(event.prompt_ids), block_size, 0, 0)
+        hashes, _ = get_prefix_hashes_incremental(list(event.prompt_ids), schema.hash_unit, 0, 0)
         return [str(h) for h in hashes]
+
+    def _resolve_reservations(self, event, schema, hash_strs):
+        if not event.prompt_ids or schema is None:
+            return ()
+        chains = {schema.hash_unit: tuple(hash_strs)}
+        groups = []
+        for group in schema.groups:
+            hashes = ()
+            if group.share_prefix:
+                if group.block_size not in chains:
+                    values, _ = get_prefix_hashes_incremental(list(event.prompt_ids), group.block_size, 0, 0)
+                    chains[group.block_size] = tuple(map(str, values))
+                hashes = chains[group.block_size]
+            groups.append(GroupReservation(group.group_idx, hashes, group.private_blocks))
+        return tuple(groups)
