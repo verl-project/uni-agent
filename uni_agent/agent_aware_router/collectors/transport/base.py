@@ -21,7 +21,23 @@ and delivers it to a handler callback.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Callable
+from dataclasses import dataclass
+from typing import Any, Callable, Literal
+
+
+@dataclass(frozen=True)
+class TransportMessage:
+    """Uninterpreted payload and ordered facts about its network source.
+
+    ``new_stream`` announces an attachment without a replay cursor;
+    ``no_continuity`` reports an interrupted subscription or incomplete replay;
+    ``unreachable`` reports exhausted connection attempts. Status-only messages
+    have an empty payload and precede any subsequent data from the source.
+    """
+
+    payload: bytes
+    sequence: int | None = None
+    status: Literal["ok", "new_stream", "no_continuity", "unreachable"] = "ok"
 
 
 class Transport(ABC):
@@ -42,13 +58,13 @@ class Transport(ABC):
     is_async: bool = True
 
     @abstractmethod
-    async def subscribe(self, handler: Callable[[bytes | str, str], None]) -> None:
+    async def subscribe(self, handler: Callable[[Any, str], None]) -> None:
         """Start data acquisition and deliver each item to handler.
 
         Args:
             handler: Callback that receives (raw_data, node_id).
-                raw_data is ``bytes`` (ZMQ) / ``str`` (HTTP response text),
-                or a ``StatisticEvent`` (callback transport).
+                raw_data is ``TransportMessage`` (ZMQ), ``str`` (HTTP response
+                text), or ``StatisticEvent`` (callback transport).
                 node_id identifies the source endpoint/node (empty for the
                 callback transport — the event carries its own ids).
         """

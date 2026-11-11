@@ -35,6 +35,7 @@ from uni_agent.agent_aware_router.store.per_request_store import PerRequestStore
 from uni_agent.agent_aware_router.strategies.base import ReplicaInfo
 from uni_agent.agent_aware_router.strategies.kvc_aware import KVCacheAwareStrategy
 from uni_agent.agent_aware_router.types import MetricKey, SlowCut
+from uni_agent.agent_aware_router.types.kv_cache import GroupReservation
 
 pytestmark = [pytest.mark.level0, pytest.mark.cpu]
 
@@ -88,19 +89,27 @@ def _names(rl: _RecordingRLInsight, metric_type: str | None = None) -> set[str]:
     return {c[1] for c in rl.calls if metric_type is None or c[0] == metric_type}
 
 
-def test_capacity_token_aware_emits_capacity_fractions(recording):
+def test_capacity_token_aware_emits_capacity_fractions(recording, layout):
     ds = DataStore()
-    ds.set_block_size(16)
+    ds.configure_cache_registry(layout((("full_attention", 16),), unit=16))
     ds.refresh_metrics(
         {
             "s0": {
-                MetricKey.NUM_GPU_BLOCKS: 100,
+                MetricKey.NUM_GPU_BLOCKS: 101,
+                MetricKey.KV_CACHE_CAPACITY_BLOCKS: 100,
                 MetricKey.KV_CACHE_USAGE_PERC: 0.2,
                 MetricKey.INFLIGHT_TOKENS: 320,
             }
         }
     )
-    ds.incr_block_refs("s0", [f"b{i}" for i in range(20)])  # 20 held blocks × 16 = 320 tokens
+    ds.pin_request(
+        "busy",
+        "s0",
+        [],
+        ds.dispatch_schema(),
+        reservations=(GroupReservation(0, tuple(f"b{i}" for i in range(20))),),
+        predict=False,
+    )  # 20 held blocks × 16 = 320 tokens
     strat = _strat(slow_cut=SlowCut.CAPACITY_TOKEN_AWARE, do_shortcut=False)
 
     strat.score(PROMPT_IDS, ds, [ReplicaInfo(replica_id="s0")])
@@ -114,11 +123,11 @@ def test_capacity_token_aware_emits_capacity_fractions(recording):
     assert avail_call[3] == {"replica": "s0"}
 
 
-def test_capacity_token_aware_skips_emit_without_capacity(recording):
-    # NUM_GPU_BLOCKS not yet scraped → cap=0, raw token values are garbage:
+def test_capacity_token_aware_skips_emit_without_capacity(recording, layout):
+    # Normalized pool capacity not yet known → no capacity fractions:
     # routing still happens, but no capacity fractions are emitted.
     ds = DataStore()
-    ds.set_block_size(16)
+    ds.configure_cache_registry(layout((("full_attention", 16),), unit=16))
     strat = _strat(slow_cut=SlowCut.CAPACITY_TOKEN_AWARE, do_shortcut=False)
 
     strat.score(PROMPT_IDS, ds, [ReplicaInfo(replica_id="s0")])
@@ -126,11 +135,26 @@ def test_capacity_token_aware_skips_emit_without_capacity(recording):
     assert not (_names(recording, "histogram") & {"avail_ratio", "need_ratio", "remaining_ratio"})
 
 
-def test_route_latency_fires_once_per_score_call_with_no_replica_label(recording):
+def test_route_latency_fires_once_per_score_call_with_no_replica_label(recording, layout):
     ds = DataStore()
-    ds.set_block_size(16)
-    ds.refresh_metrics({"s0": {MetricKey.NUM_GPU_BLOCKS: 100, MetricKey.KV_CACHE_USAGE_PERC: 0.2}})
-    ds.incr_block_refs("s0", [f"b{i}" for i in range(20)])
+    ds.configure_cache_registry(layout((("full_attention", 16),), unit=16))
+    ds.refresh_metrics(
+        {
+            "s0": {
+                MetricKey.NUM_GPU_BLOCKS: 101,
+                MetricKey.KV_CACHE_CAPACITY_BLOCKS: 100,
+                MetricKey.KV_CACHE_USAGE_PERC: 0.2,
+            }
+        }
+    )
+    ds.pin_request(
+        "busy",
+        "s0",
+        [],
+        ds.dispatch_schema(),
+        reservations=(GroupReservation(0, tuple(f"b{i}" for i in range(20))),),
+        predict=False,
+    )
     strat = _strat(slow_cut=SlowCut.CAPACITY_TOKEN_AWARE, do_shortcut=False)
 
     strat.score(PROMPT_IDS, ds, [ReplicaInfo(replica_id="s0")])
@@ -141,7 +165,7 @@ def test_route_latency_fires_once_per_score_call_with_no_replica_label(recording
     assert route_calls[0][3] == {}  # global — no replica label
 
 
-def test_route_latency_fires_even_on_sticky_short_circuit(recording):
+def test_route_latency_fires_even_on_sticky_short_circuit(recording, layout):
     ds = DataStore()
     ds.refresh_metrics({"s0": {MetricKey.NUM_REQUESTS_RUNNING: 0, MetricKey.NUM_GPU_BLOCKS: 10}})
     ds.put_sticky_binding("r1", "s0")

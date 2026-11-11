@@ -112,3 +112,43 @@ class TestVLLMMetricsCollector:
         store = _collect()
 
         assert len(store.get_metrics(NODE_ID)) > 0, "Store should have metrics after multiple poll cycles"
+
+
+@pytest.mark.parametrize(
+    "labels,expected,raw",
+    [
+        (["10"], 9, 10),
+        (["1"], 0, 1),
+        (["10", "10"], 9, 10),
+        (["10", "20"], None, 20),
+        (["10", "bad"], None, 10),
+        (["10", None], None, 10),
+        (["-1"], None, -1),
+        (["1.5"], None, 1),
+        (["true"], None, None),
+        (["nan"], None, None),
+        (["inf"], None, None),
+        ([], None, None),
+    ],
+)
+def test_capacity_info_is_normalized_without_summing_worker_series(labels, expected, raw):
+    lines = [
+        "vllm:cache_config_info{" + (f'num_gpu_blocks="{value}",' if value is not None else "") + f'worker="{i}"}} 1'
+        for i, value in enumerate(labels)
+    ]
+    update = VLLMMetricsParser().parse("\n".join(lines), NODE_ID)
+    assert update.metrics[MetricKey.KV_CACHE_CAPACITY_BLOCKS] == expected
+    assert update.metrics.get(MetricKey.NUM_GPU_BLOCKS) == raw
+
+
+def test_missing_capacity_poll_clears_previous_value_in_store():
+    parser = VLLMMetricsParser()
+    store = DataStore()
+    assert store.get_metric(NODE_ID, MetricKey.KV_CACHE_CAPACITY_BLOCKS) is None
+    for text, expected in [
+        ('vllm:cache_config_info{num_gpu_blocks="10"} 1', 9),
+        ("vllm:num_requests_running 0", None),
+    ]:
+        update = parser.parse(text, NODE_ID)
+        store.refresh_metrics({NODE_ID: update.metrics})
+        assert store.get_metric(NODE_ID, MetricKey.KV_CACHE_CAPACITY_BLOCKS) == expected

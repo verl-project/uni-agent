@@ -19,6 +19,7 @@ from __future__ import annotations
 import pytest
 
 from uni_agent.agent_aware_router.types import MetricKey
+from uni_agent.agent_aware_router.types.kv_cache import GroupReservation
 
 from ._helpers import _make_balancer
 
@@ -56,7 +57,7 @@ class TestStickyEndToEnd:
         sid2, _ = balancer.acquire_server("r1", [1, 2])
         assert sid1 == sid2
 
-    def test_overloaded_sticky_falls_back_to_healthy(self):
+    def test_overloaded_sticky_falls_back_to_healthy(self, layout):
         """Feature: bound replica saturates (load>0.9) → rebind to a healthy one.
         Description: s0 is saturated in BOTH books — the engine-side load=1.0 (kv+running+
           waiting alone cap at 0.7, so inflight must contribute) and the router's own
@@ -71,9 +72,21 @@ class TestStickyEndToEnd:
         balancer._store.refresh_metrics(
             _kv_metrics({"s0": {"kv": 1.0, "running": 64, "waiting": 1000, "inflight": 64}, "s1": {"kv": 0.3}})
         )
-        balancer._store.add_kv_blocks("s0", [f"b{i}" for i in range(10)])
-        balancer._store.refresh_metrics({"s0": {MetricKey.NUM_GPU_BLOCKS: 10}})
-        balancer._store.incr_block_refs("s0", [f"b{i}" for i in range(10)])  # 10 held blocks → avail=0 < thresh=16
+        balancer._store.configure_cache_registry(layout((("full_attention", 16),), unit=16))
+        balancer._store.refresh_metrics(
+            {
+                "s0": {MetricKey.NUM_GPU_BLOCKS: 10, MetricKey.KV_CACHE_CAPACITY_BLOCKS: 9},
+                "s1": {MetricKey.NUM_GPU_BLOCKS: 10, MetricKey.KV_CACHE_CAPACITY_BLOCKS: 9},
+            }
+        )
+        balancer._store.pin_request(
+            "busy",
+            "s0",
+            [],
+            balancer._store.dispatch_schema(),
+            reservations=(GroupReservation(0, tuple(f"b{i}" for i in range(10))),),
+            predict=False,
+        )  # 10 held blocks → avail=0 < thresh=16
         sid2, _ = balancer.acquire_server("r1", [1, 2])
         assert sid2 == "s1"
 

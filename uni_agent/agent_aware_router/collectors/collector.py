@@ -22,17 +22,18 @@ import threading
 import time
 from collections import defaultdict
 from concurrent.futures import Future
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from typing import Any
 
 from ..config.collector import CollectorConfig
 from ..debug import get_debug_var, is_debug_enabled
 from ..insight import WriteEvent, WriteKind, emitter
 from ..store.data_store import DataStore
-from ..types import EmitKey, MetricKey
+from ..types import EmitKey, KVCacheUpdate, MetricKey
 from ..utils.knob import coerce_knob_value
-from .parse import InflightBlockUpdate, KVCacheUpdate, MetricsUpdate, Parser, StickyUpdate
+from .parse import InflightBlockUpdate, MetricsUpdate, Parser, StickyUpdate
 from .parse.basic.inflight import InflightParser
-from .transport.base import Transport
+from .transport.base import Transport, TransportMessage
 from .transport.callback import StatisticEvent
 
 logger = logging.getLogger(__name__)
@@ -98,8 +99,10 @@ class Collector:
         self._parser = parser
         self._data_store = DataStore()
         self._future: Future | None = None
+        self._stop_future: Future | None = None
         self._loop: asyncio.AbstractEventLoop = asyncio.new_event_loop()
         self._loop_thread: threading.Thread | None = None
+        self._sync_started = False
         # Periodic evidence-log state. The parser is stateless (returns
         # MetricsUpdate; merged here), so the log reads a current snapshot.
         self._metrics_poll_count = 0
@@ -112,8 +115,7 @@ class Collector:
         self._kv_last_logged_total = 0
         # Last-emit time for the dispatched/completed/inflight_turn_sum snapshot (throttled).
         self._dispatch_last_log: float = 0.0
-        # Resident blocks the router wrote itself at acquire (``record_dispatch_blocks``),
-        # logged in the kv-events tally as ``router_recorded`` (cross-check vs engine-side stored).
+        # Provisional group endpoints added at acquire; logged separately from native Stored counts.
         self._dispatch_recorded_blocks: int = 0
 
     # ── Lifecycle ───────────────────────────────────────────────────────
@@ -125,8 +127,10 @@ class Collector:
             asyncio.set_event_loop(self._loop)
             self._loop.run_forever()
 
-        def handler(raw_data: bytes | str, node_id: str) -> None:
+        def handler(raw_data: Any, node_id: str) -> None:
             """Handler: parse and dispatch each update to the right store write path."""
+            if isinstance(raw_data, bytes):
+                raw_data = TransportMessage(raw_data)
             if isinstance(self._parser, InflightParser):
                 # The inflight parser is pure — the collector gathers its state
                 # from the store and drives it event by event.
@@ -152,11 +156,25 @@ class Collector:
                     logger.debug(f"parser.parse returned an unknown update: {update}")
 
         if getattr(self._transport, "is_async", True):
+            if self._loop_thread is not None or self._loop.is_running():
+                raise RuntimeError("stop the collector before starting it again")
+            if not self._loop.is_closed() and any(not task.done() for task in asyncio.all_tasks(self._loop)):
+                raise RuntimeError("finish collector cleanup before starting it again")
+            if self._loop.is_closed():
+                self._loop = asyncio.new_event_loop()
+            ready = threading.Event()
+            self._loop.call_soon(ready.set)
             self._loop_thread = threading.Thread(
                 target=run_loop,
                 daemon=True,
             )
             self._loop_thread.start()
+            if not ready.wait(5):
+                try:
+                    self.stop()
+                except Exception as exc:
+                    raise TimeoutError("collector event loop startup timed out") from exc
+                raise TimeoutError("collector event loop startup timed out")
 
             self._future = asyncio.run_coroutine_threadsafe(
                 self._transport.subscribe(handler),
@@ -165,7 +183,11 @@ class Collector:
         else:
             # CallbackTransport: subscribe only registers callbacks — run it on a
             # throwaway loop; stop() just unregisters.
+            if self._sync_started:
+                raise RuntimeError("stop the collector before starting it again")
             tmp_loop = asyncio.new_event_loop()
+            # A failed subscribe may have registered only some callbacks.
+            self._sync_started = True
             try:
                 tmp_loop.run_until_complete(self._transport.subscribe(handler))
             finally:
@@ -173,22 +195,14 @@ class Collector:
 
     def _write_kv_update(self, update: KVCacheUpdate) -> None:
         """Write KVCacheUpdate via DataStore, then emit a periodic kv-events tally."""
-        if update.block_size is not None:
-            self._data_store.set_block_size(update.block_size)
-        if update.clear_all:
-            self._data_store.clear_kv_node(update.node_id)
-        for layer, hashes in update.remove_blocks.items():
-            if hashes:
-                self._data_store.remove_kv_blocks(update.node_id, hashes, layer=layer)
-        for layer, hashes in update.add_blocks.items():
-            if hashes:
-                self._data_store.add_kv_blocks(update.node_id, hashes, layer=layer)
+        if not self._data_store.apply_kv_update(update):
+            return
+        n_added = sum(len(e.block_hashes) for e in update.events if e.is_store)
+        n_removed = sum(len(e.block_hashes) for e in update.events if e.is_remove)
+        n_clear = sum(e.is_clear for e in update.events)
 
-        # Tally for periodic summary — observe BlockStored/BlockRemoved flow.
-        n_added = sum(len(v) for v in update.add_blocks.values())
-        n_removed = sum(len(v) for v in update.remove_blocks.values())
-        if update.clear_all:
-            self._kv_event_counts["clear"] += 1
+        # Count event hashes, never treat this tally as physical capacity.
+        self._kv_event_counts["clear"] += n_clear
         if n_added:
             self._kv_event_counts["stored"] += 1
             self._kv_block_counts["stored"] += n_added
@@ -205,15 +219,14 @@ class Collector:
         total = sum(self._kv_event_counts.values())
         if total - self._kv_last_logged_total >= _KV_EVENT_LOG_INTERVAL_S:
             self._kv_last_logged_total = total
-            # Parser-side translation failures: non-zero means the event-side
-            # retained count is drifting above the engine's truth.
-            hash_map_stats = getattr(self._parser, "stats", None)
+            detail = (
+                f"retained_blocks/replica={self._data_store.per_replica_block_counts()} | "
+                f"dispatch_hints={self._dispatch_recorded_blocks}"
+            )
             logger.debug(
                 f"kv-events tally: events={dict(self._kv_event_counts)} "
                 f"blocks={dict(self._kv_block_counts)} (total_events={total}) | "
-                f"retained_blocks/replica={self._data_store.per_replica_block_counts()} | "
-                f"router_recorded={self._dispatch_recorded_blocks} | "
-                f"hash-map={dict(hash_map_stats or {})}"
+                f"{detail}"
             )
 
     def _write_metrics_update(self, update: MetricsUpdate) -> None:
@@ -299,8 +312,8 @@ class Collector:
         booked_len = self._data_store.get_per_request(rid, _PROMPT_LEN_KEY, 0) if rid else 0
         if rid:
             self._data_store.set_per_request(rid, _PROMPT_LEN_KEY, len(event.prompt_ids))
-        block_size = self._data_store.get_block_size() or 0
-        return parser.parse(event, node_id, turn=turn, stale=stale, block_size=block_size, booked_len=booked_len)
+        schema = self._data_store.dispatch_schema(event.replica_id)
+        return parser.parse(event, node_id, turn=turn, stale=stale, schema=schema, booked_len=booked_len)
 
     def _inflight_release(self, parser: InflightParser, event: StatisticEvent, node_id: str) -> list:
         """Gather the release folds from the acquire-time rows, then decide."""
@@ -315,32 +328,21 @@ class Collector:
         The acquire/release protocol decisions (when to pin, when a re-acquire
         must first unwind a stale pin) live in ``InflightParser``; this applier
         only maps each command to store operations. Unpin sets always come from
-        the request's marker row (``KVCacheStore.pop_marker``) — the ground
+        the acquire-time marker (``KVCacheStore.unpin_request``) — the ground
         truth of what that dispatch pinned — so a release whose memo was later
         replaced still unwinds exactly the original set.
         """
         if update.action == "pin":
-            self._data_store.incr_block_refs(update.node_id, update.block_hashes)
-            # Resident record runs after the ref count, on the same chain;
-            # idempotent against the engine's later ``BlockStored``.
-            if update.mark_resident:
-                self._dispatch_recorded_blocks += self._data_store.record_dispatch_blocks(
-                    update.node_id, update.block_hashes
-                )
-            self._data_store.put_marker(update.request_id, update.node_id, update.block_hashes)
-        elif update.action == "unpin":
-            marker = self._data_store.pop_marker(update.request_id)
-            if marker is None:
-                # Nothing was pinned at acquire — the held set never knew about this request.
-                logger.debug(f"release with no pinned blocks request={update.request_id} on {update.node_id}")
-                return
-            self._data_store.decr_block_refs(marker["replica"], marker["hashes"])
-        elif update.action == "stale_unpin":
-            marker = self._data_store.pop_marker(update.request_id)
-            if marker is None:
-                logger.debug(f"stale-unpin found no marker request={update.request_id}")
-                return
-            self._data_store.decr_block_refs(marker["replica"], marker["hashes"])
+            self._dispatch_recorded_blocks += self._data_store.pin_request(
+                update.request_id,
+                update.node_id,
+                update.block_hashes,
+                update.schema,
+                predict=update.mark_resident,
+                reservations=update.reservations,
+            )
+        elif update.action in {"unpin", "stale_unpin"}:
+            self._data_store.unpin_request(update.request_id)
         else:
             logger.warning(f"unknown InflightBlockUpdate action: {update.action}")
 
@@ -432,37 +434,55 @@ class Collector:
         # Snapshot current cumulative values for next window's delta.
         self._metrics_prev[node_id] = {k: float(snap.get(k, 0) or 0) for k in _CUMULATIVE_KEYS}
 
-    def stop(self) -> None:
+    def stop(self, timeout: float = 15.0) -> None:
         """
         Stop the collector — cancel tasks, drain cleanup, stop event-loop thread.
         """
-        # Transport closes protocol-level resources (sockets/clients);
-        # we own task cancellation and finally-block draining below.
-        self._transport.stop()
-
         if self._loop.is_running():
             # Cancel all tasks and wait for their finally blocks inside the loop
             # so that aclose() runs while the loop is still alive.
             async def _cancel_and_drain() -> None:
-                current = asyncio.current_task()
-                tasks = [t for t in asyncio.all_tasks() if not t.done() and t is not current]
-                for t in tasks:
-                    t.cancel()
-                await asyncio.gather(*tasks, return_exceptions=True)
+                try:
+                    self._transport.stop()
+                finally:
+                    current = asyncio.current_task()
+                    tasks = [t for t in asyncio.all_tasks() if not t.done() and t is not current]
+                    for t in tasks:
+                        t.cancel()
+                    await asyncio.gather(*tasks, return_exceptions=True)
 
-            drain = asyncio.run_coroutine_threadsafe(_cancel_and_drain(), self._loop)
+            if self._stop_future is None:
+                self._stop_future = asyncio.run_coroutine_threadsafe(_cancel_and_drain(), self._loop)
             try:
-                drain.result(timeout=15)
+                self._stop_future.result(timeout=timeout)
+            except FutureTimeoutError as exc:
+                if self._stop_future.done():
+                    self._stop_future = None
+                raise TimeoutError("collector cleanup timed out") from exc
             except Exception as exc:
-                logger.debug(f"Error draining tasks on stop: {exc}")
+                self._stop_future = None
+                raise RuntimeError("collector cleanup did not finish") from exc
 
             self._loop.call_soon_threadsafe(self._loop.stop)
+        else:
+            self._transport.stop()
+            if self._loop_thread is not None and not self._loop.is_closed():
+                self._loop.call_soon_threadsafe(self._loop.stop)
 
         if self._loop_thread is not None:
-            self._loop_thread.join(timeout=10)
+            self._loop_thread.join(timeout=min(10, timeout))
+            if self._loop_thread.is_alive():
+                raise TimeoutError("collector event loop did not stop")
             self._loop_thread = None
-
+        if self._loop.is_running():
+            raise TimeoutError("collector event loop is still running")
+        if not self._loop.is_closed():
+            if any(not task.done() for task in asyncio.all_tasks(self._loop)):
+                raise RuntimeError("collector event loop still has pending tasks")
+            self._loop.close()
         self._future = None
+        self._stop_future = None
+        self._sync_started = False
 
 
 # ── Factory function ───────────────────────────────────────────────────
@@ -520,8 +540,10 @@ def get_collector(
 
     if name == "vllm_zmq":
         from .parse.vllm.kv import VLLMKVParser
+        from .parse.vllm.native_hash import VLLMHashCodec
         from .transport.zmq import ZMQTransport
 
+        DataStore().set_native_hash_codec_factory(VLLMHashCodec.from_metadata)
         transport = ZMQTransport(
             endpoints=kv_event_endpoints or {},
             base_retry_delay=_debug_knob("base_retry_delay"),

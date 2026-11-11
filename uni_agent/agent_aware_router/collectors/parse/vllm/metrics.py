@@ -21,7 +21,10 @@ Store writes are handled by Collector via DataStore.
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any
+
+from uni_agent.vllm_plugins.native_hash import cache_capacity_blocks
 
 from ....collectors.parse import MetricsUpdate, Parser
 from ....types import METRIC_SPECS, MetricKey
@@ -87,6 +90,7 @@ class VLLMMetricsParser(Parser):
             return None
 
         result: dict[str, Any] = {}
+        capacities: list[int | None] = []
         for line in raw_data.splitlines():
             if line.startswith("#") or not line.strip():
                 continue
@@ -119,11 +123,16 @@ class VLLMMetricsParser(Parser):
             # data lives in the ``num_gpu_blocks`` label.
             if raw_name == "vllm:cache_config_info":
                 n = labels.get("num_gpu_blocks")
+                capacity = None
                 if n is not None:
                     try:
-                        result[MetricKey.NUM_GPU_BLOCKS] = int(float(n))
-                    except ValueError:
+                        raw_blocks = float(n)
+                        result[MetricKey.NUM_GPU_BLOCKS] = int(raw_blocks)
+                        if math.isfinite(raw_blocks) and raw_blocks.is_integer():
+                            capacity = cache_capacity_blocks(int(raw_blocks))
+                    except (ValueError, OverflowError):
                         pass
+                capacities.append(capacity)
                 continue
             try:
                 value = float(value_part)
@@ -134,6 +143,11 @@ class VLLMMetricsParser(Parser):
                 value_type = METRIC_SPECS[canonical].get("value_type", float)
                 result[canonical] = value_type(value)
 
+        # Info series can repeat for workers sharing one pool, so never sum
+        # them. Missing/invalid/conflicting samples invalidate a previous poll.
+        result[MetricKey.KV_CACHE_CAPACITY_BLOCKS] = (
+            capacities[0] if capacities and None not in capacities and len(set(capacities)) == 1 else None
+        )
         logger.debug(f"vllm-metrics replica={node_id} polled: {result}")
         return MetricsUpdate(node_id=node_id, metrics=result)
 

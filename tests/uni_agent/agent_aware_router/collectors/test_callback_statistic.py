@@ -39,6 +39,12 @@ from uni_agent.agent_aware_router.collectors.transport.callback import (
 from uni_agent.agent_aware_router.store.data_store import DataStore
 from uni_agent.agent_aware_router.strategies import route
 from uni_agent.agent_aware_router.types import MetricKey
+from uni_agent.agent_aware_router.types.kv_cache import (
+    DispatchSchema,
+    GroupReservation,
+    GroupReservationSpec,
+    KVCacheEvent,
+)
 
 pytestmark = [pytest.mark.level0, pytest.mark.cpu]
 
@@ -115,7 +121,7 @@ class TestInflightParser:
             StatisticEvent("on_acquire", request_id="r1", replica_id="s0", prompt_ids=tuple(prompt)),
             "",
             turn=1,
-            block_size=BLOCK_SIZE,
+            schema=DispatchSchema(0, BLOCK_SIZE, (GroupReservationSpec(0, BLOCK_SIZE),)),
         )
         assert [type(u).__name__ for u in updates] == ["InflightBlockUpdate", "MetricsUpdate"]
         pin = updates[0]
@@ -267,6 +273,79 @@ class TestCollectorCallbackIntegration:
         PerRequestStore._instance = None
         KVCacheStore._instance = None
 
+    def test_duplicate_start_preserves_one_hook_and_clean_restart(self):
+        from uni_agent.agent_aware_router.collectors.collector import Collector
+
+        balancer = _FakeBalancer()
+        collector = Collector(CallbackTransport(balancer), StickyParser())
+        try:
+            for _ in range(2):
+                collector.start()
+                assert set(balancer.callbacks) == {"on_acquire", "on_release", "on_servers_removed"}
+                with pytest.raises(RuntimeError, match="stop the collector"):
+                    collector.start()
+                assert all(len(callbacks) == 1 for callbacks in balancer.callbacks.values())
+                collector.stop()
+                assert all(not callbacks for callbacks in balancer.callbacks.values())
+        finally:
+            collector.stop()
+
+    def test_partial_callback_registration_requires_cleanup_before_retry(self, monkeypatch):
+        from uni_agent.agent_aware_router.collectors.collector import Collector
+
+        balancer = _FakeBalancer()
+        collector = Collector(CallbackTransport(balancer), StickyParser())
+        register = balancer.register_call_back
+
+        def partial_registration(event, callback):
+            if event == "on_release":
+                raise RuntimeError("registration failed")
+            register(event, callback)
+
+        try:
+            with monkeypatch.context() as patch:
+                patch.setattr(balancer, "register_call_back", partial_registration)
+                with pytest.raises(RuntimeError, match="registration failed"):
+                    collector.start()
+                with pytest.raises(RuntimeError, match="stop the collector"):
+                    collector.start()
+                assert len(balancer.callbacks["on_acquire"]) == 1
+            collector.stop()
+            assert all(not callbacks for callbacks in balancer.callbacks.values())
+            collector.start()
+            assert all(len(callbacks) == 1 for callbacks in balancer.callbacks.values())
+        finally:
+            collector.stop()
+
+    def test_failed_callback_cleanup_blocks_start_until_retry(self, monkeypatch):
+        from uni_agent.agent_aware_router.collectors.collector import Collector
+
+        balancer = _FakeBalancer()
+        collector = Collector(CallbackTransport(balancer), StickyParser())
+        unregister = balancer.un_register_call_back
+
+        def partial_cleanup(event, callback):
+            if event == "on_release":
+                raise RuntimeError("cleanup failed")
+            unregister(event, callback)
+
+        collector.start()
+        try:
+            with monkeypatch.context() as patch:
+                patch.setattr(balancer, "un_register_call_back", partial_cleanup)
+                with pytest.raises(RuntimeError, match="cleanup failed"):
+                    collector.stop()
+                with pytest.raises(RuntimeError, match="stop the collector"):
+                    collector.start()
+                assert not balancer.callbacks["on_acquire"]
+                assert len(balancer.callbacks["on_release"]) == 1
+            collector.stop()
+            assert all(not callbacks for callbacks in balancer.callbacks.values())
+            collector.start()
+            assert all(len(callbacks) == 1 for callbacks in balancer.callbacks.values())
+        finally:
+            collector.stop()
+
     def test_sticky_collector_writes_binding_on_acquire(self):
         from uni_agent.agent_aware_router.collectors.collector import Collector
         from uni_agent.agent_aware_router.store.data_store import DataStore
@@ -388,12 +467,15 @@ class TestInflightBlockPin:
         PerRequestStore._instance = None
         KVCacheStore._instance = None
 
-    @staticmethod
-    def _start(block_size: int = BLOCK_SIZE):
+    @pytest.fixture(autouse=True)
+    def _layout(self, layout):
+        self.layout = layout
+
+    def _start(self, block_size: int = BLOCK_SIZE, groups=None):
         from uni_agent.agent_aware_router.collectors.collector import Collector
 
         ds = DataStore()
-        ds.set_block_size(block_size)
+        ds.configure_cache_registry(self.layout(groups or (("full_attention", block_size),), unit=block_size))
         balancer = _FakeBalancer()
         collector = Collector(CallbackTransport(balancer), InflightParser())
         collector.start()
@@ -460,7 +542,9 @@ class TestInflightBlockPin:
             balancer.callbacks["on_acquire"][0]("r1", "s0", prompt)
             assert ds.inflight_block_count("s0") == 4
 
-            collector._write_kv_update(KVCacheUpdate(node_id="s0", clear_all=True))
+            collector._write_kv_update(
+                KVCacheUpdate(node_id="s0", events=[KVCacheEvent("clear", "s0", [], None, None, None)])
+            )
             assert ds.inflight_block_count("s0") == 0  # the book itself was cleared, no phantom count
 
             balancer.callbacks["on_release"][0]("s0", "r1")  # pre-clear request: no marker, no-op
@@ -539,11 +623,18 @@ class TestInflightBlockPin:
         collector, balancer, ds = self._start()
         ds.refresh_metrics(
             {
-                "s0": {MetricKey.NUM_GPU_BLOCKS: 10},
-                "s1": {MetricKey.NUM_GPU_BLOCKS: 10},
+                "s0": {MetricKey.NUM_GPU_BLOCKS: 10, MetricKey.KV_CACHE_CAPACITY_BLOCKS: 9},
+                "s1": {MetricKey.NUM_GPU_BLOCKS: 10, MetricKey.KV_CACHE_CAPACITY_BLOCKS: 9},
             }
         )
-        ds.incr_block_refs("s1", [f"p{i}" for i in range(10)])  # s1 pinned full
+        ds.pin_request(
+            "busy",
+            "s1",
+            [],
+            ds.dispatch_schema(),
+            reservations=(GroupReservation(0, tuple(f"p{i}" for i in range(10))),),
+            predict=False,
+        )  # s1 pinned full
         strat = KVCacheAwareStrategy(
             load_threshold=0.9,
             layer_weights={"gpu": 0.7, "cpu": 0.2, "ssd": 0.1},
@@ -572,27 +663,32 @@ class TestInflightBlockPin:
         finally:
             collector.stop()
 
-    def test_acquire_records_the_prefix_as_resident_and_release_keeps_it(self):
-        """Acquire alone makes the prefix a gpu_hit; the resident record outlives release."""
+    @pytest.mark.parametrize("hybrid", [False, True])
+    def test_acquire_predicts_group_prefix_without_native_residency(self, hybrid):
+        """All layouts retain dispatch predictions across release, without native residency."""
         from uni_agent.agent_aware_router.utils.prefix_cache import resolve_prefix_hashes
 
         prompt = list(range(4 * BLOCK_SIZE))
-        collector, balancer, ds = self._start()
+        groups = (("full_attention", BLOCK_SIZE), ("mamba", 2 * BLOCK_SIZE)) if hybrid else None
+        collector, balancer, ds = self._start(groups=groups)
+        predicted = 6 if hybrid else 4
         try:
             chain = resolve_prefix_hashes(prompt, None, ds)
-            assert ds.get_layer_prefix_hit_rate("s0", chain) == 0.0
+            assert ds.estimate_prefixes(["s0"], chain, len(prompt))["s0"].hit_rate == 0.0
 
             balancer.callbacks["on_acquire"][0]("r1", "s0", prompt)
-            assert ds.get_layer_prefix_hit_rate("s0", chain) == 1.0
-            assert ds.per_replica_block_counts() == {"s0": 4}
-            assert collector._dispatch_recorded_blocks == 4
+            estimate = ds.estimate_prefixes(["s0"], chain, len(prompt))["s0"]
+            assert estimate.provisional
+            assert estimate.estimated_hit_tokens == (2 if hybrid else 3) * BLOCK_SIZE
+            assert ds.per_replica_block_counts() == {"s0": 0}
+            assert collector._dispatch_recorded_blocks == predicted
 
             balancer.callbacks["on_release"][0]("s0", "r1")
             assert ds.inflight_block_count("s0") == 0  # held drops...
-            assert ds.per_replica_block_counts() == {"s0": 4}  # ...resident survives release
+            assert ds.per_replica_block_counts() == {"s0": 0}  # ...hints survive; no native residency counted
 
             balancer.callbacks["on_acquire"][0]("r2", "s0", prompt)
-            assert collector._dispatch_recorded_blocks == 4  # r2's record is a no-op
+            assert collector._dispatch_recorded_blocks == predicted  # r2's record is a no-op
         finally:
             collector.stop()
 
@@ -724,10 +820,17 @@ class TestCollectorEmitsToInsight:
 
     def test_kv_removed_forwards_evictions(self):
         from uni_agent.agent_aware_router.collectors.collector import Collector
-        from uni_agent.agent_aware_router.collectors.parse import KVCacheUpdate
-        from uni_agent.agent_aware_router.types import Layer
+        from uni_agent.agent_aware_router.types.kv_cache import KVCacheEvent, KVCacheUpdate
 
         collector = Collector(CallbackTransport(_FakeBalancer()), InflightParser())
-        collector._write_kv_update(KVCacheUpdate(node_id="s0", remove_blocks={Layer.GPU: ["h1", "h2", "h3"]}))
+        event = KVCacheEvent(
+            event_type="removed",
+            node_id="s0",
+            block_hashes=["h1", "h2", "h3"],
+            parent_block_hash=None,
+            block_size=None,
+            medium="GPU",
+        )
+        collector._write_kv_update(KVCacheUpdate(node_id="s0", events=[event]))
 
         assert self._rl.calls == [("counter", "kv_evictions", 3, {"replica": "s0"})]
