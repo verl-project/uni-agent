@@ -7,6 +7,7 @@ import posixpath
 import shutil
 from collections.abc import Mapping
 from concurrent.futures import Executor, wait
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -39,6 +40,22 @@ def supports_transfer_queue_checkpoint() -> bool:
         and callable(getattr(tq, "save_checkpoint", None))
         and callable(getattr(tq, "load_checkpoint", None))
     )
+
+
+@dataclass(frozen=True)
+class CheckpointLoadResult:
+    """Outcome of restoring a multi-policy checkpoint."""
+
+    global_step: int
+    restored_prompt_count: int = 0
+
+
+def _count_tq_prompt_groups(partition_id: str = "train") -> int:
+    """Return the number of prompt groups registered in a TransferQueue partition."""
+    data = tq.kv_list(partition_id)
+    if not data:
+        return 0
+    return sum(1 for tag in data.get(partition_id, {}).values() if tag.get("is_prompt", False))
 
 
 class MultiPolicyCheckpointManager:
@@ -86,7 +103,7 @@ class MultiPolicyCheckpointManager:
         *,
         policy_trainers: Mapping[str, PolicyTrainer],
         train_dataloader: StatefulDataLoader,
-    ) -> int | None:
+    ) -> CheckpointLoadResult | None:
         checkpoint_dir = self.resolve_checkpoint_dir()
         if checkpoint_dir is None:
             return None
@@ -137,12 +154,18 @@ class MultiPolicyCheckpointManager:
                 dataloader_path,
             )
 
+        restored_prompt_count = 0
         if self.trainer_mode != "sync" and supports_transfer_queue_checkpoint():
             transfer_queue_path = os.path.join(checkpoint_dir, "transfer_queue")
             if os.path.exists(transfer_queue_path):
                 logger.info("Loading TransferQueue state from %s", transfer_queue_path)
                 tq.load_checkpoint(transfer_queue_path)
-        return int(step_text)
+                restored_prompt_count = _count_tq_prompt_groups("train")
+                logger.info(
+                    "Restored %d training prompt groups from TransferQueue",
+                    restored_prompt_count,
+                )
+        return CheckpointLoadResult(int(step_text), restored_prompt_count)
 
     def resolve_checkpoint_dir(self) -> str | None:
         resume_mode = self.config.trainer.resume_mode

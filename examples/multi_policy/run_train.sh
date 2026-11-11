@@ -2,31 +2,34 @@
 set -euo pipefail
 
 # Launch three-policy external MAS training in separate_async mode.
-# Set the model directories and verl-compatible Parquet datasets before running:
+# Model directories and verl-compatible Parquet datasets default to paths under
+# $HOME; override them for your environment:
 #   POLICY_1_MODEL_PATH=/path/to/model_1 \
 #   POLICY_2_MODEL_PATH=/path/to/model_2 \
 #   POLICY_3_MODEL_PATH=/path/to/model_3 \
 #   TRAIN_DATA=/path/to/train.parquet VAL_DATA=/path/to/val.parquet \
-#   bash examples/multi_policy/scripts/run_external_mas_train.sh
+#   bash examples/multi_policy/run_train.sh
 # Training and resource settings below have defaults and can be overridden
 # through environment variables. The external MAS command is configured in
 # examples/multi_policy/config/multi_policy.yaml.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+
+PYTHON="${PYTHON:-python}"
 
 RAY_ADDRESS="${RAY_ADDRESS:-auto}"
-POLICY_1_MODEL_PATH="${POLICY_1_MODEL_PATH:?Set POLICY_1_MODEL_PATH to a model directory}"
-POLICY_2_MODEL_PATH="${POLICY_2_MODEL_PATH:?Set POLICY_2_MODEL_PATH to a model directory}"
-POLICY_3_MODEL_PATH="${POLICY_3_MODEL_PATH:?Set POLICY_3_MODEL_PATH to a model directory}"
+POLICY_1_MODEL_PATH="${POLICY_1_MODEL_PATH:-${HOME}/models/Qwen3-4B}"
+POLICY_2_MODEL_PATH="${POLICY_2_MODEL_PATH:-${HOME}/models/Qwen3-4B}"
+POLICY_3_MODEL_PATH="${POLICY_3_MODEL_PATH:-${HOME}/models/Qwen3-4B}"
 
-TRAIN_DATA="${TRAIN_DATA:?Set TRAIN_DATA to a training parquet file}"
-VAL_DATA="${VAL_DATA:?Set VAL_DATA to a validation parquet file}"
+TRAIN_DATA="${TRAIN_DATA:-${HOME}/data/multi_policy/train.parquet}"
+VAL_DATA="${VAL_DATA:-${HOME}/data/multi_policy/val.parquet}"
 
-TOTAL_TRAINING_STEPS="${TOTAL_TRAINING_STEPS:-30}"
+TOTAL_TRAINING_STEPS="${TOTAL_TRAINING_STEPS:-100}"
 # Keep TRAIN_BATCH_SIZE = PARAMETER_SYNC_STEP * PPO_MINI_BATCH_SIZE.
-TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-4}"
-PARAMETER_SYNC_STEP="${PARAMETER_SYNC_STEP:-1}"
+TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-64}"
+PARAMETER_SYNC_STEP="${PARAMETER_SYNC_STEP:-2}"
 if (( PARAMETER_SYNC_STEP <= 0 )); then
     echo "ERROR: PARAMETER_SYNC_STEP must be positive" >&2
     exit 1
@@ -37,10 +40,16 @@ if (( TRAIN_BATCH_SIZE % PARAMETER_SYNC_STEP != 0 )); then
 fi
 PPO_MINI_BATCH_SIZE="${PPO_MINI_BATCH_SIZE:-$((TRAIN_BATCH_SIZE / PARAMETER_SYNC_STEP))}"
 ROLLOUT_N="${ROLLOUT_N:-8}"
-NUM_WARMUP_BATCHES="${NUM_WARMUP_BATCHES:-2}"
+NUM_WARMUP_BATCHES="${NUM_WARMUP_BATCHES:-8}"
+MAX_CONCURRENT_SESSIONS="${MAX_CONCURRENT_SESSIONS:-128}"
 PROMPT_LENGTH="${PROMPT_LENGTH:-16384}"
 RESPONSE_LENGTH="${RESPONSE_LENGTH:-1024}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-$((PROMPT_LENGTH + RESPONSE_LENGTH + 512))}"
+
+if (( MAX_CONCURRENT_SESSIONS <= 0 )); then
+    echo "ERROR: MAX_CONCURRENT_SESSIONS must be positive" >&2
+    exit 1
+fi
 
 if (( TRAIN_BATCH_SIZE != PARAMETER_SYNC_STEP * PPO_MINI_BATCH_SIZE )); then
     echo "ERROR: TRAIN_BATCH_SIZE must equal PARAMETER_SYNC_STEP * PPO_MINI_BATCH_SIZE" >&2
@@ -50,35 +59,50 @@ fi
 POLICY_1_NNODES="${POLICY_1_NNODES:-1}"
 POLICY_1_N_GPUS_PER_NODE="${POLICY_1_N_GPUS_PER_NODE:-4}"
 POLICY_1_FSDP_SIZE="${POLICY_1_FSDP_SIZE:-4}"
-POLICY_1_ROLLOUT_NNODES="${POLICY_1_ROLLOUT_NNODES:-2}"
+POLICY_1_ROLLOUT_NNODES="${POLICY_1_ROLLOUT_NNODES:-3}"
 POLICY_1_ROLLOUT_N_GPUS_PER_NODE="${POLICY_1_ROLLOUT_N_GPUS_PER_NODE:-2}"
 POLICY_1_TENSOR_PARALLEL_SIZE="${POLICY_1_TENSOR_PARALLEL_SIZE:-2}"
 
 POLICY_2_NNODES="${POLICY_2_NNODES:-1}"
-POLICY_2_N_GPUS_PER_NODE="${POLICY_2_N_GPUS_PER_NODE:-8}"
-POLICY_2_FSDP_SIZE="${POLICY_2_FSDP_SIZE:-8}"
+POLICY_2_N_GPUS_PER_NODE="${POLICY_2_N_GPUS_PER_NODE:-4}"
+POLICY_2_FSDP_SIZE="${POLICY_2_FSDP_SIZE:-4}"
 POLICY_2_ROLLOUT_NNODES="${POLICY_2_ROLLOUT_NNODES:-2}"
-POLICY_2_ROLLOUT_N_GPUS_PER_NODE="${POLICY_2_ROLLOUT_N_GPUS_PER_NODE:-4}"
-POLICY_2_TENSOR_PARALLEL_SIZE="${POLICY_2_TENSOR_PARALLEL_SIZE:-4}"
+POLICY_2_ROLLOUT_N_GPUS_PER_NODE="${POLICY_2_ROLLOUT_N_GPUS_PER_NODE:-2}"
+POLICY_2_TENSOR_PARALLEL_SIZE="${POLICY_2_TENSOR_PARALLEL_SIZE:-2}"
 
 POLICY_3_NNODES="${POLICY_3_NNODES:-1}"
 POLICY_3_N_GPUS_PER_NODE="${POLICY_3_N_GPUS_PER_NODE:-4}"
 POLICY_3_FSDP_SIZE="${POLICY_3_FSDP_SIZE:-4}"
-POLICY_3_ROLLOUT_NNODES="${POLICY_3_ROLLOUT_NNODES:-2}"
+POLICY_3_ROLLOUT_NNODES="${POLICY_3_ROLLOUT_NNODES:-1}"
 POLICY_3_ROLLOUT_N_GPUS_PER_NODE="${POLICY_3_ROLLOUT_N_GPUS_PER_NODE:-2}"
 POLICY_3_TENSOR_PARALLEL_SIZE="${POLICY_3_TENSOR_PARALLEL_SIZE:-2}"
 
 LOG_DIR="${LOG_DIR:-${REPO_ROOT}/examples/multi_policy/logs}"
-TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
+TIMESTAMP="$(date +%Y%m%d_%H%M%S)_$$"
 LOG_PATH="${LOG_PATH:-${LOG_DIR}/external_mas_${TIMESTAMP}.log}"
 CKPT_DIR="${CKPT_DIR:-${REPO_ROOT}/checkpoints/multi_policy/external_mas_${TIMESTAMP}}"
+EXPERIMENT_NAME="${EXPERIMENT_NAME:-search_mas_${TIMESTAMP}}"
 
-PYTHON="${PYTHON:-python}"
+# Absolute paths are required for anything Ray workers resolve, so derive them
+# from the repository checkout instead of checking machine-specific values in.
+AGENT_LOG_DIR="${AGENT_LOG_DIR:-${REPO_ROOT}/examples/multi_policy/logs/agent_logs}"
+TASK_CONFIG="${TASK_CONFIG:-${REPO_ROOT}/examples/multi_policy/external_mas/task_config.yaml}"
+VERL_FILE_LOGGER_ROOT="${VERL_FILE_LOGGER_ROOT:-${REPO_ROOT}/examples/multi_policy/metrics}"
+
+# Ray workers resolve these against their own working directory, so reject
+# relative overrides instead of silently looking them up in the wrong place.
+for var in TASK_CONFIG AGENT_LOG_DIR VERL_FILE_LOGGER_ROOT; do
+    if [[ "${!var}" != /* ]]; then
+        echo "ERROR: ${var} must be an absolute path: '${!var}'" >&2
+        exit 1
+    fi
+done
+
+METRICS_PATH="${VERL_FILE_LOGGER_ROOT}/marl/${EXPERIMENT_NAME}.jsonl"
 
 mkdir -p "${LOG_DIR}" "$(dirname "${LOG_PATH}")"
 cd "${REPO_ROOT}"
 
-export PYTHON
 export RAY_ADDRESS
 export NCCL_DEBUG="${NCCL_DEBUG:-INFO}"
 export HYDRA_FULL_ERROR="${HYDRA_FULL_ERROR:-1}"
@@ -114,6 +138,7 @@ echo "Nodes:            p1 train=${POLICY_1_NNODES}/rollout=${POLICY_1_ROLLOUT_N
 echo "Train GPUs/node:  p1=${POLICY_1_N_GPUS_PER_NODE}, p2=${POLICY_2_N_GPUS_PER_NODE}, p3=${POLICY_3_N_GPUS_PER_NODE} (FSDP: p1=${POLICY_1_FSDP_SIZE}, p2=${POLICY_2_FSDP_SIZE}, p3=${POLICY_3_FSDP_SIZE}, TP: p1=${POLICY_1_TENSOR_PARALLEL_SIZE}, p2=${POLICY_2_TENSOR_PARALLEL_SIZE}, p3=${POLICY_3_TENSOR_PARALLEL_SIZE})"
 echo "Rollout GPUs/node: p1=${POLICY_1_ROLLOUT_N_GPUS_PER_NODE}, p2=${POLICY_2_ROLLOUT_N_GPUS_PER_NODE}, p3=${POLICY_3_ROLLOUT_N_GPUS_PER_NODE} (standalone)"
 echo "Steps:            ${TOTAL_TRAINING_STEPS}, batch=${TRAIN_BATCH_SIZE}, rollout_n=${ROLLOUT_N}, warmup=${NUM_WARMUP_BATCHES}"
+echo "MAS concurrency:  ${MAX_CONCURRENT_SESSIONS} sessions"
 echo "Sequence:         prompt=${PROMPT_LENGTH}, response=${RESPONSE_LENGTH}, max_model_len=${MAX_MODEL_LEN}"
 echo "Policy 1 model:   ${POLICY_1_MODEL_PATH}"
 echo "Policy 2 model:   ${POLICY_2_MODEL_PATH}"
@@ -121,6 +146,10 @@ echo "Policy 3 model:   ${POLICY_3_MODEL_PATH}"
 echo "Train data:       ${TRAIN_DATA}"
 echo "Val data:         ${VAL_DATA}"
 echo "Log file:         ${LOG_PATH}"
+echo "Agent log dir:    ${AGENT_LOG_DIR}"
+echo "Task config:      ${TASK_CONFIG}"
+echo "Experiment:       ${EXPERIMENT_NAME}"
+echo "Metrics file:     ${METRICS_PATH}"
 echo "============================================"
 
 "${PYTHON}" -u -m examples.multi_policy.main \
@@ -131,11 +160,16 @@ echo "============================================"
     data.val_files="['${VAL_DATA}']" \
     "data.train_batch_size=${TRAIN_BATCH_SIZE}" \
     "data.val_batch_size=${TRAIN_BATCH_SIZE}" \
+    "trainer.experiment_name=${EXPERIMENT_NAME}" \
     "trainer.total_training_steps=${TOTAL_TRAINING_STEPS}" \
     "trainer.default_local_dir=${CKPT_DIR}" \
     "trainer.v1.trainer_mode=separate_async" \
     "trainer.v1.separate_async.parameter_sync_step=${PARAMETER_SYNC_STEP}" \
     "trainer.v1.separate_async.num_warmup_batches=${NUM_WARMUP_BATCHES}" \
+    "ray_kwargs.ray_init.runtime_env.env_vars.VERL_FILE_LOGGER_ROOT=${VERL_FILE_LOGGER_ROOT}" \
+    "actor_rollout_ref.rollout.custom.agent_framework.log_dir=${AGENT_LOG_DIR}" \
+    "actor_rollout_ref.rollout.custom.agent_framework.agent_runners.multi_agent.max_concurrent_sessions=${MAX_CONCURRENT_SESSIONS}" \
+    "actor_rollout_ref.rollout.custom.agent_framework.agent_runners.multi_agent.runner_kwargs.task_config_path=${TASK_CONFIG}" \
     "actor_rollout_ref.actor.ppo_mini_batch_size=${PPO_MINI_BATCH_SIZE}" \
     "actor_rollout_ref.rollout.n=${ROLLOUT_N}" \
     \

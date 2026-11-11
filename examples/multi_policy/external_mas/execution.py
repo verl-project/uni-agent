@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import re
 import shlex
 import tempfile
@@ -19,7 +20,25 @@ from typing import Any
 
 import yaml
 
-from .process_backend import LocalProcessResult, run_local_process
+from .process_backend import (
+    LocalProcessError,
+    LocalProcessResult,
+    LocalProcessTimeout,
+    run_local_process,
+)
+
+logger = logging.getLogger(__name__)
+
+_COMMAND_PLACEHOLDERS = ("config_path", "prompt", "session_group_id")
+_UNSUPPORTED_PLACEHOLDERS = ("gateway_url",)
+_COMMAND_PLACEHOLDER_RE = re.compile(
+    r"(?<![$\{])\{(?P<key>" + "|".join(re.escape(name) for name in _COMMAND_PLACEHOLDERS) + r")\}"
+)
+_UNSUPPORTED_PLACEHOLDER_RE = re.compile(
+    r"(?<![$\{])\{(?P<key>" + "|".join(re.escape(name) for name in _UNSUPPORTED_PLACEHOLDERS) + r")\}"
+)
+
+_MISSING = object()
 
 
 @dataclass(frozen=True)
@@ -45,11 +64,6 @@ def extract_user_task(raw_prompt: Any) -> str:
     return str(raw_prompt)
 
 
-def _safe_filename_component(value: Any, *, default: str = "rollout") -> str:
-    component = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value)).strip("._")
-    return component or default
-
-
 def _set_path(root: dict[str, Any], dotted_path: str, value: Any) -> None:
     keys = [key for key in dotted_path.split(".") if key]
     if not keys:
@@ -64,6 +78,21 @@ def _set_path(root: dict[str, Any], dotted_path: str, value: Any) -> None:
             raise ValueError(f"Cannot inject {dotted_path!r}: {key!r} is not a mapping")
         current = child
     current[keys[-1]] = value
+
+
+def _apply_overrides(
+    template: Mapping[str, Any],
+    overrides: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Return a deep copy of ``template`` with dotted-path overrides applied."""
+    resolved = copy.deepcopy(dict(template))
+    if not overrides:
+        return resolved
+    if not isinstance(overrides, Mapping):
+        raise ValueError("config.overrides must be a mapping")
+    for dotted_path, value in overrides.items():
+        _set_path(resolved, str(dotted_path), value)
+    return resolved
 
 
 def inject_gateway_config(
@@ -114,16 +143,6 @@ def inject_gateway_config(
     return resolved
 
 
-_COMMAND_PLACEHOLDERS = ("config_path", "prompt", "session_group_id")
-_UNSUPPORTED_PLACEHOLDERS = ("gateway_url",)
-_COMMAND_PLACEHOLDER_RE = re.compile(
-    r"(?<![$\{])\{(?P<key>" + "|".join(re.escape(name) for name in _COMMAND_PLACEHOLDERS) + r")\}"
-)
-_UNSUPPORTED_PLACEHOLDER_RE = re.compile(
-    r"(?<![$\{])\{(?P<key>" + "|".join(re.escape(name) for name in _UNSUPPORTED_PLACEHOLDERS) + r")\}"
-)
-
-
 def _format_command_value(
     value: str,
     context: Mapping[str, str],
@@ -165,9 +184,6 @@ def _build_command(command_config: Mapping[str, Any], context: Mapping[str, str]
     return [_format_command_value(part, context) for part in parts], False
 
 
-_MISSING = object()
-
-
 def _parse_stdout_json(stdout: str) -> dict[str, Any]:
     """Extract the last JSON object from stdout, including pretty-printed output."""
     text = stdout.strip()
@@ -182,20 +198,22 @@ def _parse_stdout_json(stdout: str) -> dict[str, Any]:
         return value
 
     decoder = json.JSONDecoder()
-    candidates: list[tuple[int, int, dict[str, Any]]] = []
-    for index, char in enumerate(text):
-        if char != "{":
+    candidates: list[dict[str, Any]] = []
+    consumed_until = 0
+    for offset, char in enumerate(text):
+        # Skip objects nested inside an already decoded result. This keeps the
+        # parser linear for large trace payloads and JSON-like agent logs.
+        if offset < consumed_until or char != "{":
             continue
         try:
-            value, end = decoder.raw_decode(text[index:])
+            value, consumed_until = decoder.raw_decode(text, offset)
         except json.JSONDecodeError:
             continue
         if isinstance(value, dict):
-            candidates.append((index + end, index, value))
+            candidates.append(value)
 
     if candidates:
-        _, _, result = max(candidates)
-        return result
+        return candidates[-1]
     raise ValueError("External MAS stdout did not contain a JSON object")
 
 
@@ -290,6 +308,60 @@ def _parse_result(process_result: LocalProcessResult, result_config: Mapping[str
         raise ValueError(f"Unsupported external MAS result mode: {mode!r}")
 
 
+def _safe_filename_component(value: Any, *, default: str = "rollout") -> str:
+    component = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value)).strip("._")
+    return component or default
+
+
+def _write_external_mas_logs(
+    *,
+    logs: Mapping[str, Any] | None,
+    session_group_id: str,
+    stdout: str,
+    stderr: str,
+) -> None:
+    """Persist one rollout's process output when a log directory is configured."""
+    log_dir = (logs or {}).get("directory")
+    if not log_dir:
+        return
+
+    output_dir = Path(str(log_dir)).expanduser()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    rollout_name = _safe_filename_component(session_group_id)
+    (output_dir / f"{rollout_name}.stdout.log").write_text(
+        stdout,
+        encoding="utf-8",
+        newline="",
+    )
+    (output_dir / f"{rollout_name}.stderr.log").write_text(
+        stderr,
+        encoding="utf-8",
+        newline="",
+    )
+
+
+def _write_external_mas_logs_best_effort(
+    *,
+    logs: Mapping[str, Any] | None,
+    session_group_id: str,
+    stdout: str,
+    stderr: str,
+) -> None:
+    """Write diagnostics without replacing the original rollout outcome."""
+    try:
+        _write_external_mas_logs(
+            logs=logs,
+            session_group_id=session_group_id,
+            stdout=stdout,
+            stderr=stderr,
+        )
+    except Exception:
+        logger.exception(
+            "failed to write external MAS logs for session %s",
+            session_group_id,
+        )
+
+
 async def run_external_mas(
     *,
     request: ExternalMASRequest,
@@ -316,6 +388,8 @@ async def run_external_mas(
         template = yaml.safe_load(file) or {}
     if not isinstance(template, Mapping):
         raise ValueError("External MAS config template must contain a mapping")
+
+    template = _apply_overrides(template, config.get("overrides"))
 
     injected = inject_gateway_config(
         template,
@@ -345,28 +419,29 @@ async def run_external_mas(
         process_env = _format_values(command.get("env", {}), context)
         timeout_seconds = timeout.get("seconds") if isinstance(timeout, Mapping) else timeout
 
-        process_result = await run_local_process(
-            process_command,
-            work_dir=str(command["work_dir"]) if command.get("work_dir") else None,
-            env=process_env,
-            timeout_seconds=(float(timeout_seconds) if timeout_seconds is not None else None),
-            shell=shell,
+        try:
+            process_result = await run_local_process(
+                process_command,
+                work_dir=str(command["work_dir"]) if command.get("work_dir") else None,
+                env=process_env,
+                timeout_seconds=(float(timeout_seconds) if timeout_seconds is not None else None),
+                shell=shell,
+            )
+        except (LocalProcessError, LocalProcessTimeout) as exc:
+            _write_external_mas_logs_best_effort(
+                logs=logs,
+                session_group_id=request.session_group_id,
+                stdout=exc.stdout,
+                stderr=exc.stderr,
+            )
+            raise
+
+        _write_external_mas_logs_best_effort(
+            logs=logs,
+            session_group_id=request.session_group_id,
+            stdout=process_result.stdout,
+            stderr=process_result.stderr,
         )
-        log_dir = (logs or {}).get("directory")
-        if log_dir:
-            output_dir = Path(str(log_dir)).expanduser()
-            output_dir.mkdir(parents=True, exist_ok=True)
-            rollout_name = _safe_filename_component(request.session_group_id)
-            (output_dir / f"{rollout_name}.stdout.log").write_text(
-                process_result.stdout,
-                encoding="utf-8",
-                newline="",
-            )
-            (output_dir / f"{rollout_name}.stderr.log").write_text(
-                process_result.stderr,
-                encoding="utf-8",
-                newline="",
-            )
         return _parse_result(process_result, result or {})
     finally:
         temporary.close()

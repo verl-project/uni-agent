@@ -65,6 +65,39 @@ async def test_timeout_does_not_wait_for_inherited_pipe_holders(monkeypatch):
 @pytest.mark.cpu
 @pytest.mark.level0
 @pytest.mark.asyncio
+async def test_timeout_carries_partial_process_output(monkeypatch):
+    class _SlowProcess:
+        pid = 43211
+        returncode = 0
+
+        async def communicate(self):
+            await asyncio.sleep(0.05)
+            return b"partial stdout", b"partial stderr"
+
+        async def wait(self):
+            return self.returncode
+
+    process = _SlowProcess()
+
+    async def fake_create(*args, **kwargs):
+        return process
+
+    async def fake_terminate(_process):
+        return None
+
+    monkeypatch.setattr(process_backend.asyncio, "create_subprocess_exec", fake_create)
+    monkeypatch.setattr(process_backend, "_terminate_process", fake_terminate)
+
+    with pytest.raises(process_backend.LocalProcessTimeout) as exc_info:
+        await process_backend.run_local_process(["fake-mas"], timeout_seconds=0.01)
+
+    assert exc_info.value.stdout == "partial stdout"
+    assert exc_info.value.stderr == "partial stderr"
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
 async def test_terminate_process_group_kills_after_leader_exits(monkeypatch):
     calls = []
     alive = True

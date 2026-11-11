@@ -1,0 +1,55 @@
+# Task Config for the recipe-local external Search MAS runner.
+#
+# TaskConfigResolver loads this file via yaml.safe_load, so environment
+# interpolation such as ${oc.env:...} is not expanded here. Point work_dir and
+# template_path at your MAS checkout before launching; the placeholder paths
+# below are not runnable as-is.
+- name: multi_policy_external_mas
+  launcher_kwargs:
+    execution:
+      backend: local_process
+    command:
+      argv:
+        - python
+        - scripts/run_search_mas.py
+        - --config
+        - "{config_path}"
+        - --question
+        - "{prompt}"
+      work_dir: /path/to/search_mas_app
+      env: {}
+    config:
+      # MAS config template copied for each rollout.
+      template_path: /path/to/search_mas_app/configs/inference.yaml
+      # Training-only overrides applied after loading the template. The shared
+      # prediction/report files would race across concurrent rollouts, and the
+      # full trace is not needed for training.
+      overrides:
+        output.prediction_path: null
+        output.report_path: null
+        output.include_trace: false
+      injection:
+        # Dotted paths refer to the copied config; agent paths are role-local.
+        global_base_url_path: llm.base_url
+        agents_path: agents
+        agent_base_url_path: llm.base_url
+        agent_model_path: model
+        inject_agent_base_url: true
+    timeout:
+      seconds: 600
+    result:
+      mode: stdout_json
+      field_mapping:
+        final_result:
+          fields:
+            - final_answer
+            - final_response
+        reward_info:
+          approved: approved
+          final_answer: final_answer
+          final_response: final_response
+    logs:
+      # Raw external-process stdout/stderr, including failed runs.
+      # Relative paths resolve against the worker process working directory;
+      # use an absolute path on clusters where that differs from the repo root.
+      directory: examples/multi_policy/logs/external_mas
