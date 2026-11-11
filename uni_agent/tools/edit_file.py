@@ -82,6 +82,20 @@ class StrReplaceEditorArguments(BaseModel):
             return value
 
 
+def _normalize_newlines(text: str) -> str:
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _newline_of(text: str) -> str:
+    """Line ending shared by every line break in ``text``; ``\\n`` when mixed or absent."""
+    crlf = text.count("\r\n")
+    if crlf and crlf == text.count("\n") == text.count("\r"):
+        return "\r\n"
+    if "\r" in text and "\n" not in text:
+        return "\r"
+    return "\n"
+
+
 def _maybe_truncate(content: str, truncate_after: int | None = MAX_RESPONSE_LEN) -> str:
     if not truncate_after or len(content) <= truncate_after:
         return content
@@ -118,13 +132,24 @@ class EditFileTool(Tool):
         return (await sandbox.exec(["test", "-d", path])).exit_code == 0
 
     @staticmethod
-    async def _read(sandbox: SandboxBackend, path: str) -> str:
+    async def _read_raw(sandbox: SandboxBackend, path: str) -> str:
         data = await sandbox.read_file(path)
         try:
-            text = data.decode("utf-8")
+            return data.decode("utf-8")
         except UnicodeDecodeError as exc:
             raise ToolError(f"The file `{path}` is not valid UTF-8 text.") from exc
-        return text.replace("\r\n", "\n").replace("\r", "\n")
+
+    @classmethod
+    async def _read(cls, sandbox: SandboxBackend, path: str) -> str:
+        return _normalize_newlines(await cls._read_raw(sandbox, path))
+
+    async def _write_edit(self, sandbox: SandboxBackend, path: str, original: str, new_text: str) -> None:
+        """Write ``new_text`` with the line endings of ``original`` and keep ``original`` for undo."""
+        newline = _newline_of(original)
+        if newline != "\n":
+            new_text = _normalize_newlines(new_text).replace("\n", newline)
+        await sandbox.write_file(path, new_text)
+        self._history[path].append(original)
 
     # ----- dispatch -----
     async def run(self, args: dict[str, Any], *, timeout: float | None = None) -> ToolResult:
@@ -236,7 +261,8 @@ class EditFileTool(Tool):
     ) -> str:
         if not old_str:
             return "Parameter `old_str` is required for command: str_replace and must be a non-empty string."
-        file_content = (await self._read(sandbox, path)).expandtabs()
+        original = await self._read_raw(sandbox, path)
+        file_content = _normalize_newlines(original).expandtabs()
         old_str = old_str.expandtabs()
         new_str = new_str.expandtabs() if new_str is not None else ""
 
@@ -253,8 +279,7 @@ class EditFileTool(Tool):
             return f"No replacement was performed, old_str `{old_str}` is the same as new_str `{new_str}`."
 
         new_file_content = file_content.replace(old_str, new_str)
-        await sandbox.write_file(path, new_file_content)
-        self._history[path].append(file_content)
+        await self._write_edit(sandbox, path, original, new_file_content)
 
         replacement_line = file_content.split(old_str)[0].count("\n")
         start_line = max(1, replacement_line - SNIPPET_LINES)
@@ -277,7 +302,8 @@ class EditFileTool(Tool):
         if new_str is None:
             return "Parameter `new_str` is required for command: insert"
 
-        file_text = (await self._read(sandbox, path)).expandtabs()
+        original = await self._read_raw(sandbox, path)
+        file_text = _normalize_newlines(original).expandtabs()
         new_str = new_str.expandtabs()
         file_lines = file_text.split("\n")
         n_lines = len(file_lines)
@@ -296,8 +322,7 @@ class EditFileTool(Tool):
             + file_lines[insert_line : insert_line + SNIPPET_LINES]
         )
 
-        await sandbox.write_file(path, "\n".join(new_file_lines))
-        self._history[path].append(file_text)
+        await self._write_edit(sandbox, path, original, "\n".join(new_file_lines))
 
         success_msg = f"The file {path} has been edited. "
         success_msg += _make_output(
@@ -317,4 +342,4 @@ class EditFileTool(Tool):
         old_text = self._history[path][-1]
         await sandbox.write_file(path, old_text)
         self._history[path].pop()
-        return f"Last edit to {path} undone successfully. {_make_output(old_text, str(path))}"
+        return f"Last edit to {path} undone successfully. {_make_output(_normalize_newlines(old_text), str(path))}"
