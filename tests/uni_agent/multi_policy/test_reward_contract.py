@@ -5,8 +5,12 @@ from unittest.mock import AsyncMock
 import pytest
 from omegaconf import OmegaConf
 
+from examples.multi_policy.external_mas.reward import (
+    compute_score,
+    exact_match_score,
+    extract_expected_answers,
+)
 from examples.multi_policy.framework import MultiAgentGatewayFramework
-from examples.multi_policy.reward import compute_score
 from uni_agent.gateway.session import Trajectory
 from uni_agent.tasks import TaskResult
 from verl.experimental.reward_loop.reward_manager.naive import NaiveRewardManager
@@ -20,6 +24,23 @@ def _framework(*, workers=None, policy_processors=None):
     framework._mask_unfinished_episode = False
     framework._custom_reward_function_configured = False
     return framework
+
+
+def _runner_reward_scorer(
+    *,
+    data_source: str,
+    solution_str: str,
+    ground_truth: object,
+    extra_info: dict,
+    **_: object,
+) -> dict[str, float]:
+    """Test-only reward callback that keeps the runner reward contract visible."""
+    del data_source, solution_str, ground_truth
+    runner_info = extra_info.get("runner_reward_info") or {}
+    reward = runner_info.get("reward")
+    if reward is None:
+        return {"score": 1.0, "acc": 1.0}
+    return {"score": float(reward), "acc": float(reward)}
 
 
 def _trajectories():
@@ -102,7 +123,7 @@ async def test_reward_context_survives_tq_without_entering_validation_metrics(
 ):
     # Exercise the real verl scorer wrapper without a model or Ray actor.
     tokenizer = SimpleNamespace(decode=lambda *args, **kwargs: "wrong decoded answer")
-    manager = NaiveRewardManager(OmegaConf.create({}), tokenizer, compute_score)
+    manager = NaiveRewardManager(OmegaConf.create({}), tokenizer, _runner_reward_scorer)
     worker_inputs = []
 
     async def score(data):
@@ -172,17 +193,74 @@ async def test_reward_context_survives_tq_without_entering_validation_metrics(
 @pytest.mark.cpu
 @pytest.mark.level0
 @pytest.mark.parametrize(
-    ("solution", "ground_truth", "score"),
+    ("final_answer", "ground_truth", "score"),
     [
         ("Paris", "Paris", 1.0),
         ("London", "Paris", 0.0),
         ("answer", None, 0.0),
         ("answer", {"answers": ["Paris"]}, 0.0),
+        ("A", "A", 1.0),
+        ("cat", "A", 0.0),
+        ("1428", "42", 0.0),
+        ("Paris.", "Paris", 1.0),
+        ("the Eiffel Tower", "Eiffel Tower", 1.0),
+        ("café", "cafe", 1.0),
+        ("Paris", {"answers": ["Paris"]}, 1.0),
+        ("The answer is B", "A", 0.0),
     ],
 )
-def test_scorer_without_runner_context_uses_solution_and_flat_metrics(solution, ground_truth, score):
-    assert compute_score("qa", solution, ground_truth) == {
-        "score": score,
-        "acc": score,
-        "num_agent_outputs": 0,
+def test_compute_score_matches_normalized_answers(final_answer, ground_truth, score):
+    expected = extract_expected_answers({"reward_model": {"ground_truth": ground_truth}})
+    assert compute_score(final_answer, expected) == score
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize(
+    ("final_answer", "ground_truth", "score"),
+    [
+        ("35", "3.5", 0.0),
+        ("72", "7.2", 0.0),
+        ("6", "-6", 0.0),
+        ("151 times the Moon's", "1.51 times the Moon's", 0.0),
+        ("201718", "2017/18", 0.0),
+        ("20161221", "2016-12-21", 0.0),
+        ("2800137", "28.0.0.137", 0.0),
+        ("2718", "2,718", 1.0),
+        ("Paris", "Paris.", 1.0),
+        ("May 18 2018", "May 18, 2018", 1.0),
+    ],
+)
+def test_compute_score_preserves_numeric_punctuation(final_answer, ground_truth, score):
+    expected = extract_expected_answers({"reward_model": {"ground_truth": ground_truth}})
+    assert compute_score(final_answer, expected) == score
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_extract_expected_answers_prefers_ground_truth_raw():
+    metadata = {
+        "reward_model": {"ground_truth": ["['NBC' 'Telemundo']"]},
+        "ground_truth_raw": {"target": ["NBC", "Telemundo"]},
     }
+
+    expected = extract_expected_answers(metadata)
+
+    assert expected == ["NBC", "Telemundo"]
+    assert exact_match_score("NBC", expected) == 1.0
+    assert exact_match_score("Telemundo", expected) == 1.0
+    assert exact_match_score("CNN", expected) == 0.0
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize(
+    ("answer", "expected", "score"),
+    [
+        ("—", ["—"], 1.0),
+        ("(", ["("], 1.0),
+        (")", ["("], 0.0),
+    ],
+)
+def test_exact_match_score_keeps_punctuation_only_answers(answer, expected, score):
+    assert exact_match_score(answer, expected) == score

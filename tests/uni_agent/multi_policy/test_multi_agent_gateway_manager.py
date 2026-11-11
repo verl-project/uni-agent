@@ -298,3 +298,110 @@ async def test_shutdown_clears_group_state_after_parent_shutdown(monkeypatch):
     }
     assert manager._group_sessions == {}
     assert manager._group_gateway_indices == {}
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_cancelled_creation_keeps_group_state_until_abort_completes(fake_gateway_pool):
+    manager = MultiAgentGatewayManager.__new__(MultiAgentGatewayManager)
+    manager.gateways = fake_gateway_pool
+    manager.active_sessions_per_gateway = [0, 0]
+    manager._group_sessions = {}
+    manager._group_gateway_indices = {}
+
+    create_started = asyncio.Event()
+    abort_started = asyncio.Event()
+    allow_abort_to_finish = asyncio.Event()
+
+    class BlockingCreate:
+        async def remote(self, *, session_id, **kwargs):
+            create_started.set()
+            await asyncio.Event().wait()
+
+    class BlockingAbort:
+        def __init__(self):
+            self.calls = []
+
+        async def remote(self, *, session_id):
+            self.calls.append(session_id)
+            abort_started.set()
+            await allow_abort_to_finish.wait()
+
+    abort = BlockingAbort()
+    fake_gateway_pool[0].create_session = BlockingCreate()
+    fake_gateway_pool[0].abort_session = abort
+
+    creation = asyncio.create_task(
+        manager.create_session(
+            "cancelled-group",
+            role_policy_mapping={"planner": "p1", "actor": "p2"},
+        )
+    )
+    await create_started.wait()
+    creation.cancel()
+    await abort_started.wait()
+
+    assert set(manager._group_sessions) == {"cancelled-group"}
+    assert manager.active_sessions_per_gateway == [1, 0]
+
+    # Cancel again while the outer coroutine is awaiting the shielded abort.
+    creation.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await creation
+
+    # The shielded abort is still running, so the group state must remain.
+    assert set(manager._group_sessions) == {"cancelled-group"}
+    assert manager.active_sessions_per_gateway == [1, 0]
+
+    allow_abort_to_finish.set()
+
+    async def wait_for_cleanup():
+        while manager._group_sessions or manager.active_sessions_per_gateway != [0, 0]:
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(wait_for_cleanup(), timeout=1.0)
+    assert manager._group_gateway_indices == {}
+    assert set(abort.calls) == {
+        "cancelled-group:planner",
+        "cancelled-group:actor",
+    }
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_cancelled_creation_does_not_mask_original_error_when_abort_fails(
+    fake_gateway_pool,
+    monkeypatch,
+):
+    manager = MultiAgentGatewayManager.__new__(MultiAgentGatewayManager)
+    manager.gateways = fake_gateway_pool
+    manager.active_sessions_per_gateway = [0, 0]
+    manager._group_sessions = {}
+    manager._group_gateway_indices = {}
+
+    create_started = asyncio.Event()
+
+    class BlockingCreate:
+        async def remote(self, *, session_id, **kwargs):
+            create_started.set()
+            await asyncio.Event().wait()
+
+    async def failing_abort(session_id):
+        raise RuntimeError("cleanup failed")
+
+    fake_gateway_pool[0].create_session = BlockingCreate()
+    monkeypatch.setattr(manager, "abort_session", failing_abort)
+
+    creation = asyncio.create_task(manager.create_session("cancelled-group", role_policy_mapping={"planner": "p1"}))
+    await create_started.wait()
+    creation.cancel()
+
+    # The cleanup failure is logged, but the original CancelledError must win.
+    with pytest.raises(asyncio.CancelledError):
+        await creation
+
+    # Cleanup failed before dropping state; keep it so shutdown can retry.
+    assert set(manager._group_sessions) == {"cancelled-group"}
+    assert manager.active_sessions_per_gateway == [1, 0]

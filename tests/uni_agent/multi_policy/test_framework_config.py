@@ -1,5 +1,6 @@
 """Configuration and routing contracts for MAS framework extension points."""
 
+import json
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -367,3 +368,33 @@ def test_shared_framework_parser_matches_parent_and_mas_factories(selection):
         assert framework._custom_reward_function_configured is True
         assert framework._trajectory_postprocessor is _reverse_trajectories
         assert framework._trajectory_postprocessor_kwargs == {"options": {"enabled": True}}
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_trajectory_dump_splits_agents(tmp_path):
+    # _dump_trajectories only uses base helpers, so no instance state is needed.
+    framework = MultiAgentGatewayFramework.__new__(MultiAgentGatewayFramework)
+    trajectories = [
+        Trajectory([1], [2], [1], extra_fields={"role": "planner"}),
+        Trajectory([1], [2, 3], [1, 1], extra_fields={"role": "answerer"}),
+        Trajectory([1], [4], [1], extra_fields={"role": "planner"}),
+        Trajectory([1], [5], [1], extra_fields={"role": "bad/role"}),
+        Trajectory([1], [6], [1], extra_fields={"role": "bad_role"}),
+        Trajectory([1], [7], [1], extra_fields={}),
+    ]
+
+    framework._dump_trajectories(tmp_path, "session-1", trajectories)
+
+    planner_dir = tmp_path / "agents" / "planner"
+    answerer_dir = tmp_path / "agents" / "answerer"
+    sanitized_dir = tmp_path / "agents" / "bad_role"
+    collision_dir = tmp_path / "agents" / "bad_role_2"
+    unknown_dir = tmp_path / "agents" / "unknown"
+    assert json.loads((planner_dir / "trajectory.json").read_text())["num_trajectories"] == 2
+    assert json.loads((answerer_dir / "trajectory.json").read_text())["num_trajectories"] == 1
+    assert json.loads((sanitized_dir / "trajectory.json").read_text())["num_trajectories"] == 1
+    assert json.loads((collision_dir / "trajectory.json").read_text())["num_trajectories"] == 1
+    assert json.loads((unknown_dir / "trajectory.json").read_text())["num_trajectories"] == 1
+    for directory in (planner_dir, answerer_dir, sanitized_dir, collision_dir, unknown_dir):
+        assert (directory / "trajectory.npz").exists()

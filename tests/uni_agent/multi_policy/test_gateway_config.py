@@ -140,6 +140,8 @@ def test_policy_configs_use_per_policy_runtime_and_input_processing_kwargs():
     assert result["beta"].apply_chat_template_kwargs == {"enable_thinking": False}
     assert result["beta"].mm_processor_kwargs == {"max_pixels": 200}
     assert result["beta"].allowed_request_sampling_param_keys == {"temperature"}
+    assert result["alpha"].use_tree_trajectory_manager is False
+    assert result["beta"].use_tree_trajectory_manager is False
 
 
 @pytest.mark.cpu

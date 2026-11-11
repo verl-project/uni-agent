@@ -27,7 +27,16 @@ class LocalProcessError(RuntimeError):
 
 
 class LocalProcessTimeout(TimeoutError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        stdout: str = "",
+        stderr: str = "",
+    ) -> None:
+        super().__init__(message)
+        self.stdout = stdout
+        self.stderr = stderr
 
 
 _TERMINATE_GRACE_SECONDS = 2.0
@@ -151,8 +160,12 @@ async def run_local_process(
             )
     except asyncio.TimeoutError as exc:
         await _terminate_process(process)
-        await _drain_communicate(process, communicate_task)
-        raise LocalProcessTimeout(f"External MAS process timed out after {timeout_seconds} seconds") from exc
+        stdout_bytes, stderr_bytes = await _drain_communicate(process, communicate_task)
+        raise LocalProcessTimeout(
+            f"External MAS process timed out after {timeout_seconds} seconds",
+            stdout=stdout_bytes.decode("utf-8", errors="replace"),
+            stderr=stderr_bytes.decode("utf-8", errors="replace"),
+        ) from exc
     except asyncio.CancelledError:
         await _terminate_process(process)
         await _drain_communicate(process, communicate_task)
