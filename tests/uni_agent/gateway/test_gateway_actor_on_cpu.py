@@ -474,7 +474,7 @@ async def test_gateway_actor_get_session_state_reports_default_chain_tips():
 @pytest.mark.asyncio
 async def test_unsupported_capabilities_rejected_with_400():
     """OpenAI capabilities that the gateway does not support (``n > 1``,
-    ``response_format``, ``tool_choice="required"``, and per-function
+    schema-less ``response_format``, ``tool_choice="required"``, and per-function
     ``tool_choice``) are rejected with HTTP 400 before reaching the session
     or backend."""
     from fastapi import HTTPException
@@ -488,7 +488,8 @@ async def test_unsupported_capabilities_rejected_with_400():
         await actor.create_session("s1")
         cases = [
             ({"n": 2}, "n=2 is not supported"),
-            ({"response_format": {"type": "json_object"}}, "response_format is not supported"),
+            ({"response_format": {"type": "json_object"}}, "response_format must be"),
+            ({"response_format": {"type": "json_schema"}}, "response_format.json_schema.schema must be"),
             ({"tool_choice": "required"}, 'tool_choice="required"'),
             ({"tool_choice": {"type": "function", "function": {"name": "foo"}}}, "tool_choice"),
         ]
@@ -499,6 +500,49 @@ async def test_unsupported_capabilities_rejected_with_400():
                 )
             assert exc_info.value.status_code == 400
             assert expected_message_substr in str(exc_info.value.detail)
+    finally:
+        await actor.shutdown()
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_response_format_json_schema_reaches_backend():
+    """``response_format: json_schema`` lowers to ``structured_outputs`` in the
+    backend sampling params, outside the request sampling allowlist."""
+    from uni_agent.gateway.config import GatewayActorConfig
+    from uni_agent.gateway.gateway import _GatewayActor
+
+    backend = InspectingBackend()
+    actor = _GatewayActor(GatewayActorConfig(tokenizer=FakeTokenizer()), backend)
+    await actor.start()
+    try:
+        await actor.create_session("s1")
+        schema = {"type": "object", "properties": {"query": {"type": "string"}}}
+        response = await actor._handle_openai_chat_completions(
+            "s1",
+            {
+                "messages": [{"role": "user", "content": "hi"}],
+                "response_format": {
+                    "type": "json_schema",
+                    "json_schema": {"name": "resolve", "schema": schema},
+                },
+            },
+        )
+        assert response.status_code == 200
+        assert len(backend.calls) == 1
+        assert backend.calls[0]["sampling_params"]["structured_outputs"] == {"json": schema}
+        # ``text`` is the unconstrained default: accepted, no grammar injected.
+        response = await actor._handle_openai_chat_completions(
+            "s1",
+            {
+                "messages": [{"role": "user", "content": "hi"}],
+                "response_format": {"type": "text"},
+            },
+        )
+        assert response.status_code == 200
+        assert len(backend.calls) == 2
+        assert "structured_outputs" not in backend.calls[1]["sampling_params"]
     finally:
         await actor.shutdown()
 
