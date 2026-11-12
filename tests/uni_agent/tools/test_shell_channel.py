@@ -1,9 +1,12 @@
+import subprocess
+import sys
+import time
 from typing import Any
 
 import pytest
 
 from uni_agent.sandbox import ExecResult
-from uni_agent.tools.shell import TmuxShell
+from uni_agent.tools.shell import _APT_LOCK_WAIT, TmuxShell
 
 
 class RecordingBackend:
@@ -119,3 +122,45 @@ async def test_run_marks_timeout_even_when_interrupt_reports_an_exit_code(
 
     assert result.timed_out is True
     assert result.exit_code == 130
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.skipif(sys.platform != "linux", reason="requires /proc comm inspection")
+def test_apt_lock_wait_blocks_until_existing_installer_exits(tmp_path):
+    # A symlink named apt-get makes the kernel report comm="apt-get".
+    fake_apt = tmp_path / "apt-get"
+    fake_apt.symlink_to("/bin/sleep")
+    proc = subprocess.Popen([str(fake_apt), "3"])
+    try:
+        start = time.monotonic()
+        result = subprocess.run(
+            ["bash", "-c", _APT_LOCK_WAIT + "; echo waited"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        elapsed = time.monotonic() - start
+    finally:
+        proc.kill()
+    assert result.returncode == 0
+    assert result.stdout.strip() == "waited"
+    # The wait blocked until the fake installer exited instead of racing its lock.
+    assert elapsed >= 2.5
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.skipif(sys.platform != "linux", reason="requires /proc comm inspection")
+def test_apt_lock_wait_returns_immediately_without_installers():
+    start = time.monotonic()
+    result = subprocess.run(
+        ["bash", "-c", _APT_LOCK_WAIT + "; echo waited"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    elapsed = time.monotonic() - start
+    assert result.returncode == 0
+    assert result.stdout.strip() == "waited"
+    assert elapsed < 3
