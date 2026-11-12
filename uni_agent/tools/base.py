@@ -35,17 +35,23 @@ class ToolResult:
     """One tool call's normalized result: the ``text`` the model sees plus a
     ``status`` for the loop's counters. ``status`` is set by whoever knows it --
     :meth:`Toolbox.call` for bad calls / tool errors, the tool itself for a
-    ``"timeout"`` -- and defaults to ``"ok"``. :meth:`to_observation` renders the
-    next-turn content (``str(result)`` gives just the text).
+    ``"timeout"`` -- and defaults to ``"ok"``. ``images`` holds
+    ``data:image/...;base64,...`` URLs (e.g. a GUI screenshot). :meth:`to_observation`
+    renders both into the next-turn tool message content (``str(result)`` gives
+    just the text).
     """
 
     text: str | None = None
     status: ToolStatus = "ok"
+    images: tuple[str, ...] = ()
 
     def __str__(self) -> str:
         return self.text if self.text is not None else ""
 
-    def to_observation(self, max_length: int = 100_000) -> str:
+    def to_observation(self, max_length: int = 100_000) -> str | list[dict[str, Any]]:
+        """Next-turn tool message content: the labelled text, clipped to
+        ``max_length``, followed by one ``image_url`` part per image. Text-only
+        results stay a plain string so existing chat templates see no change."""
         text = self.text or ""
         if len(text) > max_length:
             elided = len(text) - max_length
@@ -55,7 +61,13 @@ class ToolResult:
                 "Retry with something that yields less output (e.g. head/tail/grep, or redirect to "
                 "a file); do not use interactive pagers.</NOTE>"
             )
-        return f"Observation:\n{text}"
+        observation = f"Observation:\n{text}"
+        if not self.images:
+            return observation
+        return [
+            {"type": "text", "text": observation},
+            *({"type": "image_url", "image_url": {"url": url}} for url in self.images),
+        ]
 
 
 class ToolError(Exception):
