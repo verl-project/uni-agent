@@ -1,0 +1,12 @@
+# Agent fragment: compose into a Task config with an already provisioned Sandbox.
+# The framework runner replaces model.base_url with a reachable Gateway session URL.
+agent:
+  name: opencode
+  opencode_bin: /opt/opencode/node_modules/.bin/opencode
+  run_timeout: 1800
+  context_limit: 32768
+  output_limit: 8192
+  model:
+    base_url: http://127.0.0.1:8000/v1
+    model_name: policy
+    api_key: EMPTY
