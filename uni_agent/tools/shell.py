@@ -141,20 +141,43 @@ def _capture_wrapper(command_path: str, out: str, err: str, rc: str, *, signal: 
 # Best-effort tmux install when the image lacks it: first package manager on PATH,
 # non-interactive, one exec. apt needs an index refresh first (minimal images ship
 # an empty lists dir); `|| true` tolerates a flaky mirror if tmux still resolves.
-_INSTALL_TMUX = r"""
-if command -v apt-get >/dev/null 2>&1; then
-  DEBIAN_FRONTEND=noninteractive apt-get update -qq || true
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq tmux
-elif command -v dnf >/dev/null 2>&1; then dnf install -y tmux
-elif command -v yum >/dev/null 2>&1; then yum install -y tmux
-elif command -v apk >/dev/null 2>&1; then apk add --no-cache tmux
-elif command -v pacman >/dev/null 2>&1; then pacman -Sy --noconfirm tmux
-elif command -v zypper >/dev/null 2>&1; then zypper install -y -n tmux
-else
-  echo "no supported package manager to install tmux" >&2
-  exit 127
-fi
+
+# Bounded wait for existing apt/dpkg processes (comm-based, no extra packages):
+# an orphaned installer from a timed-out start attempt or a concurrent tool
+# otherwise holds the lists lock and makes every retry fail immediately.
+# Zombies are skipped: a container PID 1 like `sleep` never reaps children, so
+# a finished or killed installer must not block later attempts forever.
+_APT_LOCK_WAIT = r"""
+for _ in $(seq 1 60); do
+  found=
+  for p in /proc/[0-9]*/comm; do
+    read -r name < "$p" 2>/dev/null || continue
+    case "$name" in apt|apt-get|dpkg|unattended-upgrades)
+      read -r _pid _comm st _rest < "${p%/comm}/stat" 2>/dev/null || continue
+      if [ "$st" != "Z" ]; then found=1; break; fi
+      ;;
+    esac
+  done
+  [ -z "$found" ] && break
+  sleep 5
+done
 """.strip()
+
+_INSTALL_TMUX = (
+    "if command -v apt-get >/dev/null 2>&1; then\n"
+    + _APT_LOCK_WAIT
+    + "\n  DEBIAN_FRONTEND=noninteractive apt-get update -qq || true\n"
+    "  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq tmux\n"
+    "elif command -v dnf >/dev/null 2>&1; then dnf install -y tmux\n"
+    "elif command -v yum >/dev/null 2>&1; then yum install -y tmux\n"
+    "elif command -v apk >/dev/null 2>&1; then apk add --no-cache tmux\n"
+    "elif command -v pacman >/dev/null 2>&1; then pacman -Sy --noconfirm tmux\n"
+    "elif command -v zypper >/dev/null 2>&1; then zypper install -y -n tmux\n"
+    "else\n"
+    '  echo "no supported package manager to install tmux" >&2\n'
+    "  exit 127\n"
+    "fi"
+)
 
 
 class TmuxShell:
