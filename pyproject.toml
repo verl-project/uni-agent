@@ -21,6 +21,25 @@ license-files = ["LICENSE"]
 readme = {file = "README.md", content-type = "text/markdown"}
 requires-python = ">=3.10,<3.13"
 
+# Framework/gateway runtime; training dependencies stay owned by ./verl.
+dependencies = [
+    "verl", "aiohttp", "cachetools", "fastapi", "httpx", "hydra-core",
+    "numpy", "openai", "pillow", "pydantic>=2", "pyyaml", "pyzmq",
+    "requests", "uvicorn", "xxhash",
+    # The framework/TQ path stores NonTensorData (verl requires TensorDict >=0.10).
+    "tensordict>=0.10.0",
+]
+
+[project.optional-dependencies]
+modal = ["modal"]
+e2b = ["e2b"]
+vefaas = ["volcengine-python-sdk", "swe-rex"]
+swebench = ["swebench==4.1.0"]
+insight = ["rl-insight"]
+
+[dependency-groups]
+dev = ["pytest", "pytest-asyncio", "pytest-cov", "pre-commit"]
+
 [project.urls]
 Documentation = "https://uni-agent.readthedocs.io/"
 Repository = "https://github.com/verl-project/uni-agent"
@@ -118,3 +137,71 @@ markers = [
     "level0: mark level0 case, always run in CI",
     "level1: mark level1 case, full test, not included in CI"
 ]
+
+# BEGIN GENERATED VERL UV POLICY
+[tool.uv]
+"environments" = [
+    "python_full_version >= '3.12' and sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "python_full_version >= '3.12' and sys_platform == 'linux' and platform_machine == 'aarch64'",
+]
+"override-dependencies" = [
+    "transformers==5.12.1",
+    "numpy>=2.0.0",
+    "kernels>=0.14.1,<0.15",
+    "flash-attn-4 ; platform_machine == 'flash-attn-4-excluded'",
+    "nvidia-cusparselt-cu13==0.8.0 ; platform_machine == 'x86_64' and sys_platform == 'linux'",
+    "nvidia-cusparselt-cu13==0.9.1 ; platform_machine == 'aarch64' and sys_platform == 'linux'",
+]
+
+[[tool.uv."dependency-metadata"]]
+"name" = "megatron-core"
+"version" = "0.19.2"
+"requires-dist" = [
+    "torch>=2.6.0",
+    "numpy",
+    "packaging>=24.2",
+]
+
+[[tool.uv."dependency-metadata"]]
+"name" = "megatron-bridge"
+"version" = "0.6.2"
+"requires-dist" = []
+
+[[tool.uv."dependency-metadata"]]
+"name" = "veomni"
+"version" = "0.1.12"
+"requires-dist" = []
+
+[[tool.uv."dependency-metadata"]]
+"name" = "torchtitan"
+"version" = "0.3.0"
+"requires-dist" = []
+
+[[tool.uv."dependency-metadata"]]
+"name" = "TransferQueue"
+"requires-dist" = []
+
+[[tool.uv."index"]]
+"name" = "pytorch-cu130"
+"url" = "https://download.pytorch.org/whl/cu130"
+"explicit" = true
+
+[[tool.uv."index"]]
+"name" = "pytorch-cpu"
+"url" = "https://download.pytorch.org/whl/cpu"
+"explicit" = true
+
+[[tool.uv."index"]]
+"name" = "verl-wheelhouse"
+"url" = "https://verl-project.github.io/verl-wheelhouse/cu130/torch2.13/simple/"
+"explicit" = true
+
+[tool.uv.workspace]
+"members" = [
+    "verl",
+]
+
+[tool.uv.sources]
+
+[tool.uv.sources."verl"]
+"workspace" = true
