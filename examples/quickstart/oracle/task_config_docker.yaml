@@ -1,0 +1,11 @@
+- name: swe_bench
+  run_oracle_solution: true
+  eval_timeout: 600
+  sandbox:
+    provider: docker
+    sandbox_kwargs:
+      pull_policy: missing
+      pull_timeout: 900
+      start_timeout: 120
+      # Canonical SWE-bench images are x86_64; ARM hosts need Docker emulation.
+      run_args: ["--platform", "linux/amd64", "--network", "none"]
