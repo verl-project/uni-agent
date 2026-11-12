@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import re
 from pathlib import Path
 
 import pytest
@@ -433,3 +435,70 @@ def test_upload_and_download_use_docker_cp(monkeypatch, tmp_path: Path):
         ("cp", "agent-test:/workspace/data/result.bin", str(destination)),
     ]
     assert destination.parent.is_dir()
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_write_file_small_payload_keeps_single_command(monkeypatch):
+    sandbox = DockerSandbox(image="example:local")
+    sandbox._container_name = "agent-test"
+    scripts: list[str] = []
+
+    async def fake_exec(argv, **kwargs):
+        scripts.append(argv[2])
+        return _ok()
+
+    monkeypatch.setattr(sandbox, "exec", fake_exec)
+    asyncio.run(sandbox.write_file("/workspace/a b.txt", "héllo"))
+
+    assert len(scripts) == 1
+    assert scripts[0].startswith("mkdir -p ")
+    match = re.search(r"printf %s ([A-Za-z0-9+/=]*) \| base64 -d ", scripts[0])
+    assert match is not None
+    assert base64.b64decode(match.group(1)).decode("utf-8") == "héllo"
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_write_file_large_payload_is_chunked_and_argv_safe(monkeypatch):
+    sandbox = DockerSandbox(image="example:local")
+    sandbox._container_name = "agent-test"
+    scripts: list[str] = []
+
+    async def fake_exec(argv, **kwargs):
+        scripts.append(argv[2])
+        return _ok()
+
+    monkeypatch.setattr(sandbox, "exec", fake_exec)
+    payload = bytes(range(256)) * 1024  # 256 KiB of binary data
+    asyncio.run(sandbox.write_file("/workspace/data/large.bin", payload))
+
+    staged = ""
+    for script in scripts:
+        # A single argv entry must stay below MAX_ARG_STRLEN (128 KiB on 4 KiB-page hosts).
+        assert len(script.encode()) < 128 * 1024
+        match = re.search(r"printf %s ([A-Za-z0-9+/=]*) >>? ", script)
+        if match:
+            staged += match.group(1)
+    assert base64.b64decode(staged) == payload
+    assert any(script.startswith("base64 -d ") for script in scripts)
+    assert scripts[-1].startswith("rm -f ")
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_write_file_chunk_failure_cleans_up_and_raises(monkeypatch):
+    sandbox = DockerSandbox(image="example:local")
+    sandbox._container_name = "agent-test"
+    scripts: list[str] = []
+
+    async def fake_exec(argv, **kwargs):
+        scripts.append(argv[2])
+        if ">>" in argv[2]:  # fail on the second staged chunk
+            return ExecResult(exit_code=1, stdout="", stderr="disk full")
+        return _ok()
+
+    monkeypatch.setattr(sandbox, "exec", fake_exec)
+    with pytest.raises(RuntimeError, match="disk full"):
+        asyncio.run(sandbox.write_file("/workspace/large.bin", b"x" * (200 * 1024)))
+    assert scripts[-1].startswith("rm -f ")
