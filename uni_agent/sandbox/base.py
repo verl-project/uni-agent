@@ -30,6 +30,11 @@ logger = logging.getLogger(__name__)
 
 _EXECUTABLE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
 
+# Base64 characters per staged write_file chunk. The kernel caps a single argv
+# entry (MAX_ARG_STRLEN = 32 * page size, 128 KiB on 4 KiB-page hosts), so keep
+# each chunk well below that even after shell quoting overhead.
+_WRITE_FILE_B64_CHUNK_SIZE = 48 * 1024
+
 
 def _to_str(data: str | bytes | None) -> str:
     if data is None:
@@ -559,14 +564,39 @@ class Sandbox(abc.ABC):
         return base64.b64decode(res.stdout)
 
     async def write_file(self, path: str, content: bytes | str) -> None:
-        """Write ``content`` to ``path`` (floor: ``base64 -d`` over exec)."""
+        """Write ``content`` to ``path`` (floor: ``base64 -d`` over exec).
+
+        Large payloads are staged through a temporary base64 file in chunks:
+        inlining the whole payload as one argv entry fails with E2BIG before
+        the command ever runs.
+        """
         data = content.encode("utf-8") if isinstance(content, str) else content
         b64 = base64.b64encode(data).decode("ascii")
         q = shlex.quote(path)
-        script = f'mkdir -p "$(dirname {q})" && printf %s {shlex.quote(b64)} | base64 -d > {q}'
-        res = await self.exec_shell(script)
-        if res.exit_code != 0:
-            raise RuntimeError(f"write_file {path!r} failed: {res.stderr.strip()}")
+        if len(b64) <= _WRITE_FILE_B64_CHUNK_SIZE:
+            script = f'mkdir -p "$(dirname {q})" && printf %s {shlex.quote(b64)} | base64 -d > {q}'
+            res = await self.exec_shell(script)
+            if res.exit_code != 0:
+                raise RuntimeError(f"write_file {path!r} failed: {res.stderr.strip()}")
+            return
+        # Stage chunk by chunk next to the target, then decode in one shot.
+        tmp = shlex.quote(f"{path}.uni-agent-{uuid.uuid4().hex[:8]}.b64")
+        try:
+            for index, offset in enumerate(range(0, len(b64), _WRITE_FILE_B64_CHUNK_SIZE)):
+                chunk = shlex.quote(b64[offset : offset + _WRITE_FILE_B64_CHUNK_SIZE])
+                redirect = ">" if index == 0 else ">>"
+                prefix = f'mkdir -p "$(dirname {q})" && ' if index == 0 else ""
+                res = await self.exec_shell(f"{prefix}printf %s {chunk} {redirect} {tmp}")
+                if res.exit_code != 0:
+                    raise RuntimeError(f"write_file {path!r} failed: {res.stderr.strip()}")
+            res = await self.exec_shell(f"base64 -d {tmp} > {q}")
+            if res.exit_code != 0:
+                raise RuntimeError(f"write_file {path!r} failed: {res.stderr.strip()}")
+        finally:
+            try:
+                await asyncio.shield(self.exec_shell(f"rm -f {tmp}"))
+            except Exception:
+                logger.warning("write_file failed to clean temp file for %r", path, exc_info=True)
 
     async def upload(self, local_path: Path | str, remote_path: str) -> None:
         """Upload a host file or directory tree into the sandbox.
