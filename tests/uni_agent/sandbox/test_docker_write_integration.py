@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import os
+import shlex
 import sys
 from contextlib import asynccontextmanager
 
 import pytest
 
-from uni_agent.sandbox.base import Sandbox
 from uni_agent.sandbox.docker import DockerSandbox
 
 pytestmark = pytest.mark.usefixtures("no_unhandled_asyncio_errors")
@@ -41,9 +42,14 @@ def test_linux_e2big_negative_control_and_large_editor_rewrite():
             assert sys.platform == "linux" and os.sysconf("SC_PAGE_SIZE") == 4096
             path = "/tmp/large.py"
             original = "# filler\n" * 12000 + "answer = 1\n"
-            # Run the actual unfixed base implementation through DockerSandbox.
-            with pytest.raises(RuntimeError, match="Argument list too long"):
-                await Sandbox.write_file(sandbox, path, original)
+            # Freeze the original base-method command so this negative control
+            # still demonstrates E2BIG after the shared fallback is fixed (#325).
+            b64 = base64.b64encode(original.encode()).decode("ascii")
+            q = shlex.quote(path)
+            script = f'mkdir -p "$(dirname {q})" && printf %s {shlex.quote(b64)} | base64 -d > {q}'
+            failed = await sandbox.exec_shell(script)
+            assert failed.exit_code != 0
+            assert "Argument list too long" in failed.stderr
             await sandbox.write_file(path, original)
             tool = EditFileTool(sandbox)
             result = await tool.run(
