@@ -102,8 +102,59 @@ The full-dataset oracle verification results are summarized below:
 The result JSON file passed through `--result-path` contains:
 
 - `summary`: solved count and rate, execution counts, average verifier time, and total wall time.
-- `results`: instance ID, log ID, solved status, verifier execution time, and any execution error for each sample.
+- `results`: source row index, task name, resolved sandbox configuration, instance ID, log ID, admission outcome, solved status, reward, verifier details, and any execution error for each sample.
 
 Each sample also writes a task log under `--log-dir` (default: `/tmp/eval_gold_patch`). When an oracle sample is unsolved or errors, inspect that log before starting training or inference.
+
+## Export Oracle-passing Training Data
+
+Use the same dataset, image and instance installation that training will use.
+For SWE-rebench, the dataset's existing `filtered` split is not a guarantee that
+its gold patch still passes in today's environment. Validate before training:
+
+```bash
+python examples/inference/parallel_run_oracle.py \
+    --data-path ~/data/uni_agent/swe_rebench_filtered.parquet \
+    --task-config examples/quickstart/oracle/task_config_oracle.yaml \
+    --num-workers 4 --concurrency 8 \
+    --result-path ~/data/uni_agent/swe_rebench_oracle.json \
+    --passed-data-path ~/data/uni_agent/swe_rebench_oracle_passed.parquet
+```
+
+`--passed-data-path` requires an audit JSON and a new output file. The runner
+exports only rows with outcome `passed` from **this run**, preserving the input
+schema, row contents and order. It selects by source row index, so repeated
+instance IDs do not admit other rows accidentally. With `--limit N`, only the
+first N rows are eligible; untested rows are never included. If none pass, the
+output parquet is empty with the original schema.
+
+The outcomes distinguish admission decisions from root causes:
+
+| Outcome | Meaning | Training admission |
+| --- | --- | --- |
+| `passed` | Task reports resolved (or full reward 1 when resolution is absent), without a reported execution failure | Include this row |
+| `oracle_failed` | Task returns an unresolved verifier result | Exclude; inspect logs for a bad sample/image, dependency drift, flakiness, or a solution failure |
+| `execution_error` | Task raises, reports incomplete execution/missing test output, or its Oracle command fails | Exclude pending triage/retry; do not call this a confirmed invalid sample |
+
+`status` remains `completed` or `error`; the summary separately counts
+`oracle_failed` rows. `solved_rate` retains all attempted rows as its denominator,
+including execution errors. An execution error cannot be admitted even if a
+partial verifier result says resolved. Partial rewards are not passing oracles.
+
+This is a conservative gate over the existing Task contract, not a new verifier.
+For example, SWE-rebench's script can return `eval_completed=true` after an
+installation/collection error because its final cleanup command succeeds. Such
+a row remains excluded when unresolved, but the runner cannot automatically infer
+its root cause. Read the retained `extra_info` and per-sample logs. No reward,
+patch, installation command or default dependency is changed by this gate.
+
+Keep the result JSON, input dataset identity/checksum, image digests and Task
+Config with the exported parquet. The JSON records the resolved sandbox per row,
+the config path and provider override; the exported rows themselves are unchanged.
+Reuse the same environment overrides for training. Do not add case-specific
+repairs or dependency constraints to the original-environment validation. A pass
+in a separately modified environment is separate evidence, and must never be
+combined with this run's passing rows. This command does not import historical
+result files or single-instance diagnostic output.
 
 After the oracle baseline passes, continue to [Run Agent Inference](agent-inference.md) with the same dataset and sandbox configuration.

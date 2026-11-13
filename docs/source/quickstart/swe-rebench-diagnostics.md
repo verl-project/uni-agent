@@ -6,6 +6,12 @@ command can omit the instance install, gold patch, test patch, or official test
 targets. A package listed by `pip` can also have an editable installation that
 points to a directory that no longer exists.
 
+For training admission, first use the existing [parallel Oracle runner](oracle-verification.md#export-oracle-passing-training-data)
+to validate the dataset in its original environment and export only passing rows.
+This diagnostic records evidence for triage; its `results.json` is not an admission
+input. Do not repair a failing sample's dependencies and count the repaired run
+as an original-environment pass.
+
 This guide uses the instance from [issue #267](https://github.com/verl-project/uni-agent/issues/267).
 It diagnoses one public Docker image; it does not compare a veFaaS deployment or
 explain the reporter's aggregate training reward.
@@ -102,37 +108,20 @@ build requirements leave setuptools unbounded above. Current setuptools
 Both original controls returned reward 0 with collection errors. These are
 environment failures, not evidence that the gold patch is incorrect.
 
-To test that hypothesis for this specific image, explicitly constrain its build
-tools in a separate run:
-
-```bash
-cat > build-constraints.txt <<'EOF'
-setuptools==75.8.0
-setuptools-scm==8.2.0
-wheel==0.45.1
-EOF
-
-python examples/inference/diagnose_swe_rebench.py \
-  --data-path ./data/swe_rebench_filtered.parquet \
-  --instance-id smarie__python-makefun-78 \
-  --image "$IMAGE" \
-  --build-constraints ./build-constraints.txt \
-  --output-dir ./diagnostic-constrained
-```
-
-This explicitly adds `PIP_CONSTRAINT` inside each container and saves the file
-with the results. It works with **pip 25.0 in this digest**; it is not a global
-SWE-rebench workaround. Newer pip versions have different build-constraint
-semantics; consult [pip's documentation](https://pip.pypa.io/en/stable/user_guide/#build-constraints)
-before adapting it. The install still uses the network, and these three pins
-are not a complete dependency lock.
+A separate investigation on 2026-11-05 constrained setuptools to 75.8.0,
+setuptools-scm to 8.2.0, and wheel to 0.45.1 through pip 25.0's `PIP_CONSTRAINT`.
+These are historical, instance-specific experimental inputs, not recommended
+training dependencies. The diagnostic example no longer offers dependency
+overrides. The experiment below cannot admit the original failing row; a changed
+image/environment would require a separately identified dataset and a fresh
+Oracle-validation run.
 
 Observed results with the same base commit, patches, test command and grader:
 
 | Environment | Gold | No patch |
 | --- | --- | --- |
 | Original image and install | reward 0; collection errors | reward 0; collection errors |
-| Same image with explicit build constraints | reward 1; 15 passed, 1 skipped | reward 0; 2 failed, 13 passed, 1 skipped |
+| Separate investigation with explicit build constraints | reward 1; 15 passed, 1 skipped | reward 0; 2 failed, 13 passed, 1 skipped |
 
 The constrained install recreates the editable installation at `/testbed` and
 generates the version module. The negative control fails exactly the two

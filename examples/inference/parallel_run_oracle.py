@@ -19,12 +19,47 @@ from tqdm import tqdm
 
 from uni_agent.logging import LogContext, sample_logging
 from uni_agent.tasks import TaskConfigResolver, get_task
+from uni_agent.tasks.base import TaskResult
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s", force=True)
 logger = logging.getLogger(__name__)
 
 GLOBAL_CONCURRENCY = int(os.getenv("GLOBAL_CONCURRENCY", 512))
 NUM_WORKERS = int(os.getenv("NUM_WORKERS", 8))
+
+
+def _summarize_result(result: TaskResult) -> dict:
+    """Keep verifier failures separate from reported execution failures.
+
+    These are admission outcomes, not root-cause diagnoses. In particular,
+    an unresolved verifier can still be caused by an invalid environment.
+    """
+    info = result.extra_info or {}
+    report = info.get("eval_report") or {}
+    oracle = info.get("agent") or {}
+    error = None
+    if info.get("eval_completed") is False:
+        error = "verifier reported incomplete execution"
+    elif report.get("found_eval_status") is False:
+        error = "verifier did not find test output markers"
+    elif oracle.get("mode") == "oracle" and oracle.get("exit_code") != 0:
+        error = "oracle command did not complete successfully"
+    elif result.finished is False:
+        error = "oracle task did not finish"
+    elif info.get("resolved") is None and result.reward is None:
+        error = "task returned no resolution or reward"
+
+    # A partial reward is not a passing oracle. Prefer an explicit resolution.
+    solved = not error and (info["resolved"] is True if "resolved" in info else result.reward == 1.0)
+    return {
+        "solved": solved,
+        "status": "error" if error else "completed",
+        "outcome": "execution_error" if error else ("passed" if solved else "oracle_failed"),
+        "reward": result.reward,
+        "eval_execution_time": info.get("eval_execution_time"),
+        "extra_info": info,
+        **({"error": error} if error else {}),
+    }
 
 
 class OracleEvalActor:
@@ -40,14 +75,10 @@ class OracleEvalActor:
             async with sample_logging.from_context(LogContext(log_id, log_path)):
                 try:
                     result = await get_task(task_config).run()
-                    info = result.extra_info or {}
-                    solved = bool(info.get("resolved", result.reward))
                     task_result = {
                         "instance_id": instance_id,
                         "log_id": log_id,
-                        "solved": solved,
-                        "eval_execution_time": info.get("eval_execution_time"),
-                        "status": "completed",
+                        **_summarize_result(result),
                     }
                     return task_result
                 except Exception as e:
@@ -58,6 +89,7 @@ class OracleEvalActor:
                         "solved": False,
                         "eval_execution_time": None,
                         "status": "error",
+                        "outcome": "execution_error",
                         "error": f"{type(e).__name__}: {e}",
                     }
 
@@ -112,11 +144,27 @@ def main() -> None:
         help="Root directory for per-sample logs; use an empty value to disable file logging.",
     )
     parser.add_argument("--result-path", default=None, help="Optional JSON path for summary and per-sample results.")
+    parser.add_argument(
+        "--passed-data-path",
+        type=Path,
+        default=None,
+        help="New parquet containing only passing rows from this run; requires --result-path.",
+    )
     args = parser.parse_args()
     if args.concurrency <= 0:
         parser.error("--concurrency must be positive")
     if args.num_workers <= 0:
         parser.error("--num-workers must be positive")
+    if args.limit is not None and args.limit <= 0:
+        parser.error("--limit must be positive")
+    if args.passed_data_path:
+        if not args.result_path:
+            parser.error("--passed-data-path requires --result-path for the admission audit")
+        args.passed_data_path = args.passed_data_path.expanduser()
+        if args.passed_data_path.exists():
+            parser.error("--passed-data-path must be a new file")
+        if args.passed_data_path.resolve() == Path(args.result_path).expanduser().resolve():
+            parser.error("--passed-data-path and --result-path must differ")
 
     ray.init()
 
@@ -132,8 +180,7 @@ def main() -> None:
     try:
         tasks = [_prepare_task(sample, resolver) for sample in samples]
     except (KeyError, TypeError, ValueError) as exc:
-        logger.error("failed to resolve Task Config: %s", exc)
-        return
+        parser.error(f"failed to resolve Task Config: {exc}")
 
     num_workers = min(args.num_workers, len(tasks), args.concurrency)
     worker_concurrency = _allocate_worker_concurrency(args.concurrency, num_workers)
@@ -164,7 +211,7 @@ def main() -> None:
         "error": 0,
     }
     solved_count = 0
-    unsolved_count = 0
+    oracle_failed_count = 0
     remaining = list(futures)
     with tqdm(
         total=len(futures),
@@ -177,11 +224,17 @@ def main() -> None:
             done, remaining = ray.wait(remaining, num_returns=1)
             for d in done:
                 res = ray.get(d)
-                results[fut_to_idx[d]] = res
+                row_index = fut_to_idx[d]
+                res["row_index"] = row_index
+                res["task_name"] = tasks[row_index]["name"]
+                res["sandbox"] = tasks[row_index]["sandbox"]
+                results[row_index] = res
                 status_counts[res["status"]] += 1
                 solved_count += int(res["solved"])
-                unsolved_count += int(not res["solved"])
-                pbar.set_postfix_str(f"solved={solved_count} unsolved={unsolved_count}")
+                oracle_failed_count += int(res["outcome"] == "oracle_failed")
+                pbar.set_postfix_str(
+                    f"solved={solved_count} oracle_failed={oracle_failed_count} error={status_counts['error']}"
+                )
                 pbar.update(1)
     wall = time.time() - begin_time
 
@@ -196,6 +249,7 @@ def main() -> None:
             _rule("oracle summary"),
             f"  solved     {solved_count:>4}   ({solved_rate:.1f}%)",
             f"  completed  {status_counts['completed']:>4}",
+            f"  oracle_failed {oracle_failed_count:>4}",
             f"  error      {status_counts['error']:>4}",
             f"  total      {all_num:>4}",
             _rule(f"avg {avg_exec_time:.1f}s | wall {wall:.1f}s"),
@@ -204,12 +258,12 @@ def main() -> None:
     )
     print(summary)
 
-    unsolved_instance_ids = [result["instance_id"] for result in results if not result["solved"]]
-    logger.info("unsolved instance ids: %s", unsolved_instance_ids)
+    unsolved_instance_ids = [result["instance_id"] for result in results if result["outcome"] == "oracle_failed"]
+    logger.info("oracle-failed instance ids: %s", unsolved_instance_ids)
 
     errored = [(result["instance_id"], result["error"]) for result in results if result.get("error")]
     if errored:
-        logger.warning(f"{len(errored)} samples raised exceptions (showing up to 10):")
+        logger.warning(f"{len(errored)} samples had execution errors (showing up to 10):")
         for name, err in errored[:10]:
             logger.warning(f"  {name}: {err}")
 
@@ -219,6 +273,10 @@ def main() -> None:
         "status_counts": status_counts,
         "solved": solved_count,
         "solved_rate": solved_rate / 100.0,
+        "oracle_failed": oracle_failed_count,
+        "task_config": args.task_config,
+        "sandbox_provider_override": os.getenv("SANDBOX_PROVIDER"),
+        "limit": args.limit,
         "average_eval_execution_time": avg_exec_time,
         "wall_time": wall,
     }
@@ -227,6 +285,18 @@ def main() -> None:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(json.dumps({"summary": summary_data, "results": results}, indent=2, default=str))
         logger.info("wrote oracle results to %s", output_path)
+    if args.passed_data_path:
+        _write_passed_dataset(dataset, results, args.passed_data_path)
+
+
+def _write_passed_dataset(dataset, results: list[dict], output_path: Path) -> None:
+    """Select original rows by position, never by potentially repeated instance ID."""
+    indices = [result["row_index"] for result in results if result["outcome"] == "passed"]
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    # Exclusive creation also protects against a path created during the run.
+    with output_path.open("xb") as output:
+        dataset.select(indices).to_parquet(output)
+    logger.info("wrote %s oracle-passing rows to %s", len(indices), output_path)
 
 
 if __name__ == "__main__":

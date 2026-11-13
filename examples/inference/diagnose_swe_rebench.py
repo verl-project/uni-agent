@@ -2,7 +2,7 @@
 
 Uses the normal SWEREBenchTask.run and reward implementation. The no-patch
 control substitutes an agent that makes no edits. Each control gets a new
-container; only the explicitly requested build constraints change its setup.
+container with the original instance installation, without dependency overrides.
 """
 
 from __future__ import annotations
@@ -28,16 +28,13 @@ class NoOpAgent(Agent):
 
 
 class RecordingDockerSandbox(DockerSandbox):
-    def __init__(self, *, output: Path, constraints: str | None, **kwargs):
+    def __init__(self, *, output: Path, **kwargs):
         super().__init__(**kwargs)
         self.output = output
-        self.constraints = constraints
         self.sequence = 0
 
     async def start(self):
         await super().start()
-        if self.constraints is not None:
-            await self.write_file("/tmp/uni-agent-build-constraints.txt", self.constraints)
         # Read the original image state before Task resets the repository.
         await self.exec_shell(
             "ls -ld /opt/conda /opt/miniconda3; git rev-parse HEAD; "
@@ -80,17 +77,11 @@ class DiagnosticTask(SWEREBenchTask):
 
 
 async def run_controls(args, metadata):
-    constraints = args.build_constraints.read_text() if args.build_constraints else None
     summary = {}
     for mode in ("gold", "no-patch"):
         output = args.output_dir / mode
         output.mkdir()
         run_args = ["--platform", args.platform, "--cpus", "2", "--memory", "4g"]
-        if constraints is not None:
-            # For the pip version in the example image. See the accompanying
-            # guide before using this with newer pip/build-constraint semantics.
-            run_args += ["--env", "PIP_CONSTRAINT=/tmp/uni-agent-build-constraints.txt"]
-            (output / "build-constraints.txt").write_text(constraints)
         config = SWEREBenchTaskConfig(
             metadata=metadata,
             run_oracle_solution=mode == "gold",
@@ -104,7 +95,6 @@ async def run_controls(args, metadata):
         (output / "task.json").write_text(config.model_dump_json(indent=2) + "\n")
         sandbox = RecordingDockerSandbox(
             output=output,
-            constraints=constraints,
             image=config.sandbox.image,
             runtime_timeout=config.sandbox.runtime_timeout,
             **config.sandbox.sandbox_kwargs,
@@ -130,7 +120,6 @@ def main():
     parser.add_argument(
         "--output-dir", type=Path, required=True, help="New directory; existing evidence is not overwritten"
     )
-    parser.add_argument("--build-constraints", type=Path, help="Explicit optional PIP_CONSTRAINT file for pip 25.0")
     args = parser.parse_args()
     if "@sha256:" not in args.image:
         parser.error("--image must be pinned by digest")
