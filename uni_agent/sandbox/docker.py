@@ -105,12 +105,17 @@ class DockerSandbox(Sandbox):
                 pass
             # Reap the client even if the caller is cancelled again during cleanup.
             cleanup = communication
+            cancelled_during_cleanup = False
             while not cleanup.done():
                 try:
                     await asyncio.shield(cleanup)
                 except asyncio.CancelledError:
-                    continue
+                    cancelled_during_cleanup = True
             cleanup.result()
+            # A timeout may have started cleanup before the caller cancelled.
+            # Preserve that later cancellation instead of making it retryable.
+            if cancelled_during_cleanup:
+                raise asyncio.CancelledError from None
             raise
 
         return ExecResult(
