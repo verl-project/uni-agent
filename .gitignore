@@ -122,6 +122,8 @@ ENV/
 
 # data
 *.parquet
+# exception: fabricated e2e fixtures (invented rows, no open-dataset content)
+!tests/uni_agent/agent_aware_router/e2e/testdata/*.parquet
 
 
 # local logs
