@@ -135,7 +135,11 @@ markers = [
     "gpu: run on gpu backend",
     "npu: run on npu backend",
     "level0: mark level0 case, always run in CI",
-    "level1: mark level1 case, full test, not included in CI"
+    "level1: mark level1 case, full test, not included in CI",
+    "card_one: mark tests using one npu",
+    "card_two: mark tests using two npu",
+    "card_four: mark tests using four npu",
+    "card_eight: mark tests using eight npu"
 ]
 
 # BEGIN GENERATED VERL UV POLICY
