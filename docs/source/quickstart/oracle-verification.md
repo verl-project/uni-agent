@@ -139,14 +139,20 @@ The outcomes distinguish admission decisions from root causes:
 `status` remains `completed` or `error`; the summary separately counts
 `oracle_failed` rows. `solved_rate` retains all attempted rows as its denominator,
 including execution errors. An execution error cannot be admitted even if a
-partial verifier result says resolved. Partial rewards are not passing oracles.
+partial verifier result says resolved. When `resolved` is absent, only reward
+`1.0` passes; partial rewards alone do not pass. An explicit `resolved` result
+takes priority over the numeric reward.
 
 This is a conservative gate over the existing Task contract, not a new verifier.
 For example, SWE-rebench's script can return `eval_completed=true` after an
 installation/collection error because its final cleanup command succeeds. Such
 a row remains excluded when unresolved, but the runner cannot automatically infer
-its root cause. Read the retained `extra_info` and per-sample logs. No reward,
-patch, installation command or default dependency is changed by this gate.
+its root cause. Read the retained `extra_info` and per-sample logs. SWE-bench
+and SWE-rebench stop before verification if the gold patch fails to apply; the
+Oracle audit records this as an `execution_error`, retaining the instance ID,
+exit code and command stdout/stderr. Such rows never enter the passing export.
+No scoring rule, patch content, installation command or default dependency is
+changed by this gate.
 
 Keep the result JSON, input dataset identity/checksum, image digests and Task
 Config with the exported parquet. The JSON records the resolved sandbox per row,

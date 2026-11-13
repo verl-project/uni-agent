@@ -11,9 +11,9 @@ from datasets import Dataset
 from examples.inference import parallel_run_oracle as runner
 from uni_agent.tasks.base import TaskResult
 
-pytestmark = [pytest.mark.cpu, pytest.mark.level0]
 
-
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "result, expected",
@@ -39,6 +39,7 @@ pytestmark = [pytest.mark.cpu, pytest.mark.level0]
         (TaskResult(reward=1, finished=False), "execution_error"),
         (TaskResult(), "execution_error"),
         (TaskResult(reward=0.5), "oracle_failed"),
+        (TaskResult(reward=0.5, extra_info={"resolved": True}), "passed"),
         (TaskResult(reward=1, extra_info={"resolved": False}), "oracle_failed"),
         (TaskResult(reward=1), "passed"),
     ],
@@ -63,6 +64,8 @@ async def test_actor_classifies_admission_and_retains_verifier_evidence(monkeypa
         assert record["error"] == "RuntimeError: sandbox unavailable"
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_main_exports_only_tested_passing_rows_with_duplicate_ids(monkeypatch, tmp_path):
     rows = [
         {
@@ -160,6 +163,8 @@ def test_main_exports_only_tested_passing_rows_with_duplicate_ids(monkeypatch, t
     assert all(row["sandbox"]["image"] == "original-image" for row in audit["results"])
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_zero_pass_export_preserves_schema_and_refuses_overwrite(tmp_path):
     source = Dataset.from_list([{"instance_id": "failed", "metadata": {"patch": "unchanged"}}])
     output = tmp_path / "empty.parquet"
@@ -173,6 +178,8 @@ def test_zero_pass_export_preserves_schema_and_refuses_overwrite(tmp_path):
     assert output.read_bytes() == before
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.parametrize("options", [["--limit", "0"], ["--passed-data-path", "new.parquet"]])
 def test_invalid_admission_arguments_fail_before_starting_ray(monkeypatch, options):
     init = AsyncMock()

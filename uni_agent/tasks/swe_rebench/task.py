@@ -99,7 +99,15 @@ class SWEREBenchTask(Task):
             if cfg.run_oracle_solution:
                 logger.info("applying gold patch to /testbed")
                 await sandbox.write_file("/tmp/gold_patch.patch", sample["patch"])
-                await sandbox.exec(["git", "apply", "--whitespace=fix", "/tmp/gold_patch.patch"], workdir="/testbed")
+                apply_result = await sandbox.exec(
+                    ["git", "apply", "--whitespace=fix", "/tmp/gold_patch.patch"], workdir="/testbed"
+                )
+                if apply_result.exit_code != 0:
+                    raise RuntimeError(
+                        f"failed to apply gold patch for instance_id={instance_id} "
+                        f"(exit_code={apply_result.exit_code})\n"
+                        f"stdout:\n{apply_result.stdout}\nstderr:\n{apply_result.stderr}"
+                    )
                 finished = True
             else:
                 agent = self.build_agent()
