@@ -87,9 +87,8 @@ class MetricsState:
     def incr_metric(self, node_id: str, key: str, delta: int | float = 1) -> int | float:
         """Apply a signed delta to one metric for one node (inflight ±1).
 
-        Routes to ``PerReplicaStore.incr`` (not ``refresh``) so a stateless delta
-        emitter (``InflightParser``) can move a running counter without
-        tracking the absolute value itself.
+        Routes to ``PerReplicaStore.incr`` (not ``refresh``) so callers can apply deltas
+        without tracking the absolute value themselves.
 
         Returns:
             The new value of ``key``.
@@ -99,8 +98,8 @@ class MetricsState:
     def incr_metrics(self, node_id: str, deltas: dict[str, int | float]) -> dict[str, int | float]:
         """Apply multiple signed deltas to one node under a single lock.
 
-        Batched variant of :meth:`incr_metric` for the ``on_acquire`` parser,
-        which emits several deltas per dispatch (INFLIGHT / DISPATCHED /
+        Batched variant of :meth:`incr_metric` for inflight accounting,
+        which applies several deltas per dispatch (INFLIGHT / DISPATCHED /
         PROMPT_LEN_SUM) — batching avoids one lock cycle per key on the hot path.
 
         Returns:

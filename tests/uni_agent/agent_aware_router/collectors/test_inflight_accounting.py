@@ -72,7 +72,7 @@ def assert_idle(store, replica="s0"):
 
 
 @pytest.mark.parametrize("existing", [False, True])
-def test_parse_failure_does_not_book_or_replace_dispatch(running, existing):
+def test_hash_failure_does_not_book_or_replace_dispatch(running, existing):
     callbacks, store, _ = running
     store.set_block_size(2)
     if existing:
@@ -158,21 +158,20 @@ def test_overlapping_acquires_are_serialized_through_booking_commit(running, mon
     finish = threading.Event()
     second_started = threading.Event()
     second_prepared = threading.Event()
-    original = collector._sink.prepare_inflight
+    original = collector._sink._inflight.apply
     calls = 0
 
-    def pause_after_context(event):
+    def pause_before_transition(event):
         nonlocal calls
-        context = original(event)
         calls += 1
         if calls == 1:
             entered.set()
             assert finish.wait(5)
         else:
             second_prepared.set()
-        return context
+        return original(event)
 
-    monkeypatch.setattr(collector._sink, "prepare_inflight", pause_after_context)
+    monkeypatch.setattr(collector._sink._inflight, "apply", pause_before_transition)
 
     def second():
         second_started.set()

@@ -17,20 +17,17 @@
 import pytest
 
 from uni_agent.agent_aware_router.collectors.parse import (
-    InflightBlockUpdate,
     KVCacheUpdate,
     MetricsUpdate,
     StickyUpdate,
 )
-from uni_agent.agent_aware_router.collectors.sink import InflightBookingUpdate
-from uni_agent.agent_aware_router.collectors.transport.callback import StatisticEvent
 from uni_agent.agent_aware_router.collectors.updater import StoreUpdater
 from uni_agent.agent_aware_router.store.capabilities import RequestState
 from uni_agent.agent_aware_router.store.data_store import DataStore
 from uni_agent.agent_aware_router.store.kv_cache_store import KVCacheStore
 from uni_agent.agent_aware_router.store.per_replica_store import PerReplicaStore
 from uni_agent.agent_aware_router.store.per_request_store import PerRequestStore
-from uni_agent.agent_aware_router.types import Layer, MetricKey
+from uni_agent.agent_aware_router.types import InflightUpdate, Layer, MetricKey
 
 pytestmark = [pytest.mark.cpu, pytest.mark.level0]
 
@@ -57,7 +54,7 @@ def application(monkeypatch):
         monkeypatch.setattr(cls, "_instance", None)
     store = DataStore()
     observer = Observer(store)
-    return store, observer, StoreUpdater(store.metrics, store.kv, store.requests, observer)
+    return store, observer, StoreUpdater(store, observer)
 
 
 def test_metrics_observer_receives_merged_and_incremented_post_write_values(application):
@@ -87,12 +84,15 @@ def test_pin_is_observed_only_after_its_marker_is_written(application, monkeypat
     store, observer, updater = application
 
     def record(count):
-        assert store.get_marker("r") == {"replica": "s0", "hashes": ["h"]}
+        assert store.get_marker("r")["replica"] == "s0"
+        assert store.requests.get_turn("r") == 1
         observer.calls.append(("blocks", count))
 
     monkeypatch.setattr(observer, "on_blocks_recorded", record)
-    updater.apply_inflight_blocks(InflightBlockUpdate("s0", "r", "pin", ["h"], True))
-    assert observer.calls == [("blocks", 1)]
+    store.set_block_size(2)
+    updater.apply_inflight(InflightUpdate("acquire", "s0", "r", (1, 2)))
+    assert observer.calls[0] == ("blocks", 1)
+    assert observer.calls[1][0] == "metrics"
 
 
 def test_kv_clear_remove_add_order_and_first_block_size_wins(application):
@@ -114,34 +114,59 @@ def test_kv_clear_remove_add_order_and_first_block_size_wins(application):
     assert store.get_block_size() == 16
 
 
-def test_release_unpins_acquire_marker_even_if_event_names_other_replica(application):
+def test_inflight_updater_delegates_without_interpreting_callback_state(application, monkeypatch):
+    from uni_agent.agent_aware_router.store.inflight import InflightMetricsApplied, InflightResult
+
     store, observer, updater = application
-    updater.apply_inflight_blocks(InflightBlockUpdate("s0", "r", "pin", ["a", "b"], True))
-    updater.apply_inflight_blocks(InflightBlockUpdate("s0", "other", "pin", ["a"], True))
-    assert observer.calls == [("blocks", 2), ("blocks", 0)]
-    updater.apply_inflight_blocks(InflightBlockUpdate("s1", "r", "unpin"))
-    assert store.inflight_block_count("s0") == 1
+    fact = InflightUpdate("release", "s0", "r")
+    deltas = {MetricKey.INFLIGHT_COUNT: -1}
+    values = {MetricKey.INFLIGHT_COUNT: 0}
+    seen = []
+
+    def apply(update):
+        assert update is fact
+        seen.append(update)
+        store.metrics.refresh_metrics({"s0": values})
+        return InflightResult([InflightMetricsApplied("s0", deltas, values)], blocks_recorded=2)
+
+    monkeypatch.setattr(store.inflight, "apply", apply)
+    updater.apply_inflight(fact)
+    assert seen == [fact]
+    assert observer.calls == [("blocks", 2), ("metrics", values)]
+
+
+def test_failed_inflight_transition_is_not_observed(application, monkeypatch):
+    store, observer, updater = application
+
+    def fail(update):
+        raise RuntimeError("transition failed")
+
+    monkeypatch.setattr(store.inflight, "apply", fail)
+    with pytest.raises(RuntimeError, match="transition failed"):
+        updater.apply_inflight(InflightUpdate("acquire", "s0", "r"))
+    assert observer.calls == []
+
+
+def test_observer_failure_cannot_leave_an_applied_dispatch_unbooked(application, monkeypatch):
+    store, observer, updater = application
+    store.set_block_size(2)
+    original = observer.on_metrics_applied
+
+    def fail(*args):
+        raise RuntimeError("observer unavailable")
+
+    monkeypatch.setattr(observer, "on_metrics_applied", fail)
+    with pytest.raises(RuntimeError, match="observer unavailable"):
+        updater.apply_inflight(InflightUpdate("acquire", "s0", "r", (1, 2)))
+    # DataStore finishes the transition before the updater starts observations.
+    assert store.requests.get_turn("r") == 1
+    assert store.get_metric("s0", MetricKey.INFLIGHT_COUNT) == 1
+    monkeypatch.setattr(observer, "on_metrics_applied", original)
+    updater.apply_inflight(InflightUpdate("release", "s0", "r"))
+    for key in (MetricKey.INFLIGHT_COUNT, MetricKey.INFLIGHT_TOKENS, MetricKey.INFLIGHT_TURN_SUM):
+        assert store.get_metric("s0", key) == 0
     assert store.get_marker("r") is None
-    assert store.get_marker("other")["hashes"] == ["a"]
-    updater.apply_inflight_blocks(InflightBlockUpdate("s1", "r", "unpin"))
-    assert store.inflight_block_count("s0") == 1
-
-
-def test_preparation_preserves_turn_and_stale_booking_without_touching_prefix_memo(application):
-    store, _, updater = application
-    store.requests.set_prefix_cache("r", {"hash_strs": ["memo"], "parent_hash": 1})
-    first = updater.prepare_inflight(StatisticEvent("on_acquire", "r", "s0", prompt_ids=(1, 2, 3)))
-    assert (first.turn, first.booked_len, first.stale) == (1, 0, None)
-    assert store.requests.get_turn("r") == 0
-    assert store.requests.get_prompt_length("r") == 0
-    updater.apply_inflight_booking(InflightBookingUpdate("r", "s0", first.turn, 3, True))
-    second = updater.prepare_inflight(StatisticEvent("on_acquire", "r", "s1", prompt_ids=(1, 2)))
-    assert (second.turn, second.booked_len, second.stale) == (2, 3, {"replica": "s0", "turn": 1})
-    updater.apply_inflight_booking(InflightBookingUpdate("r", "s1", second.turn, 2, True))
-    release = updater.prepare_inflight(StatisticEvent("on_release", "r", "s1"))
-    assert (release.turn, release.booked_len) == (2, 2)
-    assert store.get_per_request("r", "turn") == 2
-    assert store.requests.get_prefix_cache("r")["hash_strs"] == ["memo"]
+    assert store.inflight_block_count("s0") == 0
 
 
 def test_sticky_updates_keep_other_request_state(application):

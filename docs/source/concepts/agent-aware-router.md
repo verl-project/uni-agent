@@ -33,13 +33,14 @@ agent_aware_router/
    │    └── registry.py              ← config-type → runtime-strategy-class registry
    ├── store/                        ← singleton store
    │    ├── data_store.py            ← capability composition + compatibility facade
+   │    ├── inflight.py              ← dispatch accounting and pin lifecycle
    │    ├── capabilities.py          ← metrics / KV / named request-state operations
    │    ├── contracts.py             ← read interfaces for scoring and observation
    │    ├── kv_cache_store.py        ← prefix-hash chain + three-layer hit rate + in-flight pin book
    │    ├── per_replica_store.py / per_request_store.py
    ├── collectors/                   ← collect vLLM signals
    │    ├── collector.py/provider.py ← collector lifecycle
-   │    ├── sink.py/updater.py       ← typed application boundary + store bookkeeping
+   │    ├── sink.py/updater.py       ← typed application boundary + observation dispatch
    │    ├── parse/vllm/metrics.py  ← /metrics polling → dict
    │    ├── parse/vllm/kv.py, kv_event.py  ← kv-events zmq → incremental block state
    │    └── transport/{http,zmq,callback}.py
@@ -51,30 +52,41 @@ agent_aware_router/
 ### Collector application boundary
 
 `Collector` owns transport lifecycle and ordered parser dispatch. Its optional
-`sink` argument implements `UpdateSink`: one operation per typed update kind,
-plus inflight context preparation. Tests can inject a sink without constructing
-`DataStore`. The default `StoreUpdater` applies updates through three capabilities:
+`sink` argument implements `UpdateSink`: one operation per typed update kind.
+Tests can inject a sink without constructing `DataStore`. The default
+`StoreUpdater` applies KV, metrics and sticky updates and forwards inflight
+facts to `DataStore.inflight`. DataStore composes four capabilities:
 
 - `metrics`: merged polling snapshots and signed metric increments.
 - `kv`: cache residency, block references, and acquire-time pin markers.
-- `requests`: sticky bindings, turn/prompt bookings, and the prefix-hash memo.
+- `requests`: sticky bindings, historical turn/prompt memos and the prefix-hash memo.
+- `inflight`: acquire/release transitions, active bookings and their accounting.
 
-For inflight callbacks, `ContextualInflightParser` reads prospective booking
-context before calling the pure `InflightParser`. It appends a booking command
-only after parsing succeeds; the collector applies that command after the block
-and metric commands. A handler lock serializes context reads through application,
+`InflightParser` only decodes the callback into an `InflightUpdate` containing
+its action, replica, request ID and acquire prompt tokens. It receives no store
+context and emits no derived metric deltas or pin/booking commands. There is no
+contextual parser wrapper. DataStore resolves prefixes using its learned block
+size, allocates the next turn, reverses stale bookings and debits the acquire-time
+turn/prompt length on release. Direct DataStore callers use the same logic.
+`StoreUpdater` translates the returned applied effects into observer calls; it
+does not decide accounting amounts.
+
+DataStore resolves the new prefix before making any writes, so invalid token
+hashing leaves an old dispatch intact. It commits booking state after block and
+metric writes succeed, then returns the applied metric deltas and their post-write
+values for observation. A handler lock serializes parsing through application,
 including callbacks arriving from different threads. Each inflight collector owns
-its updater; this lock does not coordinate separate collectors or processes.
+one DataStore inflight capability through its updater; this lock does not
+coordinate separate collectors or processes sharing the underlying singletons.
 
-The updater keeps active dispatch bookings (replica, turn and prompt length)
-until release or re-acquire, independently of the request memo LRU and block
-markers. Duplicate/unknown releases are ignored, including releases from a stale
-replica after migration. Re-acquire reverses the old replica's count, tokens and
-turn contribution before charging the new dispatch, even when no blocks were
-pinned. Unpinning still uses the acquire-time block marker. Released bookings
-are removed; a missing release retains the active booking until re-acquire or
-updater teardown. Historical turn counts and other optional request memos remain
-LRU-bounded.
+The inflight capability keeps active dispatch bookings (replica, turn and prompt
+length) until release or re-acquire, independently of request memo LRU eviction
+and block markers. Duplicate/unknown releases are ignored, including releases
+from a stale replica after migration. Re-acquire reverses the old replica's count,
+tokens and turn contribution before charging the new dispatch, even without pinned
+blocks. Unpinning uses the acquire-time marker. A missing release retains the
+active booking until re-acquire or capability teardown. Historical turn counts
+and other optional request memos remain LRU-bounded.
 
 Callbacks carry no dispatch generation: a delayed release from an earlier turn
 on the *same* replica cannot be distinguished from the current turn's release.

@@ -24,10 +24,11 @@ from typing import Any
 
 from ..config.collector import CollectorConfig
 from ..debug import get_debug_var, is_debug_enabled
+from ..types import InflightUpdate
 from ..utils.knob import coerce_knob_value
-from .parse import InflightBlockUpdate, KVCacheUpdate, MetricsUpdate, Parser, StickyUpdate
+from .parse import KVCacheUpdate, MetricsUpdate, Parser, StickyUpdate
 from .parse.basic.inflight import InflightParser
-from .sink import ContextualInflightParser, InflightBookingUpdate, UpdateSink
+from .sink import UpdateSink
 from .transport.base import Transport
 
 logger = logging.getLogger(__name__)
@@ -52,7 +53,7 @@ class Collector:
             sink = default_updater(lambda: getattr(parser, "stats", None))
         self._transport = transport
         self._sink = sink
-        self._parser = ContextualInflightParser(parser, sink) if isinstance(parser, InflightParser) else parser
+        self._parser = parser
         self._future: Future | None = None
         self._loop: asyncio.AbstractEventLoop = asyncio.new_event_loop()
         self._loop_thread: threading.Thread | None = None
@@ -67,7 +68,7 @@ class Collector:
 
         def handler(raw_data: bytes | str, node_id: str) -> None:
             # Callback transports may enter from multiple caller threads. Keep
-            # context reads, parsing and all applications in one ordered unit.
+            # parsing and all applications in one ordered unit.
             with self._dispatch_lock:
                 dispatch(raw_data, node_id)
 
@@ -87,10 +88,8 @@ class Collector:
                     self._sink.apply_metrics(update)
                 elif isinstance(update, StickyUpdate):
                     self._sink.apply_sticky(update)
-                elif isinstance(update, InflightBlockUpdate):
-                    self._sink.apply_inflight_blocks(update)
-                elif isinstance(update, InflightBookingUpdate):
-                    self._sink.apply_inflight_booking(update)
+                elif isinstance(update, InflightUpdate):
+                    self._sink.apply_inflight(update)
                 else:
                     logger.debug(f"parser.parse returned an unknown update: {update}")
 

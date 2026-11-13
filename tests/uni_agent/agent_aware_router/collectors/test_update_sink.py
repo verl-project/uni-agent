@@ -18,17 +18,15 @@ import pytest
 
 from uni_agent.agent_aware_router.collectors.collector import Collector
 from uni_agent.agent_aware_router.collectors.parse import (
-    InflightBlockUpdate,
     KVCacheUpdate,
     MetricsUpdate,
     Parser,
     StickyUpdate,
 )
 from uni_agent.agent_aware_router.collectors.parse.basic.inflight import InflightParser
-from uni_agent.agent_aware_router.collectors.sink import InflightBookingUpdate, InflightContext
 from uni_agent.agent_aware_router.collectors.transport.base import Transport
 from uni_agent.agent_aware_router.collectors.transport.callback import StatisticEvent
-from uni_agent.agent_aware_router.types import MetricKey
+from uni_agent.agent_aware_router.types import InflightUpdate, MetricKey
 
 pytestmark = [pytest.mark.cpu, pytest.mark.level0]
 
@@ -36,7 +34,6 @@ pytestmark = [pytest.mark.cpu, pytest.mark.level0]
 class RecordingSink:
     def __init__(self):
         self.calls = []
-        self.context = InflightContext(turn=3, booked_len=17)
 
     def apply_kv(self, update):
         self.calls.append(("kv", update))
@@ -47,15 +44,8 @@ class RecordingSink:
     def apply_sticky(self, update):
         self.calls.append(("sticky", update))
 
-    def apply_inflight_blocks(self, update):
-        self.calls.append(("blocks", update))
-
-    def prepare_inflight(self, event):
-        self.calls.append(("context", event))
-        return self.context
-
-    def apply_inflight_booking(self, update):
-        self.calls.append(("booking", update))
+    def apply_inflight(self, update):
+        self.calls.append(("inflight", update))
 
 
 class FeedTransport(Transport):
@@ -104,41 +94,24 @@ def test_dispatch_preserves_single_mixed_and_empty_results(forbid_store):
     kv = KVCacheUpdate("node")
     metrics = MetricsUpdate("node", {MetricKey.INFLIGHT_COUNT: 1}, is_delta=True)
     sticky = StickyUpdate("put", "r", "node")
-    block = InflightBlockUpdate("node", "r", "unpin")
+    inflight = InflightUpdate("release", "node", "r")
     sink = RecordingSink()
-    run_collector(EchoParser(), sink, [kv, None, [], [sticky, block, metrics], object()])
-    assert sink.calls == [("kv", kv), ("sticky", sticky), ("blocks", block), ("metrics", metrics)]
+    run_collector(EchoParser(), sink, [kv, None, [], [sticky, inflight, metrics], object()])
+    assert sink.calls == [("kv", kv), ("sticky", sticky), ("inflight", inflight), ("metrics", metrics)]
 
 
-def test_inflight_uses_injected_booking_before_ordered_dispatch(forbid_store):
-    event = StatisticEvent("on_release", "r", "node")
+@pytest.mark.parametrize("event,action", [("on_acquire", "acquire"), ("on_release", "release")])
+def test_inflight_dispatches_facts_to_injected_sink_without_context(forbid_store, event, action):
+    payload = StatisticEvent(event, "r", "node")
     sink = RecordingSink()
-    run_collector(InflightParser(), sink, [event])
-    assert sink.calls == [
-        ("context", event),
-        ("blocks", InflightBlockUpdate("node", "r", "unpin")),
-        (
-            "metrics",
-            MetricsUpdate(
-                "node",
-                {
-                    MetricKey.INFLIGHT_COUNT: -1,
-                    MetricKey.COMPLETED_COUNT: 1,
-                    MetricKey.INFLIGHT_TURN_SUM: -3,
-                    MetricKey.INFLIGHT_TOKENS: -17,
-                },
-                is_delta=True,
-                request_id="r",
-            ),
-        ),
-        ("booking", InflightBookingUpdate("r", "node", 3, 0, False)),
-    ]
+    run_collector(InflightParser(), sink, [payload])
+    assert sink.calls == [("inflight", InflightUpdate(action, "node", "r"))]
 
 
 @pytest.mark.parametrize(
     "payload", [b"invalid", StatisticEvent("on_acquire"), StatisticEvent("on_servers_removed", replica_id="node")]
 )
-def test_ignored_inflight_payloads_do_not_request_or_apply_context(forbid_store, payload):
+def test_ignored_inflight_payloads_do_not_reach_sink(forbid_store, payload):
     sink = RecordingSink()
     run_collector(InflightParser(), sink, [payload])
     assert sink.calls == []

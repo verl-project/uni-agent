@@ -20,15 +20,16 @@ from typing import Any
 
 from ..types import Layer
 from .capabilities import KVState, MetricsState, RequestState
+from .inflight import InflightState
 from .kv_cache_store import KVCacheStore
 from .per_replica_store import PerReplicaStore
 from .per_request_store import PerRequestStore
 
 
 class DataStore:
-    """Composition root and compatibility facade for the three store capabilities.
+    """Composition root and compatibility facade for the store capabilities.
 
-    New code uses ``metrics``, ``kv`` and ``requests``. Flat methods remain
+    New code uses ``metrics``, ``kv``, ``requests`` and ``inflight``. Flat methods remain
     compatibility delegates, including legacy scratch access; production
     callers use named request operations instead of owning scratch keys.
 
@@ -49,6 +50,7 @@ class DataStore:
         self.metrics = MetricsState(self._metrics)
         self.kv = KVState(self._kv, self.metrics)
         self.requests = RequestState(self._per_request)
+        self.inflight = InflightState(self.metrics, self.kv, self.requests)
 
     # ── PerReplicaStore operations ─────────────────────────────────────────
 
@@ -250,9 +252,8 @@ class DataStore:
     def incr_metric(self, node_id: str, key: str, delta: int | float = 1) -> int | float:
         """Apply a signed delta to one metric for one node (inflight ±1).
 
-        Routes to ``PerReplicaStore.incr`` (not ``refresh``) so a stateless delta
-        emitter (``InflightParser``) can move a running counter without
-        tracking the absolute value itself.
+        Routes to ``PerReplicaStore.incr`` (not ``refresh``) so callers can apply deltas
+        without tracking the absolute value themselves.
 
         Returns:
             The new value of ``key``.
@@ -262,8 +263,8 @@ class DataStore:
     def incr_metrics(self, node_id: str, deltas: dict[str, int | float]) -> dict[str, int | float]:
         """Apply multiple signed deltas to one node under a single lock.
 
-        Batched variant of :meth:`incr_metric` for the ``on_acquire`` parser,
-        which emits several deltas per dispatch (INFLIGHT / DISPATCHED /
+        Batched variant of :meth:`incr_metric` for inflight accounting,
+        which applies several deltas per dispatch (INFLIGHT / DISPATCHED /
         PROMPT_LEN_SUM) — batching avoids one lock cycle per key on the hot path.
 
         Returns:

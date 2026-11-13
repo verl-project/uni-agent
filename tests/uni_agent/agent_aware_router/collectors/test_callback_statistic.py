@@ -28,17 +28,17 @@ import asyncio
 import pytest
 from conftest import BLOCK_SIZE
 
-from uni_agent.agent_aware_router.collectors.parse import InflightBlockUpdate, MetricsUpdate, StickyUpdate
-from uni_agent.agent_aware_router.collectors.parse.basic import inflight as inflight_module
+from uni_agent.agent_aware_router.collectors.parse import MetricsUpdate, StickyUpdate
 from uni_agent.agent_aware_router.collectors.parse.basic.inflight import InflightParser
 from uni_agent.agent_aware_router.collectors.parse.basic.sticky import StickyParser
 from uni_agent.agent_aware_router.collectors.transport.callback import (
     CallbackTransport,
     StatisticEvent,
 )
+from uni_agent.agent_aware_router.store import inflight as inflight_module
 from uni_agent.agent_aware_router.store.data_store import DataStore
 from uni_agent.agent_aware_router.strategies import route
-from uni_agent.agent_aware_router.types import MetricKey
+from uni_agent.agent_aware_router.types import InflightUpdate, MetricKey
 
 pytestmark = [pytest.mark.level0, pytest.mark.cpu]
 
@@ -79,103 +79,20 @@ class TestStickyParser:
 
 
 class TestInflightParser:
-    """The parser is pure: the collector gathers its state (turn, stale marker,
-    booked length, block size) and applies the scratch write-back; here the
-    acquire/release decisions are pinned directly on explicit state."""
+    """Decode facts without store context, hashing, or accounting decisions."""
 
-    def _parser(self) -> InflightParser:
-        return InflightParser()
+    @pytest.mark.parametrize("rid", ["r1", "", None])
+    @pytest.mark.parametrize("prompt", [(), (1,), tuple(range(32)), (-1, 2)])
+    def test_acquire_preserves_callback_facts(self, rid, prompt):
+        # Even hashing-invalid tokens are just decoded here. DataStore decides
+        # whether/how to resolve them using its current learned block size.
+        event = StatisticEvent("on_acquire", request_id=rid, replica_id="s0", prompt_ids=prompt)
+        assert InflightParser().parse(event, "ignored") == InflightUpdate("acquire", "s0", rid, prompt)
 
-    def test_on_acquire_unresolvable_chain_emits_netted_delta_only(self):
-        """No learned block size → nothing resolvable → netted deltas without a block command."""
-        updates = self._parser().parse(
-            StatisticEvent("on_acquire", request_id="r1", replica_id="s0", prompt_ids=tuple(range(42))),
-            "",
-            turn=1,
-        )
-        assert [type(u).__name__ for u in updates] == ["MetricsUpdate"]  # nothing resolvable → no block command
-        upd = updates[0]
-        assert upd.node_id == "s0"
-        assert upd.metrics == {
-            MetricKey.INFLIGHT_COUNT: 1,
-            MetricKey.INFLIGHT_TOKENS: 42,
-            MetricKey.DISPATCHED_COUNT: 1,
-            MetricKey.PROMPT_LEN_SUM: 42,
-            MetricKey.INFLIGHT_TURN_SUM: 1,  # this dispatch is turn 1
-        }
-        assert upd.is_delta is True
-        assert upd.request_id == "r1"
-
-    def test_on_acquire_emits_pin_from_the_resolved_chain(self):
-        """The parser computes the chain itself from the pushed block size (mark_resident on)."""
-        from uni_agent.agent_aware_router.utils.hash import get_prefix_hashes_incremental
-
-        prompt = list(range(2 * BLOCK_SIZE))
-        updates = self._parser().parse(
-            StatisticEvent("on_acquire", request_id="r1", replica_id="s0", prompt_ids=tuple(prompt)),
-            "",
-            turn=1,
-            block_size=BLOCK_SIZE,
-        )
-        assert [type(u).__name__ for u in updates] == ["InflightBlockUpdate", "MetricsUpdate"]
-        pin = updates[0]
-        assert pin.action == "pin"
-        assert pin.node_id == "s0"
-        assert pin.request_id == "r1"
-        hashes, _ = get_prefix_hashes_incremental(prompt, BLOCK_SIZE, 0, 0)
-        assert pin.block_hashes == [str(h) for h in hashes]
-        assert pin.mark_resident is True
-
-    def test_on_release_emits_unpin_and_netted_deltas(self):
-        updates = self._parser().parse(
-            StatisticEvent("on_release", replica_id="s0", request_id="r1"), "", turn=0, booked_len=0
-        )
-        assert [type(u).__name__ for u in updates] == ["InflightBlockUpdate", "MetricsUpdate"]
-        unpin = updates[0]
-        assert unpin.action == "unpin"
-        assert unpin.request_id == "r1"
-        assert unpin.block_hashes == []  # the collector resolves the set from the marker row
-        # no acquire-time rows → zeros folded in
-        assert updates[1].metrics == {
-            MetricKey.INFLIGHT_COUNT: -1,
-            MetricKey.COMPLETED_COUNT: 1,
-            MetricKey.INFLIGHT_TURN_SUM: 0,
-            MetricKey.INFLIGHT_TOKENS: 0,
-        }
-
-    def test_reacquire_nets_stale_booking_and_emits_stale_unpin(self):
-        """A still-held marker (stale) means the previous release was dropped: the
-        parser emits the unwind and nets the stale dispatch's booked tokens out."""
-        updates = self._parser().parse(
-            StatisticEvent("on_acquire", request_id="r1", replica_id="s0", prompt_ids=tuple(range(32))),
-            "",
-            turn=2,  # the stale dispatch was turn 1
-            stale={"replica": "s0", "turn": 1},
-            booked_len=64,  # its booked tokens
-            # block size not learned (default 0) → empty chain → no new pin command
-        )
-        actions = [u.action for u in updates if isinstance(u, InflightBlockUpdate)]
-        assert actions == ["stale_unpin"]
-        assert updates[1].node_id == "s0"
-        assert updates[1].metrics == {
-            MetricKey.INFLIGHT_COUNT: -1,
-            MetricKey.INFLIGHT_TOKENS: -64,
-            MetricKey.INFLIGHT_TURN_SUM: -1,
-        }
-        metrics = updates[-1].metrics
-        assert metrics[MetricKey.INFLIGHT_COUNT] == 1
-        assert metrics[MetricKey.INFLIGHT_TOKENS] == 32
-        assert metrics[MetricKey.INFLIGHT_TURN_SUM] == 2
-
-    def test_acquire_without_request_id_books_raw_len_only(self):
-        updates = self._parser().parse(StatisticEvent("on_acquire", replica_id="s0", prompt_ids=tuple(range(7))), "")
-        assert [type(u).__name__ for u in updates] == ["MetricsUpdate"]
-        assert updates[0].metrics == {
-            MetricKey.INFLIGHT_COUNT: 1,
-            MetricKey.INFLIGHT_TOKENS: 7,
-            MetricKey.DISPATCHED_COUNT: 1,
-            MetricKey.PROMPT_LEN_SUM: 7,
-        }  # no request_id → no turn / no block command
+    @pytest.mark.parametrize("rid", ["r1", "", None])
+    def test_release_contains_no_store_derived_debits(self, rid):
+        event = StatisticEvent("on_release", request_id=rid, replica_id="s0")
+        assert InflightParser().parse(event, "") == InflightUpdate("release", "s0", rid)
 
 
 class _FakeBalancer:
@@ -479,7 +396,7 @@ class TestInflightBlockPin:
 
     def test_reacquire_without_release_does_not_double_count(self, monkeypatch):
         """A dropped release: re-acquire unpins the stale set (warns) and nets the booked tokens."""
-        from uni_agent.agent_aware_router.collectors.parse.basic import inflight as inflight_parser_module
+        from uni_agent.agent_aware_router.store import inflight as inflight_parser_module
 
         prompt = list(range(4 * BLOCK_SIZE))
         collector, balancer, ds = self._start()
