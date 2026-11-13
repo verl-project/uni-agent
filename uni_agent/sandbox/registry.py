@@ -17,6 +17,7 @@ SANDBOX_REGISTRY: dict[str, type[Sandbox]] = {}
 #: provider name -> module that defines (and registers) it, for lazy loading.
 SANDBOX_MODULES: dict[str, str] = {
     "local": "uni_agent.sandbox.local",
+    "nono": "uni_agent.sandbox.nono",
     "docker": "uni_agent.sandbox.docker",
     "e2b": "uni_agent.sandbox.e2b",
     "modal": "uni_agent.sandbox.modal",
