@@ -18,6 +18,7 @@ gpu:
 npu:
   - '.github/workflows/ci-npu.yml'
   - '.github/workflows/upload_npu_assister.yml'
+  - 'tests/uni_agent/agent_aware_router/e2e/test_router_e2e_npu.py'
 cpu:
   - '!.github/workflows/ci-gpu.yml'
   - '!.github/workflows/ci-npu.yml'
