@@ -15,9 +15,10 @@
 """Shared types, imported by many internal modules."""
 
 from .emit_spec import EMIT_SPECS, EmitKey
+from .inflight import InflightUpdate
 from .layer import Layer
 from .metric_spec import METRIC_SPECS, MetricKey
 from .overload_mode import OverloadMode
 from .slow_cut import SlowCut
 
-__all__ = ["EmitKey", "EMIT_SPECS", "Layer", "MetricKey", "METRIC_SPECS", "OverloadMode", "SlowCut"]
+__all__ = ["EmitKey", "EMIT_SPECS", "InflightUpdate", "Layer", "MetricKey", "METRIC_SPECS", "OverloadMode", "SlowCut"]

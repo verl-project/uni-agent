@@ -52,7 +52,7 @@ class StatisticEvent:
             both as "the replica this event is about".
         server_ids: Removed server ids (``on_servers_removed``).
         prompt_ids: The acquiring request's input token ids (empty when the
-            caller forwarded none). The inflight parser derives the prompt
+            caller forwarded none). DataStore derives the prompt
             length from them and resolves the dispatch's block-hash chain to
             pin its blocks on the chosen replica (the router's held-block
             account). Set on ``on_acquire`` only.

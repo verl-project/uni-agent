@@ -66,6 +66,9 @@ class KVCAwareBalancer:
         self._strategy_summary = str(self._strategy)
 
         self._inflight: dict[str, int] = {sid: 0 for sid in self._servers}
+        # Named requests have one active dispatch, matching the inflight updater.
+        # Re-acquiring replaces that dispatch rather than adding drain work.
+        self._active_requests: dict[str, str] = {}
         max_num_seqs = self._rollout_config_int(rollout_config, "max_num_seqs", 256)
         max_num_batched_tokens = self._rollout_config_int(rollout_config, "max_num_batched_tokens", 2048)
         if hasattr(self._strategy, "set_capacity"):
@@ -275,14 +278,24 @@ class KVCAwareBalancer:
             "provider": type(self._provider).__name__,
             "strategies": [{"type": type(self._strategy).__name__}],  # legacy key; single strategy
             "route_calls": self._route_calls,
-            "sticky_size": self._store.sticky_status()["size"],
+            "sticky_size": self._store.requests.sticky_status()["size"],
             "total_inflight": self.get_total_inflight(),
         }
 
     def release_server(self, server_id: str, request_id: str | None = None) -> None:
-        """Release a server and notify statistic collectors."""
-        if self._inflight.get(server_id, 0) > 0:
-            self._inflight[server_id] -= 1
+        """Release the current named dispatch, or perform a legacy count-only release.
+
+        Without a dispatch generation, a delayed release on the same replica
+        cannot be distinguished from the current turn's release. Named callers
+        must forward request_id and preserve per-request callback ordering.
+        """
+        if request_id is None or self._active_requests.get(request_id) == server_id:
+            if request_id is not None:
+                del self._active_requests[request_id]
+            if self._inflight.get(server_id, 0) > 0:
+                self._inflight[server_id] -= 1
+        # Still notify collectors: removed replicas no longer count toward drain,
+        # but their outstanding store bookings may need this release for cleanup.
         self._fire("on_release", server_id, request_id)
 
     def acquire_server(self, request_id: str, prompt_ids: list[int] | None = None) -> tuple[str, Any]:
@@ -303,6 +316,11 @@ class KVCAwareBalancer:
         if not ranking:
             raise RuntimeError("no available replica to route to")
         server_id = ranking[0]
+        if request_id is not None:
+            previous = self._active_requests.get(request_id)
+            if previous is not None and self._inflight.get(previous, 0) > 0:
+                self._inflight[previous] -= 1
+            self._active_requests[request_id] = server_id
         self._inflight[server_id] = self._inflight.get(server_id, 0) + 1
         self._fire("on_acquire", request_id, server_id, prompt_ids)
         logger.debug(
@@ -335,7 +353,7 @@ class KVCAwareBalancer:
 
     def clear_sticky_cache(self) -> dict:
         """Clear sticky bindings while preserving prefix checkpoints."""
-        cleared = self._store.clear_sticky_bindings()
+        cleared = self._store.requests.clear_sticky_bindings()
         loads = dict(self._inflight)
         logger.info("clear_sticky_cache: cleared %s binding(s); server_loads=%s", cleared, loads)
         return {"cleared_entries": cleared, "server_loads": loads}
@@ -356,4 +374,6 @@ class KVCAwareBalancer:
             self._servers.pop(sid, None)
             self._inflight.pop(sid, None)
         if server_ids:
+            removed = set(server_ids)
+            self._active_requests = {rid: sid for rid, sid in self._active_requests.items() if sid not in removed}
             self._fire("on_servers_removed", server_ids)

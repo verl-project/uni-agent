@@ -25,6 +25,8 @@ import math
 import random
 from typing import Any, Protocol, runtime_checkable
 
+from ..store.contracts import RoutingState
+
 logger = logging.getLogger(__name__)
 
 
@@ -39,14 +41,14 @@ class RoutingStrategy(Protocol):
     def score(
         self,
         prompt_ids: list[int] | None,
-        store: Any,
+        store: RoutingState,
         replicas: list[Any],
         request_id: str | None = None,
     ) -> list[float]:
         """Score each replica. Larger is better; negatives are allowed.
 
         ``request_id`` enables sticky-session short-circuit: a strategy reads
-        the bound replica from ``store.get_sticky_binding(request_id)`` and may
+        the bound replica from ``store.requests.get_sticky_binding(request_id)`` and may
         return a pre-built score list that places it first when it is not
         overloaded (see ``KVCacheAwareStrategy``). Strategies that ignore
         stickiness accept ``request_id`` and proceed with their own scoring.
@@ -62,7 +64,7 @@ def _rank_key(score: float) -> float:
 def route(
     strategy: Any,
     prompt_ids: list[int] | None,
-    store: Any,
+    store: RoutingState,
     replicas: list[Any],
     request_id: str | None = None,
 ) -> list[str]:
@@ -75,7 +77,7 @@ def route(
     Args:
         strategy: the routing strategy that scores the replicas.
         prompt_ids: prompt token ids (content-aware routing; may be ``None``).
-        store: ``DataStore`` for metric + sticky-session queries.
+        store: Read capabilities and a request prefix-hash memo.
         replicas: ``[ReplicaInfo, ...]`` — candidate replicas.
         request_id: session id for sticky-session routing (may be ``None``).
 

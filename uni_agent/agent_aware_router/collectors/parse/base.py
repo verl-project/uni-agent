@@ -15,7 +15,7 @@
 """Parser abstract base and its update return types.
 
 A ``Parser`` turns a raw transport payload (bytes/str) into a structured
-update that the ``Collector`` applies to the store.  The update types
+update that the application sink applies to the store.  The update types
 (``KVCacheUpdate``, ``MetricsUpdate``) live here, next to the base, because
 they are the parser's output contract — the layer that both produces and
 consumes them.
@@ -27,7 +27,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
 
-from ...types import Layer
+from ...types import InflightUpdate, Layer
 
 
 @dataclass
@@ -35,7 +35,7 @@ class KVCacheUpdate:
     """Mutable accumulator for KVCacheStore updates, built by the parser.
 
     The parser dispatches each event to a handler that calls ``add``/``remove``
-    to fold blocks in; the collector then reads ``add_blocks``/``remove_blocks``
+    to fold blocks in; the updater then reads ``add_blocks``/``remove_blocks``
     to write the store.
 
     Attributes:
@@ -78,10 +78,8 @@ class MetricsUpdate:
         metrics: Dict of canonical_key → value.
         is_delta: When ``False`` (default, ``VLLMMetricsParser``) the values
             are absolute gauges applied via ``refresh`` (merge overwrite). When
-            ``True`` (``InflightParser``) the values are fully-netted signed
-            deltas applied via ``incr`` — the parser owns the netting (turn /
-            token folding, stale re-acquire recovery); the store owns the
-            running counters.
+            ``True`` the values are signed deltas applied via ``incr``.
+            Inflight accounting is derived inside DataStore, not by a parser.
         request_id: Optional routing request id carried with the update
             (``None`` when the update isn't request-scoped).
     """
@@ -90,37 +88,6 @@ class MetricsUpdate:
     metrics: dict[str, Any]
     is_delta: bool = False
     request_id: str | None = None
-
-
-@dataclass
-class InflightBlockUpdate:
-    """Structured command for the router's held-block book (``KVCacheStore``).
-
-    Emitted by ``InflightParser`` from the Balancer's ``on_acquire`` /
-    ``on_release`` callbacks. The parser owns the acquire/release protocol
-    decisions (when to pin, when a re-acquire must first unwind a stale pin);
-    the collector applies each command mechanically — pin/unpin sets for
-    ``unpin`` / ``stale_unpin`` come from the per-request marker row
-    (``KVCacheStore.pop_marker``), which is the ground truth of what the
-    dispatch pinned.
-
-    Attributes:
-        node_id: Replica the request landed on — the ``pin`` target;
-            informational for ``unpin`` / ``stale_unpin`` (whose replica comes
-            from the marker row and may be a previous one).
-        request_id: The routing request id the command is scoped to.
-        action: ``"pin"`` / ``"unpin"`` / ``"stale_unpin"``.
-        block_hashes: Resolved full-block prefix hash chain — ``pin`` only.
-        mark_resident: ``pin`` only — also record the blocks resident
-            (``KVCacheStore.record_dispatch_blocks``) so ``gpu_hit`` sees the
-            prefix immediately instead of trailing the kv-event stream.
-    """
-
-    node_id: str
-    request_id: str
-    action: str
-    block_hashes: list[str] = field(default_factory=list)
-    mark_resident: bool = False
 
 
 @dataclass
@@ -151,16 +118,16 @@ class Parser(ABC):
     """Abstract base for data parsers.
 
     Subclasses implement ``parse()`` with their backend-specific parsing logic,
-    returning a structured update the ``Collector`` applies to the store — a
-    single ``KVCacheUpdate`` / ``MetricsUpdate`` / ``StickyUpdate``, a
-    ``list`` of them (mixed with ``InflightBlockUpdate``), or ``None`` on
+    returning a structured update the application sink applies to the store — a
+    single ``KVCacheUpdate`` / ``MetricsUpdate`` / ``StickyUpdate`` /
+    ``InflightUpdate``, a ``list`` of them, or ``None`` on
     failure/skip.
     """
 
     @abstractmethod
     def parse(
         self, raw_data: bytes | str | Any, node_id: str
-    ) -> KVCacheUpdate | MetricsUpdate | StickyUpdate | InflightBlockUpdate | list | None:
+    ) -> KVCacheUpdate | MetricsUpdate | StickyUpdate | InflightUpdate | list | None:
         """Parse raw data and return a structured update (or list of them).
 
         Args:
