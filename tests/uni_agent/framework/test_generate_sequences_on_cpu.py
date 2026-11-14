@@ -2258,3 +2258,57 @@ async def test_runner_reward_context_survives_tq_without_changing_training_field
         },
     ]
     assert "runner_reward_info" not in framework._trajectory_meta(trajectories[0])
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+@pytest.mark.parametrize("validate", [False, True])
+async def test_per_prompt_rollout_n_generates_only_requested_prefix(fake_tq, session_tq_schema, validate):
+    counts = [1, 3]
+    runtime = _FakeGatewayManager(
+        {f"session-sample-{i}-rollout-{j}": [_trajectory()] for i, count in enumerate(counts) for j in range(count)}
+    )
+    framework = await _build_framework_with_agent_runners(
+        agent_runners={"runner": _inline_runner_config(_async_noop_runner)},
+        gateway_manager=runtime,
+        n=8,
+        val_n=4,
+    )
+    prompts = _build_prompts(validate=validate)
+    tu.assign_non_tensor_stack(prompts, "__rollout_n__", counts)
+    await framework.generate_sequences(prompts)
+
+    assert len(runtime.created_sessions) == sum(counts)
+    assert {key for put in fake_tq.batch_puts for key in put["keys"]} == {
+        f"uid-{i}_{j}_0" for i, count in enumerate(counts) for j in range(count)
+    }
+    assert {put["key"] for put in _session_puts(fake_tq)} == {
+        f"uid-{i}_{j}" for i, count in enumerate(counts) for j in range(count)
+    }
+    assert all("__rollout_n__" not in put["fields"] for put in fake_tq.batch_puts)
+    assert list(tu.get(prompts, "__rollout_n__")) == counts
+    assert framework._rollout_config.n == 8
+    assert framework._rollout_config.val_kwargs.n == 4
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_prompt_failure_counts_requested_sessions(fake_tq, monkeypatch):
+    framework = await _build_framework_with_agent_runners(
+        agent_runners={"runner": _inline_runner_config(_async_noop_runner)},
+        gateway_manager=_FakeGatewayManager({}),
+        n=8,
+    )
+
+    async def fail_prompt(**kwargs):
+        assert "__rollout_n__" not in kwargs["sample_fields"]
+        raise RuntimeError("prompt setup failed")
+
+    monkeypatch.setattr(framework, "_run_prompt_rollouts", fail_prompt)
+    prompts = _build_prompts()
+    tu.assign_non_tensor_stack(prompts, "__rollout_n__", [1, 3])
+    stats = await framework._run_batch_rollouts(prompts, global_steps=7, partition_id="train", num_sessions=8)
+    assert stats["num_failed_sessions"] == 4
+    assert stats["num_failed_uids"] == 2

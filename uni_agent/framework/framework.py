@@ -575,17 +575,21 @@ class GatewayAgentFramework(AgentFramework):
         if num_sessions <= 0:
             raise ValueError(f"num_sessions must be positive, got {num_sessions}")
 
-        # Batch layer: each sample/prompt owns its own group of rollout.n sessions.
+        # Consume the standard per-prompt repeat override before passing fields to runners/TQ.
+        samples = [self._extract_sample_fields(prompts=prompts, sample_index=i) for i in range(len(prompts))]
+        session_counts = [sample.pop("__rollout_n__", num_sessions) for sample in samples]
+
+        # Batch layer: each sample/prompt owns its own group of sessions (rollout.n by default).
         # Prompt tasks are isolated so one prompt failure does not drop the whole batch.
         tasks = []
         for sample_index in range(len(prompts)):
             tasks.append(
                 self._run_prompt_rollouts(
-                    sample_fields=self._extract_sample_fields(prompts=prompts, sample_index=sample_index),
+                    sample_fields=samples[sample_index],
                     sample_index=sample_index,
                     global_steps=global_steps,
                     partition_id=partition_id,
-                    num_sessions=num_sessions,
+                    num_sessions=session_counts[sample_index],
                 )
             )
         outcomes = await asyncio.gather(*tasks, return_exceptions=True)
@@ -600,9 +604,9 @@ class GatewayAgentFramework(AgentFramework):
             "num_failed_uids": 0,
             "failure_reasons": failure_reasons,
         }
-        for outcome in outcomes:
+        for count, outcome in zip(session_counts, outcomes, strict=True):
             if isinstance(outcome, Exception):
-                stats["num_failed_sessions"] += num_sessions
+                stats["num_failed_sessions"] += count
                 stats["num_failed_uids"] += 1
                 failure_reasons.append(_short_failure_reason(outcome))
                 continue
@@ -627,7 +631,7 @@ class GatewayAgentFramework(AgentFramework):
         partition_id: str,
         num_sessions: int,
     ) -> dict:
-        """Run ``rollout.n`` independent sessions for one prompt and persist their outputs."""
+        """Run the requested number of independent sessions for one prompt and persist their outputs."""
         uid = sample_fields.get("uid")
         if uid is None:
             raise ValueError("GatewayAgentFramework requires prompts['uid'] for TransferQueue output")
@@ -637,7 +641,7 @@ class GatewayAgentFramework(AgentFramework):
             sample_fields=sample_fields,
         )
 
-        # Prompt layer: rollout.n sessions race independently for the same uid.
+        # Prompt layer: the requested sessions race independently for the same uid.
         # Successful sessions are written to TQ; failed sessions only affect this uid's stats.
         await tq.async_kv_put(key=uid, partition_id=partition_id, tag={"status": "running"})
         tasks = [
