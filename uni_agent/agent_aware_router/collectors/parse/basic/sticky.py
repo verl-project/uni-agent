@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 class StickyParser(Parser):
     """Parse ``StatisticEvent`` → ``StickyUpdate`` for sticky bindings."""
 
-    def parse(self, raw_data: bytes | str | Any, node_id: str) -> StickyUpdate | None:
+    def parse(self, raw_data: bytes | str | Any, replica_id: str) -> StickyUpdate | None:
         """Dispatch on the event type; ignore non-event payloads."""
         if not isinstance(raw_data, StatisticEvent):
             return None

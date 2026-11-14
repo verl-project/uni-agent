@@ -38,7 +38,7 @@ class InflightParser(Parser):
     Args:
         raw_data: The raw callback payload — an ``on_acquire`` / ``on_release``
             ``StatisticEvent``; anything else is ignored (``None``).
-        node_id: Source endpoint id (empty for the callback transport — the
+        replica_id: Source endpoint id (empty for the callback transport — the
             event carries its own replica).
         turn: The request's turn after the collector's increment (acquire) or
             its stored turn (release); 0 when unattributable.
@@ -53,7 +53,7 @@ class InflightParser(Parser):
     def parse(
         self,
         raw_data: bytes | str | Any,
-        node_id: str,
+        replica_id: str,
         *,
         turn: int = 0,
         stale: dict[str, Any] | None = None,
@@ -98,7 +98,7 @@ class InflightParser(Parser):
             logger.debug(
                 "dispatch (on_acquire) missing request_id — skipping turn and block pinning (raw token count booked)"
             )
-            return [MetricsUpdate(node_id=event.replica_id, metrics=metrics, is_delta=True)]
+            return [MetricsUpdate(replica_id=event.replica_id, metrics=metrics, is_delta=True)]
 
         metrics[MetricKey.INFLIGHT_TURN_SUM] = turn
         # A still-held marker means the previous dispatch never released (a
@@ -110,7 +110,7 @@ class InflightParser(Parser):
                 f"— unpinning the previous block set"
             )
             updates.append(
-                InflightBlockUpdate(node_id=event.replica_id, request_id=event.request_id, action="stale_unpin")
+                InflightBlockUpdate(replica_id=event.replica_id, request_id=event.request_id, action="stale_unpin")
             )
             metrics[MetricKey.INFLIGHT_TOKENS] = plen - booked_len
             # The dropped release's INFLIGHT_COUNT -1 never arrived either; fold
@@ -125,7 +125,7 @@ class InflightParser(Parser):
         if hash_strs:
             updates.append(
                 InflightBlockUpdate(
-                    node_id=event.replica_id,
+                    replica_id=event.replica_id,
                     request_id=event.request_id,
                     action="pin",
                     block_hashes=hash_strs,
@@ -133,7 +133,7 @@ class InflightParser(Parser):
                 )
             )
         updates.append(
-            MetricsUpdate(node_id=event.replica_id, metrics=metrics, is_delta=True, request_id=event.request_id)
+            MetricsUpdate(replica_id=event.replica_id, metrics=metrics, is_delta=True, request_id=event.request_id)
         )
         return updates
 
@@ -149,11 +149,13 @@ class InflightParser(Parser):
         if event.request_id is None:
             logger.debug("release (on_release) missing request_id — skipping turn/token/block subtraction")
         else:
-            updates.append(InflightBlockUpdate(node_id=event.replica_id, request_id=event.request_id, action="unpin"))
+            updates.append(
+                InflightBlockUpdate(replica_id=event.replica_id, request_id=event.request_id, action="unpin")
+            )
             metrics[MetricKey.INFLIGHT_TURN_SUM] = -turn
             metrics[MetricKey.INFLIGHT_TOKENS] = -booked_len
         updates.append(
-            MetricsUpdate(node_id=event.replica_id, metrics=metrics, is_delta=True, request_id=event.request_id)
+            MetricsUpdate(replica_id=event.replica_id, metrics=metrics, is_delta=True, request_id=event.request_id)
         )
         return updates
 

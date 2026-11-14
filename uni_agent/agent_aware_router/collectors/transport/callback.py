@@ -36,8 +36,8 @@ from ...collectors.transport.base import Transport
 class StatisticEvent:
     """Packed Balancer callback — the payload the callback transport delivers.
 
-    The three Balancer hook points do not share a stable ``node_id`` and differ
-    in arity, so they cannot be forced into ``(raw, node_id)``:
+    The three Balancer hook points do not share a stable ``replica_id`` and differ
+    in arity, so they cannot be forced into ``(raw, replica_id)``:
 
     - ``on_acquire(request_id, chosen, prompt_ids)``  → two strings + a token list
     - ``on_release(server_id, request_id)``           → string + optional id
@@ -85,8 +85,8 @@ class CallbackTransport(Transport):
         """Register three callbacks on the Balancer; no loop, returns at once.
 
         Each callback packs its arguments into a ``StatisticEvent`` and hands
-        it to ``handler`` with an empty ``node_id`` (the event carries its own
-        ids; the sticky/inflight parsers ignore ``node_id``).
+        it to ``handler`` with an empty ``replica_id`` (the event carries its own
+        ids; the sticky/inflight parsers ignore ``replica_id``).
         """
         balancer = self._balancer
 

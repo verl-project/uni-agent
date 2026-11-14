@@ -37,6 +37,11 @@ class KVCacheStore:
     def __init__(self) -> None:
         self.block_size: int | None = None
         self.replicas_by_block: dict[str, set[str]] = {}
+        # Track GPU ownership in both directions so replica cleanup stays local.
+        self._resident_blocks_by_replica: dict[str, set[str]] = {}
+        # An invalidated replica's resident index is rebuilt by KV events, but
+        # cannot serve prefix-hit queries until the transport confirms readiness.
+        self._rebuilding_replicas: set[str] = set()
         # Per-layer per-replica block counts, maintained alongside replicas_by_block.
         self._replica_layer_counts: dict[Layer, dict[str, int]] = {
             Layer.GPU: {},
@@ -67,27 +72,58 @@ class KVCacheStore:
 
     # ── Replica management ──────────────────────────────────────────────
 
+    def invalidate_replica(self, replica_id: str) -> None:
+        """Discard untrusted resident state and gate hits until the replica is ready.
+
+        In-flight references and request markers belong to router requests and
+        survive transport interruptions, independently of the resident index.
+        """
+        with self._lock:
+            self._rebuilding_replicas.add(replica_id)
+            self._clear_resident_blocks_locked(replica_id)
+
+    def mark_replica_ready(self, replica_id: str) -> None:
+        """Allow prefix hits from the replica's rebuilt resident index."""
+        with self._lock:
+            self._rebuilding_replicas.discard(replica_id)
+
+    def enable_dispatch_estimates(self, replica_id: str) -> None:
+        """Discard untrusted residency and allow new dispatch estimates.
+
+        Preserve live request references and markers while replacing any old
+        or partial replay view with an empty resident index.
+        """
+        with self._lock:
+            self._clear_resident_blocks_locked(replica_id)
+            self._rebuilding_replicas.discard(replica_id)
+
+    def clear_resident_blocks(self, replica_id: str) -> None:
+        """Clear residency while preserving request accounting and rebuilding state."""
+        with self._lock:
+            self._clear_resident_blocks_locked(replica_id)
+
     def clear_replica(self, replica_id: str) -> None:
         """Forget everything this replica accounts for: resident blocks, block refs, markers.
 
-        O(n) in the number of unique blocks, but replica count is typically small (< 100).
+        Resident cleanup visits this replica's blocks; marker cleanup visits
+        the in-flight request rows.
         """
         with self._lock:
-            stale_hashes: list[str] = []
-            for bh, replicas in self.replicas_by_block.items():
-                if replica_id not in replicas:
-                    continue
-                replicas.discard(replica_id)
-                if not replicas:
-                    stale_hashes.append(bh)
-            for bh in stale_hashes:
-                del self.replicas_by_block[bh]
-            for layer_counts in self._replica_layer_counts.values():
-                layer_counts.pop(replica_id, None)
+            self._clear_resident_blocks_locked(replica_id)
             self._inflight_blocks.pop(replica_id, None)
             stale_pins = [rid for rid, marker in self._inflight_pins.items() if marker["replica"] == replica_id]
             for rid in stale_pins:
                 del self._inflight_pins[rid]
+
+    def _clear_resident_blocks_locked(self, replica_id: str) -> None:
+        """Remove one replica's reverse-index entries and counts; caller holds the lock."""
+        for bh in self._resident_blocks_by_replica.pop(replica_id, ()):
+            replicas = self.replicas_by_block[bh]
+            replicas.discard(replica_id)
+            if not replicas:
+                del self.replicas_by_block[bh]
+        for layer_counts in self._replica_layer_counts.values():
+            layer_counts.pop(replica_id, None)
 
     # ── Block management ────────────────────────────────────────────────
 
@@ -119,6 +155,8 @@ class KVCacheStore:
         if not hash_strs:
             return 0
         with self._lock:
+            if replica_id in self._rebuilding_replicas:
+                return 0
             return self._add_blocks_locked(replica_id, hash_strs, Layer.GPU)
 
     def remove_blocks(self, replica_id: str, block_hashes: Iterable[str], layer: Layer = Layer.GPU) -> None:
@@ -147,6 +185,7 @@ class KVCacheStore:
                     self.replicas_by_block[bh] = {replica_id}
                 else:
                     replicas.add(replica_id)
+                self._resident_blocks_by_replica.setdefault(replica_id, set()).add(bh)
             layer_counts[replica_id] = layer_counts.get(replica_id, 0) + 1
             added += 1
         return added
@@ -162,6 +201,10 @@ class KVCacheStore:
                 replicas.discard(replica_id)
                 if not replicas:
                     del self.replicas_by_block[bh]
+                owned = self._resident_blocks_by_replica[replica_id]
+                owned.discard(bh)
+                if not owned:
+                    del self._resident_blocks_by_replica[replica_id]
             layer_counts[replica_id] = layer_counts.get(replica_id, 0) - 1
 
     # ── Block reference counts and per-request markers ───────────────────
@@ -245,7 +288,7 @@ class KVCacheStore:
 
     def get_layer_prefix_hit_rate(
         self,
-        node_id: str,
+        replica_id: str,
         hash_strs: list[str],
         layer: Layer = Layer.GPU,
     ) -> float:
@@ -265,15 +308,17 @@ class KVCacheStore:
         if layer != Layer.GPU or self.block_size is None:
             return 0.0
         with self._lock:
-            return self._gpu_hit_rate_locked(node_id, hash_strs)
+            if replica_id in self._rebuilding_replicas:
+                return 0.0
+            return self._gpu_hit_rate_locked(replica_id, hash_strs)
 
-    def _gpu_hit_rate_locked(self, node_id: str, hash_strs: list[str]) -> float:
+    def _gpu_hit_rate_locked(self, replica_id: str, hash_strs: list[str]) -> float:
         """Walk the reverse index along the hash chain. Caller holds ``_lock``."""
         if not hash_strs:
             return 0.0
         matched = 0
         for i, hs in enumerate(hash_strs):
-            if not self._is_cached_locked(node_id, hs):
+            if not self._is_cached_locked(replica_id, hs):
                 break  # chain break — this node doesn't cache this hash
             matched = i + 1
         return matched / len(hash_strs)

@@ -21,8 +21,12 @@ not from the manager.
 
 from __future__ import annotations
 
+import logging
+
 from ..config.collector import CollectorConfig
 from .collector import Collector, get_collector
+
+logger = logging.getLogger(__name__)
 
 
 class CollectorManager:
@@ -32,8 +36,8 @@ class CollectorManager:
         collectors_config: ``CollectorConfig`` — connection tuning parameters.
         collection_names: List of collection names to initialize (e.g.
             ``["vllm_metrics", "vllm_zmq"]``).
-        server_addresses: ``{node_id: ip:port}`` for HTTP transport.
-        kv_event_endpoints: ``{node_id: [sub_addr, replay_addr]}`` for ZMQ transport.
+        server_addresses: ``{replica_id: ip:port}`` for HTTP transport.
+        kv_event_endpoints: ``{replica_id: [sub_addr, replay_addr]}`` for ZMQ transport.
         balancer_handler: The Balancer, forwarded to ``get_collector`` so the
             ``sticky_stat`` / ``inflight_stat`` collectors can build a
             ``CallbackTransport`` that registers its callbacks. Ignored by the
@@ -67,6 +71,13 @@ class CollectorManager:
             collector.start()
 
     def stop(self) -> None:
-        """Stop all collectors."""
+        """Attempt every collector's cleanup, then report any failures for retry."""
+        errors: list[Exception] = []
         for collector in self._collectors:
-            collector.stop()
+            try:
+                collector.stop()
+            except Exception as exc:
+                errors.append(exc)
+                logger.exception("Failed to stop collector %s", type(collector).__name__)
+        if errors:
+            raise RuntimeError(f"Failed to stop {len(errors)} collector(s)") from errors[0]
