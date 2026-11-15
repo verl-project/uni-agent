@@ -29,7 +29,12 @@ Task sample (`gui` task, ReAct agent, docker sandbox with the image above):
 The agent needs a vision-language model behind its endpoint. Screenshots reach it as a
 user message with `image_url` parts after each turn's tool results.
 
-See the [GUI agent quickstart](../../docs/source/quickstart/gui-agent.md) for the full walkthrough.
+## Tips
+
+- **Coordinates.** Qwen-VL models answer on a 0-1000 grid, so use `coordinate_space: relative_1000`. Models that answer in screen pixels use the default `pixel`.
+- **Prompt.** Small models may click without looking. Tell the model to take a screenshot first and to check the result before finishing.
+- **Parallel episodes.** Each episode needs its own X server. Use a per-session Sandbox such as Docker; with the `local` provider every episode shares one display.
+- **Training.** Screenshots that first appear mid-episode are handled by the [Gateway](../../docs/source/concepts/gateway-and-trajectories.md) when the model has a multimodal processor, so the same Task can run under RL rollouts with a vision-language policy.
 
 ## Run it against a model
 
