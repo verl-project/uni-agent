@@ -1,0 +1,170 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+
+language: "en-US"
+tone_instructions: >
+  Review Uni-Agent for distributed correctness, async/Ray cleanup, session
+  integrity, config compatibility, and layer ownership. Ignore Ruff style
+  nits. Be concise: issue, impact, minimal fix only; omit tool traces and
+  repeated context. Use English.
+
+reviews:
+  profile: "chill"
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  review_details: false
+  collapse_walkthrough: true
+  review_status: true
+  changed_files_summary: false
+  sequence_diagrams: false
+  estimate_code_review_effort: false
+  assess_linked_issues: false
+  related_issues: false
+  related_prs: false
+  suggested_labels: false
+  suggested_reviewers: false
+  in_progress_fortune: false
+  enable_prompt_for_ai_agents: false
+
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - ".*"
+
+  pre_merge_checks:
+    docstrings:
+      mode: "off"
+    title:
+      mode: "off"
+    description:
+      mode: "off"
+    issue_assessment:
+      mode: "off"
+
+  finishing_touches:
+    docstrings:
+      enabled: false
+    unit_tests:
+      enabled: false
+
+  path_filters:
+    - "!verl/**"
+    - "!assets/**"
+    - "!docs/source/assets/**"
+    - "!uni_agent/agent_aware_router/insight/*.json"
+    - "!uni_agent/version/version"
+
+  path_instructions:
+    - path: "uni_agent/framework/**"
+      instructions: |
+        Respect layer ownership: Framework orchestrates rollouts, isolates
+        failures, and delivers training records; reward belongs to Task and
+        protocol encoding belongs to Gateway.
+        Across Ray workers or tasks, never assume mutable Python state is
+        shared. Keep global concurrency limits and Gateway load accounting
+        truly global or explicitly synchronized.
+        On timeout, cancellation, or failure, cancel remote work and finalize
+        or abort each Gateway session exactly once. Release concurrency slots,
+        sandboxes, actors, and TransferQueue state.
+        Require regression tests for dispatch fairness, worker placement,
+        batch splitting, timeouts, cancellation, and cleanup.
+
+    - path: "uni_agent/gateway/**"
+      instructions: |
+        Preserve session routing and load accounting: reserve before awaiting
+        remote creation, roll back failed creation, and release exactly once.
+        Preserve the ACTIVE to FINALIZED or ABORTED state machine and keep
+        session, sample, and trajectory identities aligned.
+        Treat token IDs, response masks, rollback/coalesce behavior, routed
+        experts, and sampling parameters as training-data contracts.
+        Keep OpenAI and Anthropic adapters consistent with the tokenizer and
+        chat template used by verl.
+
+    - path: "uni_agent/sandbox/**"
+      instructions: |
+        Sandbox owns execution resources. Failed or cancelled startup must
+        clean up partial resources without hiding the original exception.
+        Startup concurrency must use a shared semaphore per event loop.
+        Preserve SANDBOX_STARTUP_TIMEOUT and SANDBOX_STOP_TIMEOUT semantics,
+        including nonpositive values disabling the timeout.
+        Wrap blocking provider SDK calls without blocking the event loop and
+        release containers, channels, tunnels, and mounts on every exit path.
+
+    - path: "uni_agent/tasks/**"
+      instructions: |
+        Task owns episode configuration, metadata, reward, and verification.
+        Keep TaskConfig strict and preserve polymorphic AgentConfig round trips.
+        TaskResult reward and accuracy must be finite numbers, finished must be
+        boolean or null, and extra_info must remain a dictionary.
+        Flag public Task or Sample Config changes that need migration notes,
+        documentation, examples, or a BREAKING designation.
+
+    - path: "uni_agent/agents/**"
+      instructions: |
+        Agent owns the solving strategy or external harness, not reward policy
+        or Sandbox lifecycle ownership. An Agent must not stop a Sandbox
+        started by its Task.
+        Preserve white-box and black-box harness boundaries, model endpoint
+        injection, cancellation behavior, and per-session isolation.
+
+    - path: "uni_agent/tools/**"
+      instructions: |
+        Preserve the distinction between ToolCallFormatError before execution
+        and ToolError during execution so model mistakes do not crash rollouts.
+        Stateful tools and shell channels must close on success, error, timeout,
+        and cancellation. Validate arguments without leaking credentials or
+        weakening Sandbox isolation.
+
+    - path: "uni_agent/agent_aware_router/**"
+      instructions: |
+        Keep acquire and release accounting symmetric for requests, tokens, and
+        replicas. Do not reset inflight state when removing a server if later
+        release events can still arrive.
+        Preserve thread-safe singleton stores, whole-request LRU eviction, and
+        callback pairing. Routing changes need concurrency and failure tests.
+
+    - path: "uni_agent/logging/**"
+      instructions: |
+        Preserve ContextVar isolation across concurrent sessions. Never emit
+        API keys, authorization headers, private model responses, endpoints
+        containing credentials, or other unredacted sensitive configuration.
+
+    - path: "tests/uni_agent/**"
+      instructions: |
+        Put markers on test functions, not classes. Every runnable test needs
+        one backend marker and exactly one level0 or level1 marker; CI gates
+        cpu and level0 tests.
+        Prefer regression tests for async cleanup, cancellation, failure paths,
+        ownership boundaries, session identity, and distributed accounting.
+
+    - path: "examples/**"
+      instructions: |
+        Keep recipes aligned with current public APIs, config schemas, and
+        documented commands. Do not include credentials or private endpoints.
+        Update matching docs and call out compatibility changes.
+
+    - path: "docs/**"
+      instructions: |
+        Check examples, config fields, commands, and paths against current
+        implementation. Document migration steps for breaking public changes.
+
+knowledge_base:
+  code_guidelines:
+    enabled: true
+    filePatterns:
+      - files: "CONTRIBUTING.md"
+        applyTo: "**/*"
+      - files: "tests/Case_Submission_Guide_EN.md"
+        applyTo: "tests/**/*.py"
+      - files: "docs/source/concepts/gateway-and-trajectories.md"
+        applyTo: "uni_agent/gateway/**/*.py,uni_agent/framework/**/*.py"
+      - files: "docs/source/concepts/sandbox.md"
+        applyTo: "uni_agent/sandbox/**/*.py,uni_agent/tools/**/*.py"
+      - files: "docs/source/concepts/agent.md"
+        applyTo: "uni_agent/agents/**/*.py"
+      - files: "docs/source/concepts/task-and-reward.md"
+        applyTo: "uni_agent/tasks/**/*.py"
+
+chat:
+  auto_reply: true

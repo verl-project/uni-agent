@@ -70,7 +70,7 @@ MAX_MODEL_LEN=$((PROMPT_LENGTH + RESPONSE_LENGTH))
 
 # ── Rollout parameters ───────────────────────────────────────────────────
 ENGINE="${ENGINE:-vllm}"
-GEN_TP="${GEN_TP:-${TP:-${ROLLOUT_NGPUS_PER_NODE}}}"
+GEN_TP="${GEN_TP:-2}"
 N="${N:-8}"
 TEMPERATURE="${TEMPERATURE:-1.0}"
 TOP_P="${TOP_P:-1.0}"
@@ -84,7 +84,7 @@ USE_DYNAMIC_BSZ="${USE_DYNAMIC_BSZ:-False}"
 
 # ── Megatron training parallelism ────────────────────────────────────────
 if [[ "${TRAINER_MODE}" == "separate_async" ]]; then
-    TRAIN_TP="${TRAIN_TP:-${TP:-${N_GPUS_PER_NODE}}}"
+    TRAIN_TP="${TRAIN_TP:-${TP:-4}}"
 else
     TRAIN_TP="${TRAIN_TP:-${TP:-8}}"
 fi
@@ -98,7 +98,7 @@ PPO_MINI_BATCH_SIZE="${PPO_MINI_BATCH_SIZE:-16}"
 PPO_MICRO_BATCH_SIZE_PER_GPU="${PPO_MICRO_BATCH_SIZE_PER_GPU:-1}"
 
 # ── Agent-framework rollout (unified run_task bridge) ────────────────────
-# mini-swe-agent knobs (step_limit/run_timeout/conda_env) and the tool-image
+# mini-swe-agent knobs (step_limit/run_timeout/conda_env_path) and the tool-image
 # mount are configured in TASK_CONFIG (task_config_mini_swe_agent.yaml).
 TASK_CONFIG="${TASK_CONFIG:-examples/mini_swe_agent/task_config_mini_swe_agent.yaml}"
 TOOL_PARSER="${TOOL_PARSER:-qwen3_coder}"   # gateway tool-call parser; must match the model chat template
@@ -107,7 +107,7 @@ MAX_CONCURRENT_SESSIONS="${MAX_CONCURRENT_SESSIONS:-256}"
 # Hard cap per-session runtime (seconds). A runner that hangs without raising
 # (e.g. remote sandbox OOM-killed without surfacing an error) otherwise holds its
 # concurrency slot forever and stalls the whole training batch.
-SESSION_TIMEOUT_SECONDS="${SESSION_TIMEOUT_SECONDS:-1800}"
+SESSION_TIMEOUT_SECONDS="${SESSION_TIMEOUT_SECONDS:-3600}"
 SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-$(basename "${MODEL_PATH}")}"
 # The agent reports finished explicitly (exit_status == "Submitted"); set True to
 # exclude unfinished episodes from the loss (paired with the finished field in agent.py).
@@ -344,7 +344,6 @@ MAIN_CMD=(
     actor_rollout_ref.actor.entropy_coeff=0
     actor_rollout_ref.actor.entropy_from_logits_with_chunking=False
     actor_rollout_ref.actor.megatron.param_offload=${OFFLOAD}
-    actor_rollout_ref.actor.megatron.grad_offload=${OFFLOAD}
     actor_rollout_ref.actor.megatron.optimizer_offload=${OFFLOAD}
     actor_rollout_ref.actor.megatron.tensor_model_parallel_size=${TRAIN_TP}
     actor_rollout_ref.actor.megatron.pipeline_model_parallel_size=${TRAIN_PP}
@@ -359,6 +358,7 @@ MAIN_CMD=(
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_method=uniform
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_granularity=full
     +actor_rollout_ref.actor.megatron.override_transformer_config.recompute_num_layers=1
+    +actor_rollout_ref.actor.megatron.override_ddp_config.grad_reduce_in_fp32=False
     actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=1
     actor_rollout_ref.ref.megatron.param_offload=${OFFLOAD}
     actor_rollout_ref.ref.megatron.tensor_model_parallel_size=${TRAIN_TP}
@@ -371,6 +371,9 @@ MAIN_CMD=(
     algorithm.use_kl_in_reward=${USE_KL_IN_REWARD}
     algorithm.kl_ctrl.kl_coef=${KL_COEF}
     algorithm.rollout_correction.bypass_mode=${BY_PASS_MODE}
+    algorithm.filter_groups.enable=True
+    algorithm.filter_groups.metric=reward
+    algorithm.filter_groups.max_inflight_gen_batches=1
     reward.reward_manager.name=dapo
     reward.custom_reward_function.path=pkg://uni_agent.framework.task_runner
     reward.custom_reward_function.name=score_from_runner_result

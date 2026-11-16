@@ -109,12 +109,11 @@ class Emitter:
 
     # ── A-class: strategy score() ─────────────────────────────────────
     def on_score(self, replica: str, components: dict[str, float]) -> None:
-        """Emit A-class score components (load/s_cache/avail/need/remaining).
+        """Emit A-class score components (avail/need/remaining).
 
-        The active strategy passes only the components it computed (the two
-        strategies are mutually exclusive at runtime). Unknown keys — anything
-        not in ``EMIT_SPECS`` — are skipped so a future component does not crash
-        the score path before it is added to the contract.
+        The active strategy passes only the components it computed. Unknown keys
+        — anything not in ``EMIT_SPECS`` — are skipped so a future component does
+        not crash the score path before it is added to the contract.
 
         Args:
             replica: Replica id (the ``replica`` label).

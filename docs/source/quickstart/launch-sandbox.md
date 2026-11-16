@@ -47,6 +47,11 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
     config = SandboxConfig(
         provider="docker",
         image="python:3.12",
+        runtime_timeout=3600,
+        image_mounts=[
+            {"image": "<tool-image>", "mount_path": "/opt/tool"},
+        ],
+        executable_paths={"tool": "/opt/tool/bin/tool"},
         sandbox_kwargs={
             # "missing" (default), "always", or "never".
             "pull_policy": "missing",
@@ -61,13 +66,15 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
 
     The provider starts an ephemeral container, executes commands with `docker exec`,
     transfers files with `docker cp`, and removes the container when the sandbox exits.
-    Setting `pull_timeout` moves the pull into its own `docker pull` step so a stalled
-    registry fails with a clear error instead of eating the whole startup budget
-    (`SANDBOX_STARTUP_TIMEOUT`, 600s by default, which bounds pull and start together);
-    `start_timeout` then bounds only `docker run`. Both are unset by default.
-    The default container command is `sleep infinity`; images without `sleep` can override
-    `entrypoint` and `command` in `sandbox_kwargs`. Run `docker login <registry>` first when
-    pulling from a private registry.
+    Before `docker run`, the provider applies `pull_policy` uniformly to the task image
+    and all mounted images. `pull_timeout` bounds each required `docker pull`, while
+    `start_timeout` bounds `docker run`; both default to 600 seconds. The whole startup
+    is also bounded by `SANDBOX_STARTUP_TIMEOUT` (600s by default).
+    The container entrypoint is fixed to `sleep`, with `runtime_timeout` passed as
+    its duration so the container exits at the configured lifetime. Task images must
+    therefore provide `sleep`. Docker image mounts require the containerd image store;
+    their source images are prepared according to `pull_policy` before `docker run`.
+    Run `docker login <registry>` first when pulling from a private registry.
 
     Docker command timeouts retire the entire sandbox: the provider removes the
     container and its processes before `exec` returns the standard timeout result
@@ -161,13 +168,88 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
         provider="modal",
         image="python:3.12",
         runtime_timeout=3600,
+        image_mounts=[
+            {"image": "<tool-image>", "mount_path": "/opt/tool"},
+        ],
+        executable_paths={"tool": "/opt/tool/bin/tool"},
         sandbox_kwargs={"app_name": "agent-sandbox"},
     )
     ```
 
+    Modal builds each configured image and mounts it into the running
+    Sandbox with `Sandbox.mount_image`. Note that Modal SDK 1.3.4 or newer is required when using `image_mounts`.
+
+=== "E2B"
+
+    **Remote cloud service.** [E2B](https://e2b.dev/) starts Firecracker-based
+    sandboxes from pre-built templates.
+
+    Install the SDK and configure its API key:
+
+    ```bash
+    pip install "e2b>=2.26,<3"
+    export E2B_API_KEY="<e2b-api-key>"
+    ```
+
+    To use a template already provided by the service, pass its name or ID:
+
+    ```python
+    from uni_agent.sandbox import SandboxConfig
+
+    config = SandboxConfig(
+        provider="e2b",
+        runtime_timeout=3600,
+        sandbox_kwargs={
+            "template": "my-ready-template",
+            "allow_internet_access": True,
+            # Optional: proxy only E2B SDK traffic without setting a
+            # process-wide HTTP_PROXY in the training worker.
+            "proxy": "http://proxy.example:8080",
+        },
+    )
+    ```
+
+    Alternatively, pass an open-source image. The provider checks its
+    deterministic template name and builds the template when missing:
+
+    ```yaml
+    sandbox:
+      provider: e2b
+      image: python:3.12
+      sandbox_kwargs:
+        cpu_count: 4
+        memory_mb: 8192
+    ```
+
+    CPU and memory are part of the generated template name. Changing either
+    value builds and uses a separate template.
+
+    `sandbox_kwargs.proxy` is forwarded to E2B template operations, sandbox
+    creation, and subsequent SDK requests. It does not set proxy variables
+    inside the remote sandbox; use `sandbox_kwargs.envs` with `HTTP_PROXY` /
+    `HTTPS_PROXY` when commands running in the sandbox also need a proxy.
+
+    Commands and file operations run as `root` by default. Set
+    `sandbox_kwargs.user: null` to use the template's default user instead.
+
+    E2B does not provide OCI image mounts. Build a composite E2B template
+    when the task needs a separate runtime image; configuring `image_mounts`
+    is rejected explicitly. `executable_paths` remains available for binaries
+    already present in the selected image or template.
+
+    !!! warning "Gateway reachability"
+        Host-side agents such as ReAct only use E2B for tools. Agents launched
+        inside the sandbox, such as Claude Code, must be able to reach their
+        model endpoint from E2B. Use a routable HTTPS Gateway address and an
+        egress allowlist; a private worker address or `127.0.0.1` is not
+        reachable from the E2B cloud.
+
 === "OpenYuanrong"
 
     **Remote or self-hosted service.** [OpenYuanrong](https://docs.openyuanrong.org/zh-cn/latest/index.html) provides elastic sandbox management for distributed agent workloads.
+
+    Completed commands preserve their exit code, stdout, and stderr, including nonzero
+    exits. These are command results; SDK exceptions still use the shared sandbox error policy.
 
     Install the sandbox SDK:
 
@@ -193,14 +275,16 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
         provider="openyuanrong",
         image="python:3.12",
         runtime_timeout=3600,
+        image_mounts=[
+            {"image": "<tool-image>", "mount_path": "/opt/tool"},
+        ],
+        executable_paths={"tool": "/opt/tool/bin/tool"},
         sandbox_kwargs={
             "cpu": 1000,
             "memory": 2048,
             "cpu_limit": 4000,
             "mem_limit": 8192,
             "idle_timeout": 7200,
-            # Mount a image (e.g. a tool runtime) at a target path.
-            "mounts": [{"target": "/opt/tool", "image_url": "<image-url>"}],
             # Reverse tunnel: let the sandbox reach a local gateway via 127.0.0.1:<proxy_port>.
             "upstream": "<gateway-host>:<gateway-port>",
             "proxy_port": 38197,
@@ -209,6 +293,52 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
         },
     )
     ```
+
+=== "OpenJiuwen agent-dx"
+
+    **Self-hosted Environment service.** Install the verified agent-dx
+    Environment SDK and configure authentication on each execution worker:
+
+    ```bash
+    pip install /path/to/agent-dx/platform/sdk/environment/python
+    export ADX_SERVER_ADDRESS="<adx-api-host>:<port>"
+    export ADX_TOKEN="<token>"
+    export ADX_TLS="1"
+    export ADX_TLS_VERIFY="1"
+    ```
+
+    ```python
+    from uni_agent.sandbox import SandboxConfig
+
+    config = SandboxConfig(
+        provider="agent_dx",
+        image="python:3.12",
+        runtime_timeout=3600,
+        image_mounts=[
+            {"image": "<tool-image>", "mount_path": "/opt/tool"},
+        ],
+        executable_paths={"tool": "/opt/tool/bin/tool"},
+        sandbox_kwargs={
+            "cpu": 1000,
+            "memory": 2048,
+            "cpu_limit": 4000,
+            "mem_limit": 8192,
+            "idle_timeout": 7200,
+            # Reverse tunnel: let the sandbox reach a local gateway via 127.0.0.1:<proxy_port>.
+            "upstream": "<gateway-host>:<gateway-port>",
+            "proxy_port": 38197,
+            # Forward sandbox ports to the host.
+            "port_forwardings": [8080],
+        },
+    )
+    ```
+
+    For in-sandbox model calls, set `sandbox_kwargs.proxy_port: 38197` in a Task
+    Config; `run_task` configures the reverse tunnel from the live Gateway Session.
+
+`image_mounts` allows Uni-Agent to attach self-contained runtime images for black-box
+agent harnesses to task sandboxes while keeping harness dependencies isolated
+from task images; `executable_paths` exposes selected runtime commands.
 
 ### Start and Stop the Sandbox
 
@@ -334,10 +464,75 @@ After configuring a supported backend above, run the complete connectivity and p
     DEBUG_MODE=1 SANDBOX_PROVIDER=modal python examples/quickstart/sandbox/demo.py
     ```
 
+=== "E2B"
+
+    ```bash
+    DEBUG_MODE=1 SANDBOX_PROVIDER=e2b IMAGE=python:3.12 \
+      python examples/quickstart/sandbox/demo.py
+    ```
+
 === "OpenYuanrong"
 
     ```bash
     DEBUG_MODE=1 SANDBOX_PROVIDER=openyuanrong python examples/quickstart/sandbox/demo.py
     ```
 
+=== "OpenJiuwen agent-dx"
+
+    ```bash
+    DEBUG_MODE=1 SANDBOX_PROVIDER=agent_dx IMAGE=python:3.12 \
+      python examples/quickstart/sandbox/demo.py
+    ```
+
 Next, [verify task oracle solutions](oracle-verification.md) against the configured sandbox before running agent inference or training.
+
+## Build a Tool Image (Sidecar)
+
+You can ask an AI assistant to follow this section. Provide the tool's name, version, and any custom scripts or dependencies.
+
+On Docker, Modal, OpenYuanRong, or OpenJiuwen agent-dx, use [`image_mounts`](../concepts/sandbox.md#runtime-images) to add a tool without rebuilding the task image.
+Copy a Dockerfile and `build_tool.sh` into `examples/my_tool_swe_task/` from one of these examples:
+
+| Runtime | Dockerfile | Build script |
+| --- | --- | --- |
+| Python | [Mini-SWE-Agent](https://github.com/verl-project/uni-agent/blob/main/examples/mini_swe_agent/Dockerfile.mini-swe-agent-tool) | [build_tool.sh](https://github.com/verl-project/uni-agent/blob/main/examples/mini_swe_agent/build_tool.sh) |
+| Node.js | [OpenClaw](https://github.com/verl-project/uni-agent/blob/main/examples/blackbox_recipes/openclaw_swe_task/Dockerfile.openclaw-tool) | [build_tool.sh](https://github.com/verl-project/uni-agent/blob/main/examples/blackbox_recipes/openclaw_swe_task/build_tool.sh) |
+
+Rename the Dockerfile to `Dockerfile.my-tool` and update its `-f` path in `build_tool.sh`.
+Pin the tool and runtime versions and install them under `/opt/my-tool`.
+You can also copy custom dependencies, configuration files, or agent startup scripts into this directory during the build.
+Note any dependencies provided by the task image in Dockerfile comments.
+Copy any local files referenced by `COPY` (such as `run_agent.py`) into the new recipe directory. Remove the launcher `COPY` line if you do not need it.
+
+The final image should contain the tool directory's contents at its root:
+
+```dockerfile
+FROM scratch
+COPY --from=builder /opt/my-tool/ /
+```
+
+Replace `builder` with your installation stage's name. You can replace `scratch` with another base image, but keep a separate final stage. Preserve this root layout so `bin/...` mounts as `/opt/my-tool/bin/...`.
+Mounting does not apply the image's `ENV` settings or run its `ENTRYPOINT`.
+
+In `build_tool.sh`, keep the script directory as the build context and add `--platform linux/amd64` to `docker build`.
+If it uses `--target tool`, change `tool` to your final stage's name or remove the option.
+Build with Docker and Bash; on ARM machines, enable amd64 emulation first.
+If downloads are slow or fail, use an image or package mirror in China, or configure an HTTP/HTTPS proxy for Docker and the build tools.
+Run from the repository root:
+
+```bash
+# Build and check the platform and size.
+TOOL_IMAGE=my-tool TOOL_TAG=v1 bash examples/my_tool_swe_task/build_tool.sh
+docker image inspect my-tool:v1 --format '{{.Os}}/{{.Architecture}} {{.Size}} bytes'
+
+# Optional: build and push to a registry the sandbox can pull from.
+docker login registry.example.com
+TOOL_IMAGE=my-tool TOOL_TAG=v1 bash examples/my_tool_swe_task/build_tool.sh \
+  --registry registry.example.com/team
+```
+
+In your [provider configuration](#choose-a-sandbox-backend), set `image_mounts[].image` to the published image and `mount_path` to `/opt/my-tool`.
+Use `executable_paths` to run a tool by name. This replaces any existing command with the same name. If your image includes Python, run it directly using its full path, such as `/opt/my-tool/bin/python`, to avoid replacing the task's Python.
+
+Edits inside a sandbox do not update the published sidecar image.
+To publish changes, update the recipe files, rebuild the image, and push a new tag.

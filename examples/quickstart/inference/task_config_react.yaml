@@ -3,7 +3,7 @@
     provider: modal
   agent:
     name: react
-    max_steps: 100
+    max_steps: 200
     tools:
       - name: str_replace_editor
       - name: stateful_shell
@@ -14,10 +14,9 @@
           TQDM_DISABLE: "1"
           GIT_PAGER: "cat"
       - name: submit
-    model:
-      temperature: 0.8
-      top_p: 0.9
-      max_total_tokens: 65536
+    sampling_params_override:
+      temperature: 1.0
+      top_p: 0.95
   prompt_template:
     - role: system
       content: You are a helpful assistant that can interact with a computer to solve tasks.
@@ -114,10 +113,9 @@
           TQDM_DISABLE: "1"
           GIT_PAGER: "cat"
       - name: submit
-    model:
+    sampling_params_override:
       temperature: 0.8
       top_p: 0.9
-      max_total_tokens: 65536
   prompt_template:
     - role: system
       content: You are a helpful assistant that can interact with a computer to solve tasks.

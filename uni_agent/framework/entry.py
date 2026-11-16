@@ -28,6 +28,25 @@ from verl.workers.config import HFModelConfig, RolloutConfig
 
 _DEFAULT_FRAMEWORK_CLASS = "uni_agent.framework.framework.GatewayAgentFramework"
 
+# Upper bound on actor construction. Exceeding it means construction is stuck.
+_FRAMEWORK_READY_TIMEOUT_SECONDS = 600.0
+
+
+def _wait_until_framework_ready(framework_worker, timeout: float = _FRAMEWORK_READY_TIMEOUT_SECONDS) -> None:
+    """Block until the framework actor finishes constructing.
+
+    ``.remote()`` returns a handle without waiting for ``__init__``, so a failure
+    there leaves a dead actor behind and nothing downstream would ever look. The
+    resulting ``ActorDiedError`` carries the original exception and traceback.
+    """
+    try:
+        ray.get(framework_worker.ready.remote(), timeout=timeout)
+    except ray.exceptions.GetTimeoutError as exc:
+        raise RuntimeError(
+            f"AgentFrameworkWorker did not finish initializing within {timeout}s; "
+            "check the actor log for what construction is stuck on"
+        ) from exc
+
 
 def build_gateway_manager(*, config, llm_client) -> GatewayManager:
     """Spawn the gateway actor pool (driver-side, driver-owned) and return its manager."""
@@ -39,6 +58,13 @@ def build_gateway_manager(*, config, llm_client) -> GatewayManager:
 
     apply_chat_template_kwargs = data_cfg.get("apply_chat_template_kwargs", {})
     mm_processor_kwargs = data_cfg.get("mm_processor_kwargs", {})
+    allowed_sampling_keys = af_cfg.get("allowed_request_sampling_param_keys")
+    if allowed_sampling_keys is not None:
+        if not isinstance(allowed_sampling_keys, list | tuple) and not OmegaConf.is_list(allowed_sampling_keys):
+            raise ValueError("allowed_request_sampling_param_keys must be a list of strings or null")
+        if any(not isinstance(key, str) for key in allowed_sampling_keys):
+            raise ValueError("allowed_request_sampling_param_keys must be a list of strings or null")
+        allowed_sampling_keys = set(allowed_sampling_keys)
 
     # Match AgentLoopWorker pattern: self-load tokenizer/processor via HFModelConfig.
     rollout_config: RolloutConfig = omega_conf_to_dataclass(rollout_cfg)
@@ -55,6 +81,9 @@ def build_gateway_manager(*, config, llm_client) -> GatewayManager:
         prompt_length=rollout_config.prompt_length,
         response_length=rollout_config.response_length,
         enable_last_assistant_rollback=af_cfg.get("enable_last_assistant_rollback", True),
+        allowed_request_sampling_param_keys=allowed_sampling_keys,
+        coalesce_reserved_exact_requests=af_cfg.get("coalesce_reserved_exact_requests", True),
+        use_tree_trajectory_manager=af_cfg.get("use_tree_trajectory_manager", False),
     )
 
     return GatewayManager(
@@ -104,6 +133,10 @@ class AgentFrameworkWorker:
     async def generate_sequences(self, prompts) -> None:
         await self.framework.generate_sequences(prompts)
 
+    def ready(self) -> None:
+        """No-op readiness probe: answering it proves ``__init__`` completed."""
+        return None
+
 
 class AgentFrameworkRolloutAdapter:
     """Trainer-facing adapter satisfying the `agent_loop_manager_class` contract.
@@ -141,6 +174,9 @@ class AgentFrameworkRolloutAdapter:
             gateway_manager=gateway_manager,
             reward_loop_worker_handles=reward_loop_worker_handles,
         )
+        # A handle says nothing about whether construction succeeded, and nothing
+        # downstream notices if it did not, so wait for it here.
+        _wait_until_framework_ready(framework_worker)
 
         instance = cls()
         instance.framework_worker = framework_worker

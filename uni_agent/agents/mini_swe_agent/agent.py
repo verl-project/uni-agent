@@ -16,6 +16,7 @@ import base64
 import json
 import logging
 import shlex
+from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 from pydantic import Field
@@ -32,9 +33,9 @@ logger = logging.getLogger(__name__)
 def build_agent_command(
     *,
     config_b64: str,
-    conda_env: str = "testbed",
     tool_python: str,
     run_agent_script: str,
+    conda_env_path: str | None = None,
 ) -> str:
     """Build the shell command that runs ``run_agent.py`` inside the sandbox.
 
@@ -42,17 +43,20 @@ def build_agent_command(
     tool image (they are bound to the tool image's Dockerfile layout, so they are
     required and declared by the recipe's task config rather than hardcoded
     here). The task config is piped via base64-encoded stdin (the protocol
-    ``run_agent.py`` expects). The tool python is called through the task's conda
-    env so mini-swe-agent resolves the repo environment inside ``/testbed``.
+    ``run_agent.py`` expects). When ``conda_env_path`` is set, the tool python is
+    called through that conda env so mini-swe-agent resolves the repo environment
+    inside ``/testbed``.
     """
-    conda_prefix = f"/opt/miniconda3/envs/{conda_env}"
-    run_agent_env = (
-        f"CONDA_DEFAULT_ENV={shlex.quote(conda_env)} "
-        f"CONDA_PREFIX={shlex.quote(conda_prefix)} "
-        f"PATH={shlex.quote(conda_prefix + '/bin')}:/opt/miniconda3/bin:$PATH "
-        "PIP_DISABLE_PIP_VERSION_CHECK=1 "
-        "PIP_PROGRESS_BAR=off"
-    )
+    conda_env_vars = ""
+    if conda_env_path:
+        env_dir = PurePosixPath(conda_env_path)
+        conda_env_vars = (
+            f"CONDA_DEFAULT_ENV={shlex.quote(env_dir.name)} "
+            f"CONDA_PREFIX={shlex.quote(str(env_dir))} "
+            f"PATH={shlex.quote(str(env_dir / 'bin'))}:"
+            f"{shlex.quote(str(env_dir.parent.parent / 'bin'))}:$PATH "
+        )
+    run_agent_env = conda_env_vars + "PIP_DISABLE_PIP_VERSION_CHECK=1 PIP_PROGRESS_BAR=off"
     return (
         "unset HTTP_PROXY HTTPS_PROXY http_proxy https_proxy NO_PROXY no_proxy; "
         f"printf %s {shlex.quote(config_b64)} | base64 -d | "
@@ -88,7 +92,11 @@ class MiniSweAgentConfig(AgentConfig):
     name: str = "mini_swe_agent"
     step_limit: int = Field(default=100, description="mini-swe-agent max agent steps.")
     run_timeout: float = Field(default=7200.0, description="Wallclock cap (s) on the agent process.")
-    conda_env: str = Field(default="testbed", description="Task repo conda env, activated around the launch.")
+    conda_env_path: str | None = Field(
+        default=None,
+        description="Task-image path of the conda env to activate around the launch "
+        "(e.g. /opt/miniconda3/envs/testbed); no conda env is activated when unset.",
+    )
     # Tool-image paths are bound to the prebuilt tool image's Dockerfile layout
     # (mounted at /opt/mini-swe-agent), so they are required here and declared by
     # the recipe's task config instead of being hardcoded as defaults.
@@ -133,7 +141,7 @@ class MiniSweAgentAgent(Agent):
         #    config -- they are bound to the tool image's Dockerfile layout).
         agent_cmd = build_agent_command(
             config_b64=config_b64,
-            conda_env=cfg.conda_env,
+            conda_env_path=cfg.conda_env_path,
             tool_python=cfg.tool_python,
             run_agent_script=cfg.run_agent_script,
         )

@@ -12,12 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""conftest for balancer tests.
-
-The fake provider is injected per-test through the Balancer's
-``provider_factory`` constructor seam (see ``_helpers._make_balancer``) — no
-class patching here. Only the singleton store reset remains as a fixture.
-"""
+"""Balancer test isolation."""
 
 from __future__ import annotations
 
@@ -26,7 +21,6 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def _reset_store_singletons():
-    """Reset the singleton-backed stores between balancer tests (function-scoped)."""
     from uni_agent.agent_aware_router.store.kv_cache_store import KVCacheStore
     from uni_agent.agent_aware_router.store.per_replica_store import PerReplicaStore
     from uni_agent.agent_aware_router.store.per_request_store import PerRequestStore

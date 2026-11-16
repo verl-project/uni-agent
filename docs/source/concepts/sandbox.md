@@ -26,7 +26,9 @@ The standard fields are:
 - `provider`: registered backend name.
 - `image`: container image used by image-backed providers such as Docker and Modal.
 - `image_map`: optional rewrite from the dataset image name to the image your cluster can pull (see below).
-- `runtime_timeout`: maximum remote sandbox lifetime.
+- `image_mounts`: optional runtime images mounted into the task sandbox.
+- `executable_paths`: command names mapped to executables supplied by the task or mounted images.
+- `runtime_timeout`: maximum sandbox lifetime.
 - `sandbox_kwargs`: provider-specific constructor arguments.
 
 Unknown fields are rejected. Put provider-specific options inside `sandbox_kwargs`.
@@ -49,6 +51,23 @@ sandbox:
 
 List as many rules as you need; the first matching `from` is used. Images that match none of the rules are left unchanged.
 
+### Runtime images
+
+Black-box agent harnesses can be packaged separately from task images and attached with:
+
+```yaml
+sandbox:
+  provider: modal
+  image: swebench/sweb.eval.x86_64.example
+  image_mounts:
+    - image: docker.io/example/claude-code-runtime:1.0
+      mount_path: /opt/agent-runtime
+  executable_paths:
+    claude: /opt/agent-runtime/bin/claude
+```
+
+Docker, Modal, OpenJiuwen agent-dx and OpenYuanRong support `image_mounts`. `image_map` rewrites only the task `image`, so mounted image references must already be complete and pullable. `executable_paths` exposes selected mounted commands after startup; Local and veFaaS reject it.
+
 ## Lifecycle
 
 Use a Sandbox as an async context manager:
@@ -64,6 +83,7 @@ The shared lifecycle uses:
 
 - `SANDBOX_STARTUP_TIMEOUT`: startup timeout, 600 seconds by default.
 - `SANDBOX_STARTUP_CONCURRENCY`: process-wide startup limit, 64 by default.
+- `SANDBOX_STOP_TIMEOUT`: timeout for the cleanup `stop()` after a failed or cancelled start, 120 seconds by default. Cancellation waits for this cleanup, so the bound keeps a hung provider from blocking it forever.
 
 Remote providers should implement `is_alive()` as a non-throwing health probe.
 
@@ -90,11 +110,18 @@ All providers share the public `Sandbox.exec()` error policy:
 - A timeout becomes `ExecResult(exit_code=-1)`.
 - A normal command/provider error while the sandbox is alive becomes `exit_code=127`.
 - An infrastructure error after the sandbox has died is re-raised.
+- A provider's `_is_fatal_exec_error()` hook can preserve infrastructure errors even while the runtime is alive. Agent DX uses this for unknown command outcomes, lost results, and truncated output.
 
 This policy prevents one bad agent command from crashing an otherwise healthy episode while still surfacing backend failures.
 
 !!! warning "Do not override `exec()`"
     Custom providers implement `_exec()`. The public `exec()` wrapper owns the cross-provider error policy and is enforced by tests.
+
+## Gateway Reverse Tunnel
+
+Some sandbox providers support a Gateway reverse tunnel and declare this with `supports_reverse_tunnel = True`. With `sandbox_kwargs.proxy_port`, the task runner supplies the Gateway Session's upstream and rewrites the model URL to the in-sandbox HTTP proxy, preserving the Session path. Providers without this capability reject the configuration. A provider class can be inspected without installing its SDK or creating a remote environment.
+
+Each supporting provider owns its upstream format through the `Sandbox.tunnel_upstream(base_url)` classmethod. The default requires an explicit `host:port`; a provider can override it to preserve its required URL scheme, supply default ports, or handle IPv6 addresses. The task runner delegates this formatting to the selected provider.
 
 ## Custom Backend
 
@@ -132,6 +159,8 @@ def from_config(cls, config: SandboxConfig):
     return cls(
         image=config.image,
         runtime_timeout=config.runtime_timeout,
+        image_mounts=config.image_mounts,
+        executable_paths=config.executable_paths,
         **config.sandbox_kwargs,
     )
 ```

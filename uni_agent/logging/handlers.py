@@ -14,7 +14,15 @@ import time
 from pathlib import Path
 from typing import TextIO
 
-from .context import _DATE_FORMAT, _FLUSH_EACH_LINE, _LOG_FORMAT, _NAME_WIDTH, _debug_enabled, _resolve_log_id
+from .context import (
+    _DATE_FORMAT,
+    _FLUSH_EACH_LINE,
+    _LOG_FORMAT,
+    _NAME_WIDTH,
+    _debug_enabled,
+    _resolve_level,
+    _resolve_log_id,
+)
 from .redaction import _redact_sensitive_text
 
 
@@ -42,17 +50,23 @@ _STOP = object()
 
 
 class _LogFileDispatch(logging.Handler):
-    """Single root-logger handler: resolve each record's log ID and format it on the
+    """Single mount-point handler: resolve each record's log ID and format it on the
     *calling* thread (cheap, and required while the ContextVar is visible), then
     enqueue all file I/O to a background writer thread. This keeps slow sinks (e.g. an HDFS
     FUSE mount, where every write is a network round-trip) off the asyncio event loop; the
     writer flushes on a fixed cadence (``_FLUSH_INTERVAL``s)."""
 
     def __init__(self) -> None:
-        super().__init__(level=logging.INFO)
+        # No floor of its own: whether a record lands in the file is decided by its
+        # logger's level (the mount point for uni_agent.*, root for anything else), so a
+        # DEBUG-configured run really does get DEBUG lines instead of INFO-only files.
+        super().__init__(level=logging.NOTSET)
         self.setFormatter(_formatter)
         self._log_ids: set[str] = set()
         self._lock = threading.Lock()
+        self._root_windows = 0  # active file-logging runs borrowing root
+        self._saved_root_level: int | None = None  # root's level before the first borrow
+        self._applied_root_level: int | None = None  # level we set on root while borrowing
         self._dropped = 0
         self._dropped_reported = 0
         self._start()
@@ -81,6 +95,8 @@ class _LogFileDispatch(logging.Handler):
 
         # The child lost the writer thread; start with independent routing state.
         self._log_ids = set()
+        self._root_windows = 0
+        self._release_root()  # the parent's runs are gone; root goes back to the host
         self._lock = threading.Lock()
         self._dropped = 0
         self._dropped_reported = 0
@@ -90,14 +106,60 @@ class _LogFileDispatch(logging.Handler):
     def register(self, log_id: str, path: Path) -> None:
         with self._lock:
             self._log_ids.add(log_id)
+            self._root_windows += 1
+            self._borrow_root()
         self._submit(("open", log_id, str(path)))
 
     def unregister(self, log_id: str) -> None:
         with self._lock:
             self._log_ids.discard(log_id)
+            self._root_windows = max(0, self._root_windows - 1)  # an unpaired exit must not go negative
+            if not self._root_windows:
+                self._release_root()
         self._submit(("close", log_id, None))
 
+    def _borrow_root(self) -> None:
+        """Borrow the host's root logger for as long as a file-logging run is active: the
+        router is attached there, so records from outside ``uni_agent.*`` land in the run's
+        file too, and root's level becomes this run's resolved level, so their INFO/DEBUG
+        records are not stopped by root's WARNING default. Records still need a LogContext
+        to be routed anywhere, so nothing is written outside a run. Callers hold
+        ``self._lock``."""
+        root = logging.getLogger()
+        if _dispatch not in root.handlers:
+            root.addHandler(_dispatch)
+        if self._saved_root_level is None:
+            self._saved_root_level = root.level
+        # Only ever loosen: a host already running root at DEBUG/INFO keeps its own
+        # verbosity, the run just makes sure root is at least as open as its level.
+        self._applied_root_level = min(root.level, self._mount_level())
+        root.setLevel(self._applied_root_level)
+
+    def _release_root(self) -> None:
+        """Hand root back: drop the router and undo the level we set — but only if root
+        still carries that level, so a host that reconfigured root mid-run keeps its own
+        value. Callers hold ``self._lock`` (the fork path runs single-threaded)."""
+        root = logging.getLogger()
+        if _dispatch in root.handlers:
+            root.removeHandler(_dispatch)
+        if self._saved_root_level is not None and root.level == self._applied_root_level:
+            root.setLevel(self._saved_root_level)
+        self._saved_root_level = None
+        self._applied_root_level = None
+
+    def _mount_level(self) -> int:
+        """The level a run's records are configured for: the mount point's, falling back
+        to the resolved ``UNI_AGENT_LOG_LEVEL``/INFO when a host configured the mount
+        without a level."""
+        mount_level = _mount().level
+        return _resolve_level() if mount_level == logging.NOTSET else mount_level
+
     def emit(self, record: logging.LogRecord) -> None:
+        # The router is mounted on both the mount point and (during runs) root; a record
+        # nudged down both paths must still be written once.
+        if getattr(record, "_uni_agent_dispatched", False):
+            return
+        record._uni_agent_dispatched = True
         log_id = _resolve_log_id(record)
         if log_id is None:
             return
@@ -247,16 +309,26 @@ class _ConsoleFilter(logging.Filter):
 
 _console_handler: logging.Handler | None = None
 
+# Namespace mount point: all uni_agent.* loggers bubble here, and propagate=False
+# keeps every record inside our namespace instead of reaching the host's root logger.
+_MOUNT_NAME = "uni_agent"
 
-def _install_console_sink() -> None:
-    """Install the filtered INFO console handler once per process."""
+
+def _mount() -> logging.Logger:
+    return logging.getLogger(_MOUNT_NAME)
+
+
+def _install_console_sink(level: int = logging.INFO) -> None:
+    """Install the filtered console handler on the ``uni_agent`` mount point once
+    per process."""
     global _console_handler
-    root = logging.getLogger()
-    if _console_handler is not None and _console_handler in root.handlers:
+    mount = _mount()
+    if _console_handler is not None and _console_handler in mount.handlers:
+        _console_handler.setLevel(level)
         return
     handler = logging.StreamHandler(sys.stdout)
-    handler.setLevel(logging.INFO)
+    handler.setLevel(level)
     handler.setFormatter(_formatter)
     handler.addFilter(_ConsoleFilter())
-    root.addHandler(handler)
+    mount.addHandler(handler)
     _console_handler = handler

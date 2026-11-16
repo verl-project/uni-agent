@@ -20,15 +20,20 @@ Store writes are handled by Collector via DataStore.
 
 from __future__ import annotations
 
+import logging
+import time
+from collections import Counter, defaultdict
+
 import msgpack
 
 from ....collectors.parse import KVCacheUpdate, Parser
 from ....collectors.parse.vllm.kv_event import KVCacheEvent
-from ....logging import get_router_logger
 from ....types import Layer
 from ....utils.hash import compute_hash
 
-logger = get_router_logger("vllm-kv")
+logger = logging.getLogger(__name__)
+
+_FILTERED_EVENT_LOG_INTERVAL_S = 30.0
 
 
 class VLLMKVParser(Parser):
@@ -38,26 +43,35 @@ class VLLMKVParser(Parser):
     ``KVCacheUpdate`` accumulator; ``parse`` is pure dispatch.
 
     Attributes:
-        remote_to_local_block_hash: Mapping from vLLM remote block_hash
-            to locally-computed prefix hash (str).  Used for chained
-            hash computation.
-        _block_size: Learned block size from first event.
+        remote_to_local_block_hash: Mapping from replica node_id to that
+            replica's {vLLM remote block_hash → locally-computed prefix hash
+            (str)}.  Used for chained hash computation.
+        _block_size: Learned block size from first eligible GPU stored event.
     """
 
     # vLLM BlockStored/BlockRemoved ``medium`` → canonical layer.
-    # Unknown / None (older vLLM) → GPU (see ``_medium_to_layer``).
-    _MEDIUM_TO_LAYER: dict[str, Layer] = {"GPU": Layer.GPU, "cpu": Layer.CPU}
+    # Only None (older vLLM) defaults to GPU; unknown media remain unclassified.
+    _MEDIUM_TO_LAYER: dict[str, Layer] = {"GPU": Layer.GPU, "CPU": Layer.CPU, "SSD": Layer.SSD}
 
     def __init__(self) -> None:
-        self.remote_to_local_block_hash: dict[str, str] = {}
+        self.remote_to_local_block_hash: dict[str, dict[str, str]] = {}
+        self.stats: dict[str, int] = {"removed_unmapped": 0, "parent_unresolved": 0}
         self._block_size: int | None = None
+        self._filtered_event_counts: dict[tuple[str, str], Counter[str]] = defaultdict(Counter)
+        self._filter_last_logged: dict[tuple[str, str], float] = {}
+
+    def _node_map(self, node_id: str) -> dict[str, str]:
+        """Remote→local hash map for one replica (created on first event)."""
+        return self.remote_to_local_block_hash.setdefault(node_id, {})
 
     def parse(self, raw_data: bytes | str, node_id: str) -> KVCacheUpdate | None:
         """Parse msgpack payload and return structured update command.
 
-        Handles both single event (real-time) and multiple events (replay):
-          - Single: [timestamp, [[tag, fields...], ...]]
-          - Multiple: [[timestamp, [...]], [timestamp, [...]]]
+        Handles both single batches (real-time) and multiple batches (replay):
+          - Single: [timestamp, [event, ...], ...]
+          - Multiple: [[timestamp, [...], ...], [timestamp, [...], ...]]
+        Each event may be a legacy positional array or a mapping with named
+        fields and a ``type`` discriminator.
 
         Args:
             raw_data: ZMQ payload bytes (msgpack-encoded).
@@ -100,14 +114,47 @@ class VLLMKVParser(Parser):
             return None
 
     @classmethod
-    def _medium_to_layer(cls, medium: str | None) -> Layer:
-        """Map a vLLM ``medium`` to a canonical layer; None/unknown → GPU."""
-        return cls._MEDIUM_TO_LAYER.get(medium, Layer.GPU)
+    def _medium_to_layer(cls, medium: str | None) -> Layer | None:
+        """Classify a medium; legacy None means GPU, unknown strings return None."""
+        if medium is None:
+            return Layer.GPU
+        return cls._MEDIUM_TO_LAYER.get(medium.upper())
 
     # ── Event handlers ──────────────────────────────────────────────────
 
+    def _record_filtered_event(self, event: KVCacheEvent, layer: Layer | None) -> None:
+        """Count excluded media without mutating the GPU routing cache view."""
+        assert event.medium is not None
+        medium = event.medium.upper()
+        key = (event.node_id, medium)
+        counts = self._filtered_event_counts[key]
+        counts[f"{event.event_type}_events"] += 1
+        counts[f"{event.event_type}_blocks"] += len(event.block_hashes)
+        now = time.monotonic()
+        last_logged = self._filter_last_logged.get(key)
+        if last_logged is not None and now - last_logged < _FILTERED_EVENT_LOG_INTERVAL_S:
+            return
+        self._filter_last_logged[key] = now
+        logger.log(
+            logging.WARNING if layer is None else logging.INFO,
+            "KV events excluded from router cache view (node=%s, medium=%r, reason=%s): "
+            "stored_events=%d removed_events=%d stored_blocks=%d removed_blocks=%d; "
+            "only GPU residency is tracked",
+            event.node_id,
+            medium,
+            "unknown medium" if layer is None else "non-GPU medium",
+            counts["stored_events"],
+            counts["removed_events"],
+            counts["stored_blocks"],
+            counts["removed_blocks"],
+        )
+
     def _on_block_stored(self, event: KVCacheEvent, update: KVCacheUpdate) -> None:
         """Handle BlockStored: learn block_size, compute local hashes, fold into update."""
+        layer = self._medium_to_layer(event.medium)
+        if layer != Layer.GPU:
+            self._record_filtered_event(event, layer)
+            return
         if event.token_ids is None:
             logger.debug("Stored event has no token_ids — skipping")
             return
@@ -116,12 +163,16 @@ class VLLMKVParser(Parser):
             self._block_size = event.block_size
             update.set_block_size(event.block_size)
 
+        node_map = self._node_map(event.node_id)
         seed = 0
         local_parent_hash = seed
         if event.parent_block_hash is not None:
-            local_parent_str = self.remote_to_local_block_hash.get(event.parent_block_hash)
+            local_parent_str = node_map.get(event.parent_block_hash)
             if local_parent_str is not None:
                 local_parent_hash = int(local_parent_str)
+            else:
+                # Parent unknown (replay gap / earlier parse failure) → chain restarts at seed.
+                self.stats["parent_unresolved"] += 1
 
         local_hashes: list[str] = []
         for i, block_bytes in enumerate(event.token_ids):
@@ -134,21 +185,33 @@ class VLLMKVParser(Parser):
             )
             local_hash_str = str(local_hash_int)
             bh = event.block_hashes[i]
-            self.remote_to_local_block_hash[bh] = local_hash_str
+            node_map[bh] = local_hash_str
             local_hashes.append(local_hash_str)
             local_parent_hash = local_hash_int  # chain
 
-        update.add(self._medium_to_layer(event.medium), local_hashes)
+        update.add(Layer.GPU, local_hashes)
 
     def _on_block_removed(self, event: KVCacheEvent, update: KVCacheUpdate) -> None:
-        """Handle BlockRemoved: convert remote hashes to local, fold into update."""
-        local_hashes = [
-            self.remote_to_local_block_hash[bh] for bh in event.block_hashes if bh in self.remote_to_local_block_hash
-        ]
-        for bh in event.block_hashes:
-            self.remote_to_local_block_hash.pop(bh, None)
+        """Handle BlockRemoved: convert remote hashes to local, fold into update.
 
-        update.remove(self._medium_to_layer(event.medium), local_hashes)
+        Only touches ``event.node_id``'s own map; the ``pop`` keeps the map
+        bounded by the resident set.
+        """
+        layer = self._medium_to_layer(event.medium)
+        if layer != Layer.GPU:
+            self._record_filtered_event(event, layer)
+            return
+        node_map = self._node_map(event.node_id)
+        local_hashes: list[str] = []
+        for bh in event.block_hashes:
+            local_hash = node_map.pop(bh, None)
+            if local_hash is None:
+                # Untranslatable removal — retained keeps the block (surfaced via stats).
+                self.stats["removed_unmapped"] += 1
+                continue
+            local_hashes.append(local_hash)
+
+        update.remove(Layer.GPU, local_hashes)
 
     def _on_all_blocks_cleared(self, event: KVCacheEvent, update: KVCacheUpdate) -> None:
         """Handle AllBlocksCleared: mark the replica for a full clear."""

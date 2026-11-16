@@ -1,5 +1,6 @@
 import pytest
 
+from uni_agent.gateway.adapters.anthropic import anthropic_to_internal
 from uni_agent.gateway.session.codec import MessageCodec
 
 
@@ -91,3 +92,102 @@ def test_deepseek_v4_codec_uses_continuous_token_without_chat_template():
     assert response_logprobs is not None
     assert response_logprobs[: len(assistant_ids)] == [-0.1] * len(assistant_ids)
     assert response_logprobs[len(assistant_ids) :] == [0.0] * (len(response_logprobs) - len(assistant_ids))
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_claude_parallel_tool_results_keep_call_order_in_deepseek_prompt():
+    request = anthropic_to_internal(
+        {
+            "messages": [
+                {"role": "user", "content": "run both"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "tool_use", "id": "a", "name": "a", "input": {}},
+                        {"type": "tool_use", "id": "b", "name": "b", "input": {}},
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "tool_result", "tool_use_id": "b", "content": "result-b"},
+                        {"type": "tool_result", "tool_use_id": "a", "content": "result-a"},
+                    ],
+                },
+            ]
+        },
+        base_sampling_params={},
+        allowed_sampling_keys=frozenset(),
+    )
+    tokenizer = _DeepSeekV4Tokenizer()
+    codec = MessageCodec(tokenizer, hf_model_type="deepseek_v4")
+    initial = codec.build_initial_tokens(request["messages"][:1])
+    initial_text = tokenizer.decode(initial)
+    assistant_text = tokenizer.decode(codec.build_initial_tokens(request["messages"][:2]))
+    generation_prompt = "<｜Assistant｜></think>"
+    assert assistant_text.startswith(initial_text) and assistant_text.endswith(generation_prompt)
+    assistant_tokens = tokenizer.encode(assistant_text[len(initial_text) : -len(generation_prompt)])
+    runtime, mask, _ = codec.merge_assistant_tokens(initial, assistant_tokens, [])
+    prompt_ids, _, _ = codec.merge_context_tokens(request["messages"][:2], request["messages"], runtime, mask)
+    prompt = tokenizer.decode(prompt_ids)
+
+    assert prompt.index("<tool_result>result-a</tool_result>") < prompt.index("<tool_result>result-b</tool_result>")
+
+
+class _NoPatchSizeProcessor:
+    """Multimodal processor without the Qwen ``patch_size`` attribute."""
+
+    chat_template = None
+
+    class image_processor:
+        pass
+
+
+def _image_url_message() -> dict:
+    return {
+        "role": "user",
+        "content": [
+            {"type": "image_url", "image_url": {"url": "image://a.png"}},
+            {"type": "text", "text": "describe"},
+        ],
+    }
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_extract_multi_modal_data_configured_patch_size_avoids_processor_read():
+    """A configured patch size makes the missing processor attribute harmless."""
+    from tests.uni_agent.support import FakeTokenizer
+
+    async def extractor(messages, image_patch_size, config=None):
+        assert image_patch_size == 14
+        return ["image://a.png"], None
+
+    codec = MessageCodec(
+        FakeTokenizer(),
+        processor=_NoPatchSizeProcessor(),
+        vision_info_extractor=extractor,
+        vision_info_extractor_kwargs={"image_patch_size": 14},
+    )
+
+    images, videos = await codec.extract_multi_modal_data([_image_url_message()])
+
+    assert images == ["image://a.png"]
+    assert videos is None
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize("has_history_image", [False, True], ids=["no-url-fallback", "requires-history-images"])
+def test_merge_context_tokens_requires_complete_resolved_images(has_history_image):
+    from tests.uni_agent.support import FakeProcessor, QwenVLTokenizer
+
+    codec = MessageCodec(QwenVLTokenizer(), processor=FakeProcessor(), hf_model_type="qwen2_5_vl")
+    previous_messages = [_image_url_message()] if has_history_image else [{"role": "user", "content": "start"}]
+    updated_messages = [*previous_messages, {"role": "assistant", "content": "FIRST"}, _image_url_message()]
+    # None must not fall back to URLs; supplying only new images must not omit history.
+    image_data = ["image://a.png"] if has_history_image else None
+    with pytest.raises(ValueError, match="image data must align with message blocks"):
+        codec.merge_context_tokens(previous_messages, updated_messages, [1, 2, 3], [1, 1, 1], image_data=image_data)

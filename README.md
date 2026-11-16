@@ -1,9 +1,10 @@
 <h1>Uni-Agent: Train Long-Horizon Agents at Scale</h1>
 
 <p>
-  <a href="https://uni-agent.readthedocs.io/en/latest/index.html"><img src="https://img.shields.io/badge/Documentation-6D28D9?style=flat-square" alt="Documentation"></a>
+  <a href="https://uni-agent.readthedocs.io/en/latest/index.html"><img src="https://img.shields.io/badge/Docs-Read%20the%20Docs-6D28D9?style=flat-square" alt="Read the Uni-Agent documentation"></a>
   <a href="https://github.com/verl-project/uni-agent/stargazers"><img src="https://img.shields.io/github/stars/verl-project/uni-agent?style=flat-square&logo=github&label=Stars" alt="GitHub Stars"></a>
   <a href="./LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-2563EB?style=flat-square" alt="Apache 2.0 License"></a>
+  <a href="https://applink.larkoffice.com/client/chat/chatter/add_by_link?link_token=919ke79f-7314-4fbe-8fa0-6d0bb93eaf6b"><img src="https://img.shields.io/badge/Lark%20Group-Dev%20Community-00B8A9?style=flat-square" alt="Join the Dev Community Lark group"></a>
 </p>
 
 Uni-Agent is a framework for training long-horizon agents:
@@ -75,8 +76,11 @@ Example scripts are available in [examples/quickstart/training](examples/quickst
 | Qwen3-30B-A3B       | ReAct       | R2E-Gym      | Fully Async, 100 turns, 128K    | 22.2    | **36.8** |
 | Qwen3-Coder-30B-A3B | ReAct       | R2E-Gym      | Fully Async, 100 turns, 128K    | 46.2    | **52.0** |
 | Qwen3.5-9B          | ReAct       | SWE-reBench  | Fully Async, 100 turns, 128K    | 53.8    | **59.2** |
+| Qwen3.5-4B          | ReAct       | SWE-reBench  | Colocate Async, 200 turns, 128K | 52.9    | **59.8** |
 | Qwen3-Coder-30B-A3B | ReAct       | SWE-reBench  | Colocate Async, 200 turns, 128K | 47.4    | **54.2** |
 | Qwen3-Coder-30B-A3B | Claude Code | SWE-reBench  | Colocate Async, 200 turns, 128K | 40.2    | **46.2** |
+
+The Qwen3.5-4B run uses [train_qwen3p5_dense.sh](examples/quickstart/training/train_qwen3p5_dense.sh) on 64 H100 GPUs; its SWE-Bench Verified score peaks at step 50.
 
 Training dynamics, asynchronous rollout performance, and reproducibility details are available in [RL Training](https://uni-agent.readthedocs.io/en/latest/benchmark/rl-training.html).
 

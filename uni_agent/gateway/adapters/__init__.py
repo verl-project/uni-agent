@@ -1,9 +1,15 @@
 from .anthropic import anthropic_build_response, anthropic_error_body, anthropic_stream_response, anthropic_to_internal
-from .openai import (
+from .openai_chat import (
     openai_build_response,
     openai_error_body,
     openai_stream_response,
     openai_to_internal,
+)
+from .openai_response import (
+    responses_build_response,
+    responses_error_body,
+    responses_stream_response,
+    responses_to_internal,
 )
 from .types import MalformedRequestError
 
@@ -17,4 +23,8 @@ __all__ = [
     "openai_error_body",
     "openai_stream_response",
     "openai_to_internal",
+    "responses_build_response",
+    "responses_error_body",
+    "responses_stream_response",
+    "responses_to_internal",
 ]

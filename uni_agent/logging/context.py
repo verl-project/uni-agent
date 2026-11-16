@@ -9,6 +9,7 @@ from __future__ import annotations
 import contextvars
 import logging
 import os
+import sys
 from dataclasses import dataclass
 
 # Fixed-width logger-name column so the ``|`` separators line up; _AlignedFormatter
@@ -25,6 +26,49 @@ def _env_flag(name: str) -> bool:
 def _debug_enabled() -> bool:
     # DEBUG_MODE surfaces per-sample INFO on stdout; it does NOT lower the level to DEBUG.
     return _env_flag("DEBUG_MODE")
+
+
+# Chatty libraries (incl. Modal's gRPC stack) pinned to WARNING to keep logs on the agent.
+_QUIET_LOGGERS = ("httpx", "httpcore", "openai", "urllib3", "asyncio", "ray", "hpack", "h2", "grpclib", "modal")
+
+# Names ``UNI_AGENT_LOG_LEVEL`` accepts; anything else warns and falls back to INFO.
+_LOG_LEVELS = ("CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG")
+
+
+def _invalid_level(raw: str) -> int:
+    allowed = ", ".join(_LOG_LEVELS)
+    print(
+        f"[uni-agent logging] invalid log level {raw!r}; expected one of {allowed}; falling back to INFO",
+        file=sys.stderr,
+        flush=True,
+    )
+    return logging.INFO
+
+
+def _resolve_level(level: int | str | None = None) -> int:
+    """Resolve a logging level: explicit ``level`` (int or name) wins, then
+    ``UNI_AGENT_LOG_LEVEL``, then INFO. Invalid names warn and fall back to INFO.
+
+    Lowering it (e.g. to DEBUG) opens DEBUG records through the root logger and the
+    global sinks; DEBUG_MODE keeps controlling only what the console filter lets
+    through for LogContext-scoped records.
+
+    UNI_AGENT_LOG_LEVEL must be one of ``_LOG_LEVELS``; any other value (e.g. ``WARN``,
+    ``FATAL``, ``NOTSET``, ``20``) warns and falls back to INFO.
+    """
+    if level is None:
+        level = os.getenv("UNI_AGENT_LOG_LEVEL", "").strip().upper()
+        if level and level not in _LOG_LEVELS:
+            return _invalid_level(level)
+    if isinstance(level, int):
+        return level
+    raw = str(level).strip().upper()
+    if not raw:
+        return logging.INFO
+    resolved = logging.getLevelName(raw)
+    if not isinstance(resolved, int):
+        return _invalid_level(raw)
+    return resolved
 
 
 # Flush every line to disk (slower). Off by default: files flush on buffer-fill/close.

@@ -1,5 +1,10 @@
 - name: harbor
   agent:
     name: openhands
+    timeout_sec: 14400
+    kwargs:
+      model_info:
+        max_input_tokens: 131072
+        max_output_tokens: 16384
   harbor_env: modal
   timeout_multiplier: 1.0

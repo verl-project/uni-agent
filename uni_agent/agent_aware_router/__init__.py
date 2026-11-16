@@ -14,6 +14,15 @@
 
 """KV-cache-aware LLM Router."""
 
+import logging
+
+from uni_agent.logging.handlers import _mount
+from uni_agent.logging.session import _setup_console_logging
+
 from .balancer import KVCAwareBalancer
+
+# Bootstrap the uni_agent namespace only when nothing has configured it yet
+if _mount().level == logging.NOTSET and not _mount().handlers:
+    _setup_console_logging()
 
 __all__ = ["KVCAwareBalancer"]

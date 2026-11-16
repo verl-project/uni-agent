@@ -1,0 +1,43 @@
+# DeepSeek Harness sidecar tool image.
+#
+# Mounted at /opt/dsh inside the SWE-bench sandbox. Ships the
+# @deepseek-ai/dsh Node CLI plus a node runtime under /opt/dsh/bin (the sandbox
+# base image has no node), and the minimal_patch.yml the runner applies for
+# tool_mode=minimal.
+#
+# The recipe exposes bin/dsh and bin/node through sandbox.executable_paths, which
+# links them into /usr/bin so dsh's `#!/usr/bin/env node` shebang resolves.
+
+# The base image is overridable via --build-arg BASE_IMAGE=... so CN / air-gapped
+# builds can point at a mirror (e.g. docker.m.daocloud.io/library/node:22-bookworm-slim).
+# node:22 satisfies dsh's transitive deps (commander@15 / pi-ai require node >=22.19).
+ARG BASE_IMAGE=node:22-bookworm-slim
+
+FROM ${BASE_IMAGE} AS builder
+
+# Pinned on purpose: minimal_patch.yml disables rows by their dsh-internal IDs,
+# and that set was measured against this version. A newer dsh that renames or
+# drops a row would make the restriction silently stop applying (no error), so
+# bump this deliberately and re-measure the tool surface (see build_tool.sh).
+ARG DSH_VERSION="0.1.0-rc.8"
+ARG NPM_REGISTRY=""
+
+ENV DISABLE_AUTOUPDATER=1 \
+    IS_SANDBOX=1 \
+    npm_config_audit=false \
+    npm_config_fund=false \
+    npm_config_update_notifier=false
+
+RUN if [ -n "${NPM_REGISTRY}" ]; then npm config set registry "${NPM_REGISTRY}"; fi \
+    && npm install -g --prefix /opt/dsh "@deepseek-ai/dsh@${DSH_VERSION}" \
+    && cp /usr/local/bin/node /opt/dsh/bin/node \
+    && /opt/dsh/bin/dsh --version
+
+# minimal_patch.yml is applied at runtime via `dsh --profile headless --patch`.
+COPY minimal_patch.yml /opt/dsh/minimal_patch.yml
+
+FROM scratch
+# Copy the /opt/dsh tree to the image ROOT (not /opt/dsh) so the openyuanrong
+# Mount at /opt/dsh exposes bin/dsh, bin/node, lib/..., minimal_patch.yml directly
+# under the mount target. Matches the claude_code tool image convention.
+COPY --from=builder /opt/dsh /

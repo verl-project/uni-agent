@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from collections import defaultdict
 from typing import TYPE_CHECKING, Any
 
@@ -22,6 +23,7 @@ if TYPE_CHECKING:
     from uni_agent.sandbox import SandboxBackend
 
 SNIPPET_LINES = 4
+LINE_ENDING = re.compile(r"\r\n|\r|\n")
 MAX_RESPONSE_LEN = 16000
 TRUNCATED_MESSAGE = (
     "<response clipped><NOTE>To save on context only part of this file has been shown to you. "
@@ -82,18 +84,58 @@ class StrReplaceEditorArguments(BaseModel):
             return value
 
 
-def _maybe_truncate(content: str, truncate_after: int | None = MAX_RESPONSE_LEN) -> str:
-    if not truncate_after or len(content) <= truncate_after:
-        return content
-    return content[:truncate_after] + TRUNCATED_MESSAGE
+def _as_lf(text: str) -> str:
+    return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
-def _make_output(file_content: str, file_descriptor: str, init_line: int = 1) -> str:
-    """``cat -n`` style numbering (1-based ``init_line``), truncated if huge."""
-    file_content = _maybe_truncate(file_content).expandtabs()
-    lines = file_content.split("\n")
-    numbered = "\n".join(f"{i + init_line:6}\t{line}" for i, line in enumerate(lines))
-    return f"Here's the result of running `cat -n` on {file_descriptor}:\n{numbered}\n"
+def _file_lines(text: str) -> list[str]:
+    """A terminator ends its line. Consecutive terminators preserve real blank lines."""
+    lines = LINE_ENDING.split(text)
+    if lines[-1] == "":
+        lines.pop()
+    return lines
+
+
+def _splice(raw: str, start: int, start_line: int, old: str, new: str) -> str:
+    """Apply an edit located in the LF view to the original text. All offsets are zero-based."""
+    if "\r" not in raw:
+        return raw[:start] + new + raw[start + len(old) :]
+
+    # Each CRLF occupies one more character on disk than in the view.
+    endings = LINE_ENDING.findall(raw)
+    matched = endings[start_line : start_line + old.count("\n")]
+    raw_start = start + endings[:start_line].count("\r\n")
+    raw_end = raw_start + len(old) + matched.count("\r\n")
+
+    # Reuse each matched separator in order. Extra breaks repeat the last one,
+    # or inherit the preceding line's ending (the first ending at start of file).
+    local_ending = matched[-1] if matched else endings[max(0, start_line - 1)]
+    first, *remaining = new.split("\n")
+    parts = [raw[:raw_start], first]
+    for index, line in enumerate(remaining):
+        ending = matched[index] if index < len(matched) else local_ending
+        parts.extend((ending, line))
+    parts.append(raw[raw_end:])
+
+    chunks: list[str] = []
+    for part in filter(None, parts):
+        # A bare CR and an LF brought together by the edit must still mean two breaks.
+        if chunks and chunks[-1].endswith("\r") and part.startswith("\n"):
+            chunks.append("\n")
+        chunks.append(part)
+    return "".join(chunks)
+
+
+def _make_output(lines: list[str], file_descriptor: str, init_line: int = 1) -> str:
+    """``cat -n`` style numbering (1-based ``init_line``), truncated if huge.
+
+    Show LF, CRLF and CR as logical line breaks, preserving tabs and spaces for matching.
+    """
+    content = "\n".join(lines)
+    if len(content) > MAX_RESPONSE_LEN:
+        lines = (content[:MAX_RESPONSE_LEN] + TRUNCATED_MESSAGE).split("\n")
+    numbered = "".join(f"{i:6}\t{line}\n" for i, line in enumerate(lines, init_line))
+    return f"Here's the result of running `cat -n` on {file_descriptor}:\n{numbered}"
 
 
 @register_tool("str_replace_editor")
@@ -119,12 +161,12 @@ class EditFileTool(Tool):
 
     @staticmethod
     async def _read(sandbox: SandboxBackend, path: str) -> str:
+        """The text of the file as it is: tabs, line endings and the final newline are kept."""
         data = await sandbox.read_file(path)
         try:
-            text = data.decode("utf-8")
+            return data.decode("utf-8")
         except UnicodeDecodeError as exc:
             raise ToolError(f"The file `{path}` is not valid UTF-8 text.") from exc
-        return text.replace("\r\n", "\n").replace("\r", "\n")
 
     # ----- dispatch -----
     async def run(self, args: dict[str, Any], *, timeout: float | None = None) -> ToolResult:
@@ -193,13 +235,14 @@ class EditFileTool(Tool):
                 f"excluding hidden items:\n{res.stdout}\n"
             )
 
-        file_content = await self._read(sandbox, path)
+        file_lines = _file_lines(await self._read(sandbox, path))
         init_line = 1
         if view_range:
             if len(view_range) != 2 or not all(isinstance(i, int) for i in view_range):
                 return "Invalid `view_range`. It should be a list of two integers."
-            file_lines = file_content.split("\n")
             n_lines = len(file_lines)
+            if not n_lines:
+                return f"Invalid `view_range`: {view_range}. The file is empty."
             init_line, final_line = view_range
             if init_line < 1 or init_line > n_lines:
                 return (
@@ -217,9 +260,9 @@ class EditFileTool(Tool):
                     f"larger or equal than its first `{init_line}`"
                 )
             final_line = n_lines if final_line == -1 else final_line
-            file_content = "\n".join(file_lines[init_line - 1 : final_line])
+            file_lines = file_lines[init_line - 1 : final_line]
 
-        return _make_output(file_content, str(path), init_line=init_line)
+        return _make_output(file_lines, str(path), init_line=init_line)
 
     async def _create(self, sandbox: SandboxBackend, path: str, file_text: str | None) -> str:
         if file_text is None:
@@ -236,33 +279,37 @@ class EditFileTool(Tool):
     ) -> str:
         if not old_str:
             return "Parameter `old_str` is required for command: str_replace and must be a non-empty string."
-        file_content = (await self._read(sandbox, path)).expandtabs()
-        old_str = old_str.expandtabs()
-        new_str = new_str.expandtabs() if new_str is not None else ""
-
-        occurrences = file_content.count(old_str)
-        if occurrences == 0:
-            return f"No replacement was performed, old_str `{old_str}` did not appear verbatim in {path}."
-        if occurrences > 1:
-            lines = [idx + 1 for idx, line in enumerate(file_content.split("\n")) if old_str in line]
+        file_content = await self._read(sandbox, path)
+        displayed = _as_lf(file_content)
+        target = _as_lf(old_str)
+        replacement = _as_lf(new_str or "")
+        start = displayed.find(target)
+        if start == -1:
+            message = f"No replacement was performed, old_str `{old_str}` did not appear verbatim in {path}."
+            if target.expandtabs() in displayed.expandtabs():
+                message += (
+                    " It does match when tabs are expanded to spaces, so the tabs and spaces in old_str "
+                    "differ from those in the file. Use the same whitespace as in the file."
+                )
+            return message
+        replacement_line = displayed.count("\n", 0, start)
+        second = displayed.find(target, start + 1)
+        if second != -1:
+            second_line = replacement_line + displayed.count("\n", start, second)
             return (
                 f"No replacement was performed. Multiple occurrences of old_str `{old_str}` "
-                f"in lines {lines}. Please ensure it is unique"
+                f"(first two start on lines {replacement_line + 1} and {second_line + 1}). Please ensure it is unique"
             )
-        if new_str == old_str:
+        if replacement == target:
             return f"No replacement was performed, old_str `{old_str}` is the same as new_str `{new_str}`."
 
-        new_file_content = file_content.replace(old_str, new_str)
+        new_file_content = _splice(file_content, start, replacement_line, target, replacement)
         await sandbox.write_file(path, new_file_content)
         self._history[path].append(file_content)
 
-        replacement_line = file_content.split(old_str)[0].count("\n")
-        start_line = max(1, replacement_line - SNIPPET_LINES)
-        end_line = min(
-            replacement_line + SNIPPET_LINES + new_str.count("\n"),
-            len(new_file_content.splitlines()),
-        )
-        snippet = "\n".join(new_file_content.split("\n")[start_line - 1 : end_line])
+        start_line = max(1, replacement_line + 1 - SNIPPET_LINES)
+        end_line = replacement_line + 1 + SNIPPET_LINES + replacement.count("\n")
+        snippet = _file_lines(new_file_content)[start_line - 1 : end_line]
 
         success_msg = f"The file {path} has been edited. "
         success_msg += _make_output(snippet, f"a snippet of {path}", start_line)
@@ -277,9 +324,8 @@ class EditFileTool(Tool):
         if new_str is None:
             return "Parameter `new_str` is required for command: insert"
 
-        file_text = (await self._read(sandbox, path)).expandtabs()
-        new_str = new_str.expandtabs()
-        file_lines = file_text.split("\n")
+        file_text = await self._read(sandbox, path)
+        file_lines = _file_lines(file_text)
         n_lines = len(file_lines)
 
         if insert_line < 0 or insert_line > n_lines:
@@ -288,22 +334,29 @@ class EditFileTool(Tool):
                 f"It should be within the range of lines of the file: {[0, n_lines]}"
             )
 
-        new_str_lines = new_str.split("\n")
-        new_file_lines = file_lines[:insert_line] + new_str_lines + file_lines[insert_line:]
-        snippet_lines = (
-            file_lines[max(0, insert_line - SNIPPET_LINES) : insert_line]
-            + new_str_lines
-            + file_lines[insert_line : insert_line + SNIPPET_LINES]
-        )
-
-        await sandbox.write_file(path, "\n".join(new_file_lines))
+        inserted = _as_lf(new_str)
+        addition = inserted + "\n"
+        preceding_breaks = insert_line
+        if insert_line == n_lines and file_text and not file_text.endswith(("\r", "\n")):
+            # The original last line needs a terminator before the first inserted line.
+            preceding_breaks -= 1
+            addition = "\n" + addition
+        start = sum(map(len, file_lines[:insert_line])) + preceding_breaks
+        new_file = _splice(file_text, start, preceding_breaks, "", addition)
+        await sandbox.write_file(path, new_file)
         self._history[path].append(file_text)
 
+        snippet_start = max(0, insert_line - SNIPPET_LINES)
+        snippet = (
+            file_lines[snippet_start:insert_line]
+            + inserted.split("\n")
+            + file_lines[insert_line : insert_line + SNIPPET_LINES]
+        )
         success_msg = f"The file {path} has been edited. "
         success_msg += _make_output(
-            "\n".join(snippet_lines),
+            snippet,
             "a snippet of the edited file",
-            max(1, insert_line - SNIPPET_LINES + 1),
+            snippet_start + 1,
         )
         success_msg += (
             "Review the changes and make sure they are as expected (correct indentation, no duplicate lines, etc). "
@@ -317,4 +370,4 @@ class EditFileTool(Tool):
         old_text = self._history[path][-1]
         await sandbox.write_file(path, old_text)
         self._history[path].pop()
-        return f"Last edit to {path} undone successfully. {_make_output(old_text, str(path))}"
+        return f"Last edit to {path} undone successfully. {_make_output(_file_lines(old_text), str(path))}"

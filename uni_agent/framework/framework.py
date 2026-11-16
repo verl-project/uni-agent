@@ -22,7 +22,7 @@ from omegaconf import OmegaConf
 from tensordict import TensorDict
 from tensordict.tensorclass import NonTensorData, NonTensorStack
 
-from uni_agent.gateway.session import SessionHandle, Trajectory
+from uni_agent.gateway.session import Trajectory
 from uni_agent.logging import LogContext, sample_logging
 from uni_agent.rl_insight.adapter import agent_loop_session
 from uni_agent.tasks import TaskResult
@@ -115,7 +115,7 @@ def _run_agent_runner_ray_task(
     runner_fqn: str,
     runner_kwargs: dict[str, object],
     raw_prompt,
-    session: SessionHandle,
+    session: object,
     sample_index: int,
     tools_kwargs: object | None,
     log_context: LogContext | None,
@@ -239,6 +239,25 @@ def _list_of_tq_fields_to_tensordict(fields: list[dict[str, object]]) -> TensorD
     return td
 
 
+def _attach_runner_reward_info(trajectories: list[Trajectory], task_result: TaskResult) -> list[Trajectory]:
+    """Preserve runner scoring context separately from final reward metrics."""
+    task_metrics = {} if task_result.accuracy is None else {"acc": task_result.accuracy}
+    return [
+        replace(
+            traj,
+            extra_fields={
+                **traj.extra_fields,
+                "runner_reward_info": {
+                    "reward": task_result.reward,
+                    "metrics": dict(task_metrics),
+                    "reward_context": dict(task_result.extra_info),
+                },
+            },
+        )
+        for traj in trajectories
+    ]
+
+
 def _trajectory_to_reward_dataproto(trajectory, sample_fields, task_result: TaskResult):
     """Build a single-sample DataProto for RewardLoopWorker.compute_score.
 
@@ -352,6 +371,17 @@ class GatewayAgentFramework(AgentFramework):
         processor=None,
         reward_loop_worker_handles=None,
     ) -> GatewayAgentFramework:
+        framework_kwargs = cls._parse_framework_config(config)
+        return cls(
+            gateway_manager=gateway_manager,
+            processor=processor,
+            reward_loop_worker_handles=reward_loop_worker_handles,
+            **framework_kwargs,
+        )
+
+    @classmethod
+    def _parse_framework_config(cls, config) -> dict[str, object]:
+        """Parse constructor settings shared by framework factories."""
         # TODO(phase-b): switch this to actor_rollout_ref.rollout.agent_framework.*
         af_cfg = OmegaConf.select(config, "actor_rollout_ref.rollout.custom.agent_framework", default={}) or {}
         reward_model_enabled = OmegaConf.select(config, "reward.reward_model.enable", default=False)
@@ -414,18 +444,15 @@ class GatewayAgentFramework(AgentFramework):
                 raise TypeError(f"Trajectory postprocessor {postprocessor_fqn!r} must resolve to a callable")
             trajectory_postprocessor_kwargs = dict(postprocessor_kwargs)
 
-        return cls(
-            gateway_manager=gateway_manager,
-            runner_registry=runner_registry,
-            reward_loop_worker_handles=reward_loop_worker_handles,
-            custom_reward_function_configured=custom_reward_function_path is not None,
-            processor=processor,
-            rollout_config=config.actor_rollout_ref.rollout,
-            log_dir=log_dir,
-            mask_unfinished_episode=mask_unfinished_episode,
-            trajectory_postprocessor=trajectory_postprocessor,
-            trajectory_postprocessor_kwargs=trajectory_postprocessor_kwargs,
-        )
+        return {
+            "runner_registry": runner_registry,
+            "custom_reward_function_configured": custom_reward_function_path is not None,
+            "rollout_config": config.actor_rollout_ref.rollout,
+            "log_dir": log_dir,
+            "mask_unfinished_episode": mask_unfinished_episode,
+            "trajectory_postprocessor": trajectory_postprocessor,
+            "trajectory_postprocessor_kwargs": trajectory_postprocessor_kwargs,
+        }
 
     async def _apply_trajectory_postprocessor(
         self,
@@ -459,14 +486,14 @@ class GatewayAgentFramework(AgentFramework):
             raise ValueError("trajectory postprocessor must preserve finalized reward fields")
         return result
 
-    def _build_session_sampling_params(
-        self,
+    @staticmethod
+    def _build_sampling_params_from_config(
         *,
+        config,
         partition_id: str,
         sample_fields: dict[str, object],
     ) -> dict[str, object]:
-        """Build trusted per-session sampling defaults using VERL rollout semantics."""
-        config = self._rollout_config
+        """Build sampling parameters from one composed rollout config."""
         sampling_params: dict[str, object] = {
             "temperature": config.temperature,
             "top_p": config.top_p,
@@ -480,9 +507,43 @@ class GatewayAgentFramework(AgentFramework):
                 top_p=config.val_kwargs.top_p,
                 top_k=config.val_kwargs.top_k,
             )
-        elif "__do_sample__" in sample_fields and not bool(sample_fields["__do_sample__"]):
+        # An explicit greedy flag overrides the partition sampling defaults.
+        if "__do_sample__" in sample_fields and not bool(sample_fields["__do_sample__"]):
             sampling_params.update(temperature=0, top_p=1.0, top_k=-1)
         return sampling_params
+
+    def _build_session_sampling_params(
+        self,
+        *,
+        partition_id: str,
+        sample_fields: dict[str, object],
+    ) -> dict[str, object]:
+        """Build trusted per-session sampling defaults using VERL rollout semantics."""
+        return self._build_sampling_params_from_config(
+            config=self._rollout_config,
+            partition_id=partition_id,
+            sample_fields=sample_fields,
+        )
+
+    async def _create_session(
+        self,
+        session_id: str,
+        *,
+        metadata: dict[str, object] | None = None,
+        sampling_params: object = None,
+    ) -> object:
+        """Create the session for one runner execution and return its handle.
+
+        The reference path creates one Gateway session; subclasses may create a
+        session group whose roles each own a Gateway session instead. Subclasses
+        that return a different shape from ``_build_session_sampling_params``
+        override this hook to consume it.
+        """
+        return await self.gateway_manager.create_session(
+            session_id,
+            metadata=metadata,
+            sampling_params=sampling_params,
+        )
 
     async def generate_sequences(self, prompts: TensorDict) -> None:
         """Run rollout-manager generation and write outputs into TransferQueue."""
@@ -776,9 +837,9 @@ class GatewayAgentFramework(AgentFramework):
         tools_kwargs = dict(tools_kwargs or {})
         tools_kwargs["_trace_identity"] = trace_identity
         async with _log_scope(parent_log):
-            session = await self.gateway_manager.create_session(
+            session = await self._create_session(
                 session_id,
-                metadata={"_trace_identity": trace_identity},
+                metadata={"_trace_identity": trace_identity, "_log_dir": str(run_dir) if run_dir is not None else None},
                 sampling_params=dict(sampling_params),
             )
             logger.info(
@@ -884,22 +945,11 @@ class GatewayAgentFramework(AgentFramework):
                 )
                 return session_trajectories, sample_fields
 
-            if self.reward_loop_worker_handles and self._custom_reward_function_configured:
-                annotations = await self._score_trajectories(
-                    session_trajectories,
-                    sample_fields,
-                    task_result,
-                )
-                reward_source = "reward_loop_worker"
-            elif task_result.reward is not None:
-                annotations = [(float(task_result.reward), {}) for _ in session_trajectories]
-                reward_source = "agent_runner"
-            elif self.reward_loop_worker_handles:
-                annotations = await self._score_trajectories(session_trajectories, sample_fields, task_result)
-                reward_source = "reward_loop_worker"
-            else:
-                annotations = None
-                reward_source = None
+            annotations, reward_source = await self._select_reward_source(
+                session_trajectories,
+                sample_fields,
+                task_result,
+            )
 
             if annotations is None:
                 logger.info("session %s: Framework produced no reward; rm_scores remain zero", session_id)
@@ -915,6 +965,8 @@ class GatewayAgentFramework(AgentFramework):
                     )
                     for traj, (score, extra) in zip(session_trajectories, annotations, strict=True)
                 ]
+
+            result_trajectories = _attach_runner_reward_info(result_trajectories, task_result)
 
             self._log_trajectory_summary(session_id, result_trajectories)
             if run_dir is not None:
@@ -961,6 +1013,36 @@ class GatewayAgentFramework(AgentFramework):
             # that is the expected outcome.
             pass
 
+    async def _select_reward_source(
+        self,
+        session_trajectories: list[Trajectory],
+        sample_fields: dict[str, object],
+        task_result: TaskResult,
+    ) -> tuple[list[tuple[float, dict[str, object]]] | None, str | None]:
+        """Select the final reward source for a finalized session.
+
+        Custom reward workers take precedence, followed by a non-None runner
+        reward and then RewardLoopWorker scoring. Returns ``(annotations,
+        source)``; both are ``None`` when no reward source is available.
+        """
+        if self.reward_loop_worker_handles and self._custom_reward_function_configured:
+            annotations = await self._score_trajectories(
+                session_trajectories,
+                sample_fields,
+                task_result,
+            )
+            reward_source = "reward_loop_worker"
+        elif task_result.reward is not None:
+            annotations = [(float(task_result.reward), {}) for _ in session_trajectories]
+            reward_source = "agent_runner"
+        elif self.reward_loop_worker_handles:
+            annotations = await self._score_trajectories(session_trajectories, sample_fields, task_result)
+            reward_source = "reward_loop_worker"
+        else:
+            annotations = None
+            reward_source = None
+        return annotations, reward_source
+
     def _log_trajectory_summary(self, session_id: str, trajectories: list[Trajectory]) -> None:
         """Log a per-session trajectory summary -- the info the task layer can't emit,
         since trajectories exist only after the session finalizes."""
@@ -968,7 +1050,8 @@ class GatewayAgentFramework(AgentFramework):
         for i, traj in enumerate(trajectories):
             model_tokens = sum(traj.response_mask) if traj.response_mask else 0
             finished = traj.finished
-            reason = (traj.extra_fields or {}).get("materialization_reason")
+            extra = traj.extra_fields or {}
+            reason = extra.get("materialization_reason")
             lines.append(
                 f"  [{i}] turns={traj.num_turns} prompt_tokens={len(traj.prompt_ids)} "
                 f"response_tokens={len(traj.response_ids)} model_tokens={model_tokens} "
@@ -978,6 +1061,12 @@ class GatewayAgentFramework(AgentFramework):
                 f"reward_score={traj.reward_score} reward_metrics={traj.reward_metrics}"
                 + (f" materialization_reason={reason}" if reason else "")
             )
+            if extra.get("num_coalesced_requests") or extra.get("rollback_count"):
+                lines[-1] += (
+                    f" coalesced_waiters={extra.get('num_coalesced_requests', 0)}"
+                    f" rollback_count={extra.get('rollback_count', 0)}"
+                    f" rollback_dropped_trainable_tokens={extra.get('rollback_dropped_trainable_tokens_total', 0)}"
+                )
         logger.info("\n".join(lines))
 
     def _dump_trajectories(self, run_dir: Path, session_id: str, trajectories: list[Trajectory]) -> None:
@@ -1025,6 +1114,9 @@ class GatewayAgentFramework(AgentFramework):
             "finished": traj.finished,
             "reward_score": traj.reward_score,
             "reward_metrics": dict(traj.reward_metrics),
+            "num_coalesced_requests": extra.get("num_coalesced_requests"),
+            "rollback_count": extra.get("rollback_count"),
+            "rollback_dropped_trainable_tokens_total": extra.get("rollback_dropped_trainable_tokens_total"),
             "materialization_reason": extra.get("materialization_reason"),
             "prompt_len": len(traj.prompt_ids),
             "response_len": len(traj.response_ids),
@@ -1146,17 +1238,18 @@ class GatewayAgentFramework(AgentFramework):
         mm_processor_kwargs = trajectory.extra_fields.get("mm_processor_kwargs")
         if mm_processor_kwargs is not None and not isinstance(mm_processor_kwargs, dict):
             raise ValueError("trajectory extra_fields.mm_processor_kwargs must be a dict or null")
+        processor = self._resolve_processor(trajectory)
         multi_modal_inputs = compute_multi_modal_inputs(
-            self._processor,
+            processor,
             input_ids.unsqueeze(0),
             trajectory.multi_modal_data,
             mm_processor_kwargs,
         )
-        if self._processor is None:
+        if processor is None:
             position_ids = compute_position_id_with_mask(attention_mask.unsqueeze(0)).squeeze(0)
         else:
             position_ids = compute_position_ids(
-                self._processor,
+                processor,
                 input_ids.unsqueeze(0),
                 attention_mask.unsqueeze(0),
                 multi_modal_inputs,
@@ -1225,4 +1318,25 @@ class GatewayAgentFramework(AgentFramework):
         materialization_reason = trajectory.extra_fields.get("materialization_reason")
         if materialization_reason is not None:
             tag["materialization_reason"] = materialization_reason
+        # Subclass tags may add routing metadata but never replace the
+        # framework-owned fields above.
+        for key, value in self._extra_tags(trajectory).items():
+            tag.setdefault(key, value)
         return field, tag
+
+    def _resolve_processor(self, trajectory: Trajectory):
+        """Return the multimodal processor for a trajectory.
+
+        The single-agent reference path has one processor. Subclasses that serve
+        several policies may resolve it from trajectory metadata instead.
+        """
+        return self._processor
+
+    def _extra_tags(self, trajectory: Trajectory) -> dict[str, object]:
+        """Return additional TransferQueue tags for a trajectory.
+
+        Defaults to none. Subclasses may add routing metadata (for example the
+        policy that generated the trajectory); keys already present in the tag
+        are not overwritten.
+        """
+        return {}

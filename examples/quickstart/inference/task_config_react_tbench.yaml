@@ -16,9 +16,8 @@
           MANPAGER: "cat"
           DEBIAN_FRONTEND: "noninteractive"
       - name: submit
-    model:
+    sampling_params_override:
       temperature: 1.0
       top_p: 0.95
       top_k: 20
-      max_total_tokens: 262144
       max_tokens_per_turn: 81920

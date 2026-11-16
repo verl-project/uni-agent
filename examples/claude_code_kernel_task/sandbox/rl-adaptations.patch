@@ -1,0 +1,2379 @@
+diff --git a/template/.claude/skills/triton-latency-optimizer/SKILL.md b/template/.claude/skills/triton-latency-optimizer/SKILL.md
+index 1e9bd7c..81b25b0 100644
+--- a/template/.claude/skills/triton-latency-optimizer/SKILL.md
++++ b/template/.claude/skills/triton-latency-optimizer/SKILL.md
+@@ -1,502 +1,28 @@
+ ---
+ name: triton-latency-optimizer
+ description: >
+-  擅长在 Ascend NPU 平台上编写高效 Triton 算子的性能优化专家。
+-  按照严格的顺序逐步优化 Triton 代码，每次只尝试一个优化点，
+-  确保优化前后功能一致、精度一致。
+-  ⚠️ 只能使用本 skill 规定的优化方式，禁止使用任何超出本 skill 之外的优化方式。
+-  触发：当用户需要对 Ascend NPU 上的 Triton 算子代码进行性能优化、降低时延、提升吞吐时使用。
+-argument-hint: >
+-  输入：code-file-path（代码文件路径）、output-path（输出路径）。
+-  输出：优化后的 Triton 代码（写入 output-path）、优化说明、功能一致性说明、精度一致性说明。
+-  固定参数：framework=torch、backend=ascend、dsl=triton_ascend。
+----
+-
+-# Latency Optimizer Skill
+-
+-<role>
+-你是一个擅长在 Ascend NPU 平台上编写高效 Triton 算子的性能优化专家。
+-你的任务是按照严格的顺序逐步优化 Triton 代码，每次只尝试一个优化点。
+-**必须确保优化前后的功能一致性和精度一致性。**
+-**⚠️ 只能使用本 skill 规定的优化方式，禁止使用任何超出本 skill 之外的优化方式。**
+-</role>
+-
+-## 输入与输出
+-
+-### 输入参数
+-
+-- **code_file_path**: 输入代码文件路径（Triton Ascend 算子代码）
+-- **output_path**: 输出代码文件路径（优化后的代码必须写入此路径）
+-- **npu**: NPU 设备 ID
+-- **arch**: 硬件架构
+-
+-### 输出要求
+-
+-**必须产出**：
+-1. `output_path` 指定的优化后代码文件
+-2. 优化策略说明（在代码注释或返回信息中）
+-3. 功能一致性说明
+-4. 精度一致性说明
+-
+-**若无更多优化点**：
+-- 仍需产出 `output_path`（内容与输入相同或微调）
+-- 在返回信息中明确说明"无更多优化点"
+-
+-## 优化点执行顺序
+-
+-Agent 必须严格按照以下顺序逐一检查优化点，**每次只能尝试一个优化点，命中后参考对应文档**。
+-
+-⚠️ **前置要求**：必须先命中某个优化点的「命中条件」（代码特征满足典型代码特征之一且适用条件成立），才能加载对应的参考文档。未命中则跳过，禁止加载参考文档。
+-
+----
+-
+-### 优化点 1：入参静态化优化
+-
+-**适用条件**：代码中存在可声明为 `tl.constexpr` 的固定参数
+-
+-**典型代码特征**：
+-```python
+-@triton.jit
+-def kernel(A, B, C, M, N,
+-            stride_am, stride_an,  # 运行时不变化的固定值，但未声明为 constexpr
+-            BLOCK_SIZE_M: tl.constexpr,
+-            BLOCK_SIZE_K: tl.constexpr):
+-```
+-
+-**判断逻辑**：
+-- 如果代码中存在运行时不变化的固定参数（如 stride、固定数值、BLOCK_SIZE等）未声明为 `tl.constexpr` → 涉及
+-- 如果所有固定参数都已正确声明为 `tl.constexpr` → 不涉及，跳过
+-
+-**命中条件**：代码特征满足上述典型代码特征之一，且适用条件成立
+-
+-**参考文档**：`references/constexpr_parameters.md`
+-
+----
+-
+-### 优化点 2：Tiling 优化（连续轴向量化）
+-
+-**适用条件**：处理多维张量（3D 及以上）的规约类或归一化算子，且规约轴并非内存布局中的最连续轴
+-
+-**典型代码特征**：
+-```python
+-@triton.jit
+-def kernel(input_ptr, output_ptr, dim1, dim2, ...):
+-    # 特征 1：向量化偏移 tl.arange 作用在非连续轴（如 dim1/M 轴）
+-    m_offsets = tl.arange(0, BLOCK_SIZE_M)
+-    # 特征 2：访存偏移计算中，向量化部分乘上了较大的 stride
+-    input_offset = m_offsets * stride_m + n_idx * stride_n
+-    # 特征 3：循环内部频繁进行还原操作（如 tl.sum）将向量压缩为标量
+-    acc = tl.zeros((BLOCK_SIZE_M,), dtype=tl.float32)
+-    ...
+-    total_sum = tl.sum(acc, axis=0)
+-```
+-
+-**判断逻辑**：
+-- 检查 `tl.load` 的偏移量计算：如果 `tl.arange` 产生的向量偏移量作用于 `stride > 1` 的轴，而存在 `stride = 1` 的轴仅被当作标量索引处理 → 涉及
+-- 检查循环累加器：如果累加器在还原轴上分块，但访存模式导致了非连续内存读取 → 涉及
+-- 如果 `tl.arange` 已经作用于内存最连续的轴（通常是最后一张量的最后一维），且实现了合并访存 → 不涉及，跳过
+-
+-**命中条件**：代码逻辑旨在对某维度进行还原，但其分块策略导致硬件执行了跨步访存
+-
+-**参考文档**：`references/tiling_optimization.md`
+-
+----
+-
+-### 优化点 3：分核优化
+-
+-**适用条件**：代码中 Grid 大小设置不合理，或未充分利用 NPU 硬件资源
+-
+-**典型代码特征**：
+-```python
+-# 特征 1：Grid 远大于物理核数
+-grid = (batch_size,)  # 如果 batch_size=128，远超 48 核
+-
+-# 特征 2：Grid 远小于物理核数
+-grid = (batch_size // 64,)  # 如果 batch_size=128，只有 2 核
+-
+-# 特征 3：每个 program 只处理 1 行数据
+-row_idx = tl.program_id(0)
+-x = tl.load(ptr + row_idx * stride + cols, mask=mask)
+-
+-# 特征 4：未使用编译优化选项（multibuffer、unit_flag）
+-kernel[grid](...)  # 未传入 multibuffer、unit_flag
+-
+-```
+-
+-**判断逻辑**：
+-- 检查 Grid 大小是否接近物理核数（40-48）
+-  - 如果 Grid >> 48 或 Grid << 48 或者 Grid值无从判断 → 涉及
+-- 检查每个 program 处理的数据量
+-  - 如果每个 program 只处理少量数据（如 1 行）→ 涉及
+-- 检查是否使用了编译优化选项
+-  - 如果未使用 multibuffer 且是内存密集型算子 → 涉及
+-- 如果 Grid 合理且已使用优化选项 → 不涉及，跳过
+-
+-**命中条件**：代码中 Grid 大小设置不合理，或未充分利用 NPU 硬件资源
+-
+-**参考文档**：`references/vector_core_partition.md`
+-
+----
+-
+-### 优化点 4：离散访存优化
+-
+-**适用条件**：代码中存在通过随机/不可预测索引访问全局内存
+-
+-**典型代码特征**：
+-```python
+-# 索引来源于 tl.load 加载的值（随机性）
+-idx = tl.load(indices_ptr + offset)  # idx 是运行时确定的随机值
+-val = tl.load(data_ptr + idx)        # 通过随机索引访问
+-
+-# 或者索引来源于 kernel 入参（可能是随机值）
+-val = tl.load(ptr + random_index)
+-```
+-
+-**判断逻辑**：
+-- 检查 `tl.load` 的索引来源：
+-  - 如果索引是 `tl.program_id` 线性变换 → 确定性连续，不涉及
+-  - 如果索引是循环变量线性变换 → 确定性步长，不涉及
+-  - 如果索引来源于 `tl.load` 加载的值或 kernel 入参 → 潜在随机，涉及
+-- 如果所有访存索引都是确定性连续/步长模式 → 不涉及，跳过
+-
+-**命中条件**：代码中存在通过随机/不可预测索引访问全局内存
+-
+-**参考文档**：`references/discrete_memory_access.md`
+-
+----
+-
+-### 优化点 5：Scalar 转 Vector 优化
+-
+-**适用条件**：代码中存在标量操作，可转换为向量操作以充分利用 NPU Vector 计算单元
+-
+-**典型代码特征**：
+-```python
+-# 特征 1：标量广播操作
+-scalar_val = 0.5  # Python 标量
+-result = x * scalar_val  # scalar 广播，无法启用 vector 加速
+-
+-# 特征 2：标量规约操作
+-sum_val = 0.0  # 标量累加器
+-for n in range(N):
+-    val = tl.load(x_ptr + n)
+-    sum_val += val  # 标量加法
+-
+-# 特征 3：标量控制流
+-if x > 0:  # 标量条件，导致 SIMD 分支分化
+-    result = tl.exp(x)
+-else:
+-    result = tl.cos(x)
+-
+-# 特征 4：int 类型比较/除法/取余
+-is_invalid = tok < 0  # int 类型比较，退化为标量
+-c = a // b  # int 类型除法，退化为标量
+-d = a % b   # int 类型取余，退化为标量
+-```
+-
+-**判断逻辑**：
+-- 检查是否存在 Python 标量与向量数据的计算（标量广播）
+-- 检查是否存在标量累加器（如 `sum_val = 0.0`）
+-- 检查是否存在 `if-else` 控制流处理向量数据
+-- 检查是否存在 `int32/int64` 类型的比较、除法、取余操作
+-- 如果存在以上任一情况 → 涉及
+-- 如果所有操作都已使用向量形式 → 不涉及，跳过
+-
+-**命中条件**：代码中存在标量操作，可转换为向量操作
+-
+-**参考文档**：`references/scalar_to_vector.md`
+-
+----
+-
+-### 优化点 6：避免向量API标量降级
+-
+-**适用条件**：代码中存在可能被编译器降级为标量循环的向量操作，包括通用算术操作、比较操作、扩展乘法、累积操作（cumsum/cumprod）或归约操作（reduce）
+-
+-**典型代码特征**：
+-```python
+-# 特征 1：通用算术操作使用 i64，或者满足降级条件
+-z = x + y  # x/y 为 i64
+-z = x % y  # x/y 为 i32且执行取余计算
+-
+-# 特征 2：整数比较操作（非 i32 EQ/NE，或非浮点比较）
+-mask = x < y  # i8/i16/i32/i64 的 LT/GT/LE/GE 比较
+-
+-# 特征 3：扩展乘法
+-z = x * y  # 触发 vmulext，始终降级
+-
+-# 特征 4：cumsum/cumprod 在最后一个维度上操作
+-x_cumsum = tl.cumsum(x_1d, axis=0)  # 一维张量，或 cumDim 是 lastDim
+-
+-# 特征 5：reduce 操作在特定条件下
+-# i64 类型的 sum/prod/max/min
+-# 整数类型的 argmax/argmin
+-# 浮点类型 argmax/argmin 且 flatten 后维度 > 2
+-```
+-
+-**判断逻辑**：
+-- 检查通用算术操作（add/sub/mul/min/max/abs/shl/shr/interleave/deinterleave）：如果数据类型为 i64
+-- 检查比较操作：如果数据类型为 i8/i16/i64（所有比较），或 i32 的 LT/GT/LE/GE → 涉及
+-- 检查取余操作：如果数据类型是任何int类型 → 涉及
+-- 检查扩展乘法（vmulext）：任何扩展乘法 → 涉及
+-- 检查 cumsum/cumprod：如果累积维度是输入张量的最后一个维度（一维时 axis=0 即最后维度），或数据类型为 i64 → 涉及
+-- 检查 reduce 操作：如果是 i64 类型的 sum/prod/max/min；整数类型的 argmax/argmin；浮点类型 argmax/argmin 且 flatten 后维度 > 2 → 涉及
+-- 如果以上情况均不存在 → 不涉及，跳过
+-
+-**命中条件**：代码中存在上述任一向量操作，且满足对应的标量降级条件
+-
+-**参考文档**：`references/avoid_scalar_lowering.md`
+-
+----
+-
+-### 优化点 7：Pass 合并优化
+-
+-**适用条件**：代码中存在多次遍历相同数据计算不同统计量
+-
+-**典型代码特征**：
+-```python
+-# Pass 1: 计算 mean
+-for ...:
+-    data = tl.load(...)
+-    mean += tl.sum(data)
+-
+-# Pass 2: 计算 variance（再次遍历！）
+-for ...:
+-    data = tl.load(...)  # 重复加载
+-    var += tl.sum((data - mean) ** 2)
+-
+-# Pass 3: 归一化（第三次遍历！）
+-for ...:
+-    data = tl.load(...)  # 第三次加载
+-    tl.store(...)
+-```
+-
+-**判断逻辑**：
+-- 检查是否存在多个独立的循环遍历相同数据
+-- 检查是否可以同时计算多个统计量（如 sum + sum_sq 可同时计算 mean + var）
+-- 如果存在多次遍历且可合并 → 涉及
+-- 如果只有单次遍历，或统计量之间有依赖无法合并 → 不涉及，跳过
+-
+-**命中条件**：代码中存在多次遍历相同数据，且可以合并计算
+-
+-**参考文档**：`references/pass-merge.md`
+-
+----
+-
+-### 优化点 8：维度合并优化
+-
+-**适用条件**：代码中存在多层嵌套循环处理连续维度，且维度间无依赖关系
+-
+-**典型代码特征**：
+-```python
+-# 问题代码：3层循环处理 NCHW 布局
+-for n in range(N):           # 64 次
+-    for h in range(H):       # 512 次
+-        for w_start in range(0, W, BLOCK_SIZE):  # 循环层数过多
+-            base_offset = n * stride_n + c * stride_c + h * stride_h
+-            data = tl.load(input_ptr + base_offset + ...)
+-```
+-
+-**判断逻辑**：
+-- 检查是否存在多层嵌套循环（3层及以上）
+-- 检查循环维度是否为连续内存布局（如 NCHW 的 H×W）
+-- 检查维度间是否有依赖关系
+-- 如果存在多层循环且维度连续、无依赖 → 涉及
+-- 如果循环层数较少，或维度间有依赖 → 不涉及，跳过
+-
+-**命中条件**：代码中存在多层嵌套循环处理连续维度，且可合并
+-
+-**参考文档**：`references/dimension-merge.md`
+-
+----
+-
+-### 优化点 9：Libdevice 函数使用
+-
+-**适用条件**：代码中存在手动实现的数学函数，而 `tl.extra.cann.libdevice` 中已有优化版本
+-
+-**典型代码特征**：
+-```python
+-# 手动实现 round
+-return (x + 0.5).to(tl.int8)
+-
+-# 手动实现 relu
+-out = tl.maximum(x, 0.0)
+-
+-# 手动实现 tanh、sinh、pow 等数学函数
+-```
+-
+-**判断逻辑**：
+-- 检查代码中是否手动实现了以下函数：round、trunc、relu、tanh、sinh、cosh、pow、atan、acos、asin、expm1、log1p、hypot 等
+-- 如果存在手动实现且 `tl.extra.cann.libdevice` 中有对应函数 → 涉及
+-- 如果代码中没有数学函数实现，或已使用 libdevice 版本 → 不涉及，跳过
+-
+-**命中条件**：代码中存在手动实现的数学函数，且 libdevice 中有优化版本
+-
+-**参考文档**：`references/libdevice-usage.md`
+-
+----
+-
+-### 优化点 10：循环不变量外提
+-
+-**适用条件**：代码中存在嵌套循环，且内层循环中有只依赖外层变量的 `tl.load`
+-
+-**典型代码特征**：
+-```python
+-# 问题代码：内层循环重复加载相同值
+-for outer_idx in range(outer_size):
+-    for inner_idx in range(inner_size):
+-        param_idx = outer_idx  # 只依赖外层变量
+-        val = tl.load(param_ptr + param_idx)  # 重复加载相同值
+-        ...
+-
+-# 或者通过整除映射到更粗粒度
+-for block in range(num_blocks):
+-    offsets = block * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+-    channel = offsets // spatial_size
+-    w = tl.load(weight_ptr + channel)  # 相同 channel 重复加载
+-```
+-
+-**判断逻辑**：
+-- 检查是否存在嵌套循环结构
+-- 检查内层循环中是否有 `tl.load(param_ptr + index_expr)`
+-- 检查 `index_expr` 是否只依赖外层循环变量，不依赖内层循环变量
+-- 如果存在且内层循环次数 >> 外层循环次数 → 涉及
+-- 如果没有嵌套循环，或所有 load 都依赖内层变量 → 不涉及，跳过
+-
+-**命中条件**：代码中存在嵌套循环，且内层循环中有只依赖外层变量的 `tl.load`
+-
+-**参考文档**：`references/loop-invariant-hoisting.md`
+-
+----
+-
+-### 优化点 11：Load 指令重排序
+-
+-**适用条件**：代码中存在循环，且循环内有多个 `tl.load` 和 `tl.store`，存在数据依赖导致的阻塞
+-
+-**典型代码特征**：
+-```python
+-for i in range(HEAD_NUM):
+-    # load B 在前，会等待上一次循环的 store B
+-    idx_B = tl.load(p_B_index)
+-    b_B = tl.load(p_B)
+-    
+-    # load A 在后，必须等 load B 完成
+-    b_A = tl.load(p_A)
+-    
+-    # calculation
+-    b_O = b_A * b_B
+-    
+-    # store
+-    tl.store(p_O, b_O)
+-    tl.store(p_B, b_B)  # store B 会阻塞下一次循环的 load B
+-```
+-
+-**判断逻辑**：
+-- 检查是否存在循环结构
+-- 检查循环内是否有多个 `tl.load` 和 `tl.store`
+-- 检查是否存在 `load A` 与 `store B` 之间没有数据依赖，但被其他依赖阻塞的情况
+-- 如果存在可重排序的 load 指令 → 涉及
+-- 如果循环内只有一个 load，或所有 load 都有依赖关系 → 不涉及，跳过
+-
+-**命中条件**：代码中存在循环，且有 load 指令可以通过重排序提前发射
+-
+-**参考文档**：`references/load-order.md`
+-
+----
+-
+-### 优化点 12：Autotune 自动调优
+-
+-**适用条件**：代码中存在一个或者多个可调参数（例如BLOCK_SIZE、BLOCK_M等），且这些参数未经过充分调优，考虑到其他优化点可能引入可调超参数，最后再优化该优化点
+-
+-**典型代码特征**：
+-```python
+-# 未使用 autotune，手动指定固定参数
+-@triton.jit
+-def kernel(..., BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr):
+-    ...
+-
+-# 调用时固定参数
+-kernel[grid](..., BLOCK_M=128, BLOCK_N=128)
+-```
+-
+-**判断逻辑**：
+-- 检查是否已使用 `@triton.autotune` 装饰器
+-- 检查是否存在多个可调的 `tl.constexpr` 参数
+-- 如果未使用 autotune 且存在可调参数 → 涉及
+-- 如果已使用 autotune → 不涉及，跳过
+-
+-**命中条件**：代码中存在多个可调参数，且未使用 autotune
+-
+-**参考文档**：`references/autotune.md`
+-
+----
+-
+-## 优化流程
+-```
+-1. 按顺序检查优化点 1 → 2 → 3 → ... → 12
+-2. 对于当前优化点，先判断是否命中（代码特征满足 + 适用条件成立）：
+-   - 未命中 → 跳过，检查下一优化点
+-   - 命中 → 参考对应文档，应用优化策略
+-3. 应用优化后，必须加载 references/checklist.md 检查代码规范
+-4. 如果代码规范不满足 → 修改代码直到满足规范
+-5. 代码规范满足后 → 返回优化后的代码，回到1继续检查优化点
+-```
+-
+-**重要约束**：
+-- ⚠️ **只能使用本 skill 规定的优化方式，禁止使用任何超出本 skill 之外的优化方式**
+-- ⚠️ **必须先命中优化点的「命中条件」，才能加载参考文档；未命中则跳过**
+-- 一次优化迭代只能使用一个优化点，可以有多轮优化，示例：
+-```
+-  第一轮：检查 1→2→3→...，命中优化点 X，应用后验证
+-  第二轮：检查 1→2→...，命中优化点 Y，应用后验证
+-  第三轮：检查 1→2→...，命中优化点 Z，应用后验证
+-  ...
+-  直到所有优化点都不命中
+-```
+-- 一次只能参考一个文档
+-
+-## 优化验证规则
+-
+-**⚠️ 强制要求：在进行任何精度验证或性能验证之前，必须先执行 checklist 检查，确保所有代码规范都已满足。验证流程如下：**
+-
+-1. **Checklist 检查**：加载 `references/checklist.md`，逐项检查代码是否满足所有规范要求
+-2. **不满足规范** → 修改代码直到满足所有规范要求，然后重新执行 checklist 检查确认
+-3. **满足规范后** → 执行精度验证和性能验证
+-
+-- **成功**：优化后的性能不劣化（speedup ≥ 1.0），该优化结果作为下一次优化迭代的基线
+-- **失败**：优化后的性能劣化（speedup < 1.0），放弃本次优化结果，以优化前的代码作为下一次优化迭代的基线
+-
+-## 参考资料索引
+-
+-| 文档类型 | 文档路径 |
+-|----------|----------|
+-| 入参静态化优化 | `references/constexpr_parameters.md` |
+-| Tiling 优化 | `references/tiling_optimization.md` |
+-| 分核优化 | `references/vector_core_partition.md` |
+-| 离散访存优化 | `references/discrete_memory_access.md` |
+-| Scalar 转 Vector 优化 | `references/scalar_to_vector.md` |
+-| 避免向量API标量降级 | `references/avoid_scalar_lowering.md` |
+-| Pass 合并优化 | `references/pass-merge.md` |
+-| 维度合并优化 | `references/dimension-merge.md` |
+-| Libdevice 函数使用 | `references/libdevice-usage.md` |
+-| 循环不变量外提 | `references/loop-invariant-hoisting.md` |
+-| Load 指令重排序 | `references/load-order.md` |
+-| Autotune 自动调优 | `references/autotune.md` |
+-| 代码规范检查 | `references/checklist.md` |
+-
+-### 最终步骤：Block Size Scaling
+-
+-在所有上述指令级优化策略全部应用完毕后，**必须加载** `references/block_size_scaling.md`，执行 Block Size Scaling 作为最终优化步骤。
+-
+-## 执行流程
+-
+-1. 读取 `code_file_path` 的代码
+-2. 分析代码特征，加载对应的优化策略文档
+-3. 应用优化策略，生成优化后的代码
+-4. 将优化后的代码写入 `output_path`
+-5. 返回优化说明和状态信息
+-
+-## 关键约束
+-
+-- **必须产出代码文件**：即使无优化点，也要写出 `output_path`
+-- **功能一致性**：优化前后的计算结果必须一致
+-- **精度一致性**：数值精度不能降低
+-- **可执行性**：输出代码必须能被 triton-op-verifier 直接验证和基准测试
++  Optimize a fully-correct Triton implementation for latency. Use after the
++  prepared verifier first reports passed_cases == total_cases.
++argument-hint: "op-name"
++---
++
++# Triton Latency Optimizer
++
++Correctness comes first:
++- Invoke this skill only after `bash tools/verify_once.sh <op_name>` reports
++  full correctness.
++- Do not benchmark before `passed_cases == total_cases`.
++- Do not tune `num_warps`, `num_ctas`, `num_stages`, or related Ascend-rejected
++  launch kwargs.
++
++Optimization loop:
++- Make one small performance change at a time.
++- Prefer fewer kernel launches, fused elementwise work, coalesced accesses,
++  less redundant loading, and launch grids that match the output shape.
++- Preserve all supported shapes and dtypes.
++- Re-run `bash tools/verify_once.sh <op_name>` after every change. A full-pass
++  run automatically benchmarks the candidate and updates the best snapshot only
++  when speedup is strictly higher.
++- Stop immediately when output contains `[best-snapshot] early-stop`.
++
++Do not invoke `benchmark.py` directly or add custom timing code.
+diff --git a/template/.claude/skills/triton-op-coding/SKILL.md b/template/.claude/skills/triton-op-coding/SKILL.md
+index cc30e5c..701abef 100644
+--- a/template/.claude/skills/triton-op-coding/SKILL.md
++++ b/template/.claude/skills/triton-op-coding/SKILL.md
+@@ -1,273 +1,44 @@
+ ---
+ name: triton-op-coding
+ description: >
+-  Triton Ascend 算子代码生成 Skill — 根据算子任务格式任务描述生成高性能
+-  Triton Ascend 内核代码。支持首次生成和基于错误反馈的迭代优化。
+-  触发：当用户需要根据任务描述生成或迭代修复 Triton Ascend 内核代码时使用。
+-argument-hint: >
+-  输入：op_name、task_desc（任务文件内容）、arch。
+-  可选：sketch（算法草图）、previous_code、verifier_error、conductor_suggestion、user_requirements。
+-  输出：包含 ModelNew 类的完整内核代码。
+-  固定参数：backend=ascend、framework=torch、dsl=triton_ascend。
++  Prepared KernelBench rollout coding path. Write ModelNew directly from
++  INSTRUCTIONS.md and src/<op_name>.py; do not load broad references or invoke
++  designer/extractor first.
++argument-hint: "op-name"
+ ---
+ 
+-# Triton Ascend 代码生成 Skill
+-
+-<role>
+-你是一个高性能计算的内核代码生成专家。
+-
+-你的任务是基于以下固定配置生成优化的内核代码：
+-
+-- **目标 DSL**: triton_ascend
+-- **目标框架**: torch
+-- **目标后端**: ascend
+-- **目标架构**: {{ arch }}
+-</role>
+-
+-## 核心约束：禁止 PyTorch 退化
+-
+-⚠️ **生成的代码必须是纯 Triton Ascend 实现，禁止退化成 PyTorch。**
+-
+-### forward() 中禁止的操作
+-
+-| 禁止操作 | 示例 | 原因 |
+-|---------|------|------|
+-| torch 计算函数 | `torch.matmul(x, w)`, `torch.relu(x)`, `torch.sum(x)` | 必须在 @triton.jit kernel 中实现 |
+-| torch.nn.functional | `F.softmax(x, dim=-1)`, `F.linear(x, w)`, `F.relu(x)` | 必须在 @triton.jit kernel 中实现 |
+-| tensor 方法计算 | `x.sum()`, `x.mean()`, `x.softmax(dim=-1)`, `x.relu()` | 必须在 @triton.jit kernel 中实现 |
+-| tensor 运算符 | `x @ w`, `x + y`, `x * y`, `x / y` | 必须在 @triton.jit kernel 中实现 |
+-| nn.Module 调用 | `self.conv(x)`, `self.linear(x)`, `self.layer(x)` | 必须在 @triton.jit kernel 中实现 |
+-
+-### forward() 中允许的操作
+-
+-| 允许操作 | 示例 | 说明 |
+-|---------|------|------|
+-| buffer 分配 | `torch.empty(shape)`, `torch.zeros(shape)`, `torch.ones(shape)` | 用于存储 kernel 输出 |
+-| 形状操作 | `x.view(...)`, `x.reshape(...)`, `x.permute(...)`, `x.transpose(...)` | 不涉及计算 |
+-| 元信息查询 | `x.shape`, `x.dtype`, `x.device`, `x.numel()` | 用于 grid 计算 |
+-| kernel 启动 | `kernel[grid](...args)` | 调用自定义 @triton.jit kernel |
+-
+-### ❌ 错误示例（退化成 PyTorch）
+-
+-```python
+-# ❌ 错误 1：完全无 kernel，纯 PyTorch
+-def forward(self, x, w):
+-    return torch.matmul(x, w)
+-
+-# ❌ 错误 2：有 kernel 但 forward 未调用
+-@triton.jit
+-def matmul_kernel(...):
+-    pass
+-
+-def forward(self, x, w):
+-    return torch.matmul(x, w)  # kernel 定义了但没用
+-
+-# ❌ 错误 3：混合实现（部分 kernel + 部分 torch）
+-def forward(self, x, w):
+-    y = self.kernel[grid](x, w)
+-    return y.sum(dim=-1)  # ← 违规：tensor 方法计算
+-
+-# ❌ 错误 4：tensor 运算符
+-def forward(self, x, w):
+-    y = self.kernel[grid](x, w)
+-    return y + 1  # ← 违规：+ 是 PyTorch 运算符
+-```
+-
+-### ✅ 正确示例（纯 Triton 实现）
+-
+-```python
+-@triton.jit
+-def add_kernel(x_ptr, y_ptr, output_ptr, n, BLOCK_SIZE: tl.constexpr):
+-    idx = tl.arange(0, BLOCK_SIZE)
+-    x = tl.load(x_ptr + idx)
+-    y = tl.load(y_ptr + idx)
+-    output = x + y  # ← 计算在 kernel 中
+-    tl.store(output_ptr + idx, output)
+-
+-class ModelNew(nn.Module):
+-    def forward(self, x, y):
+-        output = torch.empty_like(x)  # ✅ 允许：buffer 分配
+-        add_kernel[(1,)](x, y, output, x.numel(), BLOCK_SIZE=128)  # ✅ 允许：kernel 启动
+-        return output  # ✅ 允许：直接返回 kernel 输出
+-```
+-
+----
+-
+-## 输入信息
+-
+-你将获得以下信息：
+-
+-1. **任务描述和规格说明** — 算子任务格式的算子需求（包含 `Model` 类）
+-2. **算法设计草图**（`sketch`） — kernel-designer 生成的算法草图（首次生成时由 workflow 传入）
+-3. **相关的知识和示例** — Triton Ascend 编程知识（见下方知识加载规则）
+-4. **执行历史** — 之前的错误信息和修复建议（迭代生成时）
+-
+-## 知识加载规则
+-
+-### 必选知识（每次生成都加载）
+-
+-- **硬件规格**（每次生成都必须加载）：
+- `@../npu-arch/references/npu-arch-guide-triton.md` 和 `@../npu-arch/references/npu-hardware-params.md` 
+-
+-
+-- `@references/triton-ascend-fundamentals.md` — API 参考、编程基础、Grid 配置、内存优化、性能优化、调试清单
+-- `@references/triton-ascend-examples.md` — PyTorch + Triton Ascend 完整示例代码
+-
+-### 按算子类型选择的知识
+-
+-根据算子类型，**额外**加载对应的参考文档：
+-
+-| 算子类型 | 识别特征 | 加载文档 |
+-|---------|---------|---------|
+-| Element-wise | add/mul/relu/sigmoid/tanh/gelu/exp/log/silu 等逐元素操作 | `@references/triton-ascend-elementwise.md` |
+-| MatMul | matmul/bmm/linear/gemm 等矩阵乘法 | `@references/triton-ascend-matmul.md` |
+-| Reduce | sum/mean/max/min/softmax/layernorm/logsoftmax 等归约操作 | `@references/triton-ascend-reduce.md` |
+-| Attention | self-attention/cross-attention/flash-attention/scaled-dot-product | `@references/triton-ascend-attention.md` |
+-| Sort/Select | nms 等排序选择操作 | `@references/triton-ascend-sort-select.md` |
+-| Interpolate | Interpolate等插值操作 | `@references/triton-ascend-interpolate.md` |
+-
+-如果算子涉及多种类型（如融合算子），加载所有相关文档。
+-
+----
+-
+-## 算法草图使用规则
+-
+-当传入了 `sketch`（kernel-designer 生成的算法设计草图）时，**必须以草图为基础进行代码实现** ，充分利用其中的算法思路和优化策略。
+-
+-如果没有传入 `sketch`，则根据 `task_desc` 自行设计实现方案。
+-
+----
+-
+-## 代码生成模式
+-
+-### 模式 1: 首次生成（无历史信息）
+-
+-当只有 `op_name`、`task_desc` 等基本参数时：
+-
+-1. 仔细阅读 `task_desc` 中 `Model.forward()` 的参考实现
+-2. 理解算子的数学逻辑和计算模式
+-3. 判断算子类型，加载对应的知识文档
+-4. 选择合适的并行化策略和内存访问模式
+-5. 生成 kernel 函数和 `ModelNew` 类
+-
+-### 模式 2: 代码修改（有 previous_code + user_requirements）
+-
+-当用户要求修改已有代码时：
+-
+-1. **仅修改用户要求的部分**，不要重构无关代码
+-2. **保持代码结构和接口不变**（除非用户要求修改）
+-3. **确保修改后的代码仍然完整可运行**
+-4. 输出完整的修改后代码
+-
+-### 模式 3: 迭代修复（有 verifier_error / conductor_suggestion）
+-
+-当上一轮验证失败时：
+-
+-1. **分析错误**：仔细阅读 `verifier_error`，理解失败的具体原因
+-2. **参考建议**：严格按照 `conductor_suggestion` 中的修复方向进行修改
+-3. **保留优点**：保留上一轮代码中正确的部分，只修改有问题的部分
+-4. **针对性修复**：不做不必要的大规模重构
+-5. **避免重复**：如果建议中提到了历史教训，确保不犯同样的错误
+-
+----
+-
+-## 输出要求
+-
+-生成的代码**必须**是一个完整的 Python 文件，包含以下结构：
+-
+-```python
+-import torch
+-import torch.nn as nn
+-import triton
+-import triton.language as tl
+-# 其他必要的 import（如 torch_npu）
+-
+-# Kernel 函数（一个或多个）
+-@triton.jit
+-def {op_name}_kernel(...):
+-    # 高性能内核实现
+-    ...
+-
+-# 新 Model 类
+-class ModelNew(nn.Module):
+-    def __init__(self, <与原 Model 完全相同的参数>):
+-        super().__init__()
+-        # 与原 Model 相同的初始化逻辑
+-        # 在此获取核心数（如需要）
+-
+-    def forward(self, <与原 Model 完全相同的输入>):
+-        # 调用自定义 kernel
+-        ...
+-        return output
+-```
+-
+-### 关键约束
+-
+-| 约束 | 说明 |
+-|------|------|
+-| 类名 `ModelNew` | 必须使用 `ModelNew`，**不能**是 `Model` |
+-| 接口一致 | `__init__` 和 `forward` 的签名必须与原 `Model` **完全一致** |
+-| 输出一致 | 输出的形状、数据类型必须与原 `Model` 一致 |
+-| 自包含 | 所有 kernel 函数和辅助函数必须定义在同一文件内 |
+-| 可执行 | 代码必须可以直接导入运行 |
+-| 无测试代码 | 不需要生成测试代码 |
+-| 权重一致 | 含随机权重的算子（Conv2d/Linear 等）必须通过固定种子确保权重一致 |
+-| **禁止 PyTorch 退化** | **forward() 中所有核心计算必须在 @triton.jit kernel 中实现，禁止使用 torch.*/F.*/tensor 方法/tensor 运算符** |
+-
+-### 含随机权重算子的权重一致性（关键！）
+-
+-当任务描述中的 `Model` 类包含 `nn.Conv2d`、`nn.Linear`、`nn.ConvTranspose2d` 等带可学习参数的模块，或者使用 `torch.randn` / `nn.Parameter(torch.randn(...))` 创建随机参数时，**必须**在 `ModelNew.__init__` 中通过固定随机种子来确保与原 `Model` 的权重完全一致。
+-
+-**原理**：验证框架会在创建 `Model` 前调用 `torch.manual_seed(0)`，再在创建 `ModelNew` 前再次调用 `torch.manual_seed(0)`。只要两者在 `__init__` 内部以相同的顺序创建参数，就能获得完全一致的权重。
+-
+-**标准模式**：
+-
+-```python
+-class ModelNew(nn.Module):
+-    def __init__(self, in_channels, out_channels, kernel_size, ...):
+-        super().__init__()
+-        # 1. 固定种子 — 必须与验证框架中的种子一致 (0)
+-        torch.manual_seed(0)
+-
+-        # 2. 按照原 Model 的**完全相同的顺序**创建模块并提取权重
+-        #    确保随机数消耗顺序一致
+-        conv = nn.Conv2d(in_channels, out_channels, kernel_size)
+-        self.weight = nn.Parameter(conv.weight.clone())
+-        self.bias = nn.Parameter(conv.bias.clone()) if conv.bias is not None else None
+-
+-        # 如果原 Model 还有其他随机参数（如 nn.Parameter(torch.randn(...))），
+-        # 也必须在此按相同顺序创建
+-        self.extra_bias = nn.Parameter(torch.randn(bias_shape))
+-
+-    def forward(self, x):
+-        # 使用提取的权重调用自定义 kernel
+-        return custom_conv_kernel(x, self.weight, self.bias, ...)
+-```
+-
+-**核心要点**：
+-1. `ModelNew.__init__` 的**第一行**必须调用 `torch.manual_seed(0)`
+-2. 参数创建的**顺序**必须与原 `Model.__init__` 完全一致（因为每次 `torch.randn` 调用会推进随机状态）
+-3. 通过创建相同的 `nn.Module`（如 `nn.Conv2d`）来获取权重，而非手动 `torch.randn` —— 这保证内部参数的 shape 和初始化方式一致
+-4. 如果原 `Model` 有多个含权重的模块，必须按**原顺序**逐一创建并提取
+-
+----
+-
+-## 思考要求
+-
+-**重要**：思考过程中请只做框架级别的分析和决策，例如：
+-- 算子类型判断（elementwise / reduce / matmul 等）
+-- 选择什么优化策略（循环展开、向量化等）
+-- 数据类型如何处理
+-- 代码结构的大致骨架
+-
+-**不要在思考过程中写出完整的代码**，完整代码只在最终输出中给出。
+-
+-## 生成原则
+-
+-- 生成**完整的、可编译的**代码
+-- 遵循 Triton Ascend 的最佳实践
+-- 针对 Ascend NPU 架构进行优化
+-- 正确处理边界情况和异常条件
+-- 包含必要的导入和包装函数
+-- 数值正确性优先，性能次之
+-- **严格遵守禁止 PyTorch 退化的约束** — 所有核心计算必须在 @triton.jit kernel 中实现
++# Triton Op Coding
++
++Use this skill only to implement or repair the prepared operator.
++
++Fast path:
++- Read only `INSTRUCTIONS.md` and `src/<op_name>.py` before the first write.
++- Do not read the target stub before the first `Write`.
++- Write a complete `ModelNew` using at least one `@triton.jit` kernel.
++- Run `bash tools/verify_once.sh <op_name>` after each meaningful change.
++- Repair from `output/verify/verify_result_summary.json`.
++- After `passed_cases == total_cases`, switch to the
++  `triton-latency-optimizer` Skill and continue one performance change per
++  verifier run until `[best-snapshot] early-stop`.
++
++Keep forward simple:
++- Allocate output tensors.
++- Compute shapes, strides, and launch grid.
++- Launch as many Triton kernels as the implementation requires; fuse stages
++  only when it improves correctness or performance.
++- Do not perform host-side tensor math in `forward()`.
++
++Avoid known bad patterns:
++- No `.data_ptr()` kernel arguments.
++- No `tl.to(...)`, `tl.constant(...)`, or `tl.constexpr(...)` calls.
++- Use `ARG: tl.constexpr` only as a kernel parameter annotation.
++- No `@triton.autotune` or `@triton.heuristics`.
++- No chained comparisons inside `@triton.jit`; split masks into named steps.
++- No Python `assert` or `raise NotImplementedError` for verifier cases.
++- No markdown summaries or status files.
++
++Repair policy:
++- Preserve partial best implementations.
++- If compile passes and some cases pass, make small targeted edits.
++- If the same failure repeats twice, simplify the kernel instead of adding
++  another special case.
+diff --git a/template/.claude/skills/triton-op-designer/SKILL.md b/template/.claude/skills/triton-op-designer/SKILL.md
+index 7f5b0ad..dde4952 100644
+--- a/template/.claude/skills/triton-op-designer/SKILL.md
++++ b/template/.claude/skills/triton-op-designer/SKILL.md
+@@ -1,126 +1,21 @@
+ ---
+ name: triton-op-designer
+ description: >
+-  Triton Ascend 算子算法草图设计 Skill — 根据任务描述设计高质量的算法草图（sketch），
+-  用于指导后续代码生成。支持首次设计和基于历史上下文的迭代优化。
+-  触发：当用户需要为 Triton Ascend 算子设计算法草图或在已有 sketch 基础上迭代时使用。
+-argument-hint: >
+-  输入：op_name、task_desc（任务文件内容）、arch。
+-  可选：user_requirements、previous_sketch、history_context、inspirations。
+-  输出：UnifiedSketch DSL 格式的算法草图。
+-  固定参数：backend=ascend、framework=torch、dsl=triton_ascend。
++  Optional algorithm sketching skill. Do not use during prepared KernelBench
++  rollout unless explicitly requested; write ModelNew directly instead.
++argument-hint: "op-name"
+ ---
+ 
+-# Triton Ascend 算法草图设计 Skill
++# Triton Op Designer
+ 
+-<role>
+-你是一个高性能计算的算法设计专家。
++Prepared rollout default: do not invoke this skill.
+ 
+-你的任务是基于以下固定配置设计高质量的算法草图（sketch）：
++Use it only when explicitly asked to produce an algorithm sketch before coding.
++For normal rollout, follow `INSTRUCTIONS.md`, read `src/<op_name>.py`, write
++`ModelNew`, and verify with `tools/verify_once.sh`.
+ 
+-- **目标 DSL**: triton_ascend
+-- **目标框架**: torch
+-- **目标后端**: ascend
+-- **目标架构**: {{ arch }}
+-
+-⚠️ 你**仅生成算法草图**，不生成可执行代码。草图用于指导后续的代码生成（triton-op-coding）。
+-</role>
+-
+-## 输入信息
+-
+-你将获得以下信息：
+-
+-1. **任务描述和规格说明** — 算子任务格式的算子需求（包含 `Model` 类）
+-2. **相关的知识和示例** — UnifiedSketch DSL 规范和设计模式（见下方知识加载规则）
+-3. **执行历史** — 之前的设计反馈和优化建议（迭代设计时）
+-
+-## 知识加载规则
+-
+-### 必选知识（每次设计都加载）
+-
+-- `@references/sketch-design.md` — UnifiedSketch DSL 语法规范、核心操作、设计模式、最佳实践
+-
+-- **硬件规格**
+-  详细硬件规格参考： `@../npu-arch/references/npu-arch-guide-triton.md` 和 `@../npu-arch/references/npu-hardware-params.md` 
+-
+-  使用 `read` 工具读取对应架构的硬件规格文件。
+-
+-
+-### 手写优化案例（根据任务选择最相关的 2 个）
+-
+-根据任务描述中的算子类型，从以下案例中选择**最相关的 2 个**加载。选择依据：算子类型匹配 > 数据规模接近 > 优化模式相似。
+-
+-| 类别 | 案例文件 | 核心优化 |
+-|------|---------|---------|
+-| **Elementwise** | `@references/cases/elemwise-broadcast-2d.md` | 2D 广播：小维不切分、循环外加载 |
+-| | `@references/cases/elemwise-broadcast-3d.md` | 跨轴 3D 广播：两阶段 kernel |
+-| | `@references/cases/elemwise-cast.md` | int8→fp16：二次切分 + 用满 UB |
+-| | `@references/cases/elemwise-concat.md` | Slice+Concat 融合：精确切片 load |
+-| | `@references/cases/elemwise-zeros.md` | 小 shape：少核、减调度开销 |
+-| **Index** | `@references/cases/index-histogram.md` | 直方图：预排序 + 二分查找 |
+-| | `@references/cases/index-put.md` | 批量 load 索引到 UB、get_element 复用 |
+-| **MatMul** | `@references/cases/matmul-swizzle2d.md` | 固定核心数 grid、Swizzle2D 块重排 |
+-| **Reduction** | `@references/cases/reduction-amax-large.md` | M≪N：reduce 轴多核 + 原子 + 二次切分 |
+-| | `@references/cases/reduction-amax-medium.md` | 中等规模：矩阵累加再归约 |
+-| | `@references/cases/reduction-amax-small.md` | 极小 shape：grid=1 最优 |
+-| | `@references/cases/reduction-amin-atomic.md` | 原子 amin：两种原子方案对比 |
+-| | `@references/cases/reduction-amin-large.md` | 超大 1D：二次切分 + 重组 |
+-| | `@references/cases/reduction-amin-medium.md` | 大 N 维 amin：矩阵 min 再轴归约 |
+-| | `@references/cases/reduction-amin-small.md` | 1D amin：并行度平衡 |
+-| | `@references/cases/reduction-mean-large.md` | mean 行二次切分 |
+-| | `@references/cases/reduction-mean-medium.md` | mean reduce 第一轴：重组 |
+-| | `@references/cases/reduction-prod-small.md` | prod：tl.reduce + 自定义 mul |
+-| | `@references/cases/reduction-sum-fused.md` | elemwise + sum 融合 |
+-| | `@references/cases/reduction-sum-large.md` | 大规模 sum：重组 |
+-| | `@references/cases/reduction-weighted-swiglu.md` | 3D SwiGLU backward：reshape + 行二次切分 |
+-
+-### 按需加载的知识
+-
+-| 条件 | 加载文档 |
+-|------|---------|
+-| 任务描述中包含 hint 标记（`@hint:`, `@range_hint` 等） | `@references/hint-mode.md` |
+-
+----
+-
+-## 设计模式
+-
+-1. 仔细阅读 `task_desc` 中 `Model.forward()` 的参考实现
+-2. 理解算子的数学逻辑和计算模式
+-3. 判断算子类型（elementwise / reduce / matmul / attention / 复合）
+-4. 根据目标硬件架构，选择合适的并行化策略和内存访问模式
+-5. 使用 UnifiedSketch DSL 设计算法草图
+-
+----
+-
+-## 输出要求
+-
+-**直接输出** `sketch op_name { ... }` 格式的算法草图，如果任务描述中包含 hint 标记，在草图末尾附上"设计适用范围"注释（格式见 `hint-mode.md`）。
+-
+----
+-
+-## 设计原则
+-
+-- 设计**清晰的、可理解的**算法流程
+-- 遵循 **Ascend NPU** 硬件特性的最佳实践（core 级别并行、内存层次）
+-- 考虑**目标硬件架构**的优化机会（并行度、内存访问模式、数据对齐）
+-- 标注**优化点和权衡决策**（使用 `@llm_hint` 注解）
+-- 数值正确性优先，性能次之
+-
+-## 草图特点
+-
+-算法草图应该：
+-
+-- **高层抽象**: 关注算法逻辑和优化策略，而非实现细节
+-- **易于理解**: 便于 triton-op-coding 转换为可执行的 Triton Ascend 代码
+-- **包含优化提示**: 标注并行化、内存优化、循环展开等机会
+-
+-## 思考要求
+-
+-**重要**：思考过程中请只做框架级别的分析和决策，例如：
+-
+-- 算子类型判断（elementwise / reduce / matmul 等）
+-- 选择什么并行策略（core 级并行、数据切分方式）
+-- Tile 大小选择（考虑 NPU UB 容量和对齐要求）
+-- 数据类型如何处理
+-
+-**不要在思考过程中写出完整的草图**，完整草图只在最终输出中给出。
++If used, keep the sketch short:
++- Tensor shapes and output contract.
++- One-kernel mapping strategy.
++- Key masks and dtype handling.
++- No benchmark or latency work.
+diff --git a/template/.claude/skills/triton-op-verifier/SKILL.md b/template/.claude/skills/triton-op-verifier/SKILL.md
+index bc75343..10b95dd 100644
+--- a/template/.claude/skills/triton-op-verifier/SKILL.md
++++ b/template/.claude/skills/triton-op-verifier/SKILL.md
+@@ -1,379 +1,35 @@
+ ---
+ name: triton-op-verifier
+ description: >
+-  算子代码验证 Skill — 按照标准验证流程验证生成的内核代码。
+-  创建验证项目文件，调用 scripts/verify.py 运行验证，验证通过后
+-  调用 scripts/benchmark.py 进行性能测试并收集结果。
+-  触发：当用户需要验证 Triton 算子代码功能正确性或采集其性能数据时使用。
+-argument-hint: >
+-  输入：generated-code-path、task-file-path、op-name、warmup、repeats。
+-  输出：验证结果（成功/失败）、错误信息、性能数据。
+-  固定参数：framework=torch、backend=ascend、dsl=triton_ascend。
+----
+-
+-# Kernel Verifier Skill
+-
+-<role>
+-你是一个内核代码验证专家。你的任务是按照标准验证流程，创建验证项目并运行，检查生成的算子代码是否能正确编译运行且与参考实现的输出一致。验证通过后，执行性能测试并收集性能数据。
+-</role>
+-
+-## 验证流程
+-
+-```
+-输入：generated_code.py + task_file.py
+-    ↓
+-[0. Triton 退化预检查] → scripts/validate_triton_impl.py (AST 静态分析)
+-    ↓ (通过)
+-[1. 创建验证项目] → 两个文件
+-    ↓
+-[2. 执行验证脚本] → scripts/verify.py --op_name ...
+-    ↓
+-[3. 收集验证结果]
+-    ↓
+-[验证通过] → [4. 执行性能测试] → scripts/benchmark.py --op_name ...
+-    ↓
+-[5. 收集性能结果]
+-    ↓
+-输出：验证结果 + 性能数据
+-```
+-
+----
+-
+-## Step 0: Triton 退化预检查（AST 静态分析）
+-
+-在创建验证项目之前，先使用 `validate_triton_impl.py` 对生成代码进行退化检测。此检查为纯 AST 静态分析，无需 NPU/torch 运行时，毫秒级完成。
+-
+-**命令模板**：
+-
+-```bash
+-python3 <本skill所在目录的绝对路径>/scripts/validate_triton_impl.py \
+-    <生成代码文件路径> --json
+-```
+-
+-**检测三种退化类型**：
+-
+-| 类型 | 含义 | 检测方式 |
+-|------|------|---------|
+-| Type 1 | 完全无 `@triton.jit` kernel | AST 中无 `triton.jit` 装饰的函数定义 |
+-| Type 2 | 有 kernel 但 `forward()` 未调用 | kernel 定义存在但 `ModelNew.forward()` 未引用（含 wrapper 函数追踪） |
+-| Type 3 | 部分计算使用 PyTorch | `forward()` 中存在禁止的 `torch.*` / `F.*` 计算操作（精确到行号） |
+-
+-**结果判断**：
+-- exit code == 0 → 通过，继续 Step 1
+-- exit code != 0 → 退化检测到，解析 JSON 中的 `regression_type` 和 `suggestion`，直接返回失败
+-
+-**JSON 输出格式**：
+-
+-```json
+-{
+-  "valid": false,
+-  "regression_type": 3,
+-  "checks": {
+-    "triton_kernel_exists": {"passed": true, "kernels": [...]},
+-    "kernel_called_from_forward": {"passed": true, "called": [...]},
+-    "no_forbidden_torch_ops": {"passed": false, "violations": [{"line": 45, "call": "F.softmax", "reason": "..."}]}
+-  },
+-  "suggestion": "..."
+-}
+-```
+-
+----
+-
+-## Step 1: 创建验证项目
+-
+-在当前迭代的验证目录（如 `{output-path}/iter_{iteration}/verify/`）下创建两个文件：
+-
+-### 文件 1: `{op_name}_torch.py`
+-
+-直接复制任务文件的完整内容。此文件包含 `Model`、`get_inputs()`、`get_init_inputs()`。
+-
+-### 文件 2: `{op_name}_triton_ascend_impl.py`
+-
+-直接复制生成代码的完整内容。此文件包含 `ModelNew` 类。
+-
+----
+-
+-## Step 2: 执行验证（⚠️ 必须使用本脚本，禁止自创测试方法）
+-
+-**必须使用** `bash` 工具调用本 skill 自带的 `scripts/verify.py` 脚本。
+-
+-**命令模板**：
+-
+-```bash
+-python3 <本skill所在目录的绝对路径>/scripts/verify.py \
+-    --op_name <算子名> \
+-    --verify_dir <验证目录> \
+-    --triton_impl_name <triton实现模块名> \
+-    --timeout 900
+-```
+-
+-**实际调用示例**（假设验证目录为 `/tmp/workspace/softmax/verify`，算子名为 `softmax`）：
+-
+-```bash
+-python3 /path/to/triton-op-verifier/scripts/verify.py \
+-    --op_name softmax \
+-    --verify_dir /tmp/workspace/softmax/verify \
+-    --triton_impl_name triton_ascend_impl \
+-    --timeout 900
+-```
+-
+-**参数说明**：
+-
+-| 参数 | 必填 | 说明 |
+-|------|------|------|
+-| `--op_name` | 是 | 算子名称，与文件名前缀对应 |
+-| `--verify_dir` | 否 | 验证目录路径，默认当前目录 |
+-| `--triton_impl_name` | 否 | Triton 实现模块名（不含 `{op_name}_` 前缀），默认 `triton_ascend_impl` |
+-| `--timeout` | 否 | 超时秒数，默认 900 |
+-
+-**超时设置**：默认 900 秒，复杂算子可适当增加。
+-
+-**⛔ 禁止事项**：
+-- 禁止自己编写 Python 代码来测试算子（如手动 import 并 forward 比较）
+-- 禁止使用 `torch.allclose` 或其他自创方法替代 `scripts/verify.py`
+-- 禁止跳过此步骤直接报告验证结果
+-
+----
+-
+-## Step 3: 收集验证结果
+-
+-verify.py 会在 `verify_dir` 下生成 `verify_result.json`（或 `--output` 指定路径），包含：
+-
+-```json
+-{
+-  "op_name": "softmax",
+-  "total_cases": 5,
+-  "passed_cases": 4,
+-  "failed_cases": 1,
+-  "failures": [
+-    {
+-      "case_idx": 2,
+-      "input_desc": [
+-        {"type": "tensor", "shape": [128, 256], "dtype": "torch.float16"}
+-      ],
+-      "error_type": "CompilationError",
+-      "error_msg": "..."
+-    }
+-  ]
+-}
+-```
+-
+-**多 shape 行为**：每个 shape 独立 try/except，失败不中止后续 shape；全部跑完才落盘并退出。
+-
+-**退出码语义（策略 A：严格）**：
+-- `passed_cases == total_cases` → exit 0，`verifier_result = true`
+-- `passed_cases <  total_cases` → exit 1，`verifier_result = false`，`verifier_error` 应读取 `verify_result.json.failures` 的**全部条目**（不是第一个），汇总后提交给 Conductor。
+-
+-**超时**：脚本输出 `"验证超时"` 且退出码为 1 → `verifier_error = "验证超时（{timeout}秒）"`。
+-
+----
+-
+-## Step 4: 执行性能测试（验证通过后执行）
+-
+-**前置条件（L1 脚本层强制）**：benchmark.py 启动时会自动按 `--triton_impl_name` 推导对应的 `verify_result` 文件并校验 `passed_cases == total_cases`；不通过时直接 **exit 2**，禁止运行 benchmark。详见下方"L1 verify 闸门"小节。
+-
+-仅在 verify.py 的 `passed_cases == total_cases` 时执行（策略 A）。verify 有任何失败 → 禁止执行 benchmark.py。
+-
+-使用 `bash` 工具调用本 skill 自带的 `scripts/benchmark.py` 脚本。
+-
+-**命令模板**：
+-
+-```bash
+-python3 <本skill所在目录的绝对路径>/scripts/benchmark.py \
+-    --op_name <算子名> \
+-    --verify_dir <验证目录> \
+-    --triton_impl_name <triton实现模块名> \
+-    --warmup <warmup次数> \
+-    --repeats <测试次数> \
+-    --output <输出文件路径>
+-```
+-
+-**实际调用示例**：
+-
+-```bash
+-python3 /path/to/triton-op-verifier/scripts/benchmark.py \
+-    --op_name softmax \
+-    --verify_dir /tmp/workspace/softmax/verify \
+-    --triton_impl_name triton_ascend_impl \
+-    --warmup 5 \
+-    --repeats 50 \
+-    --output /tmp/workspace/softmax/iter_0/perf_result.json
+-```
+-
+-> **注意**：`--output` 路径由调用方指定，性能报告将写入该路径。通常由 `kernelgen-workflow` SubAgent 指定为 `{output-path}/iter_{iteration}/perf_result.json`。
+-
+-**参数说明**：
+-
+-| 参数 | 必填 | 说明 |
+-|------|------|------|
+-| `--op_name` | 是 | 算子名称 |
+-| `--verify_dir` | 否 | 验证目录路径，默认当前目录 |
+-| `--triton_impl_name` | 否 | Triton 实现模块名（不含 `{op_name}_` 前缀），默认 `triton_ascend_impl` |
+-| `--warmup` | 否 | warmup 次数，默认 5 |
+-| `--repeats` | 否 | 正式测试次数，默认 50 |
+-| `--output` | 否 | 性能报告输出路径（JSON 格式）|
+-| `--verify_not_required` | 否 | 跳过 L1 verify 闸门（默认强制要求 verify_result 全过）|
+-
+----
+-
+-### L1 verify 闸门
+-
+-benchmark.py 启动时按 `--triton_impl_name` 推导对应的 verify_result 文件名：
+-
+-| triton_impl_name | 对应 verify json |
+-|-----------------|----------------|
+-| `triton_ascend_impl`（默认，Phase 3）| `verify_result.json` |
+-| `triton_baseline`（Phase 4 baseline）| `verify_result_baseline.json` |
+-| `triton_optimized`（Phase 4 optimized）| `verify_result_optimized.json` |
+-| 其他 `triton_xxx` | `verify_result_xxx.json` |
+-
+-**判定规则**（默认开启，传 `--verify_not_required` 可跳过）：
+-
+-| 情况 | 退出码 | 说明 |
+-|------|-------|------|
+-| 文件不存在 | exit 2 | 必须先跑 verify.py |
+-| 文件读取失败 | exit 2 | JSON 损坏 |
+-| `total_cases == 0` | exit 2 | verify 未实际跑任何 shape |
+-| `passed_cases < total_cases` | exit 2 | 精度未全过，benchmark 无意义且会传染下游 |
+-| `passed_cases == total_cases > 0` | 继续执行 benchmark | — |
+-
+-**exit 2 时 stderr 会打印**：verify_json 路径 / passed/total / 前 5 条 failures，便于上游 agent 把错误等价映射到 verify 失败处理路径。
+-
+----
+-
+-## Step 5: 收集性能结果
+-
+-性能测试完成后，从 `--output` 指定的 JSON 文件中读取结果。
+-
+-### 性能报告格式
+-
+-```json
+-{
+-  "op_name": "softmax",
+-  "warmup": 5,
+-  "repeats": 50,
+-  "total_cases": 3,
+-  "passed_cases": 3,
+-  "failed_cases": 0,
+-  "nan_indices": [],
+-  "inf_indices": [],
+-  "zero_indices": [],
+-  "negative_indices": [],
+-  "none_indices": [],
+-  "framework": {
+-    "avg_latency_ms": 1.2345,
+-    "peak_memory_mb": 256.00,
+-    "operators": {"...": 0.0}
+-  },
+-  "implementation": {
+-    "avg_latency_ms": 0.5678,
+-    "peak_memory_mb": 128.00,
+-    "operators": {"...": 0.0}
+-  },
+-  "speedup_vs_torch": 2.1746,
+-  "per_shape_results": [
+-    {
+-      "case_idx": 1,
+-      "input_desc": [{"type":"tensor","shape":[128,256],"dtype":"torch.float16"}],
+-      "status": "pass",
+-      "framework": {"avg_latency_ms": 1.23, "peak_memory_mb": 64.0},
+-      "implementation": {"avg_latency_ms": 0.56, "peak_memory_mb": 32.0},
+-      "speedup_vs_torch": 2.19,
+-      "error_type": null,
+-      "error_msg": null
+-    }
+-  ]
+-}
+-```
+-
+-**字段说明**：
+-
+-| 指标 | 说明 |
+-|------|------|
+-| `avg_latency_ms` | 各 shape 延时的算术平均（兼容语义）|
+-| `peak_memory_mb` | 峰值内存占用（MB）|
+-| `speedup_vs_torch` | **几何平均加速比** = `(∏ s_i)^(1/n)`，仅对 status==pass 且 `s_i` 为有限正数的 shape 取几何平均；全部异常时为 `null` |
+-| `passed_cases` / `failed_cases` | 多 shape 通过 / 失败计数（异常 shape 仍计入 `passed_cases`，因为算子功能正常）|
+-| `nan_indices` / `inf_indices` / `zero_indices` / `negative_indices` / `none_indices` | 各类异常 `s_i` 的 case_idx 列表（从 1 开始），不进入几何平均；无异常时为 `[]` |
+-| `per_shape_results[].status` | `"pass"` 或 `"fail"` |
+-| `per_shape_results[].speedup_vs_torch` | 该 shape 的加速比；fail 或异常时为 `null` |
+-
+-**边界值处理**：
+-
+-`s_i = framework_latency_ms / impl_latency_ms` 可能因 profiler 故障、极小延时等出现异常值。`compute_overall` 对每个 `s_i` 按以下优先级分类：
+-
+-| 类别 | 判定 | 落盘行为 |
+-|------|------|---------|
+-| `none` | `s_i is None` | `per_shape.speedup_vs_torch = null`，case_idx 入 `none_indices` |
+-| `nan` | `math.isnan(s_i)` | 同上，入 `nan_indices` |
+-| `inf` | `math.isinf(s_i)` | 同上，入 `inf_indices` |
+-| `negative` | `s_i < 0` | 同上，入 `negative_indices` |
+-| `zero` | `s_i == 0` | 同上，入 `zero_indices` |
+-| `valid` | 有限正数 | 进入几何平均 |
+-
+-异常 shape **仍计入 `passed_cases`**（算子功能正常，仅测量数据不可信），但 `s_i` 不参与整体几何平均。全部 shape 都异常时 `speedup_vs_torch = null`。
+-
+-**退出码**：
+-- exit 0：benchmark 正常完成（按 shape 内部 try/except，pass/fail 写在 per_shape_results）
+-- exit 1：脚本本身崩溃
+-- exit 2：L1 verify 闸门拒绝（precondition 未满足，benchmark 未实际运行）
+-
+-调用方通过读 JSON 判断 `passed_cases == total_cases`；exit 2 时无 JSON 产出，应等价于"对应 verify 失败"处理。
+-
+-**返回**：
+-- `perf_result`：dict（完整性能数据）
+-- `perf_report_path`：str（性能报告文件路径）
+-
+----
+-
+-## 精度阈值说明
+-
+-验证使用基于数据类型的 **MERE/MARE 双门限相对误差**判定（NPU Benchmark 标准），与 `torch.allclose` 不同。
+-
+-**判定公式**（必须同时满足）：
+-
+-```
+-MERE < threshold        且        MARE < 10 × threshold
+-```
+-
+-其中：
+-- `MERE` = mean(|actual - golden| / max(|golden|, threshold))，平均相对误差
+-- `MARE` = max(|actual - golden| / max(|golden|, threshold))，最大相对误差
+-- 计算前两侧统一升 float32，避免低精度 dtype 自身误差污染
+-- 分母用 `clamp(min=threshold)` 而非 `+epsilon`：当 `|golden| < threshold`（参考值已小到 dtype 精度极限）时，rel_err 退化为 `|diff| / threshold`，等价于按绝对误差归一化，避免零值/极小值附近误报
+-
+-**dtype 阈值表**（2 的幂次方）：
+-
+-| 数据类型 | threshold | MERE 上限 | MARE 上限 (10×t) |
+-|---------|-----------|-----------|------------------|
+-| `float16` | 2⁻¹⁰ ≈ 9.77e-4 | 9.77e-4 | 9.77e-3 |
+-| `bfloat16` | 2⁻⁷ ≈ 7.81e-3 | 7.81e-3 | 7.81e-2 |
+-| `float32` | 2⁻¹³ ≈ 1.22e-4 | 1.22e-4 | 1.22e-3 |
+-| `hifloat32` | 2⁻¹¹ ≈ 4.88e-4 | 4.88e-4 | 4.88e-3 |
+-| `float8_e4m3` | 2⁻³ = 0.125 | 0.125 | 1.25 |
+-| `float8_e5m2` | 2⁻² = 0.25 | 0.25 | 2.5 |
+-| 其他 dtype（fallback） | 2⁻¹³ | 1.22e-4 | 1.22e-3 |
+-
+-**比对前置检查**（按顺序，任一失败即判 fail）：
+-1. 形状必须一致
+-2. NaN 位置必须完全一致（mask 按位相等）
+-3. Inf 位置和符号必须完全一致
+-4. `bool` dtype：要求 `torch.equal` 完全相等，不进入 MERE/MARE 判定
+-5. 仅在 `finite_mask` 上做 MERE/MARE 计算；当 dtype 不一致时 impl 会被 cast 到 golden 的 dtype
+-
+----
+-
+-## 脚本位置
+-
+-验证脚本位于本 skill 的 `scripts/` 目录：
+-
+-| 脚本 | 用途 |
+-|------|------|
+-| `scripts/validate_triton_impl.py` | 退化预检查（AST 静态分析） |
+-| `scripts/verify.py` | 验证正确性 |
+-| `scripts/benchmark.py` | 测试性能 |
+-
+-**CLI 参数**：
+-- `validate_triton_impl.py`: `<file_path>`, `[--json]`
+-- `verify.py`: `--op_name`, `--verify_dir`, `--triton_impl_name`, `--timeout`, `--output`
+-- `benchmark.py`: `--op_name`, `--verify_dir`, `--triton_impl_name`, `--warmup`, `--repeats`, `--output`, `--skip_framework`, `--framework_latency_ms`, `--verify_not_required`
+\ No newline at end of file
++  Prepared KernelBench rollout verifier. Use only the workspace validation
++  wrapper from INSTRUCTIONS.md. It benchmarks automatically after a full pass.
++argument-hint: "op-name"
++---
++
++# Triton Op Verifier
++
++Use this skill only as the prepared rollout verification path.
++
++Required flow:
++- Run `bash tools/verify_once.sh <op_name>` in the foreground.
++- Read `output/verify/verify_result_summary.json` after failure.
++- Treat AST success as only a precheck.
++- Treat correctness as success only when `passed_cases == total_cases`.
++- After full correctness, read the speedup printed by the wrapper and continue
++  latency optimization until the verifier hook stops the run.
++
++Do not:
++- Read verifier source, full raw logs, or full skill/reference docs by default.
++- Create a separate verification project.
++- Run custom `python3 -c` torch/triton probes.
++- Run benchmark commands or ad hoc latency probes; the wrapper handles the
++  benchmark for each fully-correct implementation.
++- Edit or change permissions on verifier scripts or validation wrappers.
++- Poll background tasks, use `sleep`, `ps`, `pgrep`, `tail -f`, `nohup`, or `&`.
++
++Repair policy:
++- Use the compact verifier summary as the only failure signal.
++- If an implementation has partial pass, preserve it and make the smallest edit.
++- If the same compile/AST issue repeats twice, simplify the kernel instead of
++  adding more special cases.
++- Do not write markdown summaries or status files.
+diff --git a/tools/verifier/_common_utils.py b/tools/verifier/_common_utils.py
+index 03fbefc..5370b64 100644
+--- a/tools/verifier/_common_utils.py
++++ b/tools/verifier/_common_utils.py
+@@ -13,6 +13,19 @@
+ from typing import Any, Dict, List
+ 
+ 
++def seed_input_generation(seed: int = 0) -> None:
++    """Reset all RNGs that a task's input factory may use."""
++    import random
++
++    import numpy as np
++    import torch
++
++    random.seed(seed)
++    np.random.seed(seed)
++    torch.manual_seed(seed)
++    torch.npu.manual_seed(seed)
++
++
+ def describe_input(inputs: List[Any]) -> List[Dict[str, Any]]:
+     """将输入列表描述为结构化字段，便于写入 JSON。
+ 
+diff --git a/tools/verifier/_log_utils.py b/tools/verifier/_log_utils.py
+index 061b8aa..296da35 100644
+--- a/tools/verifier/_log_utils.py
++++ b/tools/verifier/_log_utils.py
+@@ -23,7 +23,7 @@ def setup_logger(logger: logging.Logger) -> None:
+         return
+     logger.setLevel(logging.INFO)
+     logger.propagate = False
+-    
++
+     stdout_handler = logging.StreamHandler(sys.stdout)
+     stdout_handler.setLevel(logging.DEBUG)
+     stdout_handler.addFilter(lambda record: record.levelno < logging.WARNING)
+diff --git a/tools/verifier/benchmark.py b/tools/verifier/benchmark.py
+index 7df12b1..3dc3f30 100644
+--- a/tools/verifier/benchmark.py
++++ b/tools/verifier/benchmark.py
+@@ -34,6 +34,7 @@ from dataclasses import dataclass, field
+ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+ from _log_utils import setup_logger as _setup_logger_shared  # noqa: E402
+ from _common_utils import describe_input as _describe_input_shared  # noqa: E402
++from _common_utils import seed_input_generation as _seed_input_generation  # noqa: E402
+ 
+ logger = logging.getLogger("triton_op_verifier.benchmark")
+ 
+@@ -786,12 +787,13 @@ def benchmark_implementations(config: BenchmarkConfig) -> BenchmarkResult:
+ 
+     device = torch.device("npu")
+ 
+-    input_groups = resolve_inputs(config.op_name, config.verify_dir)
+-    total_cases = len(input_groups)
+-
+     framework_cls, impl_cls, get_init_inputs = _load_benchmark_modules(config)
+     model_spec = BenchmarkModelSpec(framework_cls, impl_cls, get_init_inputs)
+ 
++    _seed_input_generation()
++    input_groups = resolve_inputs(config.op_name, config.verify_dir)
++    total_cases = len(input_groups)
++
+     per_shape_results: List[SingleShapeResult] = [
+         _run_shape_case(
+             config, model_spec,
+@@ -804,6 +806,17 @@ def benchmark_implementations(config: BenchmarkConfig) -> BenchmarkResult:
+     failed_cases = total_cases - passed_cases
+ 
+     overall = compute_overall(per_shape_results)
++    incomplete_speedup = failed_cases > 0 or any(
++        (
++            overall.nan_indices,
++            overall.inf_indices,
++            overall.zero_indices,
++            overall.negative_indices,
++            overall.none_indices,
++        )
++    )
++    if incomplete_speedup:
++        overall.speedup_vs_torch = None
+ 
+     return BenchmarkResult(
+         op_name=config.op_name,
+diff --git a/tools/verifier/validate_triton_impl.py b/tools/verifier/validate_triton_impl.py
+index 214e3b2..af6e99f 100644
+--- a/tools/verifier/validate_triton_impl.py
++++ b/tools/verifier/validate_triton_impl.py
+@@ -61,6 +61,18 @@ ALLOWED_TORCH_FUNCS = {
+     "as_tensor",
+ }
+ 
++FORBIDDEN_FORWARD_TORCH_FUNCS = {
++    "arange", "as_tensor", "cat", "linspace", "stack", "tensor",
++}
++
++FORBIDDEN_FORWARD_BUILTINS = {
++    "dict", "max", "min", "range", "set", "sorted", "sum",
++}
++
++FORBIDDEN_KERNEL_BUILTINS = {
++    "abs", "bool", "float", "int", "len", "max", "min",
++}
++
+ ALLOWED_TENSOR_METHODS = {
+     # 形状 / 元信息
+     "size", "shape", "stride", "numel", "dtype", "device", "dim",
+@@ -72,7 +84,6 @@ ALLOWED_TENSOR_METHODS = {
+     "narrow", "clone", "detach", "t",
+     "type", "float", "half", "bfloat16", "int", "long", "bool", "double",
+     "cpu", "npu", "cuda",
+-    "item", "tolist",
+     # 原地标记
+     "requires_grad_", "zero_",
+     # 切片相关（一般通过 __getitem__ 而非方法，但以防万一）
+@@ -83,6 +94,49 @@ ALLOWED_TRITON_ATTRS = {
+     "cdiv", "next_power_of_2",
+ }
+ 
++FORBIDDEN_STATIC_KEYWORDS = {
++    "enable_linearize",
++    "force_simt_template",
++    "num_buffers_warp_spec",
++    "num_consumer_groups",
++    "num_ctas",
++    "num_stages",
++    "num_warps",
++    "reg_dec_producer",
++    "reg_inc_consumer",
++}
++
++FORBIDDEN_TL_CALLS = {
++    "constant": (
++        "tl.constant(...) is not available on this Ascend Triton path. Use a "
++        "plain Python literal for scalar constants, or cast tl values with "
++        "value.to(...)."
++    ),
++    "constexpr": (
++        "tl.constexpr is a type annotation for compile-time parameters, not a "
++        "runtime function. Annotate kernel arguments as ARG: tl.constexpr "
++        "instead of calling tl.constexpr(...)."
++    ),
++}
++
++FORBIDDEN_TRITON_CALLS = {
++    "get_device_properties": (
++        "Do not query device properties inside generated implementations. Keep "
++        "launch configuration static and derived from tensor shapes."
++    ),
++}
++
++FORBIDDEN_TRITON_DECORATORS = {
++    "autotune": (
++        "Do not use triton.autotune in rollout implementations. Generate one "
++        "deterministic correctness kernel first."
++    ),
++    "heuristics": (
++        "Do not use triton.heuristics in rollout implementations. It has "
++        "caused fragile key/config failures on this path."
++    ),
++}
++
+ FORBIDDEN_TENSOR_METHODS = {
+     # 计算操作
+     "sum", "mean", "max", "min", "softmax", "log_softmax",
+@@ -92,6 +146,8 @@ FORBIDDEN_TENSOR_METHODS = {
+     "norm", "layer_norm", "batch_norm", "group_norm",
+     "conv1d", "conv2d", "conv3d", "conv_transpose2d", "linear",
+     "dropout", "softplus", "hardtanh", "hardswish",
++    # 设备到 host 的同步/转换
++    "item", "tolist",
+ }
+ 
+ FUNCTIONAL_QUALIFIERS = {
+@@ -231,71 +287,64 @@ def _call_invokes_kernel(call_node, kernel_names) -> bool:
+     return bool(resolved and resolved[0] is None and resolved[1] in kernel_names)
+ 
+ 
+-def _func_calls_kernel(func_node, kernel_names) -> bool:
+-    """判断函数体内是否存在 kernel 启动调用。"""
+-    for child in ast.walk(func_node):
+-        if isinstance(child, ast.Call) and _call_invokes_kernel(child, kernel_names):
+-            return True
+-    return False
+-
+-
+-def find_wrapper_functions(tree, kernel_names):
+-    """找到模块级别或类级别的辅助函数，这些函数内部调用了 triton kernel。
+-
+-    返回函数名集合。
+-    """
+-    wrappers = set()
++def _helper_function_nodes(tree, kernel_names):
++    """Collect module helpers and ModelNew methods reachable from forward()."""
++    helpers = {}
+     for node in ast.iter_child_nodes(tree):
+         if isinstance(node, ast.FunctionDef) and node.name not in kernel_names:
+-            if _func_calls_kernel(node, kernel_names):
+-                wrappers.add(node.name)
+-    return wrappers
+-
+-
+-def _called_from_call_node(call_node, kernel_names, wrapper_names):
+-    """从单个 Call 节点中提取被调用的 kernel/wrapper 名称，找不到返回 None。"""
+-    if isinstance(call_node.func, ast.Subscript):
+-        name = _get_subscript_value_name(call_node.func)
+-        if name in kernel_names:
+-            return name
++            helpers[node.name] = node
++        elif isinstance(node, ast.ClassDef) and node.name == "ModelNew":
++            for item in node.body:
++                if (
++                    isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef))
++                    and item.name != "forward"
++                    and item.name not in kernel_names
++                ):
++                    helpers[item.name] = item
++    return helpers
++
++
++def _called_helper(call_node, helpers):
+     resolved = _resolve_call_name(call_node)
+     if not resolved:
+         return None
+     qual, attr = resolved
+-    if qual is None and attr in kernel_names:
+-        return attr
+-    if qual is None and attr in wrapper_names:
+-        return attr
+-    if qual == "self" and attr in wrapper_names:
++    if attr in helpers and qual in (None, "self"):
+         return attr
+     return None
+ 
+ 
+-def check_kernel_calls_in_forward(forward_node, kernel_names, wrapper_names):
+-    """检查 forward 中是否调用了 triton kernel（直接或通过 wrapper）。
+-
+-    返回被调用的 kernel/wrapper 名称集合。
+-    """
+-    called = set()
+-    if forward_node is None:
+-        return called
+-    for node in ast.walk(forward_node):
+-        if isinstance(node, ast.Call):
+-            name = _called_from_call_node(node, kernel_names, wrapper_names)
+-            if name is not None:
+-                called.add(name)
+-    return called
+-
+-
+-def _count_kernel_launches_in_forward(forward_node):
+-    """统计 forward() 中 kernel 启动调用（kernel[grid](...)）的次数。"""
+-    count = 0
+-    if forward_node is None:
+-        return count
+-    for node in ast.walk(forward_node):
+-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Subscript):
+-            count += 1
+-    return count
++def forward_execution_nodes(tree, forward_node, kernel_names):
++    """Return forward() and every helper it reaches, in call-graph order."""
++    helpers = _helper_function_nodes(tree, kernel_names)
++    execution_nodes = [forward_node]
++    seen = {id(forward_node)}
++    pending = [forward_node]
++    while pending:
++        current = pending.pop()
++        for child in ast.walk(current):
++            if not isinstance(child, ast.Call):
++                continue
++            helper_name = _called_helper(child, helpers)
++            if helper_name is None:
++                continue
++            helper = helpers[helper_name]
++            if id(helper) in seen:
++                continue
++            seen.add(id(helper))
++            execution_nodes.append(helper)
++            pending.append(helper)
++    return execution_nodes
++
++
++def kernel_launches(execution_nodes, kernel_names):
++    """Return all Triton kernels launched along the reachable forward path."""
++    launches = []
++    for func_node in execution_nodes:
++        for child in ast.walk(func_node):
++            if isinstance(child, ast.Call) and _call_invokes_kernel(child, kernel_names):
++                launches.append(_get_subscript_value_name(child.func) or "<kernel>")
++    return launches
+ 
+ 
+ # --- check_forbidden_torch_ops 拆分出的辅助规则 ---
+@@ -333,19 +382,21 @@ def _violation_matmul_op(node):
+ 
+ def _violation_list_append(node):
+     """检测 list.append 形式调用。"""
+-    if not isinstance(node, ast.Call):
+-        return None
+-    resolved = _resolve_call_name(node)
+-    if not resolved:
+-        return None
+-    qual, attr = resolved
+-    if attr == "append" and qual is not None:
++    # Shape plumbing such as ``out_shape = list(x.shape); out_shape.append(...)``
++    # is allowed in forward(). Treating every append as host-side computation made
++    # agents rewrite otherwise valid implementations instead of fixing kernels.
++    return None
++
++
++def _violation_comprehension(node):
++    if isinstance(node, (ast.ListComp, ast.DictComp, ast.SetComp, ast.GeneratorExp)):
+         return {
+             "line": node.lineno,
+-            "call": f"{qual}.append(...)",
++            "call": type(node).__name__,
+             "reason": (
+-                "forward() 中禁止 list.append，"
+-                "动态状态维护必须在 Triton kernel 内完成"
++                "forward() must not build dynamic Python collections with "
++                "comprehensions. Allocate output tensors and do computation in "
++                "Triton kernels."
+             ),
+         }
+     return None
+@@ -353,6 +404,16 @@ def _violation_list_append(node):
+ 
+ def _violation_for_torch_qual(node, qual, attr):
+     """处理 qual == 'torch' 的调用。"""
++    if attr in FORBIDDEN_FORWARD_TORCH_FUNCS:
++        return {
++            "line": node.lineno,
++            "call": f"torch.{attr}",
++            "reason": (
++                f"torch.{attr} in forward() is treated as host-side tensor "
++                "creation/computation. Keep forward() to output allocation, "
++                "shape plumbing, and Triton kernel launches."
++            ),
++        }
+     if attr in ALLOWED_TORCH_FUNCS:
+         return None
+     return {
+@@ -415,6 +476,16 @@ def _violation_for_call(node):
+         return None
+ 
+     qual, attr = resolved
++    if qual is None and attr in FORBIDDEN_FORWARD_BUILTINS:
++        return {
++            "line": node.lineno,
++            "call": f"{attr}(...)",
++            "reason": (
++                f"Python builtin {attr}(...) in forward() is treated as "
++                "host-side computation. Move the logic into the Triton kernel "
++                "or make it static shape plumbing outside the hot path."
++            ),
++        }
+     if qual == "torch":
+         return _violation_for_torch_qual(node, qual, attr)
+     if qual in FUNCTIONAL_QUALIFIERS:
+@@ -434,6 +505,9 @@ def _violation_for_node(node):
+     if v is not None:
+         return v
+     v = _violation_matmul_op(node)
++    if v is not None:
++        return v
++    v = _violation_comprehension(node)
+     if v is not None:
+         return v
+     if isinstance(node, ast.Call):
+@@ -441,32 +515,378 @@ def _violation_for_node(node):
+     return None
+ 
+ 
+-def check_forbidden_torch_ops(forward_node):
+-    """检查 forward 中是否使用了禁止的 torch 计算操作或 Python 控制流。
++def check_forbidden_torch_ops(execution_nodes, kernel_names):
++    """检查 forward 调用链是否使用了禁止的 host 计算。
+ 
+     返回违规列表 [{"line": N, "call": str, "reason": str}, ...]
+     """
+     violations = []
+-    if forward_node is None:
++    if not execution_nodes:
+         return violations
+ 
+-    for node in ast.walk(forward_node):
+-        v = _violation_for_node(node)
+-        if v is not None:
+-            violations.append(v)
+-
+-    # --- 规则 B: 如果 forward() 中 kernel 启动次数 > 1，视为 Type3 退化 ---
+-    kernel_launch_count = _count_kernel_launches_in_forward(forward_node)
+-    if kernel_launch_count > 1:
+-        violations.append({
+-            "line": forward_node.lineno,
+-            "call": f"kernel 启动 {kernel_launch_count} 次",
++    for func_node in execution_nodes:
++        for node in ast.walk(func_node):
++            v = _violation_for_node(node)
++            if v is not None:
++                violations.append(v)
++
++    return violations
++
++
++def _violation_for_data_ptr(node):
++    if not isinstance(node, ast.Call):
++        return None
++    resolved = _resolve_call_name(node)
++    if not resolved:
++        return None
++    _qual, attr = resolved
++    if attr != "data_ptr":
++        return None
++    return {
++        "line": node.lineno,
++        "call": ".data_ptr()",
++        "reason": (
++            "Do not pass raw integer pointers to Triton kernels. Launch kernels "
++            "with tensor objects directly, e.g. kernel[grid](x, out, ...)."
++        ),
++    }
++
++
++def _violation_for_tl_to(node):
++    if not isinstance(node, ast.Call):
++        return None
++    resolved = _resolve_call_name(node)
++    if not resolved:
++        return None
++    qual, attr = resolved
++    if qual != "tl" or attr != "to":
++        return None
++    return {
++        "line": node.lineno,
++        "call": "tl.to(...)",
++        "reason": (
++            "triton.language has no tl.to API on this Ascend path. Cast tensor "
++            "values with value.to(tl.float32) or another supported expression."
++        ),
++    }
++
++
++def _violation_for_forbidden_tl_call(node):
++    if not isinstance(node, ast.Call):
++        return None
++    resolved = _resolve_call_name(node)
++    if not resolved:
++        return None
++    qual, attr = resolved
++    if qual != "tl" or attr not in FORBIDDEN_TL_CALLS:
++        return None
++    return {
++        "line": node.lineno,
++        "call": f"tl.{attr}(...)",
++        "reason": FORBIDDEN_TL_CALLS[attr],
++    }
++
++
++def _violation_for_forbidden_triton_call(node):
++    if not isinstance(node, ast.Call):
++        return None
++    resolved = _resolve_call_name(node)
++    if not resolved:
++        return None
++    qual, attr = resolved
++    if qual != "triton" or attr not in FORBIDDEN_TRITON_CALLS:
++        return None
++    return {
++        "line": node.lineno,
++        "call": f"triton.{attr}(...)",
++        "reason": FORBIDDEN_TRITON_CALLS[attr],
++    }
++
++
++def _violation_for_forbidden_keyword(node):
++    if not isinstance(node, ast.Call):
++        return None
++    for keyword in node.keywords:
++        if keyword.arg in FORBIDDEN_STATIC_KEYWORDS:
++            return {
++                "line": node.lineno,
++                "call": f"{keyword.arg}=...",
++                "reason": (
++                    f"Do not tune '{keyword.arg}' in generated Triton Ascend "
++                    "code. These tuning kwargs are rejected/noisy on this path."
++                ),
++            }
++    return None
++
++
++def _decorator_triton_attr(decorator):
++    if isinstance(decorator, ast.Call):
++        return _decorator_triton_attr(decorator.func)
++    if not isinstance(decorator, ast.Attribute):
++        return None
++    if isinstance(decorator.value, ast.Name) and decorator.value.id == "triton":
++        return decorator.attr
++    return None
++
++
++def _violation_for_forbidden_triton_decorator(node):
++    if not isinstance(node, ast.FunctionDef):
++        return None
++    for decorator in node.decorator_list:
++        attr = _decorator_triton_attr(decorator)
++        if attr in FORBIDDEN_TRITON_DECORATORS:
++            return {
++                "line": node.lineno,
++                "call": f"@triton.{attr}",
++                "reason": FORBIDDEN_TRITON_DECORATORS[attr],
++            }
++    return None
++
++
++def _violation_for_raise_or_assert(node):
++    if isinstance(node, ast.Assert):
++        return {
++            "line": node.lineno,
++            "call": "assert",
+             "reason": (
+-                "forward() 中只能启动一次 Triton kernel，"
+-                "多次启动表明核心计算在 host 端循环中完成"
++                "Do not gate verifier cases with Python assert. Handle the "
++                "input shape/dtype or let the Triton kernel mask unsupported "
++                "lanes."
+             ),
+-        })
++        }
++    if isinstance(node, ast.Raise):
++        exc = node.exc
++        name = None
++        if isinstance(exc, ast.Call):
++            resolved = _resolve_call_name(exc)
++            if resolved:
++                name = resolved[1]
++        elif isinstance(exc, ast.Name):
++            name = exc.id
++        if name == "NotImplementedError":
++            return {
++                "line": node.lineno,
++                "call": "raise NotImplementedError",
++                "reason": (
++                    "Do not leave unsupported verifier paths in ModelNew. "
++                    "Implement the case or simplify the kernel instead."
++                ),
++            }
++    return None
+ 
++
++def _annotation_is_tl_constexpr(annotation):
++    if isinstance(annotation, ast.Attribute):
++        return (
++            isinstance(annotation.value, ast.Name)
++            and annotation.value.id == "tl"
++            and annotation.attr == "constexpr"
++        )
++    if isinstance(annotation, ast.Name):
++        return annotation.id == "constexpr"
++    return False
++
++
++def _kernel_static_names(func):
++    names = set()
++    for arg in func.args.args:
++        if arg.annotation is not None and _annotation_is_tl_constexpr(arg.annotation):
++            names.add(arg.arg)
++    for node in ast.walk(func):
++        if not isinstance(node, ast.For):
++            continue
++        if not isinstance(node.target, ast.Name):
++            continue
++        iter_call = node.iter
++        if not isinstance(iter_call, ast.Call):
++            continue
++        resolved = _resolve_call_name(iter_call)
++        if resolved == ("tl", "static_range"):
++            names.add(node.target.id)
++    return names
++
++
++def _is_static_kernel_condition(node, static_names=None):
++    """Best-effort allowlist for compile-time-looking Triton conditions."""
++    static_names = static_names or set()
++    if isinstance(node, ast.Constant):
++        return True
++    if isinstance(node, ast.Name):
++        return node.id.isupper() or node.id in static_names
++    if isinstance(node, ast.UnaryOp):
++        return _is_static_kernel_condition(node.operand, static_names)
++    if isinstance(node, ast.Compare):
++        names = [child.id for child in ast.walk(node) if isinstance(child, ast.Name)]
++        return bool(names) and all(
++            name.isupper() or name in static_names or name in {"tl", "triton"}
++            for name in names
++        )
++    return False
++
++
++def _range_args_are_static(node):
++    return all(isinstance(arg, ast.Constant) for arg in node.args)
++
++
++def _violation_for_kernel_break_continue(node):
++    if isinstance(node, (ast.Break, ast.Continue)):
++        return {
++            "line": node.lineno,
++            "call": type(node).__name__.lower(),
++            "reason": (
++                "break/continue inside @triton.jit is fragile on the Ascend "
++                "path. Use masks and tl.where instead of Python loop control."
++            ),
++        }
++    return None
++
++
++def _violation_for_kernel_python_cast(node):
++    if not isinstance(node, ast.Call):
++        return None
++    resolved = _resolve_call_name(node)
++    if not resolved:
++        return None
++    qual, attr = resolved
++    if qual is None and attr in FORBIDDEN_KERNEL_BUILTINS:
++        return {
++            "line": node.lineno,
++            "call": f"{attr}(...)",
++            "reason": (
++                f"Python {attr}(...) inside @triton.jit often receives tl "
++                "values and fails to compile. Use value.to(...), tl.where, "
++                "or compile-time constexpr branches."
++            ),
++        }
++    return None
++
++
++def _violation_for_kernel_range(node):
++    if not isinstance(node, ast.Call):
++        return None
++    resolved = _resolve_call_name(node)
++    if not resolved:
++        return None
++    qual, attr = resolved
++    if qual is None and attr == "range" and not _range_args_are_static(node):
++        return {
++            "line": node.lineno,
++            "call": "range(...)",
++            "reason": (
++                "Dynamic Python range(...) inside @triton.jit is unsupported "
++                "or fragile. Use tl.arange/masks, or tl.static_range for true "
++                "compile-time loops."
++            ),
++        }
++    return None
++
++
++def _violation_for_kernel_boolop(node):
++    if isinstance(node, ast.BoolOp):
++        return {
++            "line": node.lineno,
++            "call": "and/or",
++            "reason": (
++                "Python boolean and/or inside @triton.jit is invalid for tl "
++                "tensor values. Combine masks with &, |, and tl.where."
++            ),
++        }
++    if isinstance(node, ast.BinOp) and isinstance(node.op, (ast.BitAnd, ast.BitOr)):
++        if isinstance(node.left, ast.BinOp) or isinstance(node.right, ast.BinOp):
++            return {
++                "line": node.lineno,
++                "call": "&/| chain",
++                "reason": (
++                    "Chained mask expressions like a & b & c have triggered "
++                    "Ascend compiler failures. Split masks into named steps."
++                ),
++            }
++    return None
++
++
++def _violation_for_kernel_chained_compare(node):
++    if isinstance(node, ast.Compare) and len(node.ops) > 1:
++        return {
++            "line": node.lineno,
++            "call": "chained comparison",
++            "reason": (
++                "Chained comparisons such as a < b < c are unsupported or "
++                "fragile in @triton.jit on this path. Split them into named "
++                "boolean masks and combine with &."
++            ),
++        }
++    return None
++
++
++def _violation_for_kernel_dynamic_if(node, static_names=None):
++    if isinstance(node, ast.If) and not _is_static_kernel_condition(node.test, static_names):
++        return {
++            "line": node.lineno,
++            "call": "if ...",
++            "reason": (
++                "Runtime Python if inside @triton.jit is fragile on Ascend. "
++                "Use tl.where/masks, or branch only on true compile-time "
++                "conditions."
++            ),
++        }
++    if isinstance(node, ast.IfExp) and not _is_static_kernel_condition(node.test, static_names):
++        return {
++            "line": node.lineno,
++            "call": "x if cond else y",
++            "reason": (
++                "Python conditional expressions inside @triton.jit should be "
++                "replaced with tl.where or compile-time constexpr branches."
++            ),
++        }
++    return None
++
++
++def _kernel_static_violations(tree):
++    violations = []
++    checks = (
++        _violation_for_kernel_break_continue,
++        _violation_for_kernel_python_cast,
++        _violation_for_kernel_range,
++        _violation_for_kernel_boolop,
++        _violation_for_kernel_chained_compare,
++        _violation_for_kernel_dynamic_if,
++    )
++    for func in ast.walk(tree):
++        if not isinstance(func, ast.FunctionDef) or not _has_triton_decorator(func):
++            continue
++        static_names = _kernel_static_names(func)
++        for node in ast.walk(func):
++            for check in checks:
++                if check is _violation_for_kernel_dynamic_if:
++                    violation = check(node, static_names)
++                else:
++                    violation = check(node)
++                if violation is not None:
++                    violation = dict(violation)
++                    violation["call"] = f"{func.name}: {violation['call']}"
++                    violations.append(violation)
++                    break
++    return violations
++
++
++def check_static_illegal_patterns(tree):
++    """Catch known unsupported generated-code patterns before NPU verify."""
++    violations = []
++    for node in ast.walk(tree):
++        for check in (
++            _violation_for_data_ptr,
++            _violation_for_tl_to,
++            _violation_for_forbidden_tl_call,
++            _violation_for_forbidden_triton_call,
++            _violation_for_forbidden_keyword,
++            _violation_for_forbidden_triton_decorator,
++            _violation_for_raise_or_assert,
++        ):
++            violation = check(node)
++            if violation is not None:
++                violations.append(violation)
++                break
++    violations.extend(_kernel_static_violations(tree))
+     return violations
+ 
+ 
+@@ -482,6 +902,7 @@ def _empty_result(filepath):
+             "triton_kernel_exists": {"passed": False, "kernels": [], "error": None},
+             "kernel_called_from_forward": {"passed": False, "called": [], "error": None},
+             "no_forbidden_torch_ops": {"passed": False, "violations": [], "error": None},
++            "no_static_illegal_patterns": {"passed": False, "violations": [], "error": None},
+         },
+         "regression_type": None,
+         "suggestion": "",
+@@ -524,7 +945,7 @@ def _check_kernel_exists(result, tree):
+ 
+ 
+ def _check_forward_calls_kernel(result, tree, kernel_names):
+-    """填充 kernel_called_from_forward 检查；返回 (passed, forward_node)。"""
++    """填充 kernel_called_from_forward；返回可达的 forward 执行路径。"""
+     forward_node = find_model_new_forward(tree)
+     if forward_node is None:
+         result["checks"]["kernel_called_from_forward"]["error"] = (
+@@ -534,33 +955,28 @@ def _check_forward_calls_kernel(result, tree, kernel_names):
+         result["suggestion"] = "代码缺少 ModelNew 类或 forward 方法。"
+         return False, None
+ 
+-    wrapper_names = find_wrapper_functions(tree, kernel_names)
+-    called = check_kernel_calls_in_forward(forward_node, kernel_names, wrapper_names)
+-    result["checks"]["kernel_called_from_forward"]["called"] = list(called)
++    execution_nodes = forward_execution_nodes(tree, forward_node, kernel_names)
++    called = kernel_launches(execution_nodes, kernel_names)
++    result["checks"]["kernel_called_from_forward"]["called"] = sorted(set(called))
+ 
+     if not called:
+         result["checks"]["kernel_called_from_forward"]["error"] = (
+             f"@triton.jit kernel {list(kernel_names)} 已定义但 forward() 未调用任何 kernel"
+         )
+         result["regression_type"] = 2
+-        wrapper_hint = (
+-            f"也存在 wrapper 函数 {list(wrapper_names)} 但 forward 也未调用它们。"
+-            if wrapper_names else ""
+-        )
+         result["suggestion"] = (
+             f"已定义 kernel {list(kernel_names)} 但 ModelNew.forward() 中未调用。"
+             "forward() 必须通过 kernel_name[grid](...) 形式启动 kernel。"
+-            f"{wrapper_hint}"
+         )
+         return False, forward_node
+ 
+     result["checks"]["kernel_called_from_forward"]["passed"] = True
+-    return True, forward_node
++    return True, execution_nodes
+ 
+ 
+-def _check_no_forbidden_ops(result, forward_node):
++def _check_no_forbidden_ops(result, execution_nodes, kernel_names):
+     """填充 no_forbidden_torch_ops 检查；返回 passed。"""
+-    violations = check_forbidden_torch_ops(forward_node)
++    violations = check_forbidden_torch_ops(execution_nodes, kernel_names)
+     result["checks"]["no_forbidden_torch_ops"]["violations"] = violations
+ 
+     if not violations:
+@@ -568,14 +984,14 @@ def _check_no_forbidden_ops(result, forward_node):
+         return True
+ 
+     result["checks"]["no_forbidden_torch_ops"]["error"] = (
+-        f"forward() 中发现 {len(violations)} 处禁止的 PyTorch 计算操作"
++        f"forward() 调用链中发现 {len(violations)} 处禁止的 PyTorch 计算操作"
+     )
+     violation_details = "; ".join(
+         f"第{v['line']}行 {v['call']}" for v in violations[:5]
+     )
+     result["regression_type"] = 3
+     result["suggestion"] = (
+-        f"forward() 调用了 Triton kernel 但仍使用 PyTorch 进行部分计算: "
++        f"forward() 调用链启动了 Triton kernel 但仍使用 PyTorch 进行部分计算: "
+         f"{violation_details}。"
+         "所有核心计算必须在 @triton.jit kernel 中完成，"
+         "forward() 中只允许 buffer 分配（torch.empty 等）和形状操作（.view/.reshape 等）。"
+@@ -583,6 +999,33 @@ def _check_no_forbidden_ops(result, forward_node):
+     return False
+ 
+ 
++def _check_no_static_illegal_patterns(result, tree):
++    """Fill no_static_illegal_patterns check and return passed."""
++    violations = check_static_illegal_patterns(tree)
++    result["checks"]["no_static_illegal_patterns"]["violations"] = violations
++
++    if not violations:
++        result["checks"]["no_static_illegal_patterns"]["passed"] = True
++        return True
++
++    result["checks"]["no_static_illegal_patterns"]["error"] = (
++        f"Found {len(violations)} known unsupported Triton Ascend pattern(s)"
++    )
++    violation_details = "; ".join(
++        f"line {v['line']}: {v['call']}" for v in violations[:5]
++    )
++    result["regression_type"] = 3
++    result["suggestion"] = (
++        "Repair known unsupported patterns before running NPU verifier: "
++        f"{violation_details}. "
++        "Pass tensors directly to kernels; avoid tl.to(...), tl.constant(...), "
++        "and tl.constexpr(...) calls; remove unsupported tuning/decorator "
++        "configuration; avoid assert/NotImplementedError fallbacks and runtime "
++        "Python control flow, casts, or chained comparisons inside @triton.jit."
++    )
++    return False
++
++
+ def validate(code, filepath="<unknown>"):
+     """对生成代码执行完整的退化检查。
+ 
+@@ -602,11 +1045,14 @@ def validate(code, filepath="<unknown>"):
+     if not ok:
+         return result
+ 
+-    ok, forward_node = _check_forward_calls_kernel(result, tree, kernel_names)
++    ok, execution_nodes = _check_forward_calls_kernel(result, tree, kernel_names)
+     if not ok:
+         return result
+ 
+-    if not _check_no_forbidden_ops(result, forward_node):
++    if not _check_no_static_illegal_patterns(result, tree):
++        return result
++
++    if not _check_no_forbidden_ops(result, execution_nodes, kernel_names):
+         return result
+ 
+     result["valid"] = True
+diff --git a/tools/verifier/verify.py b/tools/verifier/verify.py
+index 26108a1..55357c3 100644
+--- a/tools/verifier/verify.py
++++ b/tools/verifier/verify.py
+@@ -23,6 +23,7 @@ import importlib
+ import json
+ import logging
+ import os
++import signal
+ import sys
+ import subprocess
+ import traceback
+@@ -47,6 +48,7 @@ class CaseContext:
+ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+ from _log_utils import setup_logger as _setup_logger_shared  # noqa: E402
+ from _common_utils import describe_input as _describe_input_shared  # noqa: E402
++from _common_utils import seed_input_generation as _seed_input_generation  # noqa: E402
+ 
+ logger = logging.getLogger("triton_op_verifier.verify")
+ 
+@@ -312,12 +314,24 @@ def run_single_case(framework_model, impl_model, inputs, device, case_ctx: CaseC
+                 f"[用例 {case_idx}/{total_cases}] 输出 {i} 为 None: "
+                 f"framework={fw_out is None}, impl={impl_out is None}"
+             )
+-        if isinstance(fw_out, torch.Tensor) and isinstance(impl_out, torch.Tensor):
++        fw_is_tensor = isinstance(fw_out, torch.Tensor)
++        impl_is_tensor = isinstance(impl_out, torch.Tensor)
++        if fw_is_tensor != impl_is_tensor:
++            raise AssertionError(
++                f"[用例 {case_idx}/{total_cases}] 输出 {i} 类型不一致: "
++                f"framework={type(fw_out).__name__}, impl={type(impl_out).__name__}"
++            )
++        if fw_is_tensor:
+             try:
+                 data_type = fw_out.dtype
+                 compare(fw_out, impl_out, data_type)
+             except AssertionError as e:
+                 raise AssertionError(f"[用例 {case_idx}/{total_cases}] {str(e)}") from e
++        elif type(fw_out) is not type(impl_out) or fw_out != impl_out:
++            raise AssertionError(
++                f"[用例 {case_idx}/{total_cases}] 输出 {i} 不一致: "
++                f"framework={fw_out!r}, impl={impl_out!r}"
++            )
+ 
+ 
+ def _load_verify_modules(op_name, verify_dir, triton_impl_name):
+@@ -404,10 +418,7 @@ def verify_implementations(op_name, verify_dir, triton_impl_name="triton_ascend_
+ 
+     modules = _load_verify_modules(op_name, verify_dir, triton_impl_name)
+ 
+-    # 在获取输入之前设置种子，确保随机生成的输入可复现
+-    torch.manual_seed(0)
+-    torch.npu.manual_seed(0)
+-
++    _seed_input_generation()
+     input_groups, total_cases = resolve_input_provider(modules["torch_module"])
+     device = torch.device("npu")
+ 
+@@ -503,6 +514,7 @@ if __name__ == "__main__":
+                 cmd,
+                 stdout=subprocess.PIPE,
+                 stderr=subprocess.PIPE,
++                start_new_session=True,
+             )
+             stdout, stderr = proc.communicate(timeout=args.timeout)
+ 
+@@ -513,7 +525,10 @@ if __name__ == "__main__":
+             sys.exit(proc.returncode)
+ 
+         except subprocess.TimeoutExpired:
+-            proc.kill()
++            try:
++                os.killpg(proc.pid, signal.SIGKILL)
++            except Exception:
++                proc.kill()
+             proc.wait()
+             logger.error("验证超时（%d秒），已终止子进程", args.timeout)
+             sys.exit(1)

@@ -14,29 +14,24 @@
 
 from __future__ import annotations
 
+from threading import Barrier
+from types import SimpleNamespace
+
+import httpx
 import pytest
 from omegaconf import OmegaConf
 
+import uni_agent.agent_aware_router.balancer as balancer_module
 from uni_agent.agent_aware_router.balancer import KVCAwareBalancer
+from uni_agent.agent_aware_router.config.base import ConfigError
 from uni_agent.agent_aware_router.strategies.kvc_aware import KVCacheAwareStrategy
 
-from ._helpers import (
-    _FakeCollectorManager,
-    _make_balancer,
-    _router_config,
-)
+from ._helpers import _FakeCollectorManager, _make_balancer, _router_config
 
 pytestmark = [pytest.mark.level0, pytest.mark.cpu]
 
 
-# ============================================================
-# Fake Ray actor handles for rollout-config override tests
-# ============================================================
-
-
 class _RemoteMethod:
-    """Stand-in for a Ray actor method handle: ``.remote()`` returns the value."""
-
     def __init__(self, fn):
         self._fn = fn
         self.calls = 0
@@ -47,312 +42,309 @@ class _RemoteMethod:
 
 
 class _RolloutServerHandle:
-    """Fake vLLMHttpServer actor handle exposing the balancer-probed methods."""
+    def __init__(self, rollout_config, address=("127.0.0.1", 8000)):
+        def get_rollout_config():
+            if isinstance(rollout_config, Exception):
+                raise rollout_config
+            return rollout_config
 
-    def __init__(self, rollout_cfg, address=("127.0.0.1", 8000)):
-        self._rollout_cfg = rollout_cfg
-        self.get_rollout_config = _RemoteMethod(lambda: self._rollout_cfg)
+        self.get_rollout_config = _RemoteMethod(get_rollout_config)
         self.get_server_address = _RemoteMethod(lambda: address)
-        self.get_kv_events_endpoints = _RemoteMethod(lambda: None)
 
 
-# ============================================================
-# 5.1 / construction
-# ============================================================
+def _kv_source(**overrides):
+    config = {
+        "publisher": "zmq",
+        "endpoint": "tcp://10.0.0.1:41233",
+        "replay_endpoint": "tcp://10.0.0.1:41234",
+        "topic": "kv-events",
+    }
+    config.update(overrides)
+    return {"0": config}
 
 
-class TestKVCAwareBalancerConstruction:
-    """B01-Bnn: __init__ wiring and validation."""
+def _rollout_config(**overrides):
+    config = {
+        "custom": {
+            "agent_framework": {
+                "router": {"load_threshold": 0.75, "http_interval": 3.0},
+            },
+        },
+        "max_num_seqs": 128,
+        "max_num_batched_tokens": 4096,
+    }
+    config.update(overrides)
+    return OmegaConf.create(config)
 
-    def test_normal_construction_wires_components(self):
-        """
-        Feature: construction wires config/provider/strategies/servers
-        Description: KVCAwareBalancer({"s0": h0}, router_config) with the fake
-          provider injected through the provider_factory seam
-        Expectation: _provider built and started; _strategies wired with weight
-        """
-        balancer = KVCAwareBalancer({"s0": "h0"}, _router_config(), provider_factory=_FakeCollectorManager)
-        assert balancer._provider.started is True
+
+class TestKVEventSourceDiscovery:
+    @pytest.mark.parametrize(
+        ("replay_endpoint", "expected_replay"),
+        [("tcp://10.0.0.1:41234", "10.0.0.1:41234"), (None, "")],
+    )
+    def test_single_dp_source_uses_collector_shape(self, replay_endpoint, expected_replay):
+        assert KVCAwareBalancer._parse_kv_event_sources(_kv_source(replay_endpoint=replay_endpoint)) == [
+            "10.0.0.1:41233",
+            expected_replay,
+            "zmq",
+            "kv-events",
+        ]
+
+    def test_empty_response_disables_zmq_discovery(self):
+        assert KVCAwareBalancer._parse_kv_event_sources({}) is None
+
+    @pytest.mark.parametrize(
+        ("sources", "error"),
+        [
+            (None, "invalid KV-event sources"),
+            ({"0": None}, "invalid KV-event config"),
+            (_kv_source(publisher="redis"), "unsupported KV-event publisher"),
+            (_kv_source(topic=None), "invalid KV-event topic"),
+            (_kv_source(endpoint="ipc:///tmp/kv-events"), "unsupported KV-event endpoint"),
+            ({"0": {}, "1": {}}, "does not support multiple DP ranks"),
+        ],
+    )
+    def test_invalid_sources_fail_fast(self, sources, error):
+        with pytest.raises(RuntimeError, match=error):
+            KVCAwareBalancer._parse_kv_event_sources(sources)
+
+    def test_fetch_uses_vllm_http_api(self, monkeypatch):
+        requests = []
+
+        def handler(request):
+            requests.append(request)
+            return httpx.Response(200, json=_kv_source())
+
+        transport = httpx.MockTransport(handler)
+        real_client = httpx.Client
+
+        def client_factory(**kwargs):
+            assert kwargs == {"timeout": 5.0, "trust_env": False}
+            return real_client(transport=transport)
+
+        monkeypatch.setattr(balancer_module.httpx, "Client", client_factory)
+
+        assert KVCAwareBalancer._fetch_kv_event_endpoints("10.0.0.1:8000") == [
+            "10.0.0.1:41233",
+            "10.0.0.1:41234",
+            "zmq",
+            "kv-events",
+        ]
+        assert requests[0].url == httpx.URL("http://10.0.0.1:8000/kv_event_sources")
+
+    def test_provider_discovers_sources_in_parallel_and_tolerates_unavailable_servers(self, monkeypatch):
+        monkeypatch.setattr(balancer_module.ray, "get", lambda value: value)
+        concurrent_fetches = Barrier(3, timeout=5)
+
+        def fetch(_cls, address):
+            concurrent_fetches.wait()
+            if address.endswith(":8001"):
+                raise httpx.ConnectError("offline")
+            if address.endswith(":8002"):
+                return None
+            return ["10.0.0.1:41233", "10.0.0.1:41234", "zmq", "kv-events"]
+
+        monkeypatch.setattr(KVCAwareBalancer, "_fetch_kv_event_endpoints", classmethod(fetch))
+        servers = {
+            "s0": _RolloutServerHandle(_rollout_config(), ("10.0.0.1", 8000)),
+            "s1": _RolloutServerHandle(_rollout_config(), ("10.0.0.1", 8001)),
+            "s2": _RolloutServerHandle(_rollout_config(), ("10.0.0.1", 8002)),
+        }
+
+        balancer = KVCAwareBalancer(servers, _router_config(), provider_factory=_FakeCollectorManager)
+
+        assert balancer._provider.server_addresses == {
+            "s0": "10.0.0.1:8000",
+            "s1": "10.0.0.1:8001",
+            "s2": "10.0.0.1:8002",
+        }
+        assert balancer._provider.kv_event_endpoints == {"s0": ["10.0.0.1:41233", "10.0.0.1:41234", "zmq", "kv-events"]}
+
+
+class TestConstruction:
+    def test_wires_strategy_and_collectors(self):
+        balancer = _make_balancer({"s0": "h0"})
+
+        assert balancer._provider.started
         assert balancer._provider.collection_names == [
             "inflight_stat",
             "sticky_stat",
             "vllm_metrics",
             "vllm_zmq",
         ]
-        strat = balancer._strategy
-        assert isinstance(strat, KVCacheAwareStrategy)
+        assert isinstance(balancer._strategy, KVCacheAwareStrategy)
 
-    def test_empty_servers_raises_value_error(self):
-        """
-        Feature: empty servers pool is rejected
-        Description: KVCAwareBalancer({}, router_config)
-        Expectation: raises ValueError
-        """
-        with pytest.raises(ValueError):
+    def test_rejects_empty_servers_and_missing_strategy(self):
+        with pytest.raises(ValueError, match="servers must be non-empty"):
             KVCAwareBalancer({}, _router_config())
-
-    def test_missing_strategy_raises_config_error(self):
-        """
-        Feature: a config missing strategy is rejected (delegated to from_config)
-        Description: KVCAwareBalancer with an empty router_config
-        Expectation: raises ConfigError
-        """
-        from uni_agent.agent_aware_router.config.base import ConfigError
-
         with pytest.raises(ConfigError):
             KVCAwareBalancer({"s0": "h0"}, OmegaConf.create({}))
 
+    def test_fetches_rollout_config_once(self, monkeypatch):
+        monkeypatch.setattr(balancer_module.ray, "get", lambda value: value)
+        monkeypatch.setattr(KVCAwareBalancer, "_fetch_kv_event_endpoints", classmethod(lambda _cls, _addr: None))
+        server = _RolloutServerHandle(_rollout_config())
 
-# ============================================================
-# trivial methods: get_all_servers / get_status / release_server
-# ============================================================
+        balancer = KVCAwareBalancer({"s0": server}, _router_config(), provider_factory=_FakeCollectorManager)
 
+        assert server.get_rollout_config.calls == 1
+        assert balancer._config.strategy.load_threshold == 0.75
+        assert balancer._config.collector.http_interval == 3.0
+        assert balancer._strategy._max_num_seqs == 128
+        assert balancer._strategy._max_num_batched_tokens == 4096
 
-class TestTrivialMethods:
-    """B04-B06: the no-algorithm Protocol methods."""
+    def test_uses_next_server_when_rollout_config_rpc_fails(self, monkeypatch):
+        monkeypatch.setattr(balancer_module.ray, "get", lambda value: value)
+        monkeypatch.setattr(KVCAwareBalancer, "_fetch_kv_event_endpoints", classmethod(lambda _cls, _addr: None))
+        failed = _RolloutServerHandle(RuntimeError("actor unavailable"), ("10.0.0.1", 8000))
+        healthy = _RolloutServerHandle(_rollout_config(max_num_seqs=32), ("10.0.0.1", 8001))
 
-    def test_trivial_protocol_methods(self):
-        """
-        Feature: get_all_servers / get_status / release_server — the no-algorithm Protocol methods
-        Description: construct a two-server balancer; exercise the three trivial methods in turn
-        Expectation:
-          get_all_servers() returns the pool ids
-          get_status() reports provider type, materialized strategy, pool ids, route_calls=0
-          release_server() is a no-op for both known and unknown ids; pool unchanged
-        """
-        balancer = _make_balancer({"s0": "h0", "s1": "h1"})
-
-        # B04: get_all_servers returns exactly the pool's ids
-        assert set(balancer.get_all_servers()) == {"s0", "s1"}
-
-        # B05: get_status reports construction state (provider type, strategy, pool, route_calls)
-        status = balancer.get_status()
-        # provider is the injected _FakeCollectorManager in unit tests; real env reports
-        # "CollectorManager". Assert it matches the constructed provider's type.
-        assert status["provider"] == type(balancer._provider).__name__
-        assert status["strategies"] == [{"type": "KVCacheAwareStrategy"}]  # legacy key; single strategy
-        assert set(status["servers"]) == {"s0", "s1"}
-        assert status["route_calls"] == 0
-
-        # B06: release_server is a no-op (v1 does not track inflight); known + unknown ids
-        assert balancer.release_server("s0") is None
-        assert balancer.release_server("s999") is None
-        assert set(balancer.get_all_servers()) == {"s0", "s1"}  # pool unchanged
-
-
-# ============================================================
-# acquire_server — route() delegation
-# ============================================================
-
-
-class TestAcquireServer:
-    """B07-Bnn: acquire_server delegates to route() and maps back to a handle."""
-
-    def test_prompt_ids_and_replicas_passed_to_route(self, monkeypatch):
-        """
-        Feature: prompt_ids and pool replicas are forwarded to route()
-        Description: spy on route() and capture its arguments
-        Expectation: prompt_ids matches the call; replicas carry every pool id
-        """
-        import uni_agent.agent_aware_router.balancer as balancer_mod
-
-        seen = {}
-
-        def fake_route(strategies, prompt_ids, provider, replicas, *args, **kwargs):
-            seen["prompt_ids"] = prompt_ids
-            seen["replica_ids"] = [r.replica_id for r in replicas]
-            return ["s0"]
-
-        monkeypatch.setattr(balancer_mod, "route", fake_route)
-        balancer = _make_balancer({"s0": "h0", "s1": "h1"})
-        balancer.acquire_server("r1", [7, 8, 9])
-        assert seen["prompt_ids"] == [7, 8, 9]
-        assert set(seen["replica_ids"]) == {"s0", "s1"}
-
-    def test_maps_returned_id_to_handle(self, monkeypatch):
-        """
-        Feature: the returned top id maps to its actor handle
-        Description: mock route() to return ["s1","s0"]
-        Expectation: returns (s1, h1) — not the first pool entry
-        """
-        import uni_agent.agent_aware_router.balancer as balancer_mod
-
-        monkeypatch.setattr(balancer_mod, "route", lambda *a, **k: ["s1", "s0"])
-        balancer = _make_balancer({"s0": "h0", "s1": "h1"})
-        assert balancer.acquire_server("r1", [1]) == ("s1", "h1")
-
-    def test_empty_ranking_raises_runtime_error(self, monkeypatch):
-        """
-        Feature: an empty ranking (no available / all blacklisted) raises
-        Description: mock route() to return []
-        Expectation: raises RuntimeError
-        """
-        import uni_agent.agent_aware_router.balancer as balancer_mod
-
-        monkeypatch.setattr(balancer_mod, "route", lambda *a, **k: [])
-        balancer = _make_balancer({"s0": "h0"})
-        with pytest.raises(RuntimeError):
-            balancer.acquire_server("r1", [1])
-
-    def test_none_prompt_ids_passes_through(self, monkeypatch):
-        """
-        Feature: prompt_ids=None is forwarded unchanged (strategy degrades to load)
-        Description: acquire_server("r1", None); spy on route()
-        Expectation: route receives prompt_ids is None; acquire returns normally
-        """
-        import uni_agent.agent_aware_router.balancer as balancer_mod
-
-        seen = {}
-
-        def fake_route(strategies, prompt_ids, provider, replicas, *args, **kwargs):
-            seen["prompt_ids"] = prompt_ids
-            return ["s0"]
-
-        monkeypatch.setattr(balancer_mod, "route", fake_route)
-        balancer = _make_balancer({"s0": "h0"})
-        assert balancer.acquire_server("r1", None) == ("s0", "h0")
-        assert seen["prompt_ids"] is None
-
-
-# ============================================================
-# add_servers / remove_servers — pool mutations
-# (provider is global / not keyed by the pool, so only _servers is touched)
-# ============================================================
-
-
-class TestServerPoolMutations:
-    """B12-Bnn: add/remove mutate the server pool."""
-
-    def test_add_servers_grows_pool_and_overwrites_handle(self):
-        """
-        Feature: add_servers grows the pool and overwrites existing ids (bulk-add semantics)
-        Description: add_servers({"s0": new, "s1": h1, "s2": h2}) on a one-server balancer {s0}
-        Expectation: s0 handle overwritten; s1/s2 added; pool has s0/s1/s2
-        """
-        balancer = _make_balancer({"s0": "h0"})
-        balancer.add_servers({"s0": "h0_new", "s1": "h1", "s2": "h2"})
-        assert set(balancer.get_all_servers()) == {"s0", "s1", "s2"}
-        assert balancer._servers["s0"] == "h0_new"  # existing id overwritten
-
-    def test_remove_servers_shrinks_pool_and_unknown_is_noop(self):
-        """
-        Feature: remove_servers shrinks the pool; unknown ids are a silent no-op
-        Description: remove_servers(["s0"]) then remove_servers(["s999"]) on {s0,s1}
-        Expectation: after s0 removal pool keeps only s1; unknown s999 leaves pool unchanged
-        """
-        balancer = _make_balancer({"s0": "h0", "s1": "h1"})
-        balancer.remove_servers(["s0"])
-        assert set(balancer.get_all_servers()) == {"s1"}
-
-        balancer.remove_servers(["s999"])
-        assert set(balancer.get_all_servers()) == {"s1"}  # unknown id no-op
-
-
-# ============================================================
-# 5.3A end-to-end flows (balancer directly, route() mocked)
-# ============================================================
-
-
-class TestEndToEndFlows:
-    """B17-B18: multi-step flows over the balancer (route() mocked)."""
-
-    def test_acquire_release_acquire(self, monkeypatch):
-        """
-        Feature: release does not affect subsequent routing
-        Description: acquire → release → acquire with route() returning s0
-        Expectation: both acquires return a valid server; release is None
-        """
-        import uni_agent.agent_aware_router.balancer as balancer_mod
-
-        monkeypatch.setattr(balancer_mod, "route", lambda *a, **k: ["s0"])
-        balancer = _make_balancer({"s0": "h0"})
-        first = balancer.acquire_server("r1", [1, 2])
-        assert balancer.release_server("s0") is None
-        second = balancer.acquire_server("r2", [1, 2])
-        assert first == ("s0", "h0")
-        assert second == ("s0", "h0")
-
-    def test_dynamic_add_remove_then_route(self, monkeypatch):
-        """
-        Feature: pool mutations take effect for subsequent routing
-        Description: route() returns pool replicas in order; add then remove between acquires
-        Expectation: after remove, the removed id is no longer routable
-        """
-        import uni_agent.agent_aware_router.balancer as balancer_mod
-
-        def fake_route(strategies, prompt_ids, provider, replicas, *args, **kwargs):
-            return [r.replica_id for r in replicas]
-
-        monkeypatch.setattr(balancer_mod, "route", fake_route)
-        balancer = _make_balancer({"s0": "h0"})
-
-        balancer.add_servers({"s3": "h3"})
-        assert balancer.acquire_server("r1", [1])[0] in {"s0", "s3"}
-
-        balancer.remove_servers(["s0"])
-        assert "s0" not in balancer.get_all_servers()
-        assert balancer.acquire_server("r2", [1])[0] == "s3"
-
-    def test_router_class_fqn_importable(self):
-        """
-        Feature: the YAML router_class FQN resolves to KVCAwareBalancer
-        Description: importlib.import_module + getattr on the documented FQN
-        Expectation: returns the KVCAwareBalancer class (VeRL's drop-in lookup step)
-        """
-        import importlib
-
-        mod = importlib.import_module("uni_agent.agent_aware_router.balancer")
-        assert mod.KVCAwareBalancer is KVCAwareBalancer
-
-
-# ============================================================
-# Runtime rollout-config override (custom.agent_framework.router)
-# ============================================================
-
-
-class TestRolloutConfigOverride:
-    """B20+: knobs read from the server rollout config override the router config."""
-
-    @staticmethod
-    def _rollout_cfg(**extra):
-        """Rollout config carrying max_num_seqs/batched_tokens and the router override node."""
-        base = {
-            "custom": {
-                "agent_framework": {
-                    "router": {"load_threshold": 0.75, "http_interval": 3.0},
-                },
-            },
-            "max_num_seqs": 128,
-            "max_num_batched_tokens": 4096,
-        }
-        base.update(extra)
-        return OmegaConf.create(base)
-
-    def test_construction_applies_rollout_override(self, monkeypatch):
-        """
-        Feature: constructor overrides config knobs from the rollout config
-        Description: build the balancer over fake actor handles whose rollout config
-          carries custom.agent_framework.router {load_threshold, http_interval};
-          ray.get is unwrapped to an identity
-        Expectation: strategy.load_threshold / collector.http_interval reflect the
-          override; balancer-attached defaults still land; capacity resolves from
-          the rollout config (max_num_seqs=128)
-        """
-        import uni_agent.agent_aware_router.balancer as balancer_mod
-
-        monkeypatch.setattr(balancer_mod.ray, "get", lambda fut: fut)
-        rollout_cfg = self._rollout_cfg()
         balancer = KVCAwareBalancer(
-            {"s0": _RolloutServerHandle(rollout_cfg)},
+            {"failed": failed, "healthy": healthy},
             _router_config(),
             provider_factory=_FakeCollectorManager,
         )
 
-        assert balancer._config.strategy.load_threshold == 0.75
-        assert balancer._config.collector.http_interval == 3.0
-        # non-persisted knobs are not attached to the config section (they live
-        # on the built runtime strategy / are read via getattr fallbacks in
-        # get_collector); capacity is resolved from the rollout config.
-        assert balancer._strategy.alpha == 0.7
-        assert balancer._strategy.load_threshold == 0.75
-        assert balancer._strategy._max_num_seqs == 128
+        assert failed.get_rollout_config.calls == 1
+        assert healthy.get_rollout_config.calls == 1
+        assert balancer._strategy._max_num_seqs == 32
+
+    def test_invalid_capacity_values_use_defaults(self, monkeypatch):
+        monkeypatch.setattr(balancer_module.ray, "get", lambda value: value)
+        monkeypatch.setattr(KVCAwareBalancer, "_fetch_kv_event_endpoints", classmethod(lambda _cls, _addr: None))
+        server = _RolloutServerHandle(_rollout_config(max_num_seqs=0, max_num_batched_tokens="invalid"))
+
+        balancer = KVCAwareBalancer({"s0": server}, _router_config(), provider_factory=_FakeCollectorManager)
+
+        assert balancer._strategy._max_num_seqs == 256
+        assert balancer._strategy._max_num_batched_tokens == 2048
+
+    @pytest.mark.parametrize(
+        ("rollout_config", "expected_override", "expected_capacity"),
+        [
+            (
+                {
+                    "custom": {"agent_framework": {"router": {"load_threshold": 0.5}}},
+                    "max_num_seqs": 32,
+                },
+                {"load_threshold": 0.5},
+                32,
+            ),
+            (
+                SimpleNamespace(
+                    custom=SimpleNamespace(
+                        agent_framework=SimpleNamespace(router={"load_threshold": 0.5}),
+                    ),
+                    max_num_seqs=32,
+                ),
+                {"load_threshold": 0.5},
+                32,
+            ),
+            ({}, None, 256),
+        ],
+    )
+    def test_rollout_config_helpers_accept_mappings_and_objects(
+        self, rollout_config, expected_override, expected_capacity
+    ):
+        assert KVCAwareBalancer._router_override(rollout_config) == expected_override
+        assert KVCAwareBalancer._rollout_config_int(rollout_config, "max_num_seqs", 256) == expected_capacity
+
+
+class TestBalancerProtocol:
+    def test_status_describes_runtime_state(self):
+        balancer = _make_balancer({"s0": "h0", "s1": "h1"})
+
+        assert balancer.get_all_servers() == ["s0", "s1"]
+        assert balancer.get_status() == {
+            "servers": ["s0", "s1"],
+            "provider": "_FakeCollectorManager",
+            "strategies": [{"type": "KVCacheAwareStrategy"}],
+            "route_calls": 0,
+            "sticky_size": 0,
+            "total_inflight": 0,
+        }
+
+    def test_acquire_delegates_and_maps_selected_handle(self, monkeypatch):
+        seen = {}
+
+        def fake_route(strategy, prompt_ids, store, replicas, request_id):
+            seen.update(
+                strategy=strategy,
+                prompt_ids=prompt_ids,
+                store=store,
+                replica_ids=[replica.replica_id for replica in replicas],
+                request_id=request_id,
+            )
+            return ["s1", "s0"]
+
+        monkeypatch.setattr(balancer_module, "route", fake_route)
+        balancer = _make_balancer({"s0": "h0", "s1": "h1"})
+
+        assert balancer.acquire_server("request-1", [7, 8, 9]) == ("s1", "h1")
+        assert seen == {
+            "strategy": balancer._strategy,
+            "prompt_ids": [7, 8, 9],
+            "store": balancer._store,
+            "replica_ids": ["s0", "s1"],
+            "request_id": "request-1",
+        }
+
+    def test_empty_ranking_raises(self, monkeypatch):
+        monkeypatch.setattr(balancer_module, "route", lambda *_args: [])
+        balancer = _make_balancer({"s0": "h0"})
+
+        with pytest.raises(RuntimeError, match="no available replica"):
+            balancer.acquire_server("request-1", [1])
+
+    def test_callback_failure_does_not_break_other_callbacks(self):
+        balancer = _make_balancer({"s0": "h0"})
+        received = []
+
+        def fail(*_args):
+            raise RuntimeError("broken callback")
+
+        balancer.register_call_back("custom", fail)
+        balancer.register_call_back("custom", lambda value: received.append(value))
+
+        balancer._fire("custom", "payload")
+
+        assert received == ["payload"]
+
+    def test_periodic_route_stats_are_cumulative(self, monkeypatch):
+        balancer = _make_balancer({"s0": "h0"})
+        balancer._ROUTE_LOG_EVERY = 2
+        stats = []
+        monkeypatch.setattr(
+            balancer_module.logger,
+            "info",
+            lambda message, *args: stats.append(message % args),
+        )
+
+        for index in range(4):
+            balancer.acquire_server(f"request-{index}", [index])
+
+        assert len(stats) == 2
+        assert stats[0].startswith("route-stats: calls=2 ")
+        assert stats[1].startswith("route-stats: calls=4 ")
+        assert balancer._route_calls == 4
+        assert balancer._route_time_total_ms >= balancer._route_time_max_ms >= 0
+
+    def test_add_and_remove_servers_update_pool_and_counters(self):
+        balancer = _make_balancer({"s0": "h0"})
+
+        balancer.add_servers({"s0": "new-h0", "s1": "h1"})
+        assert balancer._servers == {"s0": "new-h0", "s1": "h1"}
+        assert balancer._inflight == {"s0": 0, "s1": 0}
+
+        balancer.remove_servers(["s0", "missing"])
+        balancer.remove_servers([])
+        assert balancer.get_all_servers() == ["s1"]
+
+    def test_statistic_callbacks_unregister_on_provider_stop(self):
+        balancer = _make_balancer({"s0": "h0"})
+        assert any(balancer._callbacks.values())
+
+        balancer._provider.stop()
+        balancer._provider.stop()
+
+        assert not any(balancer._callbacks.values())

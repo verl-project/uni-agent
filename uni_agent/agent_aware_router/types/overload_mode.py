@@ -15,8 +15,9 @@
 """Sticky-overload check mode.
 
 ``is_overloaded`` decides whether the sticky short-circuit sends a returning
-session back to its bound replica (``memory_overload_filter=True``) or falls
-back to combined scoring. The mode is independent of ``slow_cut`` so the
+session back to its bound replica or falls back to combined scoring. The
+overload check itself is unconditional (disable it via ``overload_mode=None``);
+the mode only picks the signal. It is independent of ``slow_cut`` so the
 overload signal can be chosen without coupling to the routing strategy.
 
 Canonical YAML strings (``simple`` / ``blended``) are mapped to these
@@ -33,7 +34,7 @@ class OverloadMode(str, Enum):
 
     # kv_cache_usage_perc > load_threshold — a single vLLM occupancy signal
     KV_CACHE_USAGE_PERC = "kv_cache_usage_perc"
-    # _compute_load(kv, running, waiting, inflight) > load_threshold
-    KV_LOAD = "kv_load"
+    # remaining capacity
+    REMAINING_CAP = "remaining_cap"
     # do not do overload
     NONE = "None"

@@ -16,10 +16,9 @@
           TQDM_DISABLE: "1"
           PIP_PROGRESS_BAR: "off"
       - name: submit
-    model:
+    sampling_params_override:
       temperature: 1.0
       top_p: 1.0
-      max_total_tokens: 131072
   prompt_template: &swe_react_prompt
     - role: system
       content: You are a helpful assistant that can interact with a computer to solve tasks.
@@ -118,10 +117,9 @@
           TQDM_DISABLE: "1"
           PIP_PROGRESS_BAR: "off"
       - name: submit
-    model:
+    sampling_params_override:
       temperature: 1.0
       top_p: 1.0
-      max_total_tokens: 131072
   prompt_template: *swe_react_prompt
 
 - name: swe_bench_multilingual
@@ -142,10 +140,9 @@
           TQDM_DISABLE: "1"
           PIP_PROGRESS_BAR: "off"
       - name: submit
-    model:
+    sampling_params_override:
       temperature: 1.0
       top_p: 1.0
-      max_total_tokens: 131072
   prompt_template:
     - role: system
       content: You are a helpful assistant that can interact with a computer to solve tasks.

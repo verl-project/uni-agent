@@ -50,10 +50,6 @@ The Quickstart includes two ready-to-use configs:
         max_turns: 200
         run_timeout: 4800
         verbose: true
-        model:
-          temperature: 1.0
-          top_p: 0.95
-          max_total_tokens: 131072
     ```
 
 === "ReAct"
@@ -77,13 +73,19 @@ The Quickstart includes two ready-to-use configs:
               TQDM_DISABLE: "1"
               GIT_PAGER: "cat"
           - name: submit
-        model:
+        sampling_params_override:
           temperature: 0.8
           top_p: 0.9
-          max_total_tokens: 65536
     ```
 
 Configure the sandbox provider and Agent limits in YAML. Do not hard-code the runtime endpoint there unless every run uses the same service: API mode injects it from `--base-url` and `--model`, while verl mode injects the session Gateway endpoint.
+
+For verl inference, `--temperature`, `--top-p`, and `--top-k` set the shared
+rollout and validation sampling defaults. To enable ReAct YAML overrides, also
+pass `--allowed-request-sampling-param-keys temperature top_p top_k`. Direct API
+inference sends the white-box overrides directly to the endpoint.
+See [Sampling configuration](../concepts/gateway-and-trajectories.md#sampling-configuration)
+for the precedence and allowlist semantics.
 
 !!! note "Claude Code network access"
     Claude Code runs inside the sandbox and calls the Anthropic Messages endpoint from there. The endpoint must therefore be resolvable and reachable **from inside the sandbox**.
@@ -166,6 +168,9 @@ python examples/inference/parallel_infer_verl.py \
 Important controls:
 
 - `--engine`: rollout backend, either `vllm` or `sglang`.
+- `--engine-kwargs`: optional native backend settings as JSON, such as
+  `--engine sglang --engine-kwargs '{"enable_torch_compile": false}'`.
+  See [advanced engine options](../advanced/inference-engine-options.md) for graph and compilation settings.
 - `--tool-parser`: parser matching the model's chat template.
 - `--tensor-parallel-size`: tensor parallel size of the rollout engine.
 - `--nnodes` and `--n-gpus-per-node`: hardware allocated to the engine.
@@ -223,6 +228,13 @@ ray job submit --no-wait \
 
 ## Recipes
 
+### Codex (inference only)
+
+The [Codex SWE-bench recipe](https://github.com/verl-project/uni-agent/blob/main/examples/blackbox_recipes/codex_swe_task/README.md)
+runs the pinned native Codex CLI inside an OpenYuanRong sandbox through the
+session's Responses endpoint. Follow its sidecar build, Qwen3.5-9B catalog, data
+preparation and Ray setup steps to run a single-task inference check.
+
 ### Claude Code
 
 Claude Code is a black-box Agent Harness: the complete CLI runs inside the sandbox and owns its interaction loop and tools. The following examples run it with `doubao-seed-2.1-pro` through an external API and with `qwen3.6-35b-a3b` through the verl rollout engine.
@@ -262,6 +274,8 @@ Claude Code is a black-box Agent Harness: the complete CLI runs inside the sandb
         --data-path ~/data/swe_agent/swe_bench_verified.parquet \
         --model-path Qwen/Qwen3.6-35B-A3B \
         --task-config examples/quickstart/inference/task_config_claude_code.yaml \
+        --temperature 1.0 --top-p 0.95 \
+        --response-length 131072 \
         --tool-parser qwen3_coder \
         --tensor-parallel-size 4 \
         --nnodes 8 \
@@ -287,6 +301,7 @@ ReAct is a white-box Agent: Uni-Agent owns the interaction loop and exposes `str
         --data-path ~/data/swe_agent/swe_bench_verified.parquet \
         --model-path Qwen/Qwen3-Coder-30B-A3B-Instruct \
         --task-config examples/quickstart/inference/task_config_react.yaml \
+        --allowed-request-sampling-param-keys temperature top_p top_k \
         --tool-parser qwen3_coder \
         --tensor-parallel-size 4 \
         --nnodes 8 \
@@ -309,6 +324,7 @@ ReAct is a white-box Agent: Uni-Agent owns the interaction loop and exposes `str
         --data-path ~/data/swe_agent/swe_bench_verified.parquet \
         --model-path Qwen/Qwen3.6-35B-A3B \
         --task-config examples/quickstart/inference/task_config_react.yaml \
+        --temperature 1.0 --top-p 0.95 \
         --tool-parser qwen3_coder \
         --tensor-parallel-size 4 \
         --nnodes 8 \
@@ -319,6 +335,9 @@ ReAct is a white-box Agent: Uni-Agent owns the interaction loop and exposes `str
     ```
 
     !!! success "Result"
+        This command uses rollout sampling defaults and leaves the YAML sampling overrides
+        unpermitted. Set `agent.max_steps: 200` in the Task YAML to match the run below.
+
         ReAct with Qwen3.6-35B-A3B achieved a **72.6% resolve rate** on SWE-Bench Verified, with `max-turns` = 200, `temperature` = 1.0, `top-p` = 0.95.
 
 === "Doubao-Seed-2.1-Pro"
