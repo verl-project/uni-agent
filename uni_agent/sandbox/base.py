@@ -579,8 +579,9 @@ class Sandbox(abc.ABC):
             if res.exit_code != 0:
                 raise RuntimeError(f"write_file {path!r} failed: {res.stderr.strip()}")
             return
-        # Stage chunk by chunk next to the target, then decode in one shot.
-        tmp = shlex.quote(f"{path}.uni-agent-{uuid.uuid4().hex[:8]}.b64")
+        # Stage chunks in /tmp, then decode in one shot; a read-only target
+        # directory does not break large writes to a writable file.
+        tmp = shlex.quote(f"/tmp/uni-agent-{uuid.uuid4().hex[:8]}.b64")
         try:
             for index, offset in enumerate(range(0, len(b64), _WRITE_FILE_B64_CHUNK_SIZE)):
                 chunk = shlex.quote(b64[offset : offset + _WRITE_FILE_B64_CHUNK_SIZE])

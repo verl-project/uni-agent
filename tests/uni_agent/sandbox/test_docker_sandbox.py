@@ -449,7 +449,7 @@ def test_write_file_small_payload_keeps_single_command(monkeypatch):
         return _ok()
 
     monkeypatch.setattr(sandbox, "exec", fake_exec)
-    asyncio.run(sandbox.write_file("/workspace/a b.txt", "héllo"))
+    asyncio.run(Sandbox.write_file(sandbox, "/workspace/a b.txt", "héllo"))
 
     assert len(scripts) == 1
     assert scripts[0].startswith("mkdir -p ")
@@ -471,7 +471,7 @@ def test_write_file_large_payload_is_chunked_and_argv_safe(monkeypatch):
 
     monkeypatch.setattr(sandbox, "exec", fake_exec)
     payload = bytes(range(256)) * 1024  # 256 KiB of binary data
-    asyncio.run(sandbox.write_file("/workspace/data/large.bin", payload))
+    asyncio.run(Sandbox.write_file(sandbox, "/workspace/data/large.bin", payload))
 
     staged = ""
     for script in scripts:
@@ -500,5 +500,5 @@ def test_write_file_chunk_failure_cleans_up_and_raises(monkeypatch):
 
     monkeypatch.setattr(sandbox, "exec", fake_exec)
     with pytest.raises(RuntimeError, match="disk full"):
-        asyncio.run(sandbox.write_file("/workspace/large.bin", b"x" * (200 * 1024)))
+        asyncio.run(Sandbox.write_file(sandbox, "/workspace/large.bin", b"x" * (200 * 1024)))
     assert scripts[-1].startswith("rm -f ")
