@@ -270,6 +270,7 @@ class KVCAwareBalancer:
 
     def get_status(self) -> dict:
         """Construction + routing snapshot for debugging."""
+        collector_status = getattr(self._provider, "get_status", None)
         return {
             "servers": list(self._servers.keys()),
             "provider": type(self._provider).__name__,
@@ -277,6 +278,7 @@ class KVCAwareBalancer:
             "route_calls": self._route_calls,
             "sticky_size": self._store.sticky_status()["size"],
             "total_inflight": self.get_total_inflight(),
+            "collectors": collector_status() if callable(collector_status) else [],
         }
 
     def release_server(self, server_id: str, request_id: str | None = None) -> None:
