@@ -166,7 +166,13 @@ def build_harbor_process_env(config: HarborTaskConfig) -> dict[str, str] | None:
 
     process_env: dict[str, str] = {}
     if config.agent.model.base_url:
-        process_env.update(dict.fromkeys(_MODEL_BASE_URL_ENV_VARS, config.agent.model.base_url))
+        base_url = config.agent.model.base_url
+        if config.agent.name == "claude-code":
+            # Claude Code appends /v1/messages. Harbor preserves explicit URLs
+            # and can select OPENAI_BASE_URL for an openai/... model, so all
+            # endpoint aliases must use the same Messages API base.
+            base_url = base_url.rstrip("/").removesuffix("/v1")
+        process_env.update(dict.fromkeys(_MODEL_BASE_URL_ENV_VARS, base_url))
     if config.agent.model.api_key:
         process_env.update(dict.fromkeys(_MODEL_API_KEY_ENV_VARS, config.agent.model.api_key))
     return process_env or None
