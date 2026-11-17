@@ -1,4 +1,4 @@
-"""Run a frozen three-arm skill evaluation. Python 3.10+, standard library only."""
+"""Run a frozen paired skill evaluation. Python 3.10+, standard library only."""
 
 import argparse
 import hashlib
@@ -12,7 +12,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 ARMS = ("baseline", "script", "skill")
 STATES = ("identified", "ambiguous", "unknown")
@@ -54,13 +54,81 @@ def inventory(root):
     return result
 
 
+MAX_ARTIFACT_BYTES = 4 * 1024 * 1024
+JSON_TYPES = {
+    "string": (str,),
+    "number": (int, float),
+    "integer": (int,),
+    "object": (dict,),
+    "array": (list,),
+    "boolean": (bool,),
+    "null": (type(None),),
+}
+
+
+def artifact_rules(spec):
+    rules = spec.get("outputs")
+    if not isinstance(rules, dict) or not rules:
+        raise ValueError("Artifact profile requires private expected JSON outputs")
+    for name in rules:
+        path = PurePosixPath(name)
+        if (
+            not path.parts
+            or path.as_posix() != name
+            or path.is_absolute()
+            or ".." in path.parts
+            or "\\" in name
+            or ":" in name
+            or PureWindowsPath(name).drive
+            or any(PureWindowsPath(part).is_reserved() for part in path.parts)
+        ):
+            raise ValueError("Output names must be portable relative paths under output/")
+    return rules
+
+
+def public_contract(case, spec):
+    if spec.get("profile") == "artifact":
+        return (
+            "Write the requested JSON files under output/: "
+            + json.dumps(sorted(artifact_rules(spec)))
+            + ". Return one JSON object on stdout ({} is sufficient); the evaluator grades the files themselves."
+        )
+    contract = load(case / "answer-schema.json")
+    types = contract.get("fact_types")
+    if (
+        not isinstance(types, dict)
+        or set(types) != set(spec["facts"])
+        or any(not isinstance(t, str) or t not in JSON_TYPES for t in types.values())
+        or any(v is not None and type(v) not in JSON_TYPES[types[k]] for k, v in spec["facts"].items())
+        or not isinstance(contract.get("candidate_format"), str)
+        or not contract["candidate_format"].strip()
+    ):
+        raise ValueError(f"Invalid public fact types or candidate format: {case.name}")
+    return (
+        RESPONSE
+        + " Use exactly these fact fields and JSON types (null when unknown): "
+        + json.dumps(types, sort_keys=True)
+        + ". Candidate format: "
+        + contract["candidate_format"]
+    )
+
+
 def cases(root):
     answer = []
     for case in sorted((root / "cases").iterdir()):
         if not case.is_dir():
             raise ValueError(f"Unexpected file among cases: {case}")
         spec = load(case / "rubric.json")
-        if spec["kind"] not in KINDS or spec["disposition"] not in STATES:
+        if spec["kind"] not in KINDS or not spec["provenance"].strip():
+            raise ValueError(f"Invalid provenance: {case.name}")
+        if not inventory(case / "scene") or not (case / "prompt.txt").read_text(encoding="utf-8").strip():
+            raise ValueError(f"Case needs original inputs and a task: {case.name}")
+        if spec.get("profile") == "artifact":
+            artifact_rules(spec)
+            answer.append(case.name)
+            continue
+        public_contract(case, spec)
+        if spec.get("profile", "diagnosis") != "diagnosis" or spec["disposition"] not in STATES:
             raise ValueError(f"Invalid provenance kind or disposition: {case.name}")
         ids = spec["candidates"]
         if not isinstance(ids, list) or not all(isinstance(x, str) and x for x in ids) or len(ids) != len(set(ids)):
@@ -69,37 +137,28 @@ def cases(root):
             spec["disposition"] == "ambiguous" and len(ids) < 2
         ):
             raise ValueError("Disposition incompatible with expected candidates")
-        if (
-            not spec["provenance"].strip()
-            or not spec["next_step_rubric"].strip()
-            or not isinstance(spec["facts"], dict)
-        ):
+        if not spec["next_step_rubric"].strip() or not isinstance(spec["facts"], dict):
             raise ValueError(f"Missing provenance, grading rubric, or facts: {case.name}")
         paths = set(inventory(case / "scene"))
-        if (
-            not paths
-            or not spec["evidence"]
-            or not set(spec["evidence"]) <= paths
-            or not (case / "prompt.txt").read_text(encoding="utf-8").strip()
-        ):
+        if not isinstance(spec["evidence"], list) or not spec["evidence"] or not set(spec["evidence"]) <= paths:
             raise ValueError(f"Missing input or evidence path: {case.name}")
         answer.append(case.name)
     if (
         not answer
         or not (root / "package/SKILL.md").is_file()
-        or not inventory(root / "package/scripts")
         or not (root / "protocol.md").read_text(encoding="utf-8").strip()
     ):
-        raise ValueError("Suite requires cases, a protocol, SKILL.md and shared scripts")
+        raise ValueError("Suite requires cases, a protocol and SKILL.md")
     return answer
 
 
 def frozen(root):
     files = inventory(root)
-    return {"version": 1, "cases": cases(root), "sha256": files}
+    arms = ARMS if inventory(root / "package/scripts") else ("baseline", "skill")
+    return {"version": 2, "cases": cases(root), "arms": list(arms), "sha256": files}
 
 
-def score(spec, answer):
+def score(spec, answer, scene_paths):
     if not isinstance(answer, dict):
         answer = {}
     ids = answer.get("candidates")
@@ -113,11 +172,12 @@ def score(spec, answer):
         for k, v in spec["facts"].items()
     }
     claims = {
+        "fact_keys": set(facts) == set(spec["facts"]),
         "disposition": state == spec["disposition"],
         "candidates": valid_ids and sorted(ids) == sorted(spec["candidates"]),
         "evidence": isinstance(paths, list)
         and all(isinstance(p, str) for p in paths)
-        and set(spec["evidence"]) <= set(paths),
+        and set(spec["evidence"]) <= set(paths) <= set(scene_paths),
     }
     wrong = state == "identified" and (spec["disposition"] != "identified" or not claims["candidates"])
     return {
@@ -131,7 +191,7 @@ def score(spec, answer):
 
 def view(root, case, arm, work):
     shutil.copytree(root / "cases" / case / "scene", work / "scene")
-    if arm in ("script", "skill"):
+    if arm in ("script", "skill") and (root / "package/scripts").is_dir():
         shutil.copytree(root / "package/scripts", work / "package/scripts")
     if arm == "skill":
         shutil.copytree(root / "package", work / "package", dirs_exist_ok=True)
@@ -139,13 +199,14 @@ def view(root, case, arm, work):
 
 def schedule(lock, config):
     plan = []
+    arms = lock["arms"]
     rng = random.Random(config["seed"])
     for i in range(config["rounds"]):
         order = list(lock["cases"])
         rng.shuffle(order)
         for case in order:
-            offset = (config["seed"] + lock["cases"].index(case) + i) % len(ARMS)
-            for arm in ARMS[offset:] + ARMS[:offset]:
+            offset = (config["seed"] + lock["cases"].index(case) + i) % len(arms)
+            for arm in arms[offset:] + arms[:offset]:
                 plan.append({"case": case, "round": i + 1, "arm": arm})
     return plan
 
@@ -179,7 +240,11 @@ def run(root, lock, out, config):
         with tempfile.TemporaryDirectory(prefix="skill-eval-") as tmp:
             work = Path(tmp)
             view(root, case, arm, work)
-            prompt = (root / "cases" / case / "prompt.txt").read_text(encoding="utf-8") + "\n" + RESPONSE
+            case_dir = root / "cases" / case
+            spec = load(case_dir / "rubric.json")
+            prompt = (case_dir / "prompt.txt").read_text(encoding="utf-8") + "\n" + public_contract(case_dir, spec)
+            if spec.get("profile") == "artifact":
+                (work / "output").mkdir()
             save(trial / "input.json", {"prompt": prompt, "files": inventory(work)})
             start = time.monotonic()
             answer = None
@@ -206,9 +271,29 @@ def run(root, lock, out, config):
                 if isinstance(exc, subprocess.TimeoutExpired):
                     (trial / "stdout").write_bytes(exc.stdout or b"")
                     (trial / "stderr").write_bytes(exc.stderr or b"")
+            elapsed = time.monotonic() - start
+            artifacts = {}
+            if spec.get("profile") == "artifact" and error is None:
+                for name in artifact_rules(spec):
+                    src = work / "output" / name
+                    parts = [
+                        work / "output",
+                        *(work / "output" / Path(*Path(name).parts[:i]) for i in range(1, len(Path(name).parts) + 1)),
+                    ]
+                    if any(
+                        p.is_symlink() or (p.exists() and getattr(p.lstat(), "st_file_attributes", 0) & 1024)
+                        for p in parts
+                    ):
+                        continue
+                    if not src.is_file() or src.stat().st_nlink != 1 or src.stat().st_size > MAX_ARTIFACT_BYTES:
+                        continue
+                    dst = trial / "artifacts" / name
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(src, dst)
+                    artifacts[name] = digest(dst)
             save(
                 trial / "receipt.json",
-                dict(**item, seconds=round(time.monotonic() - start, 3), error=error, answer=answer),
+                dict(**item, seconds=round(elapsed, 3), error=error, answer=answer, artifacts=artifacts),
             )
     save(out / "results.json", replay(root, out))
 
@@ -237,7 +322,24 @@ def replay(root, out):
             if raw != r["answer"]:
                 raise ValueError("Receipt answer differs from original adapter output")
         spec = load(root / "cases" / item["case"] / "rubric.json")
-        result = score(spec, r["answer"])
+        if spec.get("profile") == "artifact":
+            copies = receipt_path.parent / "artifacts"
+            observed = inventory(copies)
+            if observed != r.get("artifacts", {}):
+                raise ValueError("Archived output changed since trial")
+            checks = {}
+            for name, expected in artifact_rules(spec).items():
+                checks[name] = False
+                if name in observed and r["error"] is None:
+                    try:
+                        value = load(copies / name)
+                        checks[name] = json.dumps(value, sort_keys=True) == json.dumps(expected, sort_keys=True)
+                    except (UnicodeError, ValueError):
+                        pass
+            result = {"profile": "artifact", "task_pass": all(checks.values()), "checks": checks}
+        else:
+            result = score(spec, r["answer"], inventory(root / "cases" / item["case"] / "scene"))
+            result.update(profile="diagnosis", task_pass=result["fact_pass"])
         rows.append({**item, "kind": spec["kind"], "seconds": r["seconds"], "error": r["error"], **result})
     return rows
 
@@ -249,6 +351,8 @@ def review(root, out, packet):
     key = {}
     questions = []
     for i, row in enumerate(rows):
+        if row["profile"] != "diagnosis":
+            continue
         case = root / "cases" / row["case"]
         trial = out / f"{i:04d}" / "receipt.json"
         spec = load(case / "rubric.json")
@@ -295,15 +399,19 @@ def summarize(rows):
     keys = sorted({(r["kind"], r["case"], r["arm"]) for r in rows})
     for kind, case, arm in keys:
         group = [r for r in rows if (r["kind"], r["case"], r["arm"]) == (kind, case, arm)]
-        times = [r["seconds"] for r in group if r["fact_pass"] and r["seconds"] is not None]
+        times = [r["seconds"] for r in group if r["task_pass"] and r["seconds"] is not None]
         result.append(
             {
                 "kind": kind,
                 "case": case,
                 "arm": arm,
                 "attempts": len(group),
-                "fact_passes": sum(r["fact_pass"] for r in group),
-                "wrong_identifications": sum(r["wrong_identification"] for r in group),
+                "profile": group[0]["profile"],
+                "task_passes": sum(r["task_pass"] for r in group),
+                "fact_passes": sum(r["fact_pass"] for r in group) if group[0]["profile"] == "diagnosis" else None,
+                "wrong_identifications": (
+                    sum(r["wrong_identification"] for r in group) if group[0]["profile"] == "diagnosis" else None
+                ),
                 "operational_failures": sum(r["error"] is not None for r in group),
                 "median_seconds_correct_final_answer": statistics.median(times) if times else None,
                 "mean_next_step_score": (

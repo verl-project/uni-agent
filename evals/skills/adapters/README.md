@@ -1,0 +1,11 @@
+## Model adapter included in this repository
+
+`adapters/codex_cli.py` integrates the Codex CLI through the same stdin/stdout contract. Install a Codex CLI build supporting `exec --ignore-user-config --ignore-rules --ephemeral` and the feature switches used by the adapter. Pass the actual executable path (`codex.exe` on Windows, not a shell wrapper), a concrete model identifier, reasoning setting, and a participant timeout **shorter** than `timeout_seconds` (leave at least 30 seconds for worker cleanup). Use an existing authenticated CLI installation. The adapter runs the CLI in an empty directory with a fresh profile, no inherited project instructions, shell, browsing, plugins or subagents. The only allowed evidence server exposes a bounded inventory, literal search and paged reads, plus an optional preapproved check. Actions outside that allowlist invalidate the trial. Always pin and record the CLI version and adapter/reader hashes with the run. A model offered under a moving alias is not a reproducible model snapshot.
+
+For `config.json`, replace `command` with an argv array like:
+
+```json
+["/absolute/python", "-B", "/absolute/evals/skills/adapters/codex_cli.py", "--cli", "/absolute/codex", "--model", "<model-id>", "--reasoning", "medium", "--timeout", "120", "--helper", "inspect_session.py", "--sha256", "<reviewed-script-sha256>"]
+```
+
+Pass identical argv to all arms. If the staged package is absent, `check` returns unavailable. If present, only the named, independently pinned Python helper may execute, with the provided `scene/` as its sole argument; never approve an unreviewed script. No contestant-controlled command or script arguments are accepted. The helper is trusted local code, not an OS sandbox for untrusted programs. No credentials are made available via the reader. A successful participant must use at least one evidence tool. The adapter records allowed tool names and optional usage on stderr, without exporting raw provider logs or credentials. Use inputs under 8 MiB per file and at most 2,000 staged files. The reader accepts UTF-8 evidence; for larger/binary sources supply an appropriately isolated adapter, without silently changing the task for one arm. Native skill discovery, an entire desktop agent's invisible platform integrations, and downstream engineer time are outside this benchmark.

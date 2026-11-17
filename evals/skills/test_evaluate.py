@@ -30,6 +30,10 @@ class HarnessTests(unittest.TestCase):
             "next_step_rubric": "2: request event id; 1: ask generally; 0: guess.",
         }
         ev.save(self.case / "rubric.json", self.spec)
+        ev.save(
+            self.case / "answer-schema.json",
+            {"fact_types": {"declared": "integer"}, "candidate_format": "scene-relative path"},
+        )
         (self.suite / "package/scripts").mkdir(parents=True)
         (self.suite / "package/SKILL.md").write_text("test guide")
         (self.suite / "package/scripts/check.py").write_text("pass")
@@ -82,13 +86,62 @@ class HarnessTests(unittest.TestCase):
         self.assertTrue(all(r["error"] and not r["fact_pass"] for r in rows))
         self.assertFalse(any(r["wrong_identification"] for r in rows))
 
+    def test_public_contract_and_fabricated_evidence(self):
+        self.spec["facts"]["event"] = "private-value"
+        ev.save(self.case / "rubric.json", self.spec)
+        ev.save(
+            self.case / "answer-schema.json",
+            {"fact_types": {"declared": "integer", "event": "string"}, "candidate_format": "scene-relative path"},
+        )
+        ev.run(self.suite, ev.frozen(self.suite), self.out, self.cfg)
+        for i in range(3):
+            prompt = ev.load(self.out / f"{i:04d}" / "input.json")["prompt"]
+            self.assertIn('"event": "string"', prompt)
+            self.assertIn("scene-relative path", prompt)
+            self.assertNotIn("private-value", prompt)
+        full = dict(self.answer, facts={"declared": None, "event": "private-value"})
+        bogus = dict(full, evidence=["a", "b", "missing"])
+        self.assertFalse(ev.score(self.spec, bogus, {"a", "b"})["fact_pass"])
+        extra = dict(full, facts={**full["facts"], "imagined": True})
+        self.assertFalse(ev.score(self.spec, extra, {"a", "b"})["fact_pass"])
+
+    def test_artifact_two_arms_verify_saved_bytes_not_self_claim(self):
+        (self.suite / "package/scripts/check.py").unlink()
+        (self.suite / "package/scripts").rmdir()
+        (self.case / "answer-schema.json").unlink()
+        ev.save(
+            self.case / "rubric.json",
+            {
+                "profile": "artifact",
+                "kind": "smoke",
+                "provenance": "synthetic",
+                "outputs": {"config.json": {"retries": 7}},
+            },
+        )
+        (self.case / "prompt.txt").write_text("Create config.json using the retry count in the inputs.")
+        self.adapter.write_text(
+            "import pathlib\nif pathlib.Path('package/SKILL.md').exists():\n"
+            "    pathlib.Path('output/config.json').write_text('{\"retries\":7}')\n"
+            "print('{\"success\":true}')"
+        )
+        lock = ev.frozen(self.suite)
+        self.assertEqual(lock["arms"], ["baseline", "skill"])
+        ev.run(self.suite, lock, self.out, self.cfg)
+        reports = ev.replay(self.suite, self.out)
+        self.assertEqual({r["arm"]: r["task_pass"] for r in reports}, {"baseline": False, "skill": True})
+        self.assertNotIn("identified", ev.load(self.out / "0000/input.json")["prompt"])
+        self.assertTrue(all(r["wrong_identifications"] is None for r in ev.summarize(reports)))
+        archived = next(self.out.glob("*/artifacts/config.json"))
+        archived.write_text("{}")
+        self.assertRaisesRegex(ValueError, "Archived output changed", ev.replay, self.suite, self.out)
+
     def test_wrong_id_null_and_ambiguity(self):
-        self.assertTrue(ev.score(self.spec, self.answer)["fact_pass"])
+        self.assertTrue(ev.score(self.spec, self.answer, {"a", "b"})["fact_pass"])
         wrong = dict(self.answer, disposition="identified", candidates=["a"])
-        self.assertTrue(ev.score(self.spec, wrong)["wrong_identification"])
-        self.assertFalse(ev.score(self.spec, wrong)["fact_pass"])
-        self.assertFalse(ev.score(self.spec, dict(self.answer, facts={}))["fact_pass"])
-        self.assertFalse(ev.score(self.spec, dict(self.answer, evidence=["a"]))["fact_pass"])
+        self.assertTrue(ev.score(self.spec, wrong, {"a", "b"})["wrong_identification"])
+        self.assertFalse(ev.score(self.spec, wrong, {"a", "b"})["fact_pass"])
+        self.assertFalse(ev.score(self.spec, dict(self.answer, facts={}), {"a", "b"})["fact_pass"])
+        self.assertFalse(ev.score(self.spec, dict(self.answer, evidence=["a"]), {"a", "b"})["fact_pass"])
 
 
 if __name__ == "__main__":

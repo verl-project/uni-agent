@@ -9,3 +9,5 @@ Keep one source under `skills/<name>/`: a short `SKILL.md` for the investigative
 When changing the export schema or its naming, update the checker, its boundary tests and any affected guidance in the same change. New skills should describe when *not* to use them and what evidence could change a diagnosis. Keep incident archives, private identifiers and answer keys out of the repository.
 
 Use the [shared evaluation entry point](../evals/skills/README.md) to compare the complete package with ordinary tools and with its scripts alone. Do not recommend installation based on script-call counts. Report failures and negative results alongside improvements.
+
+See the [Gateway evaluation record](../evals/skills/gateway-results.md) for the controlled pilot and the limits of the historical evidence.
