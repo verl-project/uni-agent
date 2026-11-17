@@ -99,3 +99,5 @@ A stacked series may use `[1/N]` or a numeric total:
 - Document migration steps for every breaking change.
 
 Reviewers will focus on correctness, ownership boundaries, compatibility, failure handling, test coverage, and reproducibility.
+
+For a troubleshooting guide or diagnostic skill, see the [skill contribution and evaluation guide](skills/README.md).
