@@ -112,13 +112,22 @@ class SWEREBenchTask(Task):
                 )
                 finished = agent_result.finished
 
-            try:
-                from .reward import compute_reward
+            if sandbox.retired_after_timeout:
+                logger.warning("skipping evaluation: sandbox retired after command timeout")
+                finished = False
+                result = {
+                    "resolved": False,
+                    "eval_completed": False,
+                    "eval_skipped_reason": "sandbox_retired_after_timeout",
+                }
+            else:
+                try:
+                    from .reward import compute_reward
 
-                result = await compute_reward(sample, sandbox, eval_timeout=cfg.eval_timeout)
-            except Exception:
-                logger.exception(f"scoring failed for instance_id={instance_id}")
-                raise
+                    result = await compute_reward(sample, sandbox, eval_timeout=cfg.eval_timeout)
+                except Exception:
+                    logger.exception(f"scoring failed for instance_id={instance_id}")
+                    raise
 
             logger.info(f"task done: resolved={result['resolved']}")
             return TaskResult(

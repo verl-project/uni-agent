@@ -27,6 +27,8 @@ from uni_agent.sandbox.base import ExecResult, SandboxConfig
 
 
 class FakeSandbox:
+    retired_after_timeout = False
+
     def __init__(
         self,
         *,

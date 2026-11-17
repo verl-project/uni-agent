@@ -531,6 +531,15 @@ class Sandbox(abc.ABC):
         """
         return True
 
+    @property
+    def retired_after_timeout(self) -> bool:
+        """Whether a command timeout successfully retired this episode's workspace.
+
+        Unlike a failed liveness probe, this is an explicit lifecycle outcome.
+        Providers that preserve the workspace after timeouts keep the default.
+        """
+        return False
+
     async def exec_shell(
         self,
         script: str,

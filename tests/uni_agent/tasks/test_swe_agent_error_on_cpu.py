@@ -13,8 +13,9 @@ from uni_agent.tasks.swe_bench.task import SWEBenchTask
 @pytest.mark.level0
 @pytest.mark.asyncio
 @pytest.mark.parametrize("agent_error", [None, "RuntimeError: agent failed"])
-async def test_swe_task_preserves_explicit_agent_error_without_changing_reward(monkeypatch, agent_error):
-    sandbox = object()
+@pytest.mark.parametrize("retired", [False, True])
+async def test_swe_task_preserves_explicit_agent_error_without_changing_reward(monkeypatch, agent_error, retired):
+    sandbox = SimpleNamespace(retired_after_timeout=retired)
 
     @asynccontextmanager
     async def build_sandbox():
@@ -37,10 +38,14 @@ async def test_swe_task_preserves_explicit_agent_error_without_changing_reward(m
 
     result = await task.run()
 
-    scorer.assert_awaited_once_with(task.config.metadata, sandbox, eval_timeout=60)
+    if retired:
+        scorer.assert_not_awaited()
+        assert result.extra_info["eval_skipped_reason"] == "sandbox_retired_after_timeout"
+    else:
+        scorer.assert_awaited_once_with(task.config.metadata, sandbox, eval_timeout=60)
+        assert result.extra_info["eval_report"] == scorer_result["eval_report"]
     assert result.reward == result.accuracy == 0.0
     assert result.finished is False
-    assert result.extra_info["eval_report"] == scorer_result["eval_report"]
     assert "agent_error" not in scorer_result
     if agent_error and agent_error.strip():
         assert result.extra_info["agent_error"] == agent_error
