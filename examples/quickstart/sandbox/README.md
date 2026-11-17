@@ -47,4 +47,15 @@ export E2B_API_KEY="<e2b-api-key>"
 DEBUG_MODE=1 SANDBOX_PROVIDER=e2b IMAGE=python:3.12 python examples/quickstart/sandbox/demo.py
 ```
 
+## Run with boxd
+
+Install the boxd SDK and provide an API key. Each run creates one isolated
+machine, runs the image in it with Docker, and deletes the machine at the end:
+
+```bash
+pip install "boxd>=0.3.2"
+export BOXD_API_KEY="<boxd-api-key>"
+DEBUG_MODE=1 SANDBOX_PROVIDER=boxd IMAGE=python:3.12 python examples/quickstart/sandbox/demo.py
+```
+
 See the [Launch a Sandbox](../../../docs/source/quickstart/launch-sandbox.md) guide for a step-by-step explanation.

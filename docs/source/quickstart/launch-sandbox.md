@@ -313,6 +313,62 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
     For in-sandbox model calls, set `sandbox_kwargs.proxy_port: 38197` in a Task
     Config; `run_task` configures the reverse tunnel from the live Gateway Session.
 
+=== "boxd"
+
+    **Remote cloud service.** [boxd](https://boxd.sh?ref=uni-agent) runs each sandbox on its own
+    microVM: a full Ubuntu machine with Docker.
+
+    Install the SDK and configure an API key (`boxd auth keys create <name> --org <org>`):
+
+    ```bash
+    pip install "boxd>=0.3.2"
+    export BOXD_API_KEY="<boxd-api-key>"
+    ```
+
+    ```python
+    from uni_agent.sandbox import SandboxConfig
+
+    config = SandboxConfig(
+        provider="boxd",
+        image="python:3.12",
+        runtime_timeout=3600,
+        image_mounts=[
+            {"image": "<tool-image>", "mount_path": "/opt/tool"},
+        ],
+        executable_paths={"tool": "/opt/tool/bin/tool"},
+        sandbox_kwargs={
+            # Optional: region ("fra" or "nyc"), org, and machine size.
+            "region": "nyc",
+            "vcpu": 2,
+            "memory": "8G",
+            # "org": "my-org",
+            # Optional: start from a snapshot of a prepared machine, for example
+            # one with the image already pulled. The machine keeps the snapshot's
+            # size, so leave out vcpu and memory.
+            # "from_snapshot": "my-prepared-machine",
+            # Optional, as in the Docker provider.
+            "pull_policy": "missing",
+            "pull_timeout": 900,
+        },
+    )
+    ```
+
+    Each sandbox creates one isolated machine: it does not join the org's private
+    network and holds no boxd credentials. The provider pulls `image` with the
+    machine's Docker daemon, starts it with `sleep` as the entrypoint (like the
+    Docker provider), runs commands with `docker exec`, and copies files with
+    `docker cp`. Task images must provide `sleep`, and `timeout` for commands
+    run with a timeout. The daemon uses the containerd image store, so
+    `image_mounts` work. Leave `image` unset to run commands on the machine
+    itself, as its default user with passwordless `sudo`; `image_mounts` and
+    `executable_paths` need an image.
+
+    `stop()` deletes the machine. The machine is also created with a
+    delete-after timer of `runtime_timeout`, so boxd removes it even when a
+    crashed worker never calls `stop()`. Auto-suspend is off by default
+    (`sandbox_kwargs.auto_suspend_timeout: 0`) because a long command with no
+    network traffic would otherwise put the machine to sleep.
+
 `image_mounts` allows Uni-Agent to attach self-contained runtime images for black-box
 agent harnesses to task sandboxes while keeping harness dependencies isolated
 from task images; `executable_paths` exposes selected runtime commands.
@@ -461,13 +517,20 @@ After configuring a supported backend above, run the complete connectivity and p
       python examples/quickstart/sandbox/demo.py
     ```
 
+=== "boxd"
+
+    ```bash
+    DEBUG_MODE=1 SANDBOX_PROVIDER=boxd IMAGE=python:3.12 \
+      python examples/quickstart/sandbox/demo.py
+    ```
+
 Next, [verify task oracle solutions](oracle-verification.md) against the configured sandbox before running agent inference or training.
 
 ## Build a Tool Image (Sidecar)
 
 You can ask an AI assistant to follow this section. Provide the tool's name, version, and any custom scripts or dependencies.
 
-On Docker, Modal, OpenYuanRong, or OpenJiuwen agent-dx, use [`image_mounts`](../concepts/sandbox.md#runtime-images) to add a tool without rebuilding the task image.
+On Docker, Modal, OpenYuanRong, OpenJiuwen agent-dx, or boxd, use [`image_mounts`](../concepts/sandbox.md#runtime-images) to add a tool without rebuilding the task image.
 Copy a Dockerfile and `build_tool.sh` into `examples/my_tool_swe_task/` from one of these examples:
 
 | Runtime | Dockerfile | Build script |
