@@ -34,6 +34,7 @@ dependencies = [
 modal = ["modal"]
 e2b = ["e2b"]
 vefaas = ["volcengine-python-sdk", "swe-rex"]
+gke = ["kubernetes", "k8s-agent-sandbox"]
 swebench = ["swebench==4.1.0"]
 insight = ["rl-insight"]
 

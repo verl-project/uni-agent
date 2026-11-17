@@ -123,6 +123,34 @@ Some sandbox providers support a Gateway reverse tunnel and declare this with `s
 
 Each supporting provider owns its upstream format through the `Sandbox.tunnel_upstream(base_url)` classmethod. The default requires an explicit `host:port`; a provider can override it to preserve its required URL scheme, supply default ports, or handle IPv6 addresses. The task runner delegates this formatting to the selected provider.
 
+## GKE Agent Sandbox (`gke_agent_sandbox`)
+
+`gke_agent_sandbox` runs isolated container episodes on Google Kubernetes Engine (or any Kubernetes cluster with the [`kubernetes-sigs/agent-sandbox`](https://github.com/kubernetes-sigs/agent-sandbox) CRDs installed) using `agent_sandbox_rl` warm pools and the Kubernetes `pods/exec` API.
+
+```yaml
+sandbox:
+  provider: gke_agent_sandbox
+  runtime_timeout: 7200
+  image_map:
+    - from: "swebench/**:latest"
+      to: "<region>-docker.pkg.dev/<project>/<repo>/**:latest"
+  sandbox_kwargs:
+    namespace: default
+    node_selector:
+      cloud.google.com/gke-nodepool: sandbox-cpu-pool
+```
+
+Install the client dependencies with `pip install 'uni-agent[gke]'` plus `agent-sandbox-rl`.
+
+Key behaviors and options:
+
+- **Network isolation (loopback-only by default)**: Templates default to `networkPolicyManagement: Managed` with `networkPolicy: {ingress: [], egress: []}` (deny-all ingress and egress; only pod loopback and Kubernetes API `pods/exec` remain usable). To use a single operator-managed namespace-wide `NetworkPolicy` instead (for large GKE Dataplane V2 / Cilium clusters), set `sandbox_kwargs.network_policy_management: "Unmanaged"` (or `SANDBOX_NETWORK_POLICY_MANAGEMENT=Unmanaged`); startup fails closed unless an egress-restricting `NetworkPolicy` selecting `app=agent-sandbox-rl` exists in the namespace.
+- **Overall lifetime limit (`runtime_timeout`)**: Enforced both in-process (expiring the sandbox, clamping per-command timeouts, and releasing the `SandboxClaim`) and on-cluster via a best-effort `SandboxClaim.spec.lifecycle.shutdownTime` (`shutdownPolicy: Delete`).
+- **Image rewriting**: Configure `sandbox.image_map` in Task Config (or set `SANDBOX_IMAGE_MAP`, e.g. `org/**=mirror.example.com/repo/**`).
+- **Optional pod annotations**: Pass cluster-specific pod annotations via `sandbox_kwargs.pod_annotations` or `SANDBOX_POD_ANNOTATIONS` (JSON object). No cluster-specific annotations are added by default.
+
+See `examples/quickstart/training/task_config_react_gke.yaml` for a full ReAct training config.
+
 ## Custom Backend
 
 A minimal backend implements `start()`, `stop()`, and `_exec()`:
