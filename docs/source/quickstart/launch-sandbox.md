@@ -88,6 +88,13 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
     The interrupted workspace is discarded. Agent execution and reward verification
     share the same container for successful episodes.
 
+    `sandbox.retired_after_timeout` records successful timeout retirement until a new
+    container starts. SWE-Bench, SWE-rebench, and SWE-Bench Multilingual check this
+    signal before evaluation: they skip the verifier and return zero reward/accuracy,
+    `finished=False`, and `eval_skipped_reason="sandbox_retired_after_timeout"`.
+    An unfinished agent with an intact workspace still receives normal evaluation.
+    Cleanup failures and cancellation continue to propagate instead of becoming scores.
+
     Startup failures and cancellation clean up containers using a unique ownership
     label, so a name collision does not delete another sandbox. Teardown commands
     are bounded to 30 seconds each. `SANDBOX_STOP_TIMEOUT` limits the overall cleanup

@@ -216,3 +216,53 @@ def test_real_swe_bench_verifier(monkeypatch, oracle):
         assert not await sandbox.is_alive()
 
     asyncio.run(run())
+
+
+@pytest.mark.cpu
+@pytest.mark.level1
+def test_swe_task_skips_reward_after_real_agent_command_timeout(sandbox, monkeypatch):
+    from uni_agent.agents.base import ModelConfig
+    from uni_agent.agents.mini_swe_agent.agent import MiniSweAgentAgent, MiniSweAgentConfig
+    from uni_agent.tasks.swe_bench import reward
+
+    # Exercise the real adapter and Docker timeout path without a model server:
+    # replace only the external agent executable with a sleeping process.
+    sandbox.run_args.extend(["--workdir", "/testbed"])
+    agent = MiniSweAgentAgent(
+        MiniSweAgentConfig(
+            model=ModelConfig(base_url="http://unused.invalid"),
+            tool_python="/bin/sleep",
+            run_agent_script="60",
+            run_timeout=0.2,
+        )
+    )
+    task = SWEBenchTask(
+        SWEBenchTaskConfig(
+            sandbox=SandboxConfig(provider="docker", image=sandbox.image),
+            prompt=[{"role": "user", "content": "Fix it"}],
+        )
+    )
+    scoring = AsyncMock(side_effect=AssertionError("must not score a retired workspace"))
+    monkeypatch.setattr(task, "build_sandbox", lambda: sandbox)
+    monkeypatch.setattr(task, "build_agent", lambda: agent)
+    monkeypatch.setattr(reward, "compute_reward", scoring)
+    start = sandbox.start
+    label = None
+
+    async def capture_start():
+        nonlocal label
+        await start()
+        label = sandbox._cleanup_label
+
+    monkeypatch.setattr(sandbox, "start", capture_start)
+
+    async def run():
+        result = await task.run()
+        assert result.reward == result.accuracy == 0.0
+        assert result.finished is False
+        assert result.extra_info["eval_skipped_reason"] == "sandbox_retired_after_timeout"
+        scoring.assert_not_awaited()
+        assert label is not None
+        await assert_removed(sandbox, label)
+
+    asyncio.run(run())

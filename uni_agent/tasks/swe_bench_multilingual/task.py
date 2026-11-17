@@ -78,17 +78,26 @@ class SWEBenchMultilingualTask(Task):
                 )
                 finished = agent_result.finished
 
-            try:
-                from .reward import compute_reward
+            if sandbox.retired_after_timeout:
+                logger.warning("skipping evaluation: sandbox retired after command timeout")
+                finished = False
+                result = {
+                    "resolved": False,
+                    "eval_completed": False,
+                    "eval_skipped_reason": "sandbox_retired_after_timeout",
+                }
+            else:
+                try:
+                    from .reward import compute_reward
 
-                result = await compute_reward(
-                    sample,
-                    sandbox,
-                    eval_timeout=cfg.eval_timeout,
-                )
-            except Exception:
-                logger.exception("scoring failed for instance_id=%s", instance_id)
-                raise
+                    result = await compute_reward(
+                        sample,
+                        sandbox,
+                        eval_timeout=cfg.eval_timeout,
+                    )
+                except Exception:
+                    logger.exception("scoring failed for instance_id=%s", instance_id)
+                    raise
 
             logger.info("task done: resolved=%s", result["resolved"])
             return TaskResult(

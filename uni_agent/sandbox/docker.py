@@ -78,6 +78,7 @@ class DockerSandbox(Sandbox):
         self.start_timeout = _positive_timeout("start_timeout", start_timeout)
         self._container_name: str | None = None
         self._cleanup_label: str | None = None
+        self._retired_after_timeout = False
 
     @classmethod
     def from_config(cls, config: SandboxConfig) -> DockerSandbox:
@@ -180,6 +181,7 @@ class DockerSandbox(Sandbox):
                 detail = started.stderr.strip() or started.stdout.strip()
                 raise RuntimeError(f"Failed to start Docker sandbox from {self.image!r}: {detail}")
             self._container_name = name
+            self._retired_after_timeout = False
             await self._setup_executable_paths(self.executable_paths)
         except (Exception, asyncio.CancelledError):
             try:
@@ -249,6 +251,10 @@ class DockerSandbox(Sandbox):
         except Exception:
             return False
 
+    @property
+    def retired_after_timeout(self) -> bool:
+        return self._retired_after_timeout
+
     async def _exec(
         self,
         argv: list[str],
@@ -266,11 +272,13 @@ class DockerSandbox(Sandbox):
         args.extend(argv)
         try:
             return await self._run_docker(*args, timeout=timeout)
-        except (asyncio.TimeoutError, asyncio.CancelledError):
+        except (asyncio.TimeoutError, asyncio.CancelledError) as exc:
             # Killing the Docker CLI does not terminate the command in the container.
             # Retire this rollout before returning so its processes cannot keep
             # modifying the workspace or race a subsequent verifier.
             await self.stop()
+            if isinstance(exc, asyncio.TimeoutError):
+                self._retired_after_timeout = True
             raise
 
     async def upload_file(self, local_file: Path | str, remote_file: str) -> None:

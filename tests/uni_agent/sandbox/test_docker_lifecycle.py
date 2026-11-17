@@ -224,6 +224,7 @@ def test_exec_interrupt_retires_container_before_returning(monkeypatch, interrup
                 await sandbox.exec(["sleep", "60"])
         assert calls[-1] == ("rm", "-f", "owned-id")
         assert not await sandbox.is_alive()
+        assert sandbox.retired_after_timeout is (interrupt == "timeout")
         with pytest.raises(RuntimeError, match="not started"):
             await sandbox.exec(["echo", "must not run"])
 
@@ -260,6 +261,7 @@ def test_cleanup_timeout_is_not_hidden_as_a_command_timeout(monkeypatch):
     with pytest.raises(RuntimeError, match="cleanup timed out"):
         asyncio.run(sandbox.exec(["sleep", "60"], timeout=0.1))
     assert sandbox._cleanup_label == "uni-agent.sandbox=test"
+    assert not sandbox.retired_after_timeout
 
 
 @pytest.mark.cpu
@@ -503,5 +505,33 @@ def test_old_stop_does_not_clear_restarted_container_ownership(monkeypatch):
             await old_stop
         assert sandbox._cleanup_label == new_owner
         assert sandbox._container_name == new_name
+
+    asyncio.run(run())
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_timeout_retirement_state_survives_stop_and_resets_on_restart(monkeypatch):
+    sandbox = DockerSandbox()
+
+    async def docker(*args, **kwargs):
+        if args[0] == "exec":
+            raise asyncio.TimeoutError
+        return ok("owned-id\n" if args[0] == "container" else "")
+
+    monkeypatch.setattr(sandbox, "_run_docker", docker)
+
+    async def run():
+        assert not sandbox.retired_after_timeout
+        await sandbox.start()
+        result = await sandbox.exec(["sleep", "60"], timeout=0.1)
+        assert result.exit_code == -1
+        assert sandbox.retired_after_timeout
+        await sandbox.stop()
+        assert sandbox.retired_after_timeout
+        await sandbox.start()
+        assert not sandbox.retired_after_timeout
+        await sandbox.stop()
+        assert not sandbox.retired_after_timeout
 
     asyncio.run(run())

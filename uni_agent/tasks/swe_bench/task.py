@@ -59,9 +59,18 @@ class SWEBenchTask(Task):
                 finished = agent_result.finished
                 agent_error = agent_result.info.get("error")
 
-            from .reward import compute_reward
+            if sandbox.retired_after_timeout:
+                logger.warning("skipping evaluation: sandbox retired after command timeout")
+                finished = False
+                result = {
+                    "resolved": False,
+                    "eval_completed": False,
+                    "eval_skipped_reason": "sandbox_retired_after_timeout",
+                }
+            else:
+                from .reward import compute_reward
 
-            result = await compute_reward(sample, sandbox, eval_timeout=cfg.eval_timeout)
+                result = await compute_reward(sample, sandbox, eval_timeout=cfg.eval_timeout)
             if isinstance(agent_error, str) and agent_error.strip():
                 result = {**result, "agent_error": agent_error}
 
