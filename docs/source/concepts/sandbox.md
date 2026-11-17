@@ -66,7 +66,7 @@ sandbox:
     claude: /opt/agent-runtime/bin/claude
 ```
 
-Docker, Modal, OpenJiuwen agent-dx and OpenYuanRong support `image_mounts`. `image_map` rewrites only the task `image`, so mounted image references must already be complete and pullable. `executable_paths` exposes selected mounted commands after startup; Local and veFaaS reject it.
+Docker, Modal, OpenJiuwen agent-dx, OpenYuanRong and boxd support `image_mounts`. `image_map` rewrites only the task `image`, so mounted image references must already be complete and pullable. `executable_paths` exposes selected mounted commands after startup; Local and veFaaS reject it, and boxd accepts it only with an `image`.
 
 ## Lifecycle
 
