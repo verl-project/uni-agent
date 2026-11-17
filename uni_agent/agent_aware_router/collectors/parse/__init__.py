@@ -14,6 +14,6 @@
 
 """Parser base types — imported by ``collector.py``."""
 
-from .base import KVCacheUpdate, MetricsUpdate, Parser, StickyUpdate
+from .base import InflightBlockUpdate, KVCacheUpdate, MetricsUpdate, Parser, StickyUpdate
 
-__all__ = ["Parser", "KVCacheUpdate", "MetricsUpdate", "StickyUpdate"]
+__all__ = ["Parser", "KVCacheUpdate", "MetricsUpdate", "StickyUpdate", "InflightBlockUpdate"]

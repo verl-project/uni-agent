@@ -21,11 +21,11 @@ TASK_REGISTRY: dict[str, type[Task]] = {}
 #: name -> module that defines (and registers) the task, for lazy loading.
 TASK_MODULES: dict[str, str] = {
     "harbor": "uni_agent.tasks.harbor.task",
+    "r2e_gym": "uni_agent.tasks.r2e_gym.task",
     "swe_bench": "uni_agent.tasks.swe_bench.task",
     "swe_bench_multilingual": "uni_agent.tasks.swe_bench_multilingual.task",
     "swe_bench_pro": "uni_agent.tasks.swe_bench_pro.task",
     "swe_rebench": "uni_agent.tasks.swe_rebench.task",
-    "r2e_gym": "uni_agent.tasks.r2e_gym.task",
     "hotpotqa": "uni_agent.tasks.hotpotqa.task",
     "deepeyes": "uni_agent.tasks.deepeyes.task",
     "terminal_bench": "uni_agent.tasks.terminal_bench.task",

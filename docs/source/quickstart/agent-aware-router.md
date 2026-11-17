@@ -77,7 +77,7 @@ bash examples/quickstart/agent_aware_router/run_infer.sh \
     --task-config examples/quickstart/agent_aware_router/task_config_react.yaml \
     --allowed-request-sampling-param-keys temperature top_p top_k \
     --tensor-parallel-size 2 --n-gpus-per-node 8 \
-    --load-threshold 0.9
+    --load-threshold 0.5
 ```
 
 Next, you can [train an agent with RL](rl-training.md) using the same task and rollout configuration.

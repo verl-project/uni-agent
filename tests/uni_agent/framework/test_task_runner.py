@@ -10,6 +10,8 @@ from uni_agent.framework.task_runner import (
     score_from_runner_result,
 )
 from uni_agent.gateway.session import SessionHandle
+from uni_agent.sandbox import Sandbox
+from uni_agent.sandbox.registry import SANDBOX_REGISTRY
 from uni_agent.tasks import TaskConfig, TaskResult
 
 
@@ -56,6 +58,62 @@ def test_inject_gateway_tunnel_rewrites_upstream_and_base_url():
 
 
 @pytest.mark.cpu
+@pytest.mark.level1
+@pytest.mark.parametrize(
+    ("base_url", "expected"),
+    [
+        ("https://gateway.example:443/sessions/abc/v1", "https://gateway.example:443"),
+        ("http://[::1]:8000/sessions/abc/v1", "[::1]:8000"),
+        ("https://[2001:db8::1]:443/v1", "https://[2001:db8::1]:443"),
+        ("https://gateway.example/v1", "https://gateway.example:443"),
+        ("http://gateway.example/v1", "gateway.example:80"),
+    ],
+)
+def test_agent_dx_tunnel_preserves_https_and_ipv6(base_url, expected):
+    task = {"sandbox": {"provider": "agent_dx", "sandbox_kwargs": {"proxy_port": 38197}}}
+    merged = _inject_gateway_tunnel(task, base_url)
+    assert merged["sandbox"]["sandbox_kwargs"]["upstream"] == expected
+    assert merged["agent"]["model"]["base_url"].startswith("http://127.0.0.1:38197/")
+    assert "upstream" not in task["sandbox"]["sandbox_kwargs"]
+
+
+@pytest.mark.cpu
+@pytest.mark.level1
+@pytest.mark.parametrize("port", [True, 0, -1, 1, 65536, "38197"])
+def test_tunnel_rejects_invalid_proxy_port(port):
+    task = {"sandbox": {"provider": "agent_dx", "sandbox_kwargs": {"proxy_port": port}}}
+    with pytest.raises(ValueError, match="proxy_port"):
+        _inject_gateway_tunnel(task, "http://gateway:8000/v1")
+
+
+@pytest.mark.cpu
+@pytest.mark.level1
+@pytest.mark.parametrize("url", ["ftp://gateway:123/v1", "http:/v1", "https://user:secret@gateway/v1"])
+def test_agent_dx_tunnel_rejects_unsupported_or_credentialed_urls(url):
+    task = {"sandbox": {"provider": "agent_dx", "sandbox_kwargs": {"proxy_port": 38197}}}
+    with pytest.raises(ValueError, match="HTTP\\(S\\) base_url without embedded credentials"):
+        _inject_gateway_tunnel(task, url)
+
+
+@pytest.mark.cpu
+@pytest.mark.level1
+def test_gateway_tunnel_uses_provider_owned_upstream_format(monkeypatch):
+    class CustomSandbox(Sandbox):
+        supports_reverse_tunnel = True
+
+        @classmethod
+        def tunnel_upstream(cls, base_url):
+            assert base_url == "custom://gateway/sessions/abc/v1"
+            return "https://provider-gateway:8443"
+
+    monkeypatch.setitem(SANDBOX_REGISTRY, "custom_tunnel", CustomSandbox)
+    task = {"sandbox": {"provider": "custom_tunnel", "sandbox_kwargs": {"proxy_port": 38197}}}
+    merged = _inject_gateway_tunnel(task, "custom://gateway/sessions/abc/v1")
+    assert merged["sandbox"]["sandbox_kwargs"]["upstream"] == "https://provider-gateway:8443"
+    assert merged["agent"]["model"]["base_url"] == "http://127.0.0.1:38197/sessions/abc/v1"
+
+
+@pytest.mark.cpu
 @pytest.mark.level0
 def test_inject_gateway_tunnel_raises_without_port():
     task = {"sandbox": {"provider": "openyuanrong", "sandbox_kwargs": {"proxy_port": 38197}}}
@@ -67,7 +125,7 @@ def test_inject_gateway_tunnel_raises_without_port():
 @pytest.mark.level0
 def test_inject_gateway_tunnel_rejects_non_yuanrong_sandbox():
     task = {"sandbox": {"provider": "local", "sandbox_kwargs": {"proxy_port": 38197}}}
-    with pytest.raises(ValueError, match="supported only on 'openyuanrong'"):
+    with pytest.raises(ValueError, match="supports_reverse_tunnel=True"):
         _inject_gateway_tunnel(task, "http://gateway.example:40169/v1")
 
 

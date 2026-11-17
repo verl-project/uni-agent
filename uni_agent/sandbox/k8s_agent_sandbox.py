@@ -52,13 +52,11 @@ _PWD_SENTINEL = "__UNI_AGENT_PWD__"
 # Linux caps a single exec argument at MAX_ARG_STRLEN (128 KiB). write_file sends base64 content through exec argv,
 # so it is split into chunks well below that limit and appended to a temp file before decoding.
 _WRITE_FILE_CHUNK_CHARS = 64 * 1024
-EVAL_PINNED_BATCH_ID = "eval_pinned"
 
 _FLEET_LOCK = threading.Lock()
 _GLOBAL_FLEET: Any = None
 _GLOBAL_LOOKAHEAD_WARMER: Any = None
 _LOOKAHEAD_FUTURES: dict[int | str, Future[Any]] = {}
-_PINNED_EVAL_IMAGES: list[str] = []
 _TEMPLATES_PATCHED = False
 _ACTIVE_CLAIMS: dict[str, int] = {}
 _RECENT_BATCH_IMAGES: collections.deque[set[str]] = collections.deque(maxlen=4)
@@ -569,65 +567,6 @@ def _build_image_counts(
     return unique_images, counts
 
 
-def pin_eval_sandbox_images(
-    images: list[str],
-    *,
-    replicas: int | None = None,
-    replicas_override: int = 1,
-    wait: bool = False,
-    wait_timeout: float | None = None,
-    namespace: str | None = None,
-    node_selector: dict[str, str] | None = None,
-) -> list[str]:
-    """Register and pin evaluation sandbox images under ``EVAL_PINNED_BATCH_ID`` so they remain warm across steps."""
-    global _PINNED_EVAL_IMAGES
-    if ClusterConfig is None or FleetConfig is None or SandboxFleet is None or Task is None:
-        return []
-    eff_replicas = replicas if replicas is not None else replicas_override
-    resolved_ns = _resolve_default_namespace(namespace)
-    resolved_sel = _resolve_default_node_selector(node_selector)
-    with _FLEET_LOCK:
-        fleet = _get_or_init_fleet_locked(namespace=resolved_ns, node_selector=resolved_sel)
-        max_reps = getattr(getattr(fleet, "config", None), "max_warmpool_size", None) or 8
-        unique_images, counts = _build_image_counts(
-            images,
-            replicas_override=eff_replicas,
-            max_replicas=max_reps,
-        )
-        if not unique_images:
-            return []
-        task_objs = [Task(id=img, image=img, metadata={"ds": {"docker_image": img}}) for img in unique_images]
-        _register_and_warm_locked(fleet, task_objs, warm=False)
-        warmer = _get_or_init_lookahead_warmer_locked(fleet)
-        _PINNED_EVAL_IMAGES = list(unique_images)
-    if warmer is None:
-        return list(unique_images)
-    if wait:
-        warmer.add(EVAL_PINNED_BATCH_ID, counts, wait=True, wait_timeout=wait_timeout)
-    else:
-        fut = warmer.add_async(EVAL_PINNED_BATCH_ID, counts, wait=False)
-        with _FLEET_LOCK:
-            _LOOKAHEAD_FUTURES[EVAL_PINNED_BATCH_ID] = fut
-    return list(unique_images)
-
-
-def wait_eval_sandbox_images_ready(timeout: float | None = None) -> dict[str, bool]:
-    """Wait for pinned evaluation sandbox pools to be Ready before validation runs."""
-    with _FLEET_LOCK:
-        warmer = _GLOBAL_LOOKAHEAD_WARMER
-        fut = _LOOKAHEAD_FUTURES.pop(EVAL_PINNED_BATCH_ID, None)
-        eval_imgs = list(_PINNED_EVAL_IMAGES)
-    if warmer is None or not eval_imgs:
-        return {}
-    if fut is not None:
-        fut.result()
-    return warmer.wait_ready(
-        eval_imgs,
-        timeout=timeout,
-        replicas={img: 1 for img in eval_imgs},
-    )
-
-
 def ensure_lookahead_batch_warm(
     batch_id: int | str,
     images: list[str],
@@ -731,7 +670,6 @@ def close_lookahead_warmer() -> None:
     with _FLEET_LOCK:
         warmer, _GLOBAL_LOOKAHEAD_WARMER = _GLOBAL_LOOKAHEAD_WARMER, None
         _LOOKAHEAD_FUTURES.clear()
-        _PINNED_EVAL_IMAGES.clear()
     if warmer is not None:
         warmer.close()
 
@@ -742,7 +680,7 @@ class PrewarmBatchIterator:
     Warms Step 1 synchronously on ``prime()``, then on each ``next_batch()`` returns the
     already-warmed batch for Step ``k`` while prefetching and warming Step ``k + 1`` in
     the background. Calling ``finish_oldest_inflight_batch()`` when Step ``k`` completes
-    tears down Step ``k``'s pools while keeping ``eval_pinned`` and Step ``k + 1`` warm.
+    tears down Step ``k``'s pools while keeping Step ``k + 1`` (and any other live batch) warm.
     """
 
     def __init__(

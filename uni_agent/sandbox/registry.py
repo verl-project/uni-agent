@@ -22,6 +22,7 @@ SANDBOX_MODULES: dict[str, str] = {
     "modal": "uni_agent.sandbox.modal",
     "vefaas": "uni_agent.sandbox.vefaas",
     "openyuanrong": "uni_agent.sandbox.openyuanrong",
+    "agent_dx": "uni_agent.sandbox.agent_dx",
     "k8s_agent_sandbox": "uni_agent.sandbox.k8s_agent_sandbox",
 }
 

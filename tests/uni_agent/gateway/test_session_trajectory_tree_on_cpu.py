@@ -781,7 +781,7 @@ async def test_terminal_action_rejects_pending_owner_and_waiter(terminal_action,
 @pytest.mark.level0
 @pytest.mark.asyncio
 async def test_actor_selects_session_and_captures_linear_token_truth(tmp_path):
-    from uni_agent.gateway.gateway import _GatewayActor
+    from uni_agent.gateway.gateway import SINGLE_POLICY_NAME, _GatewayActor
 
     media = (["image-a", "image-b"], [("video", {"fps": 24})])
     trajectories = []
@@ -797,7 +797,7 @@ async def test_actor_selects_session_and_captures_linear_token_truth(tmp_path):
             assert session.storage_path == tmp_path / "trajectory_tree.pkl"
         else:
             assert isinstance(session, GatewaySession)
-        backend = actor._backend
+        backend = actor._policy_clients[SINGLE_POLICY_NAME]
         messages = [{"role": "user", "content": "task"}]
         for _ in range(2):
             result = await session.run_generation(

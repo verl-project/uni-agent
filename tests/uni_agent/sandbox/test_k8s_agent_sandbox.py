@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import collections
 import json
+import os
+import subprocess
 from dataclasses import dataclass
 from types import SimpleNamespace
 
@@ -12,6 +14,7 @@ import uni_agent.sandbox.k8s_agent_sandbox as k8s_sb_mod
 from uni_agent.sandbox import SandboxConfig, build_sandbox
 from uni_agent.sandbox.base import ExecResult
 from uni_agent.sandbox.k8s_agent_sandbox import (
+    _WRITE_FILE_CHUNK_CHARS,
     K8sAgentSandbox,
     PrewarmBatchIterator,
     _K8sStatefulShell,
@@ -20,12 +23,11 @@ from uni_agent.sandbox.k8s_agent_sandbox import (
     extract_sandbox_images,
     finish_lookahead_batch_async,
     normalize_sandbox_image,
-    pin_eval_sandbox_images,
     prefetch_lookahead_batch_async,
-    wait_eval_sandbox_images_ready,
 )
 from uni_agent.tasks import TaskConfigResolver, get_task
-from uni_agent.tasks.r2e_gym import R2EGymTask, compute_reward, parse_log_pytest
+from uni_agent.tasks.r2e_gym.reward import compute_reward, parse_log_pytest
+from uni_agent.tasks.r2e_gym.task import R2EGymTask
 
 
 @dataclass
@@ -276,7 +278,7 @@ def test_extract_sandbox_images_variants(monkeypatch):
     ]
 
 
-def test_lookahead_iterator_and_pinned_eval_pools(monkeypatch):
+def test_lookahead_iterator_and_just_in_time_eval_pools(monkeypatch):
     monkeypatch.setenv("SANDBOX_IMAGE_PREFIX", "gar.local/tunix")
     monkeypatch.setenv("SANDBOX_RUN_ID", "jialeic-dsw-lookahead")
     monkeypatch.setenv("SANDBOX_MAX_WARMPOOL_SIZE", "8")
@@ -293,15 +295,9 @@ def test_lookahead_iterator_and_pinned_eval_pools(monkeypatch):
     monkeypatch.setattr(k8s_sb_mod, "_IDLE_LRU", collections.OrderedDict())
 
     try:
-        # Pin 3 eval images at 1 replica each (simulating val_mlperf70).
+        # 3 eval images, warmed just in time around validation instead of for the whole run.
         eval_imgs = [f"namanjain12/pillow_final:eval_{i}" for i in range(3)]
-        pinned = pin_eval_sandbox_images(eval_imgs, replicas=1, wait=False)
-        assert len(pinned) == 3
-        wait_eval_sandbox_images_ready()
-
-        fleet = k8s_sb_mod._GLOBAL_FLEET
-        for img in pinned:
-            assert fleet._warmed[img] == 1
+        eval_pools = [f"gar.local/tunix/pillow_final:eval_{i}" for i in range(3)]
 
         # Create 2 training batches in an epoch:
         # Batch 0 uses train_a (duplicated twice in batch) + train_shared
@@ -334,6 +330,9 @@ def test_lookahead_iterator_and_pinned_eval_pools(monkeypatch):
         # Prime before training starts -> warms Batch 0 ("train_step_1")
         primed_id = iterator.prime()
         assert primed_id == "train_step_1"
+        fleet = k8s_sb_mod._GLOBAL_FLEET
+        # No eval pool exists before a validation step asks for one.
+        assert not any(img in fleet._warmed for img in eval_pools)
         assert fleet._warmed["gar.local/tunix/numpy_final:train_a"] == 8
         assert fleet._warmed["gar.local/tunix/numpy_final:train_shared"] == 8
 
@@ -344,22 +343,32 @@ def test_lookahead_iterator_and_pinned_eval_pools(monkeypatch):
         ensure_lookahead_batch_warm("train_step_2", extract_sandbox_images(batches[1]))
         assert fleet._warmed["gar.local/tunix/numpy_final:train_b"] == 8
 
-        # Active sandbox acquisition on Batch 0 image works without re-warming or evicting eval pools
+        # Active sandbox acquisition on Batch 0 image works without re-warming
         sb = K8sAgentSandbox(image="namanjain12/numpy_final:train_a")
         asyncio.run(sb.start())
         asyncio.run(sb.stop())
 
         # Step 1 rollout finishes -> unwarm Batch 0 ("train_step_1").
         # train_a is unique to Batch 0 so it MUST be unwarmed;
-        # train_shared is needed by Batch 1 so it MUST stay warmed;
-        # all 3 eval_pinned images MUST stay warmed at 1 replica!
+        # train_shared is needed by Batch 1 so it MUST stay warmed.
         finished_id = iterator.finish_oldest_inflight_batch(wait=True)
         assert finished_id == "train_step_1"
         assert "gar.local/tunix/numpy_final:train_a" not in fleet._warmed
         assert fleet._warmed["gar.local/tunix/numpy_final:train_shared"] == 8
         assert fleet._warmed["gar.local/tunix/numpy_final:train_b"] == 8
-        for img in pinned:
+
+        # Step 1 ends in validation: prefetch the eval batch in the background, wait for it,
+        # validate, then release it. Training pools MUST be untouched throughout.
+        prefetch_lookahead_batch_async("eval_step_1", eval_imgs, replicas_override=1)
+        ensure_lookahead_batch_warm("eval_step_1", eval_imgs, replicas_override=1, wait=True)
+        for img in eval_pools:
             assert fleet._warmed[img] == 1
+        assert fleet._warmed["gar.local/tunix/numpy_final:train_shared"] == 8
+        assert fleet._warmed["gar.local/tunix/numpy_final:train_b"] == 8
+        finish_lookahead_batch_async("eval_step_1", wait=True)
+        assert not any(img in fleet._warmed for img in eval_pools)
+        assert fleet._warmed["gar.local/tunix/numpy_final:train_shared"] == 8
+        assert fleet._warmed["gar.local/tunix/numpy_final:train_b"] == 8
 
         # Step 2: pop Batch 1 and prefetch Epoch 2 Batch 0 ("train_step_3")
         b1 = iterator.next_batch()
@@ -367,14 +376,14 @@ def test_lookahead_iterator_and_pinned_eval_pools(monkeypatch):
         ensure_lookahead_batch_warm("train_step_3", extract_sandbox_images(batches[0]))
         assert fleet._warmed["gar.local/tunix/numpy_final:train_a"] == 8
 
-        # Finish Batch 1 ("train_step_2") -> train_b is unwarmed, train_a + train_shared + eval remain!
+        # Finish Batch 1 ("train_step_2") -> train_b is unwarmed, train_a + train_shared remain;
+        # the released eval pools MUST NOT come back.
         finished_id2 = iterator.finish_oldest_inflight_batch(wait=True)
         assert finished_id2 == "train_step_2"
         assert "gar.local/tunix/numpy_final:train_b" not in fleet._warmed
         assert fleet._warmed["gar.local/tunix/numpy_final:train_a"] == 8
         assert fleet._warmed["gar.local/tunix/numpy_final:train_shared"] == 8
-        for img in pinned:
-            assert fleet._warmed[img] == 1
+        assert not any(img in fleet._warmed for img in eval_pools)
     finally:
         close_lookahead_warmer()
 
@@ -420,13 +429,6 @@ def test_cross_actor_lookahead_mode_registers_plan_without_warming(monkeypatch):
 
 
 def test_write_file_chunks_large_payload_below_argv_limit(tmp_path):
-    import asyncio
-    import os
-    import subprocess
-
-    from uni_agent.sandbox.base import ExecResult
-    from uni_agent.sandbox.k8s_agent_sandbox import _WRITE_FILE_CHUNK_CHARS, K8sAgentSandbox
-
     class _LocalShellSandbox(K8sAgentSandbox):
         max_script = 0
 

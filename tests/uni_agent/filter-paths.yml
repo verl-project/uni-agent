@@ -6,6 +6,13 @@
 
 gpu:
   - '.github/workflows/ci-gpu.yml'
+  - 'tests/uni_agent/filter-paths.yml'
+  - 'pyproject.toml'
+  - 'uv.lock'
+  - 'verl'
+  - 'scripts/refresh_uv.py'
+  - 'tests/uni_agent/test_uv_gpu.py'
+  - 'tests/uni_agent/test_uv_environment_contract.py'
   - 'examples/agent_aware_router/multi-node.sh'
   - 'examples/agent_aware_router/single-node.sh'
 npu:
@@ -17,3 +24,5 @@ cpu:
   - '!.github/workflows/upload_npu_assister.yml'
   - '!examples/agent_aware_router/multi-node.sh'
   - '!examples/agent_aware_router/single-node.sh'
+  - '!tests/Case_Submission_Guide_CN.md'
+  - '!tests/Case_Submission_Guide_EN.md'

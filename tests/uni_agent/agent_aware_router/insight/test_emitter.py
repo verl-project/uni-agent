@@ -115,7 +115,7 @@ def test_disabled_short_circuits_before_importing_rl_insight(monkeypatch: pytest
     monkeypatch.delenv(facade.ENABLE_ENV, raising=False)
     monkeypatch.setattr(facade, "_enabled", None)
     assert facade._get_rl_insight() is None
-    emitter.on_score("n0", {"load": 0.5})
+    emitter.on_score("n0", {"avail_ratio": 0.5})
     emitter.on_route(0.1)
     emitter.on_write(WriteEvent(kind=WriteKind.KV_REMOVED, node="n0", deltas={EmitKey.KV_EVICTIONS: 1}))
 
@@ -126,19 +126,19 @@ def test_disabled_short_circuits_before_importing_rl_insight(monkeypatch: pytest
 def test_on_score_emits_each_component_with_replica_label(
     enabled_emitter: FakeRLInsight,
 ):
-    emitter.on_score("n0", {"load": 0.3, "s_cache": 0.7})
+    emitter.on_score("n0", {"avail_ratio": 0.3, "need_ratio": 0.7})
 
     names = [c["name"] for c in enabled_emitter.calls]
-    assert names == [EmitKey.LOAD, EmitKey.S_CACHE]
+    assert names == [EmitKey.AVAIL_RATIO, EmitKey.NEED_RATIO]
     assert all(c["method"] == "histogram" for c in enabled_emitter.calls)
     assert all(c["labels"] == {"replica": "n0"} for c in enabled_emitter.calls)
-    assert _by_name(enabled_emitter.calls)[EmitKey.LOAD]["value"] == 0.3
+    assert _by_name(enabled_emitter.calls)[EmitKey.AVAIL_RATIO]["value"] == 0.3
 
 
 def test_on_score_skips_unknown_component_keys(enabled_emitter: FakeRLInsight):
-    emitter.on_score("n0", {"load": 0.3, "not_a_metric": 9.9})
+    emitter.on_score("n0", {"avail_ratio": 0.3, "not_a_metric": 9.9})
 
-    assert [c["name"] for c in enabled_emitter.calls] == [EmitKey.LOAD]
+    assert [c["name"] for c in enabled_emitter.calls] == [EmitKey.AVAIL_RATIO]
 
 
 def test_on_route_emits_global_latency_histogram(enabled_emitter: FakeRLInsight):
@@ -281,7 +281,7 @@ def test_emit_spec_contract_covers_all_referenced_primitives():
         EmitKey.INFLIGHT_AVG_TURN,
         EmitKey.COMPLETED_COUNT,
         EmitKey.KV_EVICTIONS,
-        EmitKey.LOAD,
+        EmitKey.AVAIL_RATIO,
         EmitKey.ROUTE_LATENCY_SECONDS,
     }
     assert referenced <= set(EMIT_SPECS)

@@ -10,8 +10,11 @@ router_class: uni_agent.agent_aware_router.balancer.KVCAwareBalancer
 # from_config hydra-instantiates it.
 strategy:
   _target_: uni_agent.agent_aware_router.config.strategy.KVCAwareStrategyConfig
-  # overload when load > threshold (load ∈ [0,1], bigger = more loaded)
-  load_threshold: 0.9
+  # saturation waterline on occupancy (∈ (0,1)): overload when kv usage >
+  # load_threshold; a replica stays eligible while its free token capacity
+  # >= total × (1 - load_threshold) — i.e. in-flight requests may hold up to
+  # this fraction of the pool before the replica is gated out
+  load_threshold: 0.5
 
 collector:
   http_interval: 5

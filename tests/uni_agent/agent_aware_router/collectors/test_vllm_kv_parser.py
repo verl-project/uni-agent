@@ -25,6 +25,7 @@ from conftest import mapping_event
 
 from uni_agent.agent_aware_router.collectors.parse.vllm.kv import VLLMKVParser
 from uni_agent.agent_aware_router.collectors.parse.vllm.kv_event import KVCacheEvent
+from uni_agent.agent_aware_router.store.data_store import DataStore
 from uni_agent.agent_aware_router.types import Layer
 
 
@@ -76,12 +77,12 @@ def test_non_gpu_events_do_not_change_gpu_state(non_gpu_medium, wire_format, rep
     assert update.add_blocks == gpu_only.add_blocks
     assert not update.remove_blocks
     assert parser._block_size == 2
-    assert parser.remote_to_local_block_hash["rh_gpu"] == update.add_blocks[Layer.GPU][0]
+    assert parser.remote_to_local_block_hash["node1"]["rh_gpu"] == update.add_blocks[Layer.GPU][0]
 
     removed = parse(["BlockRemoved", ["rh_gpu"], "GPU"])
     assert removed is not None
     assert removed.remove_blocks == {Layer.GPU: update.add_blocks[Layer.GPU][:1]}
-    assert "rh_gpu" not in parser.remote_to_local_block_hash
+    assert "rh_gpu" not in parser.remote_to_local_block_hash["node1"]
     cleared = parse(["AllBlocksCleared"])
     assert cleared is not None and cleared.clear_all
 
@@ -254,11 +255,11 @@ def test_wire_events_update_hash_mapping_and_remove(replay):
         assert update is not None
         added.extend(update.add_blocks[Layer.GPU])
     assert len(added) == 3
-    assert list(parser.remote_to_local_block_hash.values()) == added
+    assert list(parser.remote_to_local_block_hash["node1"].values()) == added
     removed = parser.parse(msgpack.packb([2, [mapping_event(["BlockRemoved", [102], "GPU", 0])], 0]), "node1")
     assert removed is not None
     assert removed.remove_blocks[Layer.GPU] == [added[1]]
-    assert set(parser.remote_to_local_block_hash) == {"101", "103"}
+    assert set(parser.remote_to_local_block_hash["node1"]) == {"101", "103"}
     cleared = parser.parse(msgpack.packb([3, [mapping_event(["AllBlocksCleared"])]]), "node1")
     assert cleared is not None and cleared.clear_all
 
@@ -331,7 +332,7 @@ def test_bad_hash_collection_preserves_gpu_state_and_valid_sibling(event_type, w
 
     initial = ["BlockStored", [1, 0, 101, 49, 48], None, list(range(10)), 2, None, "GPU"]
     assert parse(initial) is not None
-    original_hashes = parser.remote_to_local_block_hash.copy()
+    original_hashes = parser.remote_to_local_block_hash["node1"].copy()
     if event_type == "BlockStored":
         bad = [event_type, bad_hashes, None, [20, 21, 22, 23, 24, 25], 2, None, "GPU"]
     else:
@@ -343,4 +344,63 @@ def test_bad_hash_collection_preserves_gpu_state_and_valid_sibling(event_type, w
     assert update is not None
     assert not update.remove_blocks
     assert len(update.add_blocks[Layer.GPU]) == 1
-    assert parser.remote_to_local_block_hash == {**original_hashes, "200": update.add_blocks[Layer.GPU][0]}
+    assert parser.remote_to_local_block_hash["node1"] == {**original_hashes, "200": update.add_blocks[Layer.GPU][0]}
+
+
+# ── Per-replica remote→local hash map (shared-map regression) ─────────────
+
+
+def _chained_stored(node_hashes, tokens_per_block=2, parent=None, medium="GPU"):
+    """One BlockStored frame: [timestamp, [[tag, hashes, parent, tokens, block_size, None, medium]]]."""
+    ids = list(range(len(node_hashes) * tokens_per_block))
+    return [0, [["stored", list(node_hashes), parent, ids, tokens_per_block, None, medium]]]
+
+
+def _removed(hashes, medium="GPU"):
+    """One BlockRemoved frame."""
+    return [0, [["removed", list(hashes), medium, None]]]
+
+
+def _apply(parser, payload, node_id, store):
+    update = parser.parse(msgpack.packb(payload), node_id)
+    assert update is not None
+    for layer, hashes in update.remove_blocks.items():
+        if hashes:
+            store.remove_kv_blocks(node_id, hashes, layer=layer)
+    for layer, hashes in update.add_blocks.items():
+        if hashes:
+            store.add_kv_blocks(node_id, hashes, layer=layer)
+    return update
+
+
+def test_hash_map_is_per_replica_and_survives_sibling_eviction():
+    """A sibling replica's eviction must not break this replica's translation.
+
+    Regression: a flat shared map let replica A's eviction pop the entry
+    replica B still needed, so B's retained count kept drifting high
+    (design doc §5.3.5).
+    """
+    parser = VLLMKVParser()
+    store = DataStore()
+    remote_hashes = ["rh0", "rh1", "rh2"]
+
+    # Same content-chained prefix stored on both replicas → identical local chain.
+    _apply(parser, _chained_stored(remote_hashes), "nodeA", store)
+    _apply(parser, _chained_stored(remote_hashes), "nodeB", store)
+    assert store.per_replica_block_counts() == {"nodeA": 3, "nodeB": 3}
+
+    # Per-replica maps: one entry per node, and local hashes agree across nodes
+    # (the prompt-side chain is replica-independent, so they must).
+    node_maps = parser.remote_to_local_block_hash
+    assert set(node_maps) == {"nodeA", "nodeB"}
+    assert node_maps["nodeA"] == node_maps["nodeB"], "local chain must not depend on the replica"
+
+    # nodeA drops the whole prefix first …
+    _apply(parser, _removed(remote_hashes), "nodeA", store)
+    assert store.per_replica_block_counts() == {"nodeA": 0, "nodeB": 3}
+
+    # … nodeB's eviction of the same remote hashes must still translate.
+    update = _apply(parser, _removed(remote_hashes), "nodeB", store)
+    assert len(update.remove_blocks[Layer.GPU]) == 3, "sibling eviction must not eat this replica's mapping"
+    assert store.per_replica_block_counts()["nodeB"] == 0, "nodeB must not retain blocks its engine freed"
+    assert parser.stats["removed_unmapped"] == 0

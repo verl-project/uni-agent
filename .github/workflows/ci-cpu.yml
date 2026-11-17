@@ -29,6 +29,13 @@ jobs:
       matrix:
         python-version: [ "3.12" ]
 
+    env:
+      # Ray 2.54.1's native OTel exporter can race with worker environment
+      # updates and SIGSEGV in getenv(). Use its OpenCensus metrics backend
+      # for CPU CI; actor tests and application telemetry remain enabled.
+      # https://github.com/ray-project/ray/issues/63138
+      RAY_enable_open_telemetry: "0"
+
     steps:
       # 1. git clone code
       - name: Checkout code

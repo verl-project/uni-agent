@@ -62,7 +62,7 @@ def _multiline_repr(obj: Any, indent: int = 0) -> str:
 
         KVCAwareConfig(
           strategy=KVCAwareStrategyConfig(
-            load_threshold=0.9,
+            load_threshold=0.5,
             ...
           ),
           ...

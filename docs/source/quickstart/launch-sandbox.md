@@ -271,6 +271,48 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
     )
     ```
 
+=== "OpenJiuwen agent-dx"
+
+    **Self-hosted Environment service.** Install the verified agent-dx
+    Environment SDK and configure authentication on each execution worker:
+
+    ```bash
+    pip install /path/to/agent-dx/platform/sdk/environment/python
+    export ADX_SERVER_ADDRESS="<adx-api-host>:<port>"
+    export ADX_TOKEN="<token>"
+    export ADX_TLS="1"
+    export ADX_TLS_VERIFY="1"
+    ```
+
+    ```python
+    from uni_agent.sandbox import SandboxConfig
+
+    config = SandboxConfig(
+        provider="agent_dx",
+        image="python:3.12",
+        runtime_timeout=3600,
+        image_mounts=[
+            {"image": "<tool-image>", "mount_path": "/opt/tool"},
+        ],
+        executable_paths={"tool": "/opt/tool/bin/tool"},
+        sandbox_kwargs={
+            "cpu": 1000,
+            "memory": 2048,
+            "cpu_limit": 4000,
+            "mem_limit": 8192,
+            "idle_timeout": 7200,
+            # Reverse tunnel: let the sandbox reach a local gateway via 127.0.0.1:<proxy_port>.
+            "upstream": "<gateway-host>:<gateway-port>",
+            "proxy_port": 38197,
+            # Forward sandbox ports to the host.
+            "port_forwardings": [8080],
+        },
+    )
+    ```
+
+    For in-sandbox model calls, set `sandbox_kwargs.proxy_port: 38197` in a Task
+    Config; `run_task` configures the reverse tunnel from the live Gateway Session.
+
 `image_mounts` allows Uni-Agent to attach self-contained runtime images for black-box
 agent harnesses to task sandboxes while keeping harness dependencies isolated
 from task images; `executable_paths` exposes selected runtime commands.
@@ -412,4 +454,62 @@ After configuring a supported backend above, run the complete connectivity and p
     DEBUG_MODE=1 SANDBOX_PROVIDER=openyuanrong python examples/quickstart/sandbox/demo.py
     ```
 
+=== "OpenJiuwen agent-dx"
+
+    ```bash
+    DEBUG_MODE=1 SANDBOX_PROVIDER=agent_dx IMAGE=python:3.12 \
+      python examples/quickstart/sandbox/demo.py
+    ```
+
 Next, [verify task oracle solutions](oracle-verification.md) against the configured sandbox before running agent inference or training.
+
+## Build a Tool Image (Sidecar)
+
+You can ask an AI assistant to follow this section. Provide the tool's name, version, and any custom scripts or dependencies.
+
+On Docker, Modal, OpenYuanRong, or OpenJiuwen agent-dx, use [`image_mounts`](../concepts/sandbox.md#runtime-images) to add a tool without rebuilding the task image.
+Copy a Dockerfile and `build_tool.sh` into `examples/my_tool_swe_task/` from one of these examples:
+
+| Runtime | Dockerfile | Build script |
+| --- | --- | --- |
+| Python | [Mini-SWE-Agent](https://github.com/verl-project/uni-agent/blob/main/examples/mini_swe_agent/Dockerfile.mini-swe-agent-tool) | [build_tool.sh](https://github.com/verl-project/uni-agent/blob/main/examples/mini_swe_agent/build_tool.sh) |
+| Node.js | [OpenClaw](https://github.com/verl-project/uni-agent/blob/main/examples/blackbox_recipes/openclaw_swe_task/Dockerfile.openclaw-tool) | [build_tool.sh](https://github.com/verl-project/uni-agent/blob/main/examples/blackbox_recipes/openclaw_swe_task/build_tool.sh) |
+
+Rename the Dockerfile to `Dockerfile.my-tool` and update its `-f` path in `build_tool.sh`.
+Pin the tool and runtime versions and install them under `/opt/my-tool`.
+You can also copy custom dependencies, configuration files, or agent startup scripts into this directory during the build.
+Note any dependencies provided by the task image in Dockerfile comments.
+Copy any local files referenced by `COPY` (such as `run_agent.py`) into the new recipe directory. Remove the launcher `COPY` line if you do not need it.
+
+The final image should contain the tool directory's contents at its root:
+
+```dockerfile
+FROM scratch
+COPY --from=builder /opt/my-tool/ /
+```
+
+Replace `builder` with your installation stage's name. You can replace `scratch` with another base image, but keep a separate final stage. Preserve this root layout so `bin/...` mounts as `/opt/my-tool/bin/...`.
+Mounting does not apply the image's `ENV` settings or run its `ENTRYPOINT`.
+
+In `build_tool.sh`, keep the script directory as the build context and add `--platform linux/amd64` to `docker build`.
+If it uses `--target tool`, change `tool` to your final stage's name or remove the option.
+Build with Docker and Bash; on ARM machines, enable amd64 emulation first.
+If downloads are slow or fail, use an image or package mirror in China, or configure an HTTP/HTTPS proxy for Docker and the build tools.
+Run from the repository root:
+
+```bash
+# Build and check the platform and size.
+TOOL_IMAGE=my-tool TOOL_TAG=v1 bash examples/my_tool_swe_task/build_tool.sh
+docker image inspect my-tool:v1 --format '{{.Os}}/{{.Architecture}} {{.Size}} bytes'
+
+# Optional: build and push to a registry the sandbox can pull from.
+docker login registry.example.com
+TOOL_IMAGE=my-tool TOOL_TAG=v1 bash examples/my_tool_swe_task/build_tool.sh \
+  --registry registry.example.com/team
+```
+
+In your [provider configuration](#choose-a-sandbox-backend), set `image_mounts[].image` to the published image and `mount_path` to `/opt/my-tool`.
+Use `executable_paths` to run a tool by name. This replaces any existing command with the same name. If your image includes Python, run it directly using its full path, such as `/opt/my-tool/bin/python`, to avoid replacing the task's Python.
+
+Edits inside a sandbox do not update the published sidecar image.
+To publish changes, update the recipe files, rebuild the image, and push a new tag.
