@@ -22,7 +22,8 @@ from tests.uni_agent.framework.support import (
     _inline_runner_config,
     _trajectory,
 )
-from uni_agent.framework.framework import GatewayAgentFramework, _select_session_trajectories
+from uni_agent.framework.framework import GatewayAgentFramework
+from uni_agent.framework.trajectory_selection import _select_session_trajectories
 from uni_agent.gateway.session import Trajectory
 from verl.utils import tensordict_utils as tu
 from verl.utils.import_utils import load_extern_object
@@ -264,7 +265,7 @@ async def test_custom_select_exception_falls_back_to_all(fake_tq, caplog):
         gateway_manager=runtime,
     )
 
-    with caplog.at_level(logging.ERROR, logger="uni_agent.framework.framework"):
+    with caplog.at_level(logging.ERROR, logger="uni_agent.framework.trajectory_selection"):
         await framework.generate_sequences(_build_prompts(count=1, global_steps=4))
 
     assert fake_tq.batch_puts[0]["keys"] == ["uid-0_0_0", "uid-0_0_1"]
