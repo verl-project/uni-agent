@@ -147,12 +147,14 @@ def _capture_wrapper(command_path: str, out: str, err: str, rc: str, *, signal: 
 # otherwise holds the lists lock and makes every retry fail immediately.
 # Zombies are skipped: a container PID 1 like `sleep` never reaps children, so
 # a finished or killed installer must not block later attempts forever.
+# ``comm`` is truncated to 15 visible characters, so ``unattended-upgrades``
+# matches as ``unattended-upgr``.
 _APT_LOCK_WAIT = r"""
 for _ in $(seq 1 60); do
   found=
   for p in /proc/[0-9]*/comm; do
     read -r name < "$p" 2>/dev/null || continue
-    case "$name" in apt|apt-get|dpkg|unattended-upgrades)
+    case "$name" in apt|apt-get|dpkg|unattended-upgr)
       read -r _pid _comm st _rest < "${p%/comm}/stat" 2>/dev/null || continue
       if [ "$st" != "Z" ]; then found=1; break; fi
       ;;
@@ -162,6 +164,11 @@ for _ in $(seq 1 60); do
   sleep 5
 done
 """.strip()
+
+# Ceiling for the wait above (60 iterations x 5s). The install exec budget adds
+# this to the apt update/install time so a slow wait cannot starve installation.
+_APT_LOCK_WAIT_SECONDS = 300.0
+_INSTALL_TMUX_TIMEOUT_SECONDS = _APT_LOCK_WAIT_SECONDS + 360.0
 
 _INSTALL_TMUX = (
     "if command -v apt-get >/dev/null 2>&1; then\n"
@@ -227,7 +234,7 @@ class TmuxShell:
     async def start(self) -> None:
         # tmux backs the channel; install it on first use if the image lacks it.
         if (await self.backend.exec(["tmux", "-V"])).exit_code != 0:
-            res = await self.backend.exec_shell(_INSTALL_TMUX, timeout=300.0)
+            res = await self.backend.exec_shell(_INSTALL_TMUX, timeout=_INSTALL_TMUX_TIMEOUT_SECONDS)
             if (await self.backend.exec(["tmux", "-V"])).exit_code != 0:
                 raise RuntimeError(
                     "tmux is not available and could not be installed in the "

@@ -1,6 +1,7 @@
 import subprocess
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -124,12 +125,33 @@ async def test_run_marks_timeout_even_when_interrupt_reports_an_exit_code(
     assert result.exit_code == 130
 
 
+def _real_installer_running() -> bool:
+    """Whether an unrelated live apt/dpkg process is visible on the host."""
+    if sys.platform != "linux":
+        return False
+    for comm_path in Path("/proc").glob("[0-9]*/comm"):
+        try:
+            name = comm_path.read_text().strip()
+            if name not in {"apt", "apt-get", "dpkg", "unattended-upgr"}:
+                continue
+            state = (comm_path.parent / "stat").read_text().split()
+            if len(state) >= 3 and state[2] != "Z":
+                return True
+        except OSError:
+            continue
+    return False
+
+
 @pytest.mark.cpu
 @pytest.mark.level0
 @pytest.mark.skipif(sys.platform != "linux", reason="requires /proc comm inspection")
-def test_apt_lock_wait_blocks_until_existing_installer_exits(tmp_path):
-    # A symlink named apt-get makes the kernel report comm="apt-get".
-    fake_apt = tmp_path / "apt-get"
+@pytest.mark.parametrize("fake_name", ["apt-get", "unattended-upgrades"])
+def test_apt_lock_wait_blocks_until_existing_installer_exits(tmp_path, fake_name):
+    if _real_installer_running():
+        pytest.skip("unrelated apt/dpkg installer active on host")
+    # A symlink makes the kernel report comm after the link name; names longer
+    # than 15 characters are truncated (unattended-upgrades -> unattended-upgr).
+    fake_apt = tmp_path / fake_name
     fake_apt.symlink_to("/bin/sleep")
     proc = subprocess.Popen([str(fake_apt), "3"])
     try:
@@ -143,6 +165,7 @@ def test_apt_lock_wait_blocks_until_existing_installer_exits(tmp_path):
         elapsed = time.monotonic() - start
     finally:
         proc.kill()
+        proc.wait()
     assert result.returncode == 0
     assert result.stdout.strip() == "waited"
     # The wait blocked until the fake installer exited instead of racing its lock.
@@ -153,6 +176,8 @@ def test_apt_lock_wait_blocks_until_existing_installer_exits(tmp_path):
 @pytest.mark.level0
 @pytest.mark.skipif(sys.platform != "linux", reason="requires /proc comm inspection")
 def test_apt_lock_wait_returns_immediately_without_installers():
+    if _real_installer_running():
+        pytest.skip("unrelated apt/dpkg installer active on host")
     start = time.monotonic()
     result = subprocess.run(
         ["bash", "-c", _APT_LOCK_WAIT + "; echo waited"],
