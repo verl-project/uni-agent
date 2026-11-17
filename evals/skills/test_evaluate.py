@@ -57,6 +57,33 @@ class HarnessTests(unittest.TestCase):
             "seed": 5,
         }
 
+    def test_timestamped_findings_use_actual_reader_and_frozen_oracle(self):
+        reader = Path(ev.__file__).parent / "adapters/reader.py"
+        self.cfg["measure_evidence"] = True
+        # Use the real MCP reader protocol with a wrong finding followed by a correct one.
+        ticket = {**self.answer, "candidates": ["third"]}
+        self.adapter.write_text(
+            "import json, os, sys, subprocess\n"
+            + f"answers = {[ticket, self.answer]!r}\n"
+            + "calls = [dict(jsonrpc='2.0', id=i,method='tools/call',"
+            + "params=dict(name='submit_evidence',arguments=dict(finding=a))) for i,a in enumerate(answers)]\n"
+            + f"p = subprocess.run([sys.executable, {str(reader)!r}, '.', '--journal', "
+            + "os.environ['SKILL_EVAL_JOURNAL'], '--start-ns', os.environ['SKILL_EVAL_START_NS']],"
+            + "input='\\n'.join(map(json.dumps,calls)), capture_output=True, text=True, check=True)\n"
+            + "assert p.stdout.count('Recorded. No correctness feedback.') == 2\n"
+            + "print(json.dumps(answers[1]))\n"
+        )
+        ev.run(self.suite, self.lock, self.out, self.cfg)
+        rows = ev.replay(self.suite, self.out)
+        for i, row in enumerate(rows):
+            path = self.out / f"{i:04}" / "findings.jsonl"
+            entries = [json.loads(line) for line in path.read_text().splitlines()]
+            self.assertEqual(row["seconds_first_correct_evidence_submission"], entries[1]["ns"] / 1e9)
+        self.assertEqual(ev.summarize(rows)[0]["trials_with_correct_evidence_submission"], 1)
+        path.write_text("")
+        with self.assertRaisesRegex(ValueError, "checkpoint journal changed"):
+            ev.replay(self.suite, self.out)
+
     def test_replay_three_arms_and_blind_grading(self):
         ev.run(self.suite, self.lock, self.out, self.cfg)
         results = ev.replay(self.suite, self.out)

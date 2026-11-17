@@ -1,6 +1,7 @@
 """Boundary checks for the allowlisted evidence adapter. No model calls."""
 
 import hashlib
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -29,3 +30,26 @@ class ReaderTests(unittest.TestCase):
             self.assertIn("smoke helper", r.call("check", {}))
             with self.assertRaisesRegex(ValueError, "No approved helper installed"):
                 Reader(work).call("check", {})
+
+    def test_match_preserves_one_literal_argument(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            work = Path(tmp)
+            (work / "scene").mkdir()
+            scripts = work / "package/scripts"
+            scripts.mkdir(parents=True)
+            h = scripts / "check.py"
+            h.write_text("import json,sys; print(json.dumps(sys.argv[1:]))", encoding="utf-8")
+            r = Reader(work, h.name, hashlib.sha256(h.read_bytes()).hexdigest())
+            marker = "--help two words; $x"
+            self.assertEqual(
+                json.loads(r.call("check", {"literal": marker})), [str(work / "scene"), "--match=" + marker]
+            )
+            for bad in (
+                {"literal": ""},
+                {"literal": 2},
+                {"literal": None},
+                {"literal": "a" * 1001},
+                {"argv": "--help"},
+            ):
+                with self.subTest(bad=bad), self.assertRaises(ValueError):
+                    r.call("check", bad)

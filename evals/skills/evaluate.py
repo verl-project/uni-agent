@@ -217,7 +217,8 @@ def run(root, lock, out, config):
     rounds, timeout = config["rounds"], config["timeout_seconds"]
     argv = config["command"]
     if (
-        type(rounds) is not int
+        type(config.get("measure_evidence", False)) is not bool
+        or type(rounds) is not int
         or rounds < 1
         or type(timeout) is not int
         or timeout < 1
@@ -246,7 +247,14 @@ def run(root, lock, out, config):
             if spec.get("profile") == "artifact":
                 (work / "output").mkdir()
             save(trial / "input.json", {"prompt": prompt, "files": inventory(work)})
-            start = time.monotonic()
+            timing = config.get("measure_evidence", False) and spec.get("profile", "diagnosis") == "diagnosis"
+            journal = (trial / "findings.jsonl").resolve()
+            timing_env = {k: v for k, v in os.environ.items() if k not in {"SKILL_EVAL_JOURNAL", "SKILL_EVAL_START_NS"}}
+            if timing:
+                journal.touch(exist_ok=False)
+            start_ns = time.monotonic_ns()
+            if timing:
+                timing_env.update(SKILL_EVAL_JOURNAL=str(journal), SKILL_EVAL_START_NS=str(start_ns))
             answer = None
             error = None
             try:
@@ -256,7 +264,7 @@ def run(root, lock, out, config):
                     input=prompt.encode(),
                     capture_output=True,
                     timeout=timeout,
-                    env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "PYTHONIOENCODING": "utf-8"},
+                    env={**timing_env, "PYTHONDONTWRITEBYTECODE": "1", "PYTHONIOENCODING": "utf-8"},
                 )
                 (trial / "stdout").write_bytes(result.stdout)
                 (trial / "stderr").write_bytes(result.stderr)
@@ -271,7 +279,7 @@ def run(root, lock, out, config):
                 if isinstance(exc, subprocess.TimeoutExpired):
                     (trial / "stdout").write_bytes(exc.stdout or b"")
                     (trial / "stderr").write_bytes(exc.stderr or b"")
-            elapsed = time.monotonic() - start
+            elapsed = (time.monotonic_ns() - start_ns) / 1e9
             artifacts = {}
             if spec.get("profile") == "artifact" and error is None:
                 for name in artifact_rules(spec):
@@ -293,9 +301,32 @@ def run(root, lock, out, config):
                     artifacts[name] = digest(dst)
             save(
                 trial / "receipt.json",
-                dict(**item, seconds=round(elapsed, 3), error=error, answer=answer, artifacts=artifacts),
+                dict(
+                    **item,
+                    seconds=round(elapsed, 3),
+                    error=error,
+                    answer=answer,
+                    artifacts=artifacts,
+                    journal_sha256=digest(journal) if timing else None,
+                ),
             )
     save(out / "results.json", replay(root, out))
+
+
+def first_finding(path, sha, spec, scene_paths, seconds):
+    if digest(path) != sha:
+        raise ValueError("Evidence checkpoint journal changed since trial")
+    first = None
+    previous = -1
+    for line in path.read_text(encoding="utf-8").splitlines():
+        entry = json.loads(line)
+        ns = entry["ns"]
+        if type(ns) is not int or ns < 0 or ns < previous or ns / 1e9 > seconds + 0.001:
+            raise ValueError("Invalid checkpoint timestamp")
+        previous = ns
+        if first is None and score(spec, entry["finding"], scene_paths)["fact_pass"]:
+            first = ns / 1e9
+    return first
 
 
 def replay(root, out):
@@ -340,6 +371,18 @@ def replay(root, out):
         else:
             result = score(spec, r["answer"], inventory(root / "cases" / item["case"] / "scene"))
             result.update(profile="diagnosis", task_pass=result["fact_pass"])
+            if load(out / "config.json").get("measure_evidence"):
+                result["seconds_first_correct_evidence_submission"] = None
+                if receipt_path.exists():
+                    value = first_finding(
+                        receipt_path.parent / "findings.jsonl",
+                        r["journal_sha256"],
+                        spec,
+                        inventory(root / "cases" / item["case"] / "scene"),
+                        r["seconds"],
+                    )
+                    if r["error"] is None:
+                        result["seconds_first_correct_evidence_submission"] = value
         rows.append({**item, "kind": spec["kind"], "seconds": r["seconds"], "error": r["error"], **result})
     return rows
 
@@ -421,6 +464,16 @@ def summarize(rows):
                 ),
             }
         )
+        if any("seconds_first_correct_evidence_submission" in r for r in group):
+            observations = [
+                r["seconds_first_correct_evidence_submission"]
+                for r in group
+                if r.get("seconds_first_correct_evidence_submission") is not None
+            ]
+            result[-1]["trials_with_correct_evidence_submission"] = len(observations)
+            result[-1]["median_seconds_first_correct_evidence_among_observed"] = (
+                statistics.median(observations) if observations else None
+            )
     return result
 
 

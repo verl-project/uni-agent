@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 TEXT = {"type": "string"}
@@ -13,14 +14,14 @@ MAX_FILE = 8 * 1024 * 1024
 MAX_FILES = 2000
 
 
-def tool(name, description, fields):
+def tool(name, description, fields, optional=()):
     return {
         "name": name,
         "description": description,
         "inputSchema": {
             "type": "object",
             "properties": fields,
-            "required": list(fields),
+            "required": [key for key in fields if key not in optional],
             "additionalProperties": False,
         },
         "annotations": {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False},
@@ -37,8 +38,20 @@ TOOLS = [
     tool(
         "search", "Search a literal substring in the original scene; returns paths and line numbers.", {"literal": TEXT}
     ),
-    tool("check", "Run the one experimenter-approved diagnostic helper on the complete scene, if available.", {}),
+    tool(
+        "check",
+        "Run the approved helper on the whole scene. Optionally supply a literal ticket marker for --match.",
+        {"literal": {"type": "string", "minLength": 1, "maxLength": 1000}},
+        optional=("literal",),
+    ),
 ]
+
+
+CHECKPOINT_TOOL = tool(
+    "submit_evidence",
+    "Submit a provisional evidence finding without receiving correctness feedback. Use the public answer contract.",
+    {"finding": {"type": "object"}},
+)
 
 
 class Reader:
@@ -102,13 +115,21 @@ class Reader:
         if name == "check":
             if not self.helper:
                 raise ValueError("No approved helper installed")
+            if not isinstance(args, dict) or set(args) - {"literal"}:
+                raise ValueError("Unknown helper arguments")
+            argv = [sys.executable, "-I", "-B", str(self.helper), str(self.root / "scene")]
+            if "literal" in args:
+                literal = args["literal"]
+                if not isinstance(literal, str) or not 1 <= len(literal) <= 1000 or "\0" in literal:
+                    raise ValueError("Invalid literal")
+                argv.append("--match=" + literal)
             env = {
                 k: v
                 for k, v in os.environ.items()
                 if k.upper() in {"SYSTEMROOT", "WINDIR", "PATH", "TEMP", "TMP", "LANG"}
             }
             output = subprocess.run(
-                [sys.executable, "-I", "-B", str(self.helper), str(self.root / "scene")],
+                argv,
                 cwd=self.root,
                 env=env,
                 capture_output=True,
@@ -125,7 +146,12 @@ def main():
     p.add_argument("root", type=Path)
     p.add_argument("--helper")
     p.add_argument("--sha256")
+    p.add_argument("--journal", type=Path)
+    p.add_argument("--start-ns", type=int)
     args = p.parse_args()
+    if (args.journal is None) != (args.start_ns is None):
+        p.error("journal and start-ns must be set together")
+    submissions = 0
     reader = Reader(args.root, args.helper, args.sha256)
     for line in sys.stdin.buffer:
         req = json.loads(line)
@@ -141,12 +167,21 @@ def main():
                 "capabilities": {"tools": {}},
             }
         elif method == "tools/list":
-            result = {"tools": TOOLS}
+            result = {"tools": TOOLS + ([CHECKPOINT_TOOL] if args.journal else [])}
         elif method == "tools/call":
             try:
-                result = {
-                    "content": [{"type": "text", "text": reader.call(params["name"], params.get("arguments", {}))}]
-                }
+                if args.journal and params["name"] == "submit_evidence":
+                    finding = params["arguments"]["finding"]
+                    ns = time.monotonic_ns() - args.start_ns
+                    if not isinstance(finding, dict) or len(json.dumps(finding)) > 32000 or submissions >= 32:
+                        raise ValueError("Invalid checkpoint")
+                    with args.journal.open("a", encoding="utf-8") as f:
+                        f.write(json.dumps({"ns": ns, "finding": finding}) + "\n")
+                    submissions += 1
+                    text = "Recorded. No correctness feedback."
+                else:
+                    text = reader.call(params["name"], params.get("arguments", {}))
+                result = {"content": [{"type": "text", "text": text}]}
             except (KeyError, ValueError, OSError, subprocess.SubprocessError):
                 result = {"content": [{"type": "text", "text": "Unavailable or invalid request"}], "isError": True}
         elif method == "ping":

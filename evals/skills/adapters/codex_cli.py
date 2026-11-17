@@ -25,7 +25,14 @@ def main():
     a = p.parse_args()
     if bool(a.helper) != bool(a.sha256) or (a.helper and Path(a.helper).name != a.helper):
         p.error("Specify a helper filename and its SHA-256 together")
+    journal = os.environ.get("SKILL_EVAL_JOURNAL")
+    allowed = ALLOWED | ({"submit_evidence"} if journal else set())
     prompt = sys.stdin.buffer.read()
+    if journal:
+        prompt += (
+            b"\nWhen you have evidence, call submit_evidence with disposition, candidates, facts and evidence."
+            b" You may revise; no grading feedback is returned."
+        )
     work = Path.cwd()
     cli = str(a.cli.resolve(strict=True))
     reader = Path(__file__).with_name("reader.py").resolve()
@@ -46,6 +53,9 @@ def main():
         rargs = ["-I", "-B", str(reader), str(work)] + (
             ["--helper", a.helper, "--sha256", a.sha256] if a.helper else []
         )
+        if journal:
+            rargs += ["--journal", journal, "--start-ns", env.pop("SKILL_EVAL_START_NS")]
+            env.pop("SKILL_EVAL_JOURNAL")
         cmd = [
             cli,
             "-a",
@@ -77,7 +87,7 @@ def main():
             "-c",
             "mcp_servers.evidence.startup_timeout_sec=30",
         ]
-        for name in sorted(ALLOWED):
+        for name in sorted(allowed):
             cmd += ["-c", f'mcp_servers.evidence.tools.{name}.approval_mode="approve"']
         for flag in DISABLED:
             cmd += ["--disable", flag]
@@ -117,7 +127,7 @@ def main():
             if not kind:
                 continue
             if kind == "mcp_tool_call":
-                if item.get("server") != "evidence" or item.get("tool") not in ALLOWED:
+                if item.get("server") != "evidence" or item.get("tool") not in allowed:
                     raise SystemExit("Unexpected MCP call; trial discarded")
                 if (
                     evt.get("type") == "item.completed"
@@ -127,7 +137,7 @@ def main():
                     evidence_calls.append(item["tool"])
             elif kind not in ("agent_message", "reasoning", "plan", "todo_list"):
                 raise SystemExit("Unexpected participant action; trial discarded")
-        if not evidence_calls:
+        if not set(evidence_calls) & ALLOWED:
             raise SystemExit("No successful evidence tool call; trial discarded")
         answer = json.loads((root / "answer").read_text(encoding="utf-8-sig"))
         if not isinstance(answer, dict):
