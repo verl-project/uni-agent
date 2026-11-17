@@ -156,6 +156,8 @@ def test_start_pulls_and_adds_image_mount(monkeypatch):
                 "sleep",
                 "--mount",
                 "type=image,source=example/tool:latest,destination=/opt/tool",
+                "--label",
+                sandbox._cleanup_label,
                 "example/task:latest",
                 "3600",
             ),

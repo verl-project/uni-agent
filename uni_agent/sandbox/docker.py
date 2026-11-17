@@ -167,20 +167,20 @@ class DockerSandbox(Sandbox):
         args.append(str(math.ceil(self.runtime_timeout)))
 
         try:
-            started = await self._run_docker(*args, timeout=self.start_timeout)
+            try:
+                started = await self._run_docker(*args, timeout=self.start_timeout)
+            except asyncio.TimeoutError as exc:
+                raise TimeoutError(
+                    f"Starting Docker sandbox from {self.image!r} exceeded start_timeout={self.start_timeout:g}s"
+                ) from exc
             if started.exit_code != 0:
                 detail = started.stderr.strip() or started.stdout.strip()
                 raise RuntimeError(f"Failed to start Docker sandbox from {self.image!r}: {detail}")
-        except asyncio.TimeoutError as exc:
-            await self.stop()
-            raise TimeoutError(
-                f"Starting Docker sandbox from {self.image!r} exceeded start_timeout={self.start_timeout:g}s"
-            ) from exc
+            self._container_name = name
+            await self._setup_executable_paths(self.executable_paths)
         except (Exception, asyncio.CancelledError):
             await self.stop()
             raise
-        self._container_name = name
-        await self._setup_executable_paths(self.executable_paths)
 
     async def stop(self) -> None:
         try:

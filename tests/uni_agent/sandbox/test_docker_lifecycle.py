@@ -80,7 +80,7 @@ def test_restart_retries_pending_cleanup_before_allocating_container(monkeypatch
         removal_fails = not cleanup_recovers
         if cleanup_recovers:
             await sandbox.start()
-            assert [call[0] for call in calls] == ["container", "rm", "run"]
+            assert [call[0] for call in calls] == ["container", "rm", "image", "run"]
             assert sandbox._container_name is not None
             assert sandbox._cleanup_label is not None
             assert sandbox._cleanup_label != previous_owner
@@ -277,3 +277,27 @@ def test_repeated_cancellation_waits_for_removal(monkeypatch):
         assert sandbox._cleanup_label is None
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("failure", [RuntimeError, asyncio.TimeoutError, asyncio.CancelledError])
+def test_failed_executable_path_setup_cleans_started_container(monkeypatch, failure):
+    sandbox = DockerSandbox()
+    calls = []
+
+    async def docker(*args, **kwargs):
+        calls.append(args)
+        return ok("owned-id\n" if args[0] == "container" else "")
+
+    async def setup(paths):
+        assert sandbox._container_name is not None
+        raise failure("setup interrupted")
+
+    monkeypatch.setattr(sandbox, "_run_docker", docker)
+    monkeypatch.setattr(sandbox, "_setup_executable_paths", setup)
+    # Python 3.10's asyncio.run may discard the cancellation message.
+    message = None if failure is asyncio.CancelledError else "setup interrupted"
+    with pytest.raises(failure, match=message):
+        asyncio.run(sandbox.start())
+    assert calls[-1] == ("rm", "-f", "owned-id")
+    assert sandbox._container_name is None
+    assert sandbox._cleanup_label is None
