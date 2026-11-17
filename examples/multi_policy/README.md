@@ -171,10 +171,8 @@ The code separates generic multi-role wiring from the example MAS:
 - [`external_mas/task_config.yaml`](external_mas/task_config.yaml) is the
   recipe-local Task/runner config: command, paths, injection, result mapping,
   timeout, and logs.
-- [`external_mas/execution.py`](external_mas/execution.py) launches the
-  external process, injects Gateway config, and parses stdout.
-- [`external_mas/process_backend.py`](external_mas/process_backend.py) owns
-  local subprocess execution, timeout, and process-group cleanup.
+- [`external_mas/execution.py`](external_mas/execution.py) runs the command
+  inside the rollout sandbox, injects Gateway config, and parses stdout.
 - [`external_mas/runner.py`](external_mas/runner.py) is the `runner_fqn` entry
   point; importing it registers the Task.
 
@@ -341,27 +339,37 @@ forwarding; otherwise `ExternalMASTask` cannot access the ground truth.
 
 `agent_runners.multi_agent.runner_kwargs.task_config_path` points at
 [`external_mas/task_config.yaml`](external_mas/task_config.yaml). The external
-process settings are under that file's `launcher_kwargs`:
+process settings are under that file's `launcher_kwargs`, which is a typed block:
+a misspelled key, a missing template path, a command without `argv`/`template`,
+and an unknown `result.mode` all fail while the Task Config loads instead of
+being silently ignored at runtime.
 
-- `execution.backend` currently supports `local_process`.
+Execution always goes through the Task Config's `sandbox` block, the same way
+the other recipes run their agent. The provider decides where the command runs:
+`local` uses the Ray worker host, while `docker`, `modal`, `e2b`, and the other
+providers run it in an isolated or remote environment. The sandbox must be able
+to reach the role Gateway URLs, and the command, its working directory, and the
+files they use must exist in that environment. `config.template_path` is read on
+the worker host that loads the Task Config, and the rendered config is written
+into the sandbox.
+
 - `command.argv` is the command and argument list used to launch the MAS.
   Command and `command.env` values can use `{config_path}`, `{prompt}`, and
   `{session_group_id}`; other braces are left unchanged. `{gateway_url}` is
   rejected because each role has its own Gateway URL. `command.work_dir` sets
-  its working directory and `command.env` adds environment variables. The
-  working directory, command, template, and any files they use must be
-  available on the Ray worker that runs the external process.
+  its working directory and `command.env` adds environment variables.
 - `config.template_path` points to the MAS YAML template. The runner copies
   this file for each rollout and injects the role Gateway URLs at the dotted
   paths configured under `config.injection`. The MAS must read these injected
-  URLs for its role-specific model requests and be able to reach the Gateway
-  from its execution environment.
+  URLs for its role-specific model requests.
+- `config.config_dir` is the sandbox directory that receives each rollout's
+  rendered config (default `/tmp`). The file is removed after the run.
 - `timeout.seconds` limits the external process. `result` describes how to
   parse its output; the example expects a JSON object on stdout and maps its
   final result and reward fields.
 - `logs.directory` stores each rollout's external-process stdout and stderr.
-  Both successful and failed runs are written; timeout logs contain whatever
-  output was drained before termination.
+  Both successful and failed runs are written; timeout logs contain the
+  provider's timeout diagnostics.
 
 For example, this minimal template shape works with the checked-in injection
 paths. The runner creates missing mappings as needed, fills the root URL with
@@ -526,7 +534,7 @@ TOTAL_TRAINING_STEPS=5 bash examples/multi_policy/run_train.sh
 The launcher prints the metrics file path; see [Monitoring](#monitoring) for the
 log and metrics layout.
 
-The external MAS process backend and launcher target Linux; other platforms
+The launcher and the `local` sandbox provider target Linux; other platforms
 are not supported.
 
 The script uses defaults for training and resource settings; see

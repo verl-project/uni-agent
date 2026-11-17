@@ -1,22 +1,18 @@
 import json
 from pathlib import Path
-from unittest.mock import AsyncMock
+from types import SimpleNamespace
 
 import pytest
 import yaml
 
-from examples.multi_policy.external_mas import execution as execution_module
 from examples.multi_policy.external_mas.execution import (
+    ExternalMASError,
     ExternalMASRequest,
+    ExternalMASTimeout,
     _apply_overrides,
     _parse_stdout_json,
     inject_gateway_config,
     run_external_mas,
-)
-from examples.multi_policy.external_mas.process_backend import (
-    LocalProcessError,
-    LocalProcessResult,
-    LocalProcessTimeout,
 )
 
 
@@ -61,50 +57,6 @@ def test_external_config_overrides_apply_dotted_paths_without_mutating_template(
         "include_trace": False,
     }
     assert template["output"] == {"prediction_path": "shared.jsonl", "include_trace": True}
-
-
-@pytest.mark.cpu
-@pytest.mark.level0
-@pytest.mark.asyncio
-async def test_external_runner_applies_config_overrides(monkeypatch, tmp_path):
-    template_path = tmp_path / "mas.yaml"
-    template_path.write_text(
-        "output:\n  prediction_path: shared.jsonl\n  include_trace: true\nllm: {}\nagents: {}\n",
-        encoding="utf-8",
-    )
-    captured = {}
-
-    async def fake_run(command, **kwargs):
-        config_path = Path(command[command.index("--config") + 1])
-        captured["template"] = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-        return LocalProcessResult(0, "{}", "")
-
-    monkeypatch.setattr(execution_module, "run_local_process", fake_run)
-
-    await run_external_mas(
-        request=ExternalMASRequest(
-            prompt="question",
-            role_urls={"planner": "http://gateway/planner/v1"},
-            session_group_id="group-1",
-        ),
-        execution={"backend": "local_process"},
-        command={"argv": ["fake-mas", "--config", "{config_path}"]},
-        config={
-            "template_path": str(template_path),
-            "overrides": {
-                "output.prediction_path": None,
-                "output.report_path": None,
-                "output.include_trace": False,
-            },
-        },
-        result={"mode": "none"},
-    )
-
-    assert captured["template"]["output"] == {
-        "prediction_path": None,
-        "report_path": None,
-        "include_trace": False,
-    }
 
 
 @pytest.mark.cpu
@@ -180,30 +132,113 @@ def test_external_mas_task_config_is_recipe_local():
         }
     )
 
+    assert resolved["sandbox"]["provider"] == "local"
     launcher = resolved["launcher_kwargs"]
-    assert launcher["execution"]["backend"] == "local_process"
     assert launcher["command"]["argv"][-1] == "{prompt}"
     assert launcher["config"]["template_path"].endswith("/configs/inference.yaml")
+    assert launcher["config"]["config_dir"] == "/tmp"
     assert launcher["result"]["mode"] == "stdout_json"
+
+
+class _FakeSandbox:
+    """Minimal sandbox: records the rendered config and returns a canned result."""
+
+    def __init__(self, *, exit_code: int = 0, stdout: str = "{}", stderr: str = "") -> None:
+        self.exit_code = exit_code
+        self.stdout = stdout
+        self.stderr = stderr
+        self.written: dict[str, str] = {}
+        self.execs: list[dict] = []
+        self.started = 0
+        self.stopped = 0
+
+    async def start(self) -> None:
+        self.started += 1
+
+    async def stop(self) -> None:
+        self.stopped += 1
+
+    async def __aenter__(self) -> "_FakeSandbox":
+        await self.start()
+        return self
+
+    async def __aexit__(self, *exc) -> None:
+        await self.stop()
+
+    async def write_file(self, path: str, content: str) -> None:
+        self.written[path] = content
+
+    def _result(self) -> SimpleNamespace:
+        return SimpleNamespace(exit_code=self.exit_code, stdout=self.stdout, stderr=self.stderr)
+
+    async def exec(self, argv, *, timeout=None, workdir=None, env=None):
+        self.execs.append({"argv": list(argv), "timeout": timeout, "workdir": workdir, "env": env})
+        if list(argv)[:1] == ["rm"]:
+            return SimpleNamespace(exit_code=0, stdout="", stderr="")
+        return self._result()
+
+    async def exec_shell(self, script, *, timeout=None, workdir=None, env=None):
+        self.execs.append({"script": script, "timeout": timeout, "workdir": workdir, "env": env})
+        return self._result()
+
+
+def _request(session_group_id: str = "group-1") -> ExternalMASRequest:
+    return ExternalMASRequest(
+        prompt="question",
+        role_urls={"planner": "http://gateway/planner/v1"},
+        session_group_id=session_group_id,
+    )
 
 
 @pytest.mark.cpu
 @pytest.mark.level0
 @pytest.mark.asyncio
-async def test_external_runner_writes_process_logs_on_success(monkeypatch, tmp_path):
+async def test_external_runner_applies_config_overrides(tmp_path):
+    template_path = tmp_path / "mas.yaml"
+    template_path.write_text(
+        "output:\n  prediction_path: shared.jsonl\n  include_trace: true\nllm: {}\nagents: {}\n",
+        encoding="utf-8",
+    )
+    sandbox = _FakeSandbox()
+
+    await run_external_mas(
+        request=_request(),
+        sandbox=sandbox,
+        command={"argv": ["fake-mas", "--config", "{config_path}"]},
+        config={
+            "template_path": str(template_path),
+            "overrides": {
+                "output.prediction_path": None,
+                "output.report_path": None,
+                "output.include_trace": False,
+            },
+        },
+        result={"mode": "none"},
+    )
+
+    ((config_path, payload),) = sandbox.written.items()
+    template = yaml.safe_load(payload)
+    assert template["output"] == {
+        "prediction_path": None,
+        "report_path": None,
+        "include_trace": False,
+    }
+    run = next(entry for entry in sandbox.execs if entry["argv"][:1] != ["rm"])
+    assert run["argv"][2] == config_path
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_external_runner_writes_process_logs_on_success(tmp_path):
     template_path = tmp_path / "mas.yaml"
     template_path.write_text("llm: {}\nagents: {}\n", encoding="utf-8")
-    process = AsyncMock(return_value=LocalProcessResult(0, "stdout text", "stderr text"))
-    monkeypatch.setattr(execution_module, "run_local_process", process)
+    sandbox = _FakeSandbox(stdout="stdout text", stderr="stderr text")
     log_dir = tmp_path / "logs"
 
     result = await run_external_mas(
-        request=ExternalMASRequest(
-            prompt="question",
-            role_urls={"planner": "http://gateway/planner/v1"},
-            session_group_id="group-1",
-        ),
-        execution={"backend": "local_process"},
+        request=_request(),
+        sandbox=sandbox,
         command={"argv": ["fake-mas"], "work_dir": str(tmp_path)},
         config={"template_path": str(template_path)},
         result={"mode": "none"},
@@ -218,28 +253,23 @@ async def test_external_runner_writes_process_logs_on_success(monkeypatch, tmp_p
 @pytest.mark.cpu
 @pytest.mark.level0
 @pytest.mark.asyncio
-async def test_external_runner_writes_process_logs_on_nonzero_exit(monkeypatch, tmp_path):
+async def test_external_runner_writes_process_logs_on_nonzero_exit(tmp_path):
     template_path = tmp_path / "mas.yaml"
     template_path.write_text("llm: {}\nagents: {}\n", encoding="utf-8")
-    process = AsyncMock(side_effect=LocalProcessError(7, "partial stdout", "boom stderr"))
-    monkeypatch.setattr(execution_module, "run_local_process", process)
+    sandbox = _FakeSandbox(exit_code=7, stdout="partial stdout", stderr="boom stderr")
     log_dir = tmp_path / "logs"
 
-    with pytest.raises(LocalProcessError) as exc_info:
+    with pytest.raises(ExternalMASError) as exc_info:
         await run_external_mas(
-            request=ExternalMASRequest(
-                prompt="question",
-                role_urls={"planner": "http://gateway/planner/v1"},
-                session_group_id="group-1",
-            ),
-            execution={"backend": "local_process"},
+            request=_request(),
+            sandbox=sandbox,
             command={"argv": ["fake-mas"], "work_dir": str(tmp_path)},
             config={"template_path": str(template_path)},
             result={"mode": "none"},
             logs={"directory": str(log_dir)},
         )
 
-    assert exc_info.value.returncode == 7
+    assert exc_info.value.exit_code == 7
     assert (log_dir / "group-1.stdout.log").read_text(encoding="utf-8") == "partial stdout"
     assert (log_dir / "group-1.stderr.log").read_text(encoding="utf-8") == "boom stderr"
 
@@ -247,85 +277,64 @@ async def test_external_runner_writes_process_logs_on_nonzero_exit(monkeypatch, 
 @pytest.mark.cpu
 @pytest.mark.level0
 @pytest.mark.asyncio
-async def test_external_runner_writes_process_logs_on_timeout(monkeypatch, tmp_path):
+async def test_external_runner_reports_timeout_without_partial_output(tmp_path):
     template_path = tmp_path / "mas.yaml"
     template_path.write_text("llm: {}\nagents: {}\n", encoding="utf-8")
-    process = AsyncMock(
-        side_effect=LocalProcessTimeout(
-            "timeout",
-            stdout="partial stdout",
-            stderr="timeout stderr",
-        )
-    )
-    monkeypatch.setattr(execution_module, "run_local_process", process)
+    # The base sandbox contract reports a timeout as exit code -1 and drops the
+    # output captured so far, so the logs can only hold the synthetic message.
+    sandbox = _FakeSandbox(exit_code=-1, stdout="", stderr="local exec timed out after 5s")
     log_dir = tmp_path / "logs"
 
-    with pytest.raises(LocalProcessTimeout):
+    with pytest.raises(ExternalMASTimeout):
         await run_external_mas(
-            request=ExternalMASRequest(
-                prompt="question",
-                role_urls={"planner": "http://gateway/planner/v1"},
-                session_group_id="group-1",
-            ),
-            execution={"backend": "local_process"},
+            request=_request(),
+            sandbox=sandbox,
             command={"argv": ["fake-mas"], "work_dir": str(tmp_path)},
             config={"template_path": str(template_path)},
+            timeout={"seconds": 5},
             result={"mode": "none"},
             logs={"directory": str(log_dir)},
         )
 
-    assert (log_dir / "group-1.stdout.log").read_text(encoding="utf-8") == "partial stdout"
-    assert (log_dir / "group-1.stderr.log").read_text(encoding="utf-8") == "timeout stderr"
+    assert (log_dir / "group-1.stdout.log").read_text(encoding="utf-8") == ""
+    assert "timed out" in (log_dir / "group-1.stderr.log").read_text(encoding="utf-8")
 
 
 @pytest.mark.cpu
 @pytest.mark.level0
 @pytest.mark.asyncio
-async def test_external_runner_log_write_failure_does_not_replace_process_error(monkeypatch, tmp_path):
+async def test_external_runner_log_write_failure_does_not_replace_process_error(tmp_path):
     template_path = tmp_path / "mas.yaml"
     template_path.write_text("llm: {}\nagents: {}\n", encoding="utf-8")
-    process = AsyncMock(side_effect=LocalProcessError(9, "stdout", "stderr"))
-    monkeypatch.setattr(execution_module, "run_local_process", process)
+    sandbox = _FakeSandbox(exit_code=9, stdout="stdout", stderr="stderr")
     blocked_log_dir = tmp_path / "blocked"
     blocked_log_dir.write_text("not a directory", encoding="utf-8")
 
-    with pytest.raises(LocalProcessError) as exc_info:
+    with pytest.raises(ExternalMASError) as exc_info:
         await run_external_mas(
-            request=ExternalMASRequest(
-                prompt="question",
-                role_urls={"planner": "http://gateway/planner/v1"},
-                session_group_id="group-1",
-            ),
-            execution={"backend": "local_process"},
+            request=_request(),
+            sandbox=sandbox,
             command={"argv": ["fake-mas"], "work_dir": str(tmp_path)},
             config={"template_path": str(template_path)},
             result={"mode": "none"},
             logs={"directory": str(blocked_log_dir)},
         )
 
-    assert exc_info.value.returncode == 9
+    assert exc_info.value.exit_code == 9
 
 
 @pytest.mark.cpu
 @pytest.mark.level0
 @pytest.mark.asyncio
-async def test_external_runner_does_not_expose_single_gateway_url_placeholder(monkeypatch, tmp_path):
+async def test_external_runner_does_not_expose_single_gateway_url_placeholder(tmp_path):
     template_path = tmp_path / "mas.yaml"
     template_path.write_text("llm: {}\nagents: {}\n", encoding="utf-8")
-    process = AsyncMock()
-    monkeypatch.setattr(execution_module, "run_local_process", process)
-    request = ExternalMASRequest(
-        prompt="question",
-        role_urls={"planner": "http://gateway/planner/v1"},
-        session_group_id="group-1",
-    )
+    sandbox = _FakeSandbox()
 
     with pytest.raises(ValueError, match="gateway_url"):
         await run_external_mas(
-            request=request,
-            execution={"backend": "local_process"},
+            request=_request(),
+            sandbox=sandbox,
             command={"argv": ["mas", "--gateway", "{gateway_url}"]},
             config={"template_path": str(template_path)},
         )
-
-    process.assert_not_awaited()

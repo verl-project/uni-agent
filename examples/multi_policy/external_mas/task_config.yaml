@@ -5,9 +5,12 @@
 # template_path at your MAS checkout before launching; the placeholder paths
 # below are not runnable as-is.
 - name: multi_policy_external_mas
+  # The sandbox owns execution: every rollout runs its command inside it, the
+  # same way the other recipes run their agent. `local` runs on the Ray worker
+  # host; `docker`/`modal`/`e2b` run in an isolated or remote environment.
+  sandbox:
+    provider: local
   launcher_kwargs:
-    execution:
-      backend: local_process
     command:
       argv:
         - python
@@ -21,6 +24,8 @@
     config:
       # MAS config template copied for each rollout.
       template_path: /path/to/search_mas_app/configs/inference.yaml
+      # Sandbox directory that receives this rollout's rendered config.
+      config_dir: /tmp
       # Training-only overrides applied after loading the template. The shared
       # prediction/report files would race across concurrent rollouts, and the
       # full trace is not needed for training.
