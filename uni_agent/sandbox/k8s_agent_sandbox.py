@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import collections
 import logging
 import os
@@ -48,6 +49,9 @@ logger = logging.getLogger(__name__)
 
 RUNTIME_CONTAINER_NAME = "agent-runtime"
 _PWD_SENTINEL = "__UNI_AGENT_PWD__"
+# Linux caps a single exec argument at MAX_ARG_STRLEN (128 KiB). write_file sends base64 content through exec argv,
+# so it is split into chunks well below that limit and appended to a temp file before decoding.
+_WRITE_FILE_CHUNK_CHARS = 64 * 1024
 
 _FLEET_LOCK = threading.Lock()
 _GLOBAL_FLEET: Any = None
@@ -1039,6 +1043,12 @@ class K8sAgentSandbox(Sandbox):
                     stdout_chunks.append(resp.read_stdout())
                 if resp.peek_stderr():
                     stderr_chunks.append(resp.read_stderr())
+            # Frames that arrive together with the close frame are buffered but never surface through the
+            # is_open() loop; drain them, or large outputs (e.g. read_file's base64) come back truncated.
+            channels = getattr(resp, "_channels", None)
+            if isinstance(channels, dict):
+                stdout_chunks.append(channels.pop(1, "") or "")
+                stderr_chunks.append(channels.pop(2, "") or "")
             rc = resp.returncode
         finally:
             try:
@@ -1052,6 +1062,37 @@ class K8sAgentSandbox(Sandbox):
         if exit_code == 124:
             raise TimeoutError(stdout_str or stderr_str or f"Command timed out after {timeout}s")
         return ExecResult(exit_code=exit_code, stdout=stdout_str, stderr=stderr_str)
+
+    async def write_file(self, path: str, content: bytes | str) -> None:
+        """Write ``content`` to ``path``, chunking the base64 payload below the exec argv size limit.
+
+        The base implementation passes the whole payload as one ``printf`` argument, which fails with "argument list
+        too long" for files over ~96 KiB (e.g. ``str_replace_editor`` edits of large source files).
+        """
+        data = content.encode("utf-8") if isinstance(content, str) else content
+        b64 = base64.b64encode(data).decode("ascii")
+        q = shlex.quote(path)
+        if len(b64) <= _WRITE_FILE_CHUNK_CHARS:
+            script = f'mkdir -p "$(dirname {q})" && printf %s {shlex.quote(b64)} | base64 -d > {q}'
+            res = await self.exec_shell(script)
+            if res.exit_code != 0:
+                raise RuntimeError(f"write_file {path!r} failed: {res.stderr.strip()}")
+            return
+        tmp = shlex.quote(f"/tmp/.uni_agent_write_{uuid.uuid4().hex}.b64")
+        res = await self.exec_shell(f'mkdir -p "$(dirname {q})" && : > {tmp}')
+        if res.exit_code != 0:
+            raise RuntimeError(f"write_file {path!r} failed: {res.stderr.strip()}")
+        try:
+            for start in range(0, len(b64), _WRITE_FILE_CHUNK_CHARS):
+                chunk = b64[start : start + _WRITE_FILE_CHUNK_CHARS]
+                res = await self.exec_shell(f"printf %s {shlex.quote(chunk)} >> {tmp}")
+                if res.exit_code != 0:
+                    raise RuntimeError(f"write_file {path!r} failed: {res.stderr.strip()}")
+            res = await self.exec_shell(f"base64 -d {tmp} > {q}")
+            if res.exit_code != 0:
+                raise RuntimeError(f"write_file {path!r} failed: {res.stderr.strip()}")
+        finally:
+            await self.exec_shell(f"rm -f {tmp}")
 
     async def _exec(
         self,
