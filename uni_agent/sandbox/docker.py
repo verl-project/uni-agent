@@ -1,17 +1,20 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import math
 import uuid
 from collections.abc import Awaitable
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
-from .base import ExecResult, Sandbox, _to_str
+from .base import _DEFAULT_STOP_TIMEOUT, ExecResult, Sandbox, _env_number, _to_str
 from .registry import register_sandbox
 
 if TYPE_CHECKING:
     from .base import ImageMount, SandboxConfig
+
+logger = logging.getLogger(__name__)
 
 
 async def _finish_cleanup(awaitable: Awaitable[Any]) -> Any:
@@ -179,12 +182,20 @@ class DockerSandbox(Sandbox):
             self._container_name = name
             await self._setup_executable_paths(self.executable_paths)
         except (Exception, asyncio.CancelledError):
-            await self.stop()
+            try:
+                await self.stop()
+            except Exception:
+                # Preserve the startup failure (especially cancellation), while
+                # keeping ownership available for a later cleanup retry.
+                logger.warning("Docker sandbox cleanup failed after startup failure", exc_info=True)
             raise
 
     async def stop(self) -> None:
+        timeout = _env_number("SANDBOX_STOP_TIMEOUT", _DEFAULT_STOP_TIMEOUT)
         try:
-            await _finish_cleanup(self._stop())
+            # Put the deadline inside the shield: caller cancellation must not
+            # interrupt removal, but also must not disable the cleanup budget.
+            await _finish_cleanup(asyncio.wait_for(self._stop(), timeout=timeout if timeout > 0 else None))
         except asyncio.TimeoutError as exc:
             # A removal timeout is an infrastructure error, not a command timeout
             # that Sandbox.exec may turn into an ordinary tool observation.
@@ -194,7 +205,8 @@ class DockerSandbox(Sandbox):
         # Invalidate the data plane immediately; retain the ownership label until
         # removal succeeds so callers can retry a failed cleanup.
         self._container_name = None
-        if self._cleanup_label is None:
+        owner = self._cleanup_label
+        if owner is None:
             return
         found = await self._run_docker(
             "container",
@@ -203,7 +215,7 @@ class DockerSandbox(Sandbox):
             "--quiet",
             "--no-trunc",
             "--filter",
-            f"label={self._cleanup_label}",
+            f"label={owner}",
             timeout=30.0,
         )
         if found.exit_code != 0:
@@ -212,7 +224,10 @@ class DockerSandbox(Sandbox):
             removed = await self._run_docker("rm", "-f", container_id, timeout=30.0)
             if removed.exit_code != 0:
                 raise RuntimeError(f"Failed to remove Docker sandbox {container_id!r}: {removed.stderr.strip()}")
-        self._cleanup_label = None
+        # Another stop may have completed and start allocated a new container
+        # while this removal was in flight. Only release our own ownership.
+        if self._cleanup_label == owner:
+            self._cleanup_label = None
 
     def _require_container(self) -> str:
         if self._container_name is None:

@@ -15,8 +15,6 @@ from uni_agent.sandbox import SandboxConfig
 from uni_agent.sandbox.docker import DockerSandbox
 from uni_agent.tasks.swe_bench.task import SWEBenchTask, SWEBenchTaskConfig
 
-pytestmark = [pytest.mark.cpu, pytest.mark.level1]
-
 
 @pytest.fixture
 def sandbox():
@@ -33,6 +31,8 @@ async def assert_removed(sandbox, label):
     assert not await sandbox.is_alive()
 
 
+@pytest.mark.cpu
+@pytest.mark.level1
 def test_isolated_workspaces_and_file_transfer(sandbox, tmp_path: Path):
     other = DockerSandbox(image=sandbox.image, pull_policy="never", run_args=["--network", "none"])
 
@@ -60,6 +60,8 @@ def test_isolated_workspaces_and_file_transfer(sandbox, tmp_path: Path):
 
 
 @pytest.mark.parametrize("failure", [None, "agent", "reward", "cancel"])
+@pytest.mark.cpu
+@pytest.mark.level1
 def test_swe_task_shares_agent_mutations_with_reward_and_cleans_up(sandbox, monkeypatch, failure):
     from uni_agent.tasks.swe_bench import reward
 
@@ -106,6 +108,8 @@ def test_swe_task_shares_agent_mutations_with_reward_and_cleans_up(sandbox, monk
 
 
 @pytest.mark.parametrize("interrupt", ["timeout", "cancel"])
+@pytest.mark.cpu
+@pytest.mark.level1
 def test_interrupted_exec_removes_container_and_child_processes(sandbox, interrupt):
     async def run():
         async with sandbox:
@@ -126,6 +130,8 @@ def test_interrupted_exec_removes_container_and_child_processes(sandbox, interru
     asyncio.run(run())
 
 
+@pytest.mark.cpu
+@pytest.mark.level1
 def test_cancel_start_after_container_created(sandbox, monkeypatch):
     real_run = sandbox._run_docker
 
@@ -157,6 +163,8 @@ def test_cancel_start_after_container_created(sandbox, monkeypatch):
     asyncio.run(run())
 
 
+@pytest.mark.cpu
+@pytest.mark.level1
 def test_name_collision_keeps_existing_container(sandbox):
     async def run():
         async with sandbox:
@@ -173,6 +181,8 @@ def test_name_collision_keeps_existing_container(sandbox):
 
 
 @pytest.mark.parametrize("oracle", [False, True], ids=["no-patch", "gold-patch"])
+@pytest.mark.cpu
+@pytest.mark.level1
 def test_real_swe_bench_verifier(monkeypatch, oracle):
     """Use an explicit public dataset row and its pre-pulled canonical image."""
     sample_path = os.getenv("UNI_AGENT_SWE_BENCH_SAMPLE")

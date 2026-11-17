@@ -90,9 +90,13 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
 
     Startup failures and cancellation clean up containers using a unique ownership
     label, so a name collision does not delete another sandbox. Teardown commands
-    are bounded to 30 seconds each. Cleanup failures raise an error and retain the
-    ownership label for a subsequent `stop()` retry; they do not report successful
-    removal. After a daemon outage, inspect `docker ps -a --filter label=uni-agent.sandbox`
+    are bounded to 30 seconds each. `SANDBOX_STOP_TIMEOUT` limits the overall cleanup
+    to 120 seconds by default, including during cancellation; a nonpositive value
+    disables this overall limit. Cleanup failures retain the ownership label for a
+    subsequent `stop()` retry and raise an error. During failed startup, cleanup
+    errors are logged and the original startup exception is preserved. Failed cleanup
+    does not report successful removal. After a daemon outage, inspect
+    `docker ps -a --filter label=uni-agent.sandbox`
     for containers needing cleanup. Do not reuse a fixed `container_name` across
     concurrent tasks or mount the same writable host workspace into their containers.
 
