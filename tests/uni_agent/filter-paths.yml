@@ -16,10 +16,12 @@ gpu:
   - 'examples/agent_aware_router/multi-node.sh'
   - 'examples/agent_aware_router/single-node.sh'
 npu:
+  - '.github/workflows/detect-card-used.yml'
   - '.github/workflows/ci-npu.yml'
   - '.github/workflows/upload_npu_assister.yml'
 cpu:
   - '!.github/workflows/ci-gpu.yml'
+  - '!.github/workflows/detect-card-used.yml'
   - '!.github/workflows/ci-npu.yml'
   - '!.github/workflows/upload_npu_assister.yml'
   - '!examples/agent_aware_router/multi-node.sh'

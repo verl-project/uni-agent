@@ -16,10 +16,217 @@ jobs:
   changes:
     uses: ./.github/workflows/detect-changes.yml
 
-  # ============ Job: test in npu ============
-  run:
+  # detect npu tests card number
+  card_used:
     needs: changes
     if: needs.changes.outputs.npu == 'true'
+    uses: ./.github/workflows/detect-card-used.yml
+
+  # ============ Job: test in npu with one npu ============
+  run-card-one:
+    needs: [ changes, card_used ]
+    if: needs.changes.outputs.npu == 'true' && needs.card_used.outputs.one == 'true'
+    runs-on: linux-aarch64-a2-1
+    container:
+      image: ascendai/cann:latest
+
+    strategy:
+      matrix:
+        python-version: [ "3.12" ]
+
+    env:
+      # use GitHub proxy to download
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # set pypi source
+      UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+      UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi https://pypi.tuna.tsinghua.edu.cn/simple"
+      UV_INDEX_STRATEGY: unsafe-best-match
+      UV_NO_CACHE: 1
+      UV_SYSTEM_PYTHON: 1
+
+    steps:
+      # 1. git clone code
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+          persist-credentials: false
+
+      # 2. set up python
+      - name: Install lsb-release
+        run: |
+          apt-get update
+          apt-get install -y lsb-release
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: 'pip'
+
+      # 3. install dependencies
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade uv datasets
+          uv pip install -r requirements-test.txt
+
+          git clone --branch v4.1.0 https://github.com/princeton-nlp/SWE-bench.git
+          cd SWE-bench
+          pip install -e .
+
+      # 4. Test with pytest
+      - name: Test with pytest
+        run: |
+          uv pip install pytest pytest-cov pytest-custom_exit_code
+          export PYTHONPATH="${PYTHONPATH}:${GITHUB_WORKSPACE}"
+          pytest tests/uni_agent/ -m="npu and level0 and card_one" --suppress-no-test-exit-code --cov=./uni_agent/ --cov-report=xml --cov-report=term
+
+      # Upload coverage file to artifact
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report-card-one
+          path: coverage.xml
+          retention-days: 1
+
+  # ============ Job: test in npu with two npu ============
+  run-card-two:
+    needs: [ changes, card_used ]
+    if: needs.changes.outputs.npu == 'true' && needs.card_used.outputs.two == 'true'
+    runs-on: linux-aarch64-a2-2
+    container:
+      image: ascendai/cann:latest
+
+    strategy:
+      matrix:
+        python-version: [ "3.12" ]
+
+    env:
+      # use GitHub proxy to download
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # set pypi source
+      UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+      UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi https://pypi.tuna.tsinghua.edu.cn/simple"
+      UV_INDEX_STRATEGY: unsafe-best-match
+      UV_NO_CACHE: 1
+      UV_SYSTEM_PYTHON: 1
+
+    steps:
+      # 1. git clone code
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+          persist-credentials: false
+
+      # 2. set up python
+      - name: Install lsb-release
+        run: |
+          apt-get update
+          apt-get install -y lsb-release
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: 'pip'
+
+      # 3. install dependencies
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade uv datasets
+          uv pip install -r requirements-test.txt
+
+          git clone --branch v4.1.0 https://github.com/princeton-nlp/SWE-bench.git
+          cd SWE-bench
+          pip install -e .
+
+      # 4. Test with pytest
+      - name: Test with pytest
+        run: |
+          uv pip install pytest pytest-cov pytest-custom_exit_code
+          export PYTHONPATH="${PYTHONPATH}:${GITHUB_WORKSPACE}"
+          pytest tests/uni_agent/ -m="npu and level0 and card_two" --suppress-no-test-exit-code --cov=./uni_agent/ --cov-report=xml --cov-report=term
+
+      # Upload coverage file to artifact
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report-card-two
+          path: coverage.xml
+          retention-days: 1
+
+  # ============ Job: test in npu with four npu ============
+  run-card-four:
+    needs: [ changes, card_used ]
+    if: needs.changes.outputs.npu == 'true' && needs.card_used.outputs.four == 'true'
+    runs-on: linux-aarch64-a2-4
+    container:
+      image: ascendai/cann:latest
+
+    strategy:
+      matrix:
+        python-version: [ "3.12" ]
+
+    env:
+      # use GitHub proxy to download
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # set pypi source
+      UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
+      UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi https://pypi.tuna.tsinghua.edu.cn/simple"
+      UV_INDEX_STRATEGY: unsafe-best-match
+      UV_NO_CACHE: 1
+      UV_SYSTEM_PYTHON: 1
+
+    steps:
+      # 1. git clone code
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: true
+          persist-credentials: false
+
+      # 2. set up python
+      - name: Install lsb-release
+        run: |
+          apt-get update
+          apt-get install -y lsb-release
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: 'pip'
+
+      # 3. install dependencies
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade uv datasets
+          uv pip install -r requirements-test.txt
+
+          git clone --branch v4.1.0 https://github.com/princeton-nlp/SWE-bench.git
+          cd SWE-bench
+          pip install -e .
+
+      # 4. Test with pytest
+      - name: Test with pytest
+        run: |
+          uv pip install pytest pytest-cov pytest-custom_exit_code
+          export PYTHONPATH="${PYTHONPATH}:${GITHUB_WORKSPACE}"
+          pytest tests/uni_agent/ -m="npu and level0 and card_four" --suppress-no-test-exit-code --cov=./uni_agent/ --cov-report=xml --cov-report=term
+
+      # Upload coverage file to artifact
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report-card-four
+          path: coverage.xml
+          retention-days: 1
+
+  # ============ Job: test in npu with eight npu ============
+  run-card-eight:
+    needs: [ changes, card_used ]
+    if: needs.changes.outputs.npu == 'true' && needs.card_used.outputs.eight == 'true'
     runs-on: linux-aarch64-a2-8
     container:
       image: ascendai/cann:latest
@@ -73,36 +280,58 @@ jobs:
         run: |
           uv pip install pytest pytest-cov pytest-custom_exit_code
           export PYTHONPATH="${PYTHONPATH}:${GITHUB_WORKSPACE}"
-          pytest tests/uni_agent/ -m="npu and level0" --suppress-no-test-exit-code --cov=./uni_agent/ --cov-report=xml --cov-report=term
+          pytest tests/uni_agent/ -m="npu and level0 and card_eight" --suppress-no-test-exit-code --cov=./uni_agent/ --cov-report=xml --cov-report=term
 
       # Upload coverage file to artifact
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v4
         with:
-          name: coverage-report
+          name: coverage-report-card-eight
           path: coverage.xml
           retention-days: 1
 
+  # ============ Jobs: upload coverage to codecov ============
+  upload-card-one:
+    needs: run-card-one
+    uses: ./.github/workflows/upload_npu_assister.yml
+    with:
+      coverage-file: coverage.xml
+      artifact-name: coverage-report-card-one
+      flags: npu-tests-card-one
+
+  upload-card-two:
+    needs: run-card-two
+    uses: ./.github/workflows/upload_npu_assister.yml
+    with:
+      coverage-file: coverage.xml
+      artifact-name: coverage-report-card-two
+      flags: npu-tests-card-two
+
+  upload-card-four:
+    needs: run-card-four
+    uses: ./.github/workflows/upload_npu_assister.yml
+    with:
+      coverage-file: coverage.xml
+      artifact-name: coverage-report-card-four
+      flags: npu-tests-card-four
+
+  upload-card-eight:
+    needs: run-card-eight
+    uses: ./.github/workflows/upload_npu_assister.yml
+    with:
+      coverage-file: coverage.xml
+      artifact-name: coverage-report-card-eight
+      flags: npu-tests-card-eight
+
   npu-gate:
     runs-on: ubuntu-latest
-    needs: [changes, run]
+    needs: [changes, card_used, run-card-one, run-card-two, run-card-four, run-card-eight]
     if: always()
     steps:
       - name: Report result
         run: |
-          if [[ "${{ needs.run.result }}" == "failure" ]]; then
+          if [[ "${{ needs.changes.result }}" != "success" || ( "${{ needs.card_used.result }}" != "success" && "${{ needs.card_used.result }}" != "skipped" ) || "${{ needs.run-card-one.result }}" == "failure" || "${{ needs.run-card-two.result }}" == "failure" ||"${{ needs.run-card-four.result }}" == "failure" || "${{ needs.run-card-eight.result }}" == "failure" ]]; then
             echo "NPU CI FAILED"
             exit 1
           fi
           echo "NPU CI SUCCESS"
-
-  upload:
-    # Call upload workflow, which is running in Ubuntu provided by GitHub
-    needs: [ run, npu-gate ]
-    uses: ./.github/workflows/upload_npu_assister.yml
-    with:
-      coverage-file: coverage.xml
-      flags: npu-tests
-      artifact-name: coverage-report
-    secrets:
-      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
