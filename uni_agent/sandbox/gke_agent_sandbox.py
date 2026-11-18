@@ -64,13 +64,8 @@ _DEFAULT_NETWORK_POLICY_MANAGEMENT = "Managed"
 _VALID_NETWORK_POLICY_MODES = ("Managed", "Unmanaged")
 _DENY_ALL_NETWORK_POLICY: dict[str, list[Any]] = {"ingress": [], "egress": []}
 _AGENT_SANDBOX_RL_INSTALL_HINT = (
-    "GKEAgentSandbox requires 'kubernetes', 'k8s-agent-sandbox', and 'agent-sandbox-rl'. "
-    "Install them with:\n"
-    "  pip install 'uni-agent[gke]'\n"
-    "  pip install 'git+https://github.com/kubernetes-sigs/agent-sandbox.git"
-    "@9afee7039342f18fa9ad402929cabf8b66eebaa7#subdirectory=clients/python/agentic-sandbox-client'\n"
-    "  pip install 'git+https://github.com/kubernetes-sigs/agent-sandbox.git"
-    "@9afee7039342f18fa9ad402929cabf8b66eebaa7#subdirectory=examples/agent-sandbox-rl'"
+    "GKEAgentSandbox requires 'agent_sandbox_rl' and 'kubernetes'. "
+    "Install 'uni-agent[gke]' and 'agent-sandbox-rl' (see docs/source/concepts/sandbox.md)."
 )
 
 _AGENT_SANDBOX_EXT_GROUP = "extensions.agents.x-k8s.io"
