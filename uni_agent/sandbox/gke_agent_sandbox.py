@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-import base64
 import collections
-import inspect
 import json
 import logging
 import math
@@ -56,16 +54,14 @@ logger = logging.getLogger(__name__)
 
 RUNTIME_CONTAINER_NAME = "agent-runtime"
 _PWD_SENTINEL = "__UNI_AGENT_PWD__"
-# Linux caps a single exec argument at MAX_ARG_STRLEN (128 KiB). write_file sends base64 content through exec argv,
-# so it is split into chunks well below that limit and appended to a temp file before decoding.
-_WRITE_FILE_CHUNK_CHARS = 64 * 1024
 
 _DEFAULT_NETWORK_POLICY_MANAGEMENT = "Managed"
 _VALID_NETWORK_POLICY_MODES = ("Managed", "Unmanaged")
 _DENY_ALL_NETWORK_POLICY: dict[str, list[Any]] = {"ingress": [], "egress": []}
 _AGENT_SANDBOX_RL_INSTALL_HINT = (
     "GKEAgentSandbox requires 'agent_sandbox_rl', which is not installed. "
-    "Install 'uni-agent[gke]' and 'agent-sandbox-rl' (see docs/source/concepts/sandbox.md)."
+    "Install the 'gke' extra from a uni-agent checkout (pip install -e '.[gke]') and 'agent-sandbox-rl' "
+    "(see docs/source/concepts/sandbox.md)."
 )
 
 _AGENT_SANDBOX_EXT_GROUP = "extensions.agents.x-k8s.io"
@@ -194,15 +190,6 @@ def apply_image_map(
         if mapped is not None:
             return mapped
     return image
-
-
-def normalize_sandbox_image(
-    image: str,
-    *,
-    image_map: Sequence[ImageMap | Mapping[str, Any]] | Mapping[str, Any] | str | None = None,
-) -> str:
-    """Rewrite a dataset container image reference using configured ``ImageMap`` rules."""
-    return apply_image_map(image, image_map=image_map)
 
 
 def _read_in_cluster_namespace() -> str | None:
@@ -487,23 +474,22 @@ def _get_or_init_fleet_locked(
         "run_id": run_id,
         "install_teardown_hooks": True,
     }
-    if TemplateSpec is not None:
-        template_kwargs: dict[str, Any] = {
-            "colocate_replicas": colocate_replicas,
-            "network_policy_management": resolved_np_mgmt,
-            "automount_service_account_token": False,
-            "share_process_namespace": False,
+    template_kwargs: dict[str, Any] = {
+        "colocate_replicas": colocate_replicas,
+        "network_policy_management": resolved_np_mgmt,
+        "automount_service_account_token": False,
+        "share_process_namespace": False,
+    }
+    if node_selector:
+        template_kwargs["extra_pod_spec"] = {
+            "tolerations": [
+                {"key": k, "operator": "Equal", "value": str(v), "effect": "NoSchedule"}
+                for k, v in node_selector.items()
+            ]
         }
-        if node_selector:
-            template_kwargs["extra_pod_spec"] = {
-                "tolerations": [
-                    {"key": k, "operator": "Equal", "value": str(v), "effect": "NoSchedule"}
-                    for k, v in node_selector.items()
-                ]
-            }
-        if resolved_np_mgmt == "Managed":
-            template_kwargs["extra_template_spec"] = {"networkPolicy": resolved_np}
-        fleet_kwargs["template"] = TemplateSpec(**template_kwargs)
+    if resolved_np_mgmt == "Managed":
+        template_kwargs["extra_template_spec"] = {"networkPolicy": resolved_np}
+    fleet_kwargs["template"] = TemplateSpec(**template_kwargs)
 
     cfg = FleetConfig(**fleet_kwargs)
     _GLOBAL_FLEET = SandboxFleet(cfg)
@@ -543,18 +529,14 @@ def _register_and_warm_locked(
         if fleet.plan_ is None:
             fleet.load_tasks(unplanned)
             fleet.plan()
-        elif hasattr(fleet, "add_tasks"):
-            fleet.add_tasks(unplanned)
         else:
-            existing = list(fleet.tasks) if getattr(fleet, "tasks", None) else []
-            fleet.load_tasks(existing + unplanned)
-            fleet.plan()
+            fleet.add_tasks(unplanned)
 
     for t in unique_tasks:
         _IDLE_LRU[t.image] = None
         _IDLE_LRU.move_to_end(t.image)
 
-    if warm and hasattr(fleet, "warm_images"):
+    if warm:
         warmed_map = getattr(fleet, "_warmed", None)
         # Re-warm images that were evicted across epochs even when still present in fleet.plan_.
         to_warm = (
@@ -581,7 +563,7 @@ def _evict_excess_warmpools_locked(fleet: Any) -> list[str]:
     """Unwarm oldest zero-claim, unpinned warm pools once active pool count exceeds SANDBOX_MAX_WARM_IMAGES."""
     if _is_lookahead_mode_enabled():
         return []
-    if getattr(getattr(fleet, "config", None), "adopt_existing", False) or not hasattr(fleet, "unwarm_images"):
+    if getattr(getattr(fleet, "config", None), "adopt_existing", False):
         return []
     max_warm_images = _getenv_int("SANDBOX_MAX_WARM_IMAGES", 128)
     if max_warm_images <= 0:
@@ -725,9 +707,8 @@ def _get_or_init_lookahead_warmer_locked(fleet: Any) -> Any:
     global _GLOBAL_LOOKAHEAD_WARMER
     if _GLOBAL_LOOKAHEAD_WARMER is not None and getattr(_GLOBAL_LOOKAHEAD_WARMER, "fleet", None) is fleet:
         return _GLOBAL_LOOKAHEAD_WARMER
-    warmer_cls = LookaheadWarmer or _FallbackLookaheadWarmer
     cap = getattr(getattr(fleet, "config", None), "max_warmpool_size", None) or 8
-    _GLOBAL_LOOKAHEAD_WARMER = warmer_cls(
+    _GLOBAL_LOOKAHEAD_WARMER = LookaheadWarmer(
         fleet,
         cap=cap,
         keep_finished=0,
@@ -736,115 +717,6 @@ def _get_or_init_lookahead_warmer_locked(fleet: Any) -> Any:
         register_images=True,
     )
     return _GLOBAL_LOOKAHEAD_WARMER
-
-
-class _FallbackLookaheadWarmer:
-    """Built-in fallback when ``agent_sandbox_rl.lookahead.LookaheadWarmer`` is not installed."""
-
-    def __init__(
-        self,
-        fleet: Any,
-        *,
-        cap: int = 8,
-        keep_finished: int = 0,
-        max_workers: int = 32,
-        fail_fast: bool = False,
-        register_images: bool = True,
-    ) -> None:
-        del max_workers, fail_fast, register_images
-        self.fleet = fleet
-        self.cap = cap
-        self.keep_finished = keep_finished
-        self._lock = threading.Lock()
-        self._live: collections.OrderedDict[int | str, dict[str, int]] = collections.OrderedDict()
-        self._finished: collections.deque[dict[str, int]] = collections.deque(maxlen=max(0, keep_finished))
-        self._applied: dict[str, int] = {}
-        self._executor: ThreadPoolExecutor | None = None
-
-    def _desired_locked(self) -> dict[str, int]:
-        totals: dict[str, int] = {}
-        for counts in list(self._live.values()) + list(self._finished):
-            for img, n in counts.items():
-                totals[img] = min(self.cap, totals.get(img, 0) + int(n))
-        return totals
-
-    def _reconcile(self) -> None:
-        with self._lock:
-            desired = self._desired_locked()
-            to_unwarm = [img for img in list(self._applied) if img not in desired]
-            to_warm = [(img, n) for img, n in desired.items() if self._applied.get(img) != n]
-            for img in to_unwarm:
-                self._applied.pop(img, None)
-            for img, n in to_warm:
-                self._applied[img] = n
-        if to_unwarm:
-            if hasattr(self.fleet, "unwarm_images"):
-                self.fleet.unwarm_images(to_unwarm)
-            elif hasattr(self.fleet, "unwarm"):
-                for img in to_unwarm:
-                    self.fleet.unwarm(img)
-        for img, n in to_warm:
-            if hasattr(self.fleet, "warm_image"):
-                self.fleet.warm_image(img, replicas_override=n, wait=False)
-            elif hasattr(self.fleet, "warm"):
-                self.fleet.warm(img, replicas=n)
-
-    def add(
-        self,
-        batch_id: int | str,
-        counts: dict[str, int],
-        *,
-        wait: bool = False,
-        wait_timeout: float | None = None,
-    ) -> None:
-        with self._lock:
-            self._live[batch_id] = dict(counts)
-        self._reconcile()
-        if wait:
-            self.wait_ready(counts.keys(), timeout=wait_timeout, replicas=counts)
-
-    def add_async(
-        self,
-        batch_id: int | str,
-        counts: dict[str, int],
-        *,
-        wait: bool = False,
-        wait_timeout: float | None = None,
-    ) -> Future[Any]:
-        with self._lock:
-            if self._executor is None:
-                self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="lookahead-warm")
-            ex = self._executor
-        return ex.submit(self.add, batch_id, counts, wait=wait, wait_timeout=wait_timeout)
-
-    def finish(self, batch_id: int | str) -> None:
-        with self._lock:
-            counts = self._live.pop(batch_id, None)
-            if counts is None:
-                return
-            if self.keep_finished:
-                self._finished.append(counts)
-        self._reconcile()
-
-    def wait_ready(
-        self,
-        images: Any,
-        *,
-        timeout: float | None = None,
-        replicas: dict[str, int] | None = None,
-    ) -> dict[str, bool]:
-        wait_fn = getattr(self.fleet, "wait_pools_ready", None) or getattr(self.fleet, "wait_warm_ready", None)
-        if callable(wait_fn):
-            return wait_fn(list(images), timeout=timeout, replicas=replicas)
-        return {img: True for img in images}
-
-    def close(self) -> None:
-        with self._lock:
-            ex, self._executor = self._executor, None
-            self._live.clear()
-            self._finished.clear()
-        if ex is not None:
-            ex.shutdown(wait=True)
 
 
 def _build_image_counts(
@@ -902,8 +774,6 @@ def ensure_lookahead_batch_warm(
         _register_and_warm_locked(fleet, task_objs, warm=False)
         warmer = _get_or_init_lookahead_warmer_locked(fleet)
         fut = _LOOKAHEAD_FUTURES.pop(batch_id, None)
-    if warmer is None:
-        return
     if fut is not None:
         fut.result()
         if wait:
@@ -951,8 +821,6 @@ def prefetch_lookahead_batch_async(
         task_objs = [Task(id=img, image=img, metadata={"ds": {"docker_image": img}}) for img in unique_images]
         _register_and_warm_locked(fleet, task_objs, warm=False)
         warmer = _get_or_init_lookahead_warmer_locked(fleet)
-    if warmer is None:
-        return
     fut = warmer.add_async(batch_id, counts, wait=False)
     with _FLEET_LOCK:
         _LOOKAHEAD_FUTURES[batch_id] = fut
@@ -991,7 +859,7 @@ def close_lookahead_warmer() -> None:
 
 
 class PrewarmBatchIterator:
-    """2-slot sliding lookahead iterator modeled after JAX MLPerf's ``PrewarmDatasetIterator``.
+    """2-slot sliding lookahead iterator.
 
     Warms Step 1 synchronously on ``prime()``, then on each ``next_batch()`` returns the
     already-warmed batch for Step ``k`` while prefetching and warming Step ``k + 1`` in
@@ -1083,19 +951,6 @@ class PrewarmBatchIterator:
         batch_id = self._inflight_batch_ids.popleft()
         self._finish_batch_fn(batch_id, wait=wait)
         return batch_id
-
-
-def ensure_tasks_in_fleet_plan(
-    fleet: Any,
-    tasks: list[Any],
-    *,
-    warm: bool = True,
-    replicas_override: int | None = None,
-) -> None:
-    """Registers ``tasks`` in ``fleet.plan_``, creates warm pools for unwarmed images, and evicts LRU idle pools."""
-    with _FLEET_LOCK:
-        _register_and_warm_locked(fleet, tasks, warm=warm, replicas_override=replicas_override)
-        _evict_excess_warmpools_locked(fleet)
 
 
 def prewarm_sandbox_images(
@@ -1198,19 +1053,6 @@ def _patch_claim_lifecycle(handle: Any, runtime_timeout: float) -> None:
         logger.debug("Best-effort SandboxClaim lifecycle patch skipped for %s", claim_name, exc_info=True)
 
 
-def _call_fleet_acquire(fleet: Any, task_obj: Any, pod_annotations: dict[str, str]) -> Any:
-    if pod_annotations:
-        try:
-            sig = inspect.signature(fleet.acquire)
-            if "pod_annotations" in sig.parameters or any(
-                p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
-            ):
-                return fleet.acquire(task_obj, pod_annotations=pod_annotations)
-        except (TypeError, ValueError):
-            pass
-    return fleet.acquire(task_obj)
-
-
 def _acquire_from_fleet(
     image: str,
     *,
@@ -1244,7 +1086,7 @@ def _acquire_from_fleet(
     try:
         for attempt in range(5):
             try:
-                handle = _call_fleet_acquire(fleet, task_obj, pod_annotations)
+                handle = fleet.acquire(task_obj, pod_annotations=pod_annotations or None)
                 _patch_claim_lifecycle(handle, runtime_timeout)
                 return handle
             except Exception as exc:
@@ -1309,16 +1151,12 @@ class _GKEStatefulShell:
         if m:
             self.cwd = m.group(1).strip() or self.cwd
             stdout = stdout[: m.start()]
-        return ExecResult(exit_code=res.exit_code, stdout=stdout, stderr=stderr_or_empty(res.stderr))
+        return ExecResult(exit_code=res.exit_code, stdout=stdout, stderr=res.stderr or "")
 
     async def close(self) -> None:
         if self._initialized:
             await self._sandbox.exec(["rm", "-f", self._env_file], timeout=10.0)
             self._initialized = False
-
-
-def stderr_or_empty(val: str | None) -> str:
-    return val or ""
 
 
 @register_sandbox("gke_agent_sandbox")
@@ -1338,9 +1176,7 @@ class GKEAgentSandbox(Sandbox):
         network_policy_management: str | None = None,
         network_policy: Mapping[str, Any] | None = None,
         image_map: Sequence[ImageMap | Mapping[str, Any]] | Mapping[str, Any] | str | None = None,
-        **kwargs: Any,
     ) -> None:
-        del kwargs
         timeout_val = float(runtime_timeout)
         if not math.isfinite(timeout_val) or timeout_val <= 0:
             raise ValueError(f"runtime_timeout must be a finite positive number, got {runtime_timeout!r}")
@@ -1512,37 +1348,6 @@ class GKEAgentSandbox(Sandbox):
         if exit_code == 124:
             raise TimeoutError(stdout_str or stderr_str or f"Command timed out after {timeout}s")
         return ExecResult(exit_code=exit_code, stdout=stdout_str, stderr=stderr_str)
-
-    async def write_file(self, path: str, content: bytes | str) -> None:
-        """Write ``content`` to ``path``, chunking the base64 payload below the exec argv size limit.
-
-        The base implementation passes the whole payload as one ``printf`` argument, which fails with "argument list
-        too long" for files over ~96 KiB (e.g. ``str_replace_editor`` edits of large source files).
-        """
-        data = content.encode("utf-8") if isinstance(content, str) else content
-        b64 = base64.b64encode(data).decode("ascii")
-        q = shlex.quote(path)
-        if len(b64) <= _WRITE_FILE_CHUNK_CHARS:
-            script = f'mkdir -p "$(dirname {q})" && printf %s {shlex.quote(b64)} | base64 -d > {q}'
-            res = await self.exec_shell(script)
-            if res.exit_code != 0:
-                raise RuntimeError(f"write_file {path!r} failed: {res.stderr.strip()}")
-            return
-        tmp = shlex.quote(f"/tmp/.uni_agent_write_{uuid.uuid4().hex}.b64")
-        res = await self.exec_shell(f'mkdir -p "$(dirname {q})" && : > {tmp}')
-        if res.exit_code != 0:
-            raise RuntimeError(f"write_file {path!r} failed: {res.stderr.strip()}")
-        try:
-            for start in range(0, len(b64), _WRITE_FILE_CHUNK_CHARS):
-                chunk = b64[start : start + _WRITE_FILE_CHUNK_CHARS]
-                res = await self.exec_shell(f"printf %s {shlex.quote(chunk)} >> {tmp}")
-                if res.exit_code != 0:
-                    raise RuntimeError(f"write_file {path!r} failed: {res.stderr.strip()}")
-            res = await self.exec_shell(f"base64 -d {tmp} > {q}")
-            if res.exit_code != 0:
-                raise RuntimeError(f"write_file {path!r} failed: {res.stderr.strip()}")
-        finally:
-            await self.exec_shell(f"rm -f {tmp}")
 
     async def _exec(
         self,

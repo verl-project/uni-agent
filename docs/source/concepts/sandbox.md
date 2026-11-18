@@ -155,7 +155,7 @@ sandbox:
 Install the client dependencies (since `agent-sandbox-rl` is not on PyPI yet, install both client packages from `kubernetes-sigs/agent-sandbox`):
 
 ```bash
-pip install 'uni-agent[gke]'
+pip install -e '.[gke]'  # from a uni-agent checkout
 pip install 'git+https://github.com/kubernetes-sigs/agent-sandbox.git@9afee7039342f18fa9ad402929cabf8b66eebaa7#subdirectory=clients/python/agentic-sandbox-client'
 pip install 'git+https://github.com/kubernetes-sigs/agent-sandbox.git@9afee7039342f18fa9ad402929cabf8b66eebaa7#subdirectory=examples/agent-sandbox-rl'
 ```
