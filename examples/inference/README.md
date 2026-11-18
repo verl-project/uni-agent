@@ -22,3 +22,9 @@ python examples/inference/parallel_infer_api.py \
     --task-config examples/quickstart/inference/task_config_react.yaml \
     --limit 8
 ```
+
+The verl runner accepts `--engine-kwargs '{...}'` to forward native options to
+the selected backend without changing the task or Gateway path. For example,
+vLLM's `compilation_config` and SGLang's `cuda_graph_config` can select decode
+graph execution. See the [native graph and compilation examples](https://uni-agent.readthedocs.io/en/latest/quickstart/agent-inference.html#native-graph-and-compilation-options)
+for version-specific configurations and their workload limits.

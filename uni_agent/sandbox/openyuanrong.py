@@ -111,6 +111,7 @@ class OpenyuanrongSandbox(Sandbox):
     """Command execution via remote sandbox."""
 
     supports_shell = True
+    supports_reverse_tunnel = True
 
     def __init__(
         self,

@@ -34,7 +34,7 @@ class OverloadMode(str, Enum):
 
     # kv_cache_usage_perc > load_threshold — a single vLLM occupancy signal
     KV_CACHE_USAGE_PERC = "kv_cache_usage_perc"
-    # _compute_load(kv, running, waiting, inflight) > load_threshold
-    KV_LOAD = "kv_load"
+    # remaining capacity
+    REMAINING_CAP = "remaining_cap"
     # do not do overload
     NONE = "None"

@@ -35,7 +35,7 @@ For each rollout session, the Agent Framework:
 2. Receives a session-scoped model `base_url`.
 3. Launches the configured Agent Runner, such as `run_task`.
 4. The runner injects the session endpoint into `agent.model`.
-5. The Agent sends OpenAI Chat Completions or Anthropic Messages requests to the session URL.
+5. The Agent sends OpenAI Chat Completions, Responses, or Anthropic Messages requests to the session URL.
 6. The Gateway forwards tokenized requests to the verl rollout engine.
 7. The managed Agent Runner returns a `TaskResult`, or `None` when it provides no episode annotations.
 8. The Framework finalizes the session, attaches reward/status/metrics, and writes trajectories to TransferQueue.
@@ -44,10 +44,114 @@ The model-facing endpoints are:
 
 ```text
 POST /sessions/{session_id}/v1/chat/completions
+POST /sessions/{session_id}/v1/responses
 POST /sessions/{session_id}/v1/messages
 ```
 
 Sessions are held in Gateway memory until they are finalized or aborted.
+
+## Agent Identity
+
+Gateway can preserve the identity of agents sharing one rollout session. Claude
+Code requests are recognized by `x-claude-code-session-id`,
+`x-claude-code-agent-id`, and `x-claude-code-parent-agent-id`. Header availability
+depends on the Claude Code version; enabling subagents alone does not guarantee
+these headers. No launcher change or hook is required when the client sends them.
+
+The Chat Completions, Responses, and Anthropic Messages routes lower these
+headers into an optional `AgentContext`:
+
+```python
+{
+    "provider": "claude_code",
+    "session_id": "claude-session",  # Harness session, not the Gateway rollout ID.
+    "agent_id": "child-a",          # None for a main-agent request.
+    "parent_agent_id": "parent-a",  # None when no explicit parent was supplied.
+}
+```
+
+An absent parent stays unknown: Gateway does not infer a direct parent from the
+root session. Identity values are opaque, limited to 512 characters, and must
+not contain control characters. Child identity requires a nonempty harness
+session ID; a parent requires a distinct child ID. Invalid headers return HTTP
+400. Other headers, including credentials and backend routing headers, are not
+copied into the context. A JSON body field named `agent_context` is not used.
+
+Gateway scopes chain matching, rollback candidates, and exact in-flight request
+coalescing to the complete context. Identical requests from different agents
+therefore generate independently. Requests with matching identity retain the
+existing chain and coalescing rules; one agent can still produce multiple
+chains. Clients should supply consistent identity on every turn. Requests with
+no identity keep the existing behavior and do not attach to identified chains.
+Finalized trajectories carry the context in `trajectory.extra_fields["agent_context"]`.
+
+A backend explicitly opts into receiving the context:
+
+```python
+class MyBackend:
+    supports_agent_context = True
+
+    async def generate(self, request_id, *, agent_context=None, **generation_kwargs):
+        # request_id is still the outer Gateway session ID.
+        # Combine it with agent_context for backend-specific routing if needed.
+        ...
+```
+
+Only backends with `supports_agent_context is True` receive the additional
+keyword, and only on requests that have context. Existing backends need no
+signature change. The backend receives its own copy; context does not enter
+model messages, tokenization, or sampling parameters. Python callers may also
+set `InternalGenerationRequest.agent_context` directly for other harnesses.
+Backend session naming and resource release remain the backend integration's
+responsibility; this interface does not add agent lifecycle hooks.
+
+## Responses Capability Boundaries
+
+Responses streaming uses the same completed-outcome flow as Chat Completions:
+the handler waits for generation to finish, then emits the SSE item and content
+events followed by a terminal response. Generation errors use the HTTP error
+path before stream headers are sent. The SSE response is a serialization of the
+completed outcome; it does not deliver tokens as the model generates them.
+
+The Responses adapter validates requests before starting generation, including
+streaming requests. Unsupported capabilities return HTTP 400.
+
+- `parallel_tool_calls` may be omitted or `true`. `false` is rejected because
+  the current backend cannot enforce a single tool call per response.
+- `tool_choice` supports the strings `auto` and `none`, normalized to lowercase.
+  `none` removes tools from the model request. Other strings and all object
+  forms are rejected; required or named tool selection is not enforced.
+- The wire field is `max_output_tokens`. The adapter maps it to the internal
+  `max_tokens` sampling key, subject to the Gateway sampling allowlist. A
+  request containing the Chat Completions field `max_tokens` is rejected,
+  including when both fields are supplied. Omission or `null` leaves the
+  configured output budget unchanged.
+- Message items require a `system`, `developer`, `user`, or `assistant` role.
+  The adapter maps `developer` to the backend's `system` role. Unknown, missing,
+  or non-string roles are rejected. Tool results use `function_call_output` or
+  `custom_tool_call_output` items with a `call_id`, rather than a `tool` message.
+
+
+- Function/custom tool outputs preserve strings and arrays of `input_text` and
+  `input_image` blocks. Supported image URLs or inline data use the same content
+  normalization as user images; unsupported sources, files and content types
+  return HTTP 400 rather than becoming JSON text.
+- Image-enabled models can receive additional images in later tool or user
+  messages. The shared session retains the complete image history for continuous
+  token merging. Models without a multimodal processor reject image content with
+  HTTP 400. Adding videos after generation has begun remains unsupported.
+
+
+- Remote `compaction` / `compaction_summary` items contain opaque state that this
+  Gateway cannot interpret and return HTTP 400. Notification-only
+  `context_compaction` items are skipped; ordinary user-text compaction summaries
+  remain supported. Images encountered in text-only fields return HTTP 400
+  instead of an image-omitted placeholder.
+
+See the [Responses API reference](https://developers.openai.com/api/reference/python/resources/responses/methods/create)
+and [message-to-item migration guide](https://developers.openai.com/api/docs/guides/migrate-to-responses)
+for the public wire format. These Gateway capability limits are narrower than
+the full OpenAI API.
 
 ## Token-Level Trajectories
 
@@ -146,7 +250,7 @@ The configured Tool parser must match the model's chat template.
 
 One session may contain multiple model turns. Tool observations are encoded as continuation tokens and marked with `response_mask=0`, while model completions are marked with `response_mask=1`.
 
-Concurrent requests may create multiple chains within one session. Chains sharing a message prefix reuse the same encoded context where possible, then materialize as separate trajectories during finalization.
+Concurrent requests may create multiple chains within one session. Chains sharing a message prefix and agent context reuse the same encoded context where possible, then materialize as separate trajectories during finalization.
 
 When a transport retry resends an identical request while the original request
 is still in flight, `coalesce_reserved_exact_requests` makes the retry await the
@@ -155,7 +259,7 @@ to all waiters, so the backend generation and trajectory commit happen once.
 If the owner fails or is cancelled, the same failure is delivered to its
 waiters and the coordination state is cleared so a later retry can try again.
 The fingerprint is computed from the provider-normalized `messages`, `tools`,
-and `sampling_params` fields; differences in any of these fields are treated as
+`sampling_params`, and optional `agent_context` fields; differences in any of these fields are treated as
 different requests. JSON object key order and wire-format whitespace do not
 affect matching. Coalescing is scoped to one Gateway session and includes first
 turns and requests that start a new chain. A retry that arrives after the owner
@@ -199,6 +303,55 @@ replacement suffix. This preserves token, mask, and rollout-log-probability
 alignment without materializing a redundant trajectory. The behavior is enabled
 by default and can be disabled with
 `actor_rollout_ref.rollout.custom.agent_framework.enable_last_assistant_rollback=false`.
+
+## Multiple Turns and Trees
+
+`GatewaySession` directly manages Chain trajectories by default. The Gateway
+Actor selects `TreeGatewaySession` when `use_tree_trajectory_manager` is `true`
+(default: `false`). `TreeGatewaySession`, defined in
+`uni_agent/gateway/session/tree_session.py`, directly manages shared message
+prefixes as a tree instead of maintaining separate chain buffers:
+
+```yaml
+actor_rollout_ref:
+  rollout:
+    custom:
+      agent_framework:
+        use_tree_trajectory_manager: true
+```
+
+Each `MessageNode` holds one generation and the unmatched request context needed
+to reach it, including token deltas, optional log probabilities, and multimodal
+inputs. Requests reuse matching message prefixes and Tool schemas, then extend
+the current path or fork from a shared ancestor. Pending nodes become completed
+when generation commits; failed or cancelled generations remove their pending
+branch and restore any temporarily replaced node.
+
+Exact in-flight request coalescing also applies in Tree mode. Last-Assistant
+rewrites replace an eligible unbranched leaf when rollback is enabled; otherwise
+they create a branch so existing descendants remain intact.
+
+Capacity exhaustion closes the selected chain, applying any last-Assistant
+rollback before materialization, as in Chain mode. Closed chains cannot be
+continued or rewritten in place. Their history remains available as a shared
+prefix for new chains.
+
+At finalization, each committed chain tip is expanded into the same `Trajectory`
+record type used by Chain mode, ordered by its latest commit or capacity
+materialization. Each chain trains only its own generated tokens. Shared history
+from another chain becomes part of the initial prompt; subsequent continuation
+context receives mask `0`. Training
+ownership is fixed by chain ID and does not change when trajectories are filtered
+or reordered.
+The Framework then applies its existing trajectory selection, postprocessing,
+reward scoring, and TransferQueue flow.
+
+When `log_dir` is configured, finalization attempts to write `trajectory_tree.pkl`
+in the session log directory before releasing the in-memory tree. Abort attempts to
+write `trajectory_tree_abort.pkl`. These are end-of-session diagnostic snapshots,
+not per-turn checkpoints; without `log_dir`, no tree pickle is written.
+Snapshots store child links in a flat `node_children` table, without parent
+references, so serialization depth does not grow with conversation length.
 
 ## Reward Flow
 

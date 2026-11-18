@@ -11,6 +11,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from pydantic import Field, field_validator, model_validator
@@ -58,6 +59,10 @@ class HarborTaskConfig(TaskConfig):
     sandbox: None = Field(default=None, exclude=True)
     harbor_env: str = Field(default="docker", description="Harbor environment backend.")
     agent: HarborAgentConfig = Field(default_factory=HarborAgentConfig)
+    add_model_host_to_allowlist: bool = Field(
+        default=True,
+        description="Whether to add the model endpoint host to the Harbor agent-phase allowlist.",
+    )
     timeout_multiplier: float = Field(default=1.0, gt=0)
     override_cpus: int | None = Field(default=None, gt=0)
     override_memory_mb: int | None = Field(default=None, gt=0)
@@ -96,6 +101,18 @@ class HarborTaskConfig(TaskConfig):
         return self
 
 
+def _model_endpoint_host(config: HarborTaskConfig) -> str | None:
+    """Return the model host that a directly connected agent must reach."""
+    if not config.agent.model.base_url:
+        return None
+    host = urlsplit(config.agent.model.base_url).hostname
+    if host is None:
+        raise ValueError(f"Harbor agent.model.base_url must be an absolute URL, got {config.agent.model.base_url!r}")
+    if host.lower() == "localhost" or host in {"127.0.0.1", "::1"}:
+        return None
+    return host
+
+
 def build_harbor_trial_command(
     config: HarborTaskConfig,
     *,
@@ -130,6 +147,9 @@ def build_harbor_trial_command(
         command.extend(["--override-cpus", str(config.override_cpus)])
     if config.override_memory_mb is not None:
         command.extend(["--override-memory-mb", str(config.override_memory_mb)])
+    if config.agent.name != "oracle" and config.add_model_host_to_allowlist:
+        if host := _model_endpoint_host(config):
+            command.extend(["--allow-agent-host", host])
     for key, value in sorted(config.agent.kwargs.items()):
         try:
             encoded_value = json.dumps(value, ensure_ascii=False, separators=(",", ":"))

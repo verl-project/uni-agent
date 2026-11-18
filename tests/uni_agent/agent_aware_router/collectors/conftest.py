@@ -35,7 +35,7 @@ from uni_agent.agent_aware_router.types import Layer
 
 # ── Shared configuration constants ───────────────────────────────────────
 
-NODE_ID = "127.0.0.1:8000"
+REPLICA_ID = "127.0.0.1:8000"
 BLOCK_SIZE = 16
 
 # Prometheus-format metrics text — covers all assertions in the polling tests.
@@ -56,7 +56,7 @@ vllm:num_requests_waiting 7
 class FakeHTTPTransport(Transport):
     """Fake HTTP transport — injects pre-canned Prometheus text.
 
-    ``subscribe(handler)`` feeds ``handler(text, NODE_ID)`` periodically
+    ``subscribe(handler)`` feeds ``handler(text, REPLICA_ID)`` periodically
     until cancelled, simulating the real HTTP polling loop.
     """
 
@@ -69,7 +69,7 @@ class FakeHTTPTransport(Transport):
     async def subscribe(self, handler):
         try:
             while True:
-                handler(self._text, NODE_ID)
+                handler(self._text, REPLICA_ID)
                 await asyncio.sleep(self._interval)
         except (asyncio.CancelledError, GeneratorExit):
             pass
@@ -94,7 +94,7 @@ class FakeZMQTransport(Transport):
     async def subscribe(self, handler):
         try:
             for p in self._payloads:
-                handler(p, NODE_ID)
+                handler(p, REPLICA_ID)
                 await asyncio.sleep(self._interval)
             while True:
                 await asyncio.sleep(self._interval)
@@ -126,12 +126,22 @@ def make_stored_event(
     return ["stored", [block_hash], parent, raw_ids, block_size, None, medium]
 
 
-def kv_payload(*events: list) -> bytes:
+def kv_payload(*events: list | dict) -> bytes:
     """Pack one or more events as a single msgpack payload.
 
-    Format: ``[timestamp, [[tag, fields...], ...]]``.
+    Format: ``[timestamp, [event, ...]]``; events may be arrays or mappings.
     """
-    return msgpack.packb([1234567890, [list(e) for e in events]])
+    return msgpack.packb([1234567890, list(events)])
+
+
+def mapping_event(event: list) -> dict:
+    """Convert a positional vLLM event to named fields for mapping tests."""
+    field_names = {
+        "BlockStored": ("block_hashes", "parent_block_hash", "token_ids", "block_size", "lora_id", "medium"),
+        "BlockRemoved": ("block_hashes", "medium", "group_idx"),
+        "AllBlocksCleared": (),
+    }
+    return {"type": event[0], **dict(zip(field_names[event[0]], event[1:], strict=False))}
 
 
 # ── Autouse: reset singleton stores between tests ─────────────────────────
@@ -149,8 +159,12 @@ def _reset_store_singletons():
     # KVCacheStore
     kv = KVCacheStore.singleton()
     kv.block_size = None
+    kv._gated_replicas.clear()
     kv.replicas_by_block.clear()
+    kv._resident_blocks_by_replica.clear()
     kv._replica_layer_counts = {Layer.GPU: {}, Layer.CPU: {}, Layer.SSD: {}}
+    kv._inflight_blocks.clear()
+    kv._inflight_pins.clear()
     # PerReplicaStore
     pr = PerReplicaStore.singleton()
     pr._data.clear()

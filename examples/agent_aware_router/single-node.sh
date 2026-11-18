@@ -87,6 +87,7 @@ run_experiment() {
             --concurrency "$CONCURRENCY" \
             --kv-events \
             --tool-parser "$TOOL_PARSER" \
+            --log-dir "/tmp/router-trajs/${log_file%.log}" \
             "$@" > "$log_file" 2>&1
     done
 }

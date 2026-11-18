@@ -235,6 +235,28 @@ rewritten through the reverse tunnel when `proxy_port` is set).
 | `VAL_BEFORE_TRAIN` | `true` | Run validation before the first step |
 | `CKPTS_DIR` | `checkpoints/${PROJECT_NAME}/${EXPERIMENT_NAME}` | Checkpoint root |
 
+## Single-task inference
+
+Initialize the checkout-pinned verl revision with `git submodule update --init verl`
+and install its backend dependencies in the Ray driver, server, and gateway environments.
+The launcher defaults to vLLM; select SGLang with `ENGINE=sglang`:
+
+```bash
+DATA_PATH=/path/to/one-row-swe-bench.parquet \
+MODEL_PATH=/path/to/Qwen3.5-9B \
+ENGINE=sglang LANGUAGE_MODEL_ONLY=1 \
+CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+TENSOR_PARALLEL_SIZE=8 N_GPUS_PER_NODE=8 \
+LIMIT=1 N=1 CONCURRENCY=1 GATEWAY_COUNT=1 \
+bash examples/mini_swe_agent/run_infer_mini_swe_agent.sh
+```
+
+`LANGUAGE_MODEL_ONLY=1` selects the backend's text-only model configuration;
+SGLang uses `json_model_override_args`, while vLLM uses its native flag.
+`ENFORCE_EAGER=1` disables graph capture. Both options default to off.
+verl owns the inference service. SGLang initializes its native tokenizer, and
+Uni-Agent retains the generated token IDs and logprobs in the trajectory.
+
 ### How the time budgets relate
 
 - `agent.step_limit` caps the number of agent turns.

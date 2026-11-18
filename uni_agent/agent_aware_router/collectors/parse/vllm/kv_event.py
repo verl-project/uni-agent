@@ -18,9 +18,13 @@ KVCacheEvent — standardized KV cache event data structure.
 
 from __future__ import annotations
 
+import logging
 import struct
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -29,7 +33,7 @@ class KVCacheEvent:
 
     Attributes:
         event_type: ``"stored"`` / ``"removed"`` / ``"clear"``.
-        node_id: Source endpoint (from ZMQ connection or group_idx).
+        replica_id: Source endpoint (from ZMQ connection or group_idx).
         block_hashes: Block hashes involved in the event (list from msgpack).
         parent_block_hash: Parent block hash — single value shared by all
                            block_hashes in a BlockStored event.
@@ -40,7 +44,7 @@ class KVCacheEvent:
     """
 
     event_type: str
-    node_id: str
+    replica_id: str
     block_hashes: list[str]
     parent_block_hash: str | None
     token_ids: list[bytes] | None
@@ -50,19 +54,25 @@ class KVCacheEvent:
     # ── Factory ──────────────────────────────────────────────────────────
 
     @classmethod
-    def from_raw(cls, raw_data: Any, default_node_id: str | None = None) -> list[KVCacheEvent]:
+    def from_raw(cls, raw_data: Any, default_replica_id: str | None = None) -> list[KVCacheEvent]:
         """Parse msgpack-decoded raw data into a list of KVCacheEvent instances.
 
         Parsing pattern::
 
-            timestamp    = raw_data[0]               # ignored for routing
-            event_list   = raw_data[1]               # list of events
-            event_tag    = raw_data[1][i][0]          # tag for event i
-            event_fields = raw_data[1][i][1:]         # fields for event i
+            timestamp  = raw_data[0]  # ignored for routing
+            event_list = raw_data[1]
+
+            # Array event:
+            event_tag    = event_entry[0]
+            event_fields = event_entry[1:]
+
+            # Mapping event:
+            event_tag    = event_entry["type"]
+            event_fields = event_entry
 
         Args:
-            raw_data: Msgpack-decoded list ``[timestamp, [[tag, fields...], ...]]``.
-            default_node_id: Fallback node_id when raw data lacks it.
+            raw_data: Msgpack-decoded batch ``[timestamp, [event, ...], ...]``.
+            default_replica_id: Fallback replica_id when raw data lacks it.
 
         Returns:
             A list of KVCacheEvent instances.  Malformed events are skipped.
@@ -78,24 +88,40 @@ class KVCacheEvent:
             raise ValueError(f"Expected raw_data[1] as event list, got {type(event_list)}")
 
         results: list[KVCacheEvent] = []
+        replica_id = default_replica_id or ""
+        malformed_count = 0
+        first_error: tuple[str, str] | None = None
         for event_entry in event_list:
-            if not isinstance(event_entry, list | tuple) or len(event_entry) < 1:
+            if isinstance(event_entry, Mapping):
+                tag = event_entry.get("type")
+                fields = event_entry
+            elif isinstance(event_entry, list | tuple) and event_entry:
+                tag = event_entry[0]
+                fields = event_entry[1:]
+            else:
                 continue
 
-            tag = event_entry[0]
-            fields = event_entry[1:]
             event_type = cls._resolve_event_type(tag)
             if event_type.startswith("unknown"):
                 continue
 
-            node_id = default_node_id or ""
             try:
-                event = cls._build_event(event_type, fields, node_id)
+                event = cls._build_event(event_type, fields, replica_id)
                 if event is not None:
                     results.append(event)
-            except (ValueError, TypeError, IndexError):
+            except (ValueError, TypeError, IndexError, KeyError) as exc:
+                malformed_count += 1
+                if first_error is None:
+                    first_error = (event_type, str(exc))
                 continue
 
+        if first_error is not None:
+            logger.warning(
+                "Skipping malformed KV events (node=%s, count=%d, first_type=%s): %s",
+                replica_id,
+                malformed_count,
+                *first_error,
+            )
         return results
 
     # ── Build helpers ────────────────────────────────────────────────────
@@ -104,16 +130,32 @@ class KVCacheEvent:
     def _build_event(
         cls,
         event_type: str,
-        fields: list | tuple,
-        node_id: str,
+        fields: list | tuple | Mapping,
+        replica_id: str,
     ) -> KVCacheEvent | None:
-        """Dispatch to the appropriate builder by event_type."""
+        """Normalize named fields to the legacy layout and share the builders."""
+        if isinstance(fields, Mapping):
+            if event_type == "stored":
+                fields = [
+                    fields["block_hashes"],
+                    fields["parent_block_hash"],
+                    fields["token_ids"],
+                    fields["block_size"],
+                    None,  # Legacy lora_id position; not used by the router.
+                    fields.get("medium"),
+                ]
+            elif event_type == "removed":
+                fields = [fields["block_hashes"], fields.get("medium")]
+
+        if event_type in ("stored", "removed") and not isinstance(fields[0], list | tuple):
+            raise TypeError("block_hashes must be a list or tuple")
+
         if event_type == "stored":
-            return cls._build_block_stored(fields, node_id)
+            return cls._build_block_stored(fields, replica_id)
         elif event_type == "removed":
-            return cls._build_block_removed(fields, node_id)
+            return cls._build_block_removed(fields, replica_id)
         elif event_type == "clear":
-            return cls._build_all_blocks_cleared(node_id)
+            return cls._build_all_blocks_cleared(replica_id)
         return None
 
     @staticmethod
@@ -127,7 +169,7 @@ class KVCacheEvent:
         return str(fields[idx])
 
     @classmethod
-    def _build_block_stored(cls, fields: list | tuple, node_id: str) -> KVCacheEvent:
+    def _build_block_stored(cls, fields: list | tuple, replica_id: str) -> KVCacheEvent:
         """Build a BlockStored event from its field list.
 
         Field order (after tag):
@@ -153,7 +195,7 @@ class KVCacheEvent:
 
         return cls(
             event_type="stored",
-            node_id=node_id,
+            replica_id=replica_id,
             block_hashes=block_hashes,
             parent_block_hash=parent_block_hash,
             token_ids=token_ids,
@@ -162,7 +204,7 @@ class KVCacheEvent:
         )
 
     @classmethod
-    def _build_block_removed(cls, fields: list | tuple, node_id: str) -> KVCacheEvent:
+    def _build_block_removed(cls, fields: list | tuple, replica_id: str) -> KVCacheEvent:
         """Build a BlockRemoved event from its field list.
 
         Field order (after tag):
@@ -175,7 +217,7 @@ class KVCacheEvent:
 
         return cls(
             event_type="removed",
-            node_id=node_id,
+            replica_id=replica_id,
             block_hashes=block_hashes,
             parent_block_hash=None,
             token_ids=None,
@@ -184,11 +226,11 @@ class KVCacheEvent:
         )
 
     @classmethod
-    def _build_all_blocks_cleared(cls, node_id: str) -> KVCacheEvent:
+    def _build_all_blocks_cleared(cls, replica_id: str) -> KVCacheEvent:
         """Build an AllBlocksCleared event — no fields after tag."""
         return cls(
             event_type="clear",
-            node_id=node_id,
+            replica_id=replica_id,
             block_hashes=[],
             parent_block_hash=None,
             token_ids=None,

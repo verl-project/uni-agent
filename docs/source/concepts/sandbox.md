@@ -66,7 +66,7 @@ sandbox:
     claude: /opt/agent-runtime/bin/claude
 ```
 
-Docker, Modal, and OpenYuanRong support `image_mounts`. `image_map` rewrites only the task `image`, so mounted image references must already be complete and pullable. `executable_paths` exposes selected mounted commands after startup; Local and veFaaS reject it.
+Docker, Modal, OpenJiuwen agent-dx and OpenYuanRong support `image_mounts`. `image_map` rewrites only the task `image`, so mounted image references must already be complete and pullable. `executable_paths` exposes selected mounted commands after startup; Local and veFaaS reject it.
 
 ## Lifecycle
 
@@ -101,7 +101,19 @@ await sandbox.download(remote_path, local_path)
 await sandbox.expose_port(port)
 ```
 
-The base class provides portable command, file, and directory-transfer implementations. Providers may override file methods when they have a native data plane. For example, Local uses the host filesystem directly, Docker uses `docker cp`, and Modal uses its filesystem API for absolute paths.
+The base class provides portable command, file, and directory-transfer implementations. Providers may override file methods when they have a native data plane. For example, Local uses the host filesystem directly, Docker uses `docker cp` for file upload/download and stdin for `write_file`, and Modal uses its filesystem API for absolute paths.
+
+Docker `write_file` sends raw bytes through `docker exec -i`, avoiding host command-argument size limits. The task image needs `bash`, `mkdir`, `dirname`, and `cat`. Writes overwrite in place (including through symlinks), preserve existing file permissions, and are not atomic. If a write is cancelled, its Docker client is killed and reaped; the task owner must still call `stop()` to guarantee container-side cleanup. A cancelled or failed write may leave a partial file.
+
+To run the focused real-Docker regressions on Linux with 4 KiB pages:
+
+```bash
+docker pull ubuntu:24.04
+UNI_AGENT_DOCKER_WRITE_IMAGE=ubuntu:24.04 PYTHONPATH=. python -m pytest -q \
+  tests/uni_agent/sandbox/test_docker_write_integration.py
+```
+
+These checks require the normal test dependencies, including `pytest`, `pydantic`, and `jsonschema`; they run containers with networking disabled and remove them on teardown.
 
 ## Error Policy
 
@@ -110,11 +122,18 @@ All providers share the public `Sandbox.exec()` error policy:
 - A timeout becomes `ExecResult(exit_code=-1)`.
 - A normal command/provider error while the sandbox is alive becomes `exit_code=127`.
 - An infrastructure error after the sandbox has died is re-raised.
+- A provider's `_is_fatal_exec_error()` hook can preserve infrastructure errors even while the runtime is alive. Agent DX uses this for unknown command outcomes, lost results, and truncated output.
 
 This policy prevents one bad agent command from crashing an otherwise healthy episode while still surfacing backend failures.
 
 !!! warning "Do not override `exec()`"
     Custom providers implement `_exec()`. The public `exec()` wrapper owns the cross-provider error policy and is enforced by tests.
+
+## Gateway Reverse Tunnel
+
+Some sandbox providers support a Gateway reverse tunnel and declare this with `supports_reverse_tunnel = True`. With `sandbox_kwargs.proxy_port`, the task runner supplies the Gateway Session's upstream and rewrites the model URL to the in-sandbox HTTP proxy, preserving the Session path. Providers without this capability reject the configuration. A provider class can be inspected without installing its SDK or creating a remote environment.
+
+Each supporting provider owns its upstream format through the `Sandbox.tunnel_upstream(base_url)` classmethod. The default requires an explicit `host:port`; a provider can override it to preserve its required URL scheme, supply default ports, or handle IPv6 addresses. The task runner delegates this formatting to the selected provider.
 
 ## Custom Backend
 

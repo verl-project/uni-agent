@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from typing import Any
 
 import torch
@@ -70,8 +71,12 @@ def compute_position_ids(
     attention_mask: torch.Tensor,
     multi_modal_inputs: dict[str, torch.Tensor],
 ) -> torch.Tensor:
-    """Return text-only or multimodal-aware position ids for a single sample."""
-    if processor is None or not multi_modal_inputs:
+    """Return position ids using the model's layout, including text-only samples."""
+    # M-RoPE models need the same position layout for every trajectory in a
+    # batch. An empty media payload does not make the model text-only: let its
+    # RoPE implementation supply the text positions as well. Other processors
+    # (including multimodal models without M-RoPE) use ordinary 1D positions.
+    if processor is None or not hasattr(processor, "get_rope_index"):
         return compute_position_id_with_mask(attention_mask)
 
     multi_modal_kwargs = {
@@ -83,6 +88,10 @@ def compute_position_ids(
         mm_token_type_ids[0][input_ids[0] == processor.image_token_id] = 1
         mm_token_type_ids[0][input_ids[0] == processor.video_token_id] = 2
         multi_modal_kwargs["mm_token_type_ids"] = mm_token_type_ids
+    elif not multi_modal_inputs and "mm_token_type_ids" in inspect.signature(processor.get_rope_index).parameters:
+        # Newer model implementations require modality IDs even for text-only
+        # samples, whose processor payload is empty. Keep older signatures valid.
+        multi_modal_kwargs["mm_token_type_ids"] = torch.zeros_like(input_ids)
 
     vision_position_ids, _ = processor.get_rope_index(
         input_ids=input_ids,

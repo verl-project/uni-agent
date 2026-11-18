@@ -15,6 +15,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path, PurePosixPath
 from typing import Any, ClassVar, Protocol, runtime_checkable
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -28,6 +29,11 @@ from .utils import (
 logger = logging.getLogger(__name__)
 
 _EXECUTABLE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]*$")
+
+# Base64 characters per staged write_file chunk. The kernel caps a single argv
+# entry (MAX_ARG_STRLEN = 32 * page size, 128 KiB on 4 KiB-page hosts), so keep
+# each chunk well below that even after shell quoting overhead.
+_WRITE_FILE_B64_CHUNK_SIZE = 48 * 1024
 
 
 def _to_str(data: str | bytes | None) -> str:
@@ -347,6 +353,16 @@ class Sandbox(abc.ABC):
     provider: ClassVar[str] = ""
     #: Whether this sandbox natively supports a long-lived shell session. False by default.
     supports_shell: ClassVar[bool] = False
+    #: Whether the provider can route in-sandbox HTTP to the SDK worker's upstream.
+    supports_reverse_tunnel: ClassVar[bool] = False
+
+    @classmethod
+    def tunnel_upstream(cls, base_url: str) -> str | None:
+        """Return the provider's upstream address; default to an explicit host:port."""
+        parsed = urlparse(base_url)
+        if not parsed.hostname or not parsed.port:
+            return None
+        return f"{parsed.hostname}:{parsed.port}"
 
     @classmethod
     def from_config(cls, config: SandboxConfig) -> Sandbox:
@@ -464,6 +480,10 @@ class Sandbox(abc.ABC):
         finally:
             await self.stop()
 
+    def _is_fatal_exec_error(self, exc: BaseException) -> bool:
+        """Whether an infrastructure/configuration error must escape exec's result conversion."""
+        return False
+
     # ----- data plane: providers implement the _exec primitive -----
     @abc.abstractmethod
     async def _exec(
@@ -489,6 +509,8 @@ class Sandbox(abc.ABC):
         try:
             return await self._exec(argv, timeout=timeout, workdir=workdir, env=env)
         except Exception as exc:
+            if self._is_fatal_exec_error(exc):
+                raise
             if self._is_timeout_error(exc):
                 return ExecResult(exit_code=-1, stdout="", stderr=f"exec timed out after {timeout}s: {exc}")
             if not await self.is_alive():
@@ -542,14 +564,40 @@ class Sandbox(abc.ABC):
         return base64.b64decode(res.stdout)
 
     async def write_file(self, path: str, content: bytes | str) -> None:
-        """Write ``content`` to ``path`` (floor: ``base64 -d`` over exec)."""
+        """Write ``content`` to ``path`` (floor: ``base64 -d`` over exec).
+
+        Large payloads are staged through a temporary base64 file in chunks:
+        inlining the whole payload as one argv entry fails with E2BIG before
+        the command ever runs.
+        """
         data = content.encode("utf-8") if isinstance(content, str) else content
         b64 = base64.b64encode(data).decode("ascii")
         q = shlex.quote(path)
-        script = f'mkdir -p "$(dirname {q})" && printf %s {shlex.quote(b64)} | base64 -d > {q}'
-        res = await self.exec_shell(script)
-        if res.exit_code != 0:
-            raise RuntimeError(f"write_file {path!r} failed: {res.stderr.strip()}")
+        if len(b64) <= _WRITE_FILE_B64_CHUNK_SIZE:
+            script = f'mkdir -p "$(dirname {q})" && printf %s {shlex.quote(b64)} | base64 -d > {q}'
+            res = await self.exec_shell(script)
+            if res.exit_code != 0:
+                raise RuntimeError(f"write_file {path!r} failed: {res.stderr.strip()}")
+            return
+        # Stage chunks in /tmp, then decode in one shot; a read-only target
+        # directory does not break large writes to a writable file.
+        tmp = shlex.quote(f"/tmp/uni-agent-{uuid.uuid4().hex[:8]}.b64")
+        try:
+            for index, offset in enumerate(range(0, len(b64), _WRITE_FILE_B64_CHUNK_SIZE)):
+                chunk = shlex.quote(b64[offset : offset + _WRITE_FILE_B64_CHUNK_SIZE])
+                redirect = ">" if index == 0 else ">>"
+                prefix = f'mkdir -p "$(dirname {q})" && ' if index == 0 else ""
+                res = await self.exec_shell(f"{prefix}printf %s {chunk} {redirect} {tmp}")
+                if res.exit_code != 0:
+                    raise RuntimeError(f"write_file {path!r} failed: {res.stderr.strip()}")
+            res = await self.exec_shell(f"base64 -d {tmp} > {q}")
+            if res.exit_code != 0:
+                raise RuntimeError(f"write_file {path!r} failed: {res.stderr.strip()}")
+        finally:
+            try:
+                await asyncio.shield(self.exec_shell(f"rm -f {tmp}"))
+            except Exception:
+                logger.warning("write_file failed to clean temp file for %r", path, exc_info=True)
 
     async def upload(self, local_path: Path | str, remote_path: str) -> None:
         """Upload a host file or directory tree into the sandbox.

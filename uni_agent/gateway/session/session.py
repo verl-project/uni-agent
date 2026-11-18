@@ -14,7 +14,13 @@ from typing import Any
 from fastapi import HTTPException
 
 from uni_agent.gateway.session.codec import MessageCodec
-from uni_agent.gateway.session.types import InternalGenerationRequest, SessionHandle, Trajectory
+from uni_agent.gateway.session.types import (
+    AgentContext,
+    InternalGenerationRequest,
+    SessionHandle,
+    Trajectory,
+    UnsupportedMediaError,
+)
 from uni_agent.rl_insight.adapter import start_generation_span
 
 _EMPTY_PREFIX_HASH = hashlib.sha256(b"uni-agent-prefix-v1\0empty").hexdigest()
@@ -95,6 +101,7 @@ class ChainState:
     video_data: list[Any] | None
     last_assistant_start: LastAssistantStart
     updated_seq: int
+    agent_context: AgentContext | None = None
     num_coalesced_requests: int = 0
     rollback_count: int = 0
     rollback_dropped_trainable_tokens_total: int = 0
@@ -159,6 +166,7 @@ class EncodedData:
     mm_processor_kwargs: dict[str, Any]
     capacity_exhausted: bool
     chain_id: int | None
+    agent_context: AgentContext | None = None
     incoming_message_prefix_hashes: list[str] = field(default_factory=list)
     last_assistant_start: LastAssistantStart | None = None
     rollback_applied: bool = False
@@ -257,6 +265,8 @@ class GatewaySession:
         # Same-session requests overlap backend generation and commit in backend
         # completion order. That order also determines which trajectory an optional
         # RewardLoopWorker treats as the session's final scoring input.
+        if "agent_context" in request:
+            request = {**request, "agent_context": request["agent_context"].copy()}
         reserved_chain_id: int | None = None
         request_fingerprint = (
             self._compute_request_fingerprint(request) if self._coalesce_reserved_exact_requests else None
@@ -343,6 +353,9 @@ class GatewaySession:
                 raise RuntimeError("generation input preparation did not produce a request")
 
             try:
+                backend_kwargs = {}
+                if encoded.agent_context is not None and getattr(backend, "supports_agent_context", False) is True:
+                    backend_kwargs["agent_context"] = encoded.agent_context.copy()
                 output = await backend.generate(
                     request_id=self.handle.session_id,
                     prompt_ids=encoded.context_ids,
@@ -350,6 +363,7 @@ class GatewaySession:
                     image_data=encoded.image_data,
                     video_data=encoded.video_data,
                     mm_processor_kwargs=encoded.mm_processor_kwargs,
+                    **backend_kwargs,
                 )
             except ValueError as e:
                 raise HTTPException(status_code=400, detail=str(e)) from e
@@ -550,6 +564,7 @@ class GatewaySession:
             incoming_assistant_count=sum(message["role"] == "assistant" for message in messages),
             tools=tools,
             incoming_message_prefix_hashes=incoming_message_prefix_hashes,
+            agent_context=request.get("agent_context"),
         )
         rollback_applied = False
         rollback_dropped_trainable_tokens = 0
@@ -608,8 +623,7 @@ class GatewaySession:
                 incremental_messages = messages[len(selected_chain.message_history) :]
                 previous_messages = selected_chain.message_history
 
-            new_image_data = None
-            new_video_data = None
+            appended_images = None
             updated_messages = previous_messages + incremental_messages
             merged_token_ids = None
             merged_response_mask = None
@@ -619,8 +633,19 @@ class GatewaySession:
                 self._trajectory_capacity is not None and current_trajectory_length >= self._trajectory_capacity
             )
             if incremental_messages and not capacity_exhausted:
-                new_image_data, new_video_data = await self._codec.extract_multi_modal_data(incremental_messages)
+                self._codec.validate_incremental_media(incremental_messages)
+                appended_images, appended_videos = await self._codec.extract_multi_modal_data(incremental_messages)
+                if appended_videos:
+                    raise UnsupportedMediaError(
+                        "Continuous Token context merging does not currently support incremental video data"
+                    )
                 runtime_token_ids = buffer.prompt_ids + buffer.response_ids
+                # The merge view covers the whole updated conversation, so the
+                # images handed to Continuous Token combine resolved history
+                # with newly extracted images.
+                updated_images = None
+                if image_data is not None or appended_images is not None:
+                    updated_images = [*(image_data or []), *(appended_images or [])]
                 merged_token_ids, merged_response_mask, merged_response_logprobs = self._codec.merge_context_tokens(
                     previous_messages,
                     updated_messages,
@@ -628,8 +653,7 @@ class GatewaySession:
                     buffer.response_mask,
                     buffer.response_logprobs if sampling_params.get("logprobs", False) else None,
                     tools=tools,
-                    image_data=new_image_data,
-                    video_data=new_video_data,
+                    image_data=updated_images,
                 )
                 capacity_exhausted = (
                     self._trajectory_capacity is not None and len(merged_token_ids) >= self._trajectory_capacity
@@ -643,14 +667,10 @@ class GatewaySession:
                 buffer.response_mask = list(merged_response_mask)
                 buffer.response_logprobs = list(merged_response_logprobs or [])
                 self._assert_response_logprob_alignment(buffer)
-                if new_image_data:
+                if appended_images:
                     if image_data is None:
                         image_data = []
-                    image_data.extend(new_image_data)
-                if new_video_data:
-                    if video_data is None:
-                        video_data = []
-                    video_data.extend(new_video_data)
+                    image_data.extend(appended_images)
 
         context_ids = buffer.prompt_ids + buffer.response_ids
         if capacity_exhausted:
@@ -665,6 +685,7 @@ class GatewaySession:
                 mm_processor_kwargs=mm_processor_kwargs,
                 capacity_exhausted=True,
                 chain_id=chain_id,
+                agent_context=request.get("agent_context"),
                 incoming_message_prefix_hashes=list(incoming_message_prefix_hashes),
                 rollback_applied=rollback_applied,
                 rollback_dropped_trainable_tokens=rollback_dropped_trainable_tokens,
@@ -696,6 +717,7 @@ class GatewaySession:
             mm_processor_kwargs=mm_processor_kwargs,
             capacity_exhausted=False,
             chain_id=chain_id,
+            agent_context=request.get("agent_context"),
             incoming_message_prefix_hashes=list(incoming_message_prefix_hashes),
             last_assistant_start=last_assistant_start,
             rollback_applied=rollback_applied,
@@ -708,11 +730,14 @@ class GatewaySession:
         incoming_assistant_count: int,
         tools: list[dict[str, Any]] | None,
         incoming_message_prefix_hashes: list[str],
+        agent_context: AgentContext | None = None,
     ) -> tuple[ChainState, bool] | None:
         ranked_candidates = []
         deepest_rollback_candidates = []
         deepest_rollback_service_value = -1
         for chain in self.active_chains:
+            if chain.agent_context != agent_context:
+                continue
             if chain.chain_id in self.reserved_chain_ids or chain.active_tool_schemas != tools:
                 continue
             assistant_start = chain.last_assistant_start
@@ -894,6 +919,7 @@ class GatewaySession:
                     video_data=self._copy_media_list(encoded.video_data),
                     last_assistant_start=encoded.last_assistant_start,
                     updated_seq=order_seq,
+                    agent_context=encoded.agent_context,
                 )
             )
             return chain_id
@@ -990,6 +1016,8 @@ class GatewaySession:
         # version so the framework falls back instead of tagging None.
         marks = [mark for mark in chain.buffer.generation_versions if mark[0] is not None]
         trajectory_extra_fields: dict[str, Any] = {}
+        if chain.agent_context is not None:
+            trajectory_extra_fields["agent_context"] = chain.agent_context.copy()
         if marks:
             trajectory_extra_fields["min_global_steps"] = min(mark[0] for mark in marks)
             trajectory_extra_fields["max_global_steps"] = max(mark[1] for mark in marks)

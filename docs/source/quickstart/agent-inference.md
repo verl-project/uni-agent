@@ -168,6 +168,9 @@ python examples/inference/parallel_infer_verl.py \
 Important controls:
 
 - `--engine`: rollout backend, either `vllm` or `sglang`.
+- `--engine-kwargs`: optional native backend settings as JSON, such as
+  `--engine sglang --engine-kwargs '{"enable_torch_compile": false}'`.
+  See [advanced engine options](../advanced/inference-engine-options.md) for graph and compilation settings.
 - `--tool-parser`: parser matching the model's chat template.
 - `--tensor-parallel-size`: tensor parallel size of the rollout engine.
 - `--nnodes` and `--n-gpus-per-node`: hardware allocated to the engine.
@@ -224,6 +227,13 @@ ray job submit --no-wait \
 ```
 
 ## Recipes
+
+### Codex (inference only)
+
+The [Codex SWE-bench recipe](https://github.com/verl-project/uni-agent/blob/main/examples/blackbox_recipes/codex_swe_task/README.md)
+runs the pinned native Codex CLI inside an OpenYuanRong sandbox through the
+session's Responses endpoint. Follow its sidecar build, Qwen3.5-9B catalog, data
+preparation and Ray setup steps to run a single-task inference check.
 
 ### Claude Code
 

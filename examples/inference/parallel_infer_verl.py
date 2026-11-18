@@ -1,8 +1,8 @@
-"""Parallel agent inference over a verl-launched engine, through the training path.
+"""Parallel agent inference over a verl-launched engine and agent framework.
 
 Same job as ``parallel_infer_api.py`` (run each row's task, report a score), but verl
-brings the engine up and rollouts flow through the *exact* training stack -- the agent
-framework adapter + TransferQueue (TQ):
+brings the engine up and rollouts flow through the agent framework adapter and
+TransferQueue (TQ):
 
     verl LLMServerManager (vLLM / SGLang)
     ->  AgentFrameworkRolloutAdapter.generate_sequences   (fire-and-forget -> TQ)
@@ -33,6 +33,7 @@ import logging
 import os
 import time
 from collections import defaultdict
+from functools import partial
 from pathlib import Path
 from uuid import uuid4
 
@@ -74,9 +75,22 @@ def _rule(text: str = "", width: int = 50, ch: str = "-") -> str:
     return f"{ch * (pad // 2)} {text} {ch * (pad - pad // 2)}"
 
 
+def _parse_json_object(value: str, *, error_message: str | None = None) -> dict[str, object]:
+    """Parse one CLI JSON object."""
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise argparse.ArgumentTypeError(error_message or f"invalid JSON object: {exc.msg}") from exc
+    if not isinstance(parsed, dict):
+        raise argparse.ArgumentTypeError(error_message or "expected a JSON object")
+    return parsed
+
+
 def init_config(args: argparse.Namespace, *, served_model_name: str):
     """Compose verl's ``ppo_trainer`` config and override the engine + framework knobs."""
     from hydra import compose, initialize_config_dir
+
+    prompt_length = getattr(args, "prompt_length", DEFAULT_PROMPT_LENGTH)
 
     config_dir = str(Path(verl.__file__).resolve().parent / "trainer" / "config")
     with initialize_config_dir(config_dir=config_dir, version_base=None):
@@ -110,9 +124,10 @@ def init_config(args: argparse.Namespace, *, served_model_name: str):
     config.actor_rollout_ref.model.path = os.path.expanduser(args.model_path)
     rollout.name = args.engine
     rollout.mode = "async"
+    rollout.enforce_eager = bool(getattr(args, "enforce_eager", False))
     # Standalone inference has no trainer to broadcast weights.
     rollout.load_format = "auto"
-    rollout.prompt_length = DEFAULT_PROMPT_LENGTH
+    rollout.prompt_length = prompt_length
     rollout.response_length = response_length
     rollout.max_model_len = rollout.prompt_length + rollout.response_length
     rollout.tensor_model_parallel_size = args.tensor_parallel_size
@@ -122,7 +137,17 @@ def init_config(args: argparse.Namespace, *, served_model_name: str):
     rollout.disable_log_stats = False
     rollout.free_cache_engine = False
     OmegaConf.update(config, "actor_rollout_ref.rollout.enable_sleep_mode", False, force_add=True)
-    if args.engine == "vllm":
+    if args.engine == "sglang":
+        from verl.plugin.platform import get_platform
+
+        rollout.skip_tokenizer_init = False
+        sglang_kwargs = {"random_seed": rollout.seed}
+        if get_platform().device_name == "npu":
+            sglang_kwargs.update(device="npu", attention_backend="ascend", enable_memory_saver=False)
+        OmegaConf.update(
+            config, "actor_rollout_ref.rollout.engine_kwargs.sglang", sglang_kwargs, merge=True, force_add=True
+        )
+    elif args.engine == "vllm":
         OmegaConf.update(
             config,
             "actor_rollout_ref.rollout.engine_kwargs.vllm.kv_cache_dtype",
@@ -130,13 +155,38 @@ def init_config(args: argparse.Namespace, *, served_model_name: str):
             force_add=True,
         )
     if getattr(args, "language_model_only", False):
-        if args.engine != "vllm":
-            raise ValueError("--language-model-only is supported only with --engine vllm")
+        if args.engine == "sglang":
+            OmegaConf.update(
+                config,
+                "actor_rollout_ref.rollout.engine_kwargs.sglang.json_model_override_args",
+                json.dumps({"language_model_only": True}),
+                force_add=True,
+            )
+        elif args.engine == "vllm":
+            OmegaConf.update(
+                config, "actor_rollout_ref.rollout.engine_kwargs.vllm.language_model_only", True, force_add=True
+            )
+        else:
+            raise ValueError("--language-model-only is supported only with --engine vllm or sglang")
+    if (apply_chat_template_kwargs := getattr(args, "apply_chat_template_kwargs", None)) is not None:
         OmegaConf.update(
-            config, "actor_rollout_ref.rollout.engine_kwargs.vllm.language_model_only", True, force_add=True
+            config,
+            "data.apply_chat_template_kwargs",
+            dict(apply_chat_template_kwargs),
+            force_add=True,
         )
     if getattr(args, "disable_thinking", False):
         OmegaConf.update(config, "data.apply_chat_template_kwargs.enable_thinking", False, force_add=True)
+
+    engine_kwargs = getattr(args, "engine_kwargs", None)
+    if engine_kwargs:
+        OmegaConf.update(
+            config,
+            f"actor_rollout_ref.rollout.engine_kwargs.{args.engine}",
+            engine_kwargs,
+            merge=True,
+            force_add=True,
+        )
 
     # Gateway tool-call parser: the gateway decodes tool calls from raw tokens, so
     # this must match the model's chat template (the analog of vLLM's
@@ -166,7 +216,7 @@ def init_config(args: argparse.Namespace, *, served_model_name: str):
 
     # Data.
     config.data.return_raw_chat = True
-    config.data.max_prompt_length = DEFAULT_PROMPT_LENGTH
+    config.data.max_prompt_length = prompt_length
     config.data.max_response_length = response_length
 
     return config
@@ -326,6 +376,12 @@ def main() -> None:
         help="Optional path to write a JSON result file (mean rm_score and per-session scores).",
     )
     parser.add_argument(
+        "--prompt-length",
+        type=int,
+        default=os.getenv("PROMPT_LENGTH", str(DEFAULT_PROMPT_LENGTH)),
+        help="Prompt-token budget passed to the verl rollout and data config.",
+    )
+    parser.add_argument(
         "--limit",
         "--max-samples",
         dest="limit",
@@ -342,6 +398,13 @@ def main() -> None:
     parser.add_argument("--temperature", type=float, default=DEFAULT_TEMPERATURE, help="Default sampling temperature.")
     parser.add_argument("--top-p", type=float, default=DEFAULT_TOP_P, help="Default nucleus sampling probability.")
     parser.add_argument("--top-k", type=int, default=-1, help="Default top-k sampling (-1 disables).")
+    parser.add_argument(
+        "--apply-chat-template-kwargs",
+        type=_parse_json_object,
+        default=None,
+        metavar="JSON",
+        help="JSON object assigned to data.apply_chat_template_kwargs for model-specific prompt rendering.",
+    )
     parser.add_argument(
         "--allowed-request-sampling-param-keys",
         nargs="+",
@@ -382,7 +445,18 @@ def main() -> None:
     parser.add_argument(
         "--language-model-only",
         action="store_true",
-        help="Load only the language-model component (required for text-only Qwen3.5 vLLM runs).",
+        help="Load only the language-model component (SGLang uses an HF model-config override).",
+    )
+    parser.add_argument(
+        "--enforce-eager",
+        action="store_true",
+        help="Disable CUDA graph capture in the selected engine.",
+    )
+    parser.add_argument(
+        "--engine-kwargs",
+        type=partial(_parse_json_object, error_message="--engine-kwargs must be a JSON object"),
+        default=None,
+        help="JSON object of native options for the selected engine, merged after backend-specific defaults.",
     )
     parser.add_argument(
         "--disable-thinking",
@@ -413,6 +487,8 @@ def main() -> None:
     )
 
     args = parser.parse_args()
+    if args.prompt_length < 1:
+        parser.error("--prompt-length must be >= 1")
 
     ray.init()
 

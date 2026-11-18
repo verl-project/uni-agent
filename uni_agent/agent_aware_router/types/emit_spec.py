@@ -62,9 +62,7 @@ class EmitKey:
     PROMPT_LEN_SUM: str = "prompt_len_sum"
     INFLIGHT_AVG_TURN: str = "inflight_avg_turn"
     KV_EVICTIONS: str = "kv_evictions"
-    # ── A-class · strategy on_score / on_route (6) ──
-    LOAD: str = "load"
-    S_CACHE: str = "s_cache"
+    # ── A-class · strategy on_score / on_route (4) ──
     AVAIL_RATIO: str = "avail_ratio"
     NEED_RATIO: str = "need_ratio"
     REMAINING_RATIO: str = "remaining_ratio"
@@ -158,16 +156,6 @@ EMIT_SPECS: dict[str, dict[str, Any]] = {
         ),
     },
     # ── A-class histogram · strategy components (per-dispatch × per-replica observe) ──
-    EmitKey.LOAD: {
-        "type": "histogram",
-        "labels": ["replica"],
-        "help": "Prefix-load-aware load score (replica-state component, [0, 1])",
-    },
-    EmitKey.S_CACHE: {
-        "type": "histogram",
-        "labels": ["replica"],
-        "help": "Weighted three-layer prefix cache hit rate (request-replica component, [0, 1])",
-    },
     EmitKey.AVAIL_RATIO: {
         "type": "histogram",
         "labels": ["replica"],

@@ -7,7 +7,7 @@ shape stays OpenAI-like for chat templates.
 
 from __future__ import annotations
 
-from typing import Any, Literal, NotRequired, TypedDict
+from typing import Any, Literal, TypedDict
 
 
 class MalformedRequestError(ValueError):
@@ -117,15 +117,18 @@ class AnthropicMessage(TypedDict):
     content: str | list[AnthropicContentBlock]
 
 
-class AnthropicRequest(TypedDict):
-    model: NotRequired[str]
+class _AnthropicRequestRequired(TypedDict):
     messages: list[AnthropicMessage]
-    system: NotRequired[str | list[AnthropicContentBlock]]
-    tools: NotRequired[list[dict[str, Any]]]
-    tool_choice: NotRequired[str | dict[str, Any]]
-    stream: NotRequired[bool]
-    max_tokens: NotRequired[int]
-    stop_sequences: NotRequired[list[str]]
-    temperature: NotRequired[float]
-    top_p: NotRequired[float]
-    top_k: NotRequired[int]
+
+
+class AnthropicRequest(_AnthropicRequestRequired, total=False):
+    model: str
+    system: str | list[AnthropicContentBlock]
+    tools: list[dict[str, Any]]
+    tool_choice: str | dict[str, Any]
+    stream: bool
+    max_tokens: int
+    stop_sequences: list[str]
+    temperature: float
+    top_p: float
+    top_k: int
