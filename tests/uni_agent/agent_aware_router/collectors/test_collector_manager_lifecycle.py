@@ -126,3 +126,24 @@ def test_stop_attempts_every_collector_and_can_retry_after_failures(monkeypatch,
     manager.stop()
     assert calls == [0, 1, 2, 0, 1, 2]
     assert all(collector.attempts == 2 for collector in collectors.values())
+
+
+def test_metadata_initial_window_finishes_before_other_collectors_start(monkeypatch):
+    calls = []
+
+    class InitialMetadataTransport(RecordingTransport):
+        def wait_initial(self, timeout):
+            calls.append(("initial", timeout))
+            return False
+
+    metadata = Collector(InitialMetadataTransport("metadata", calls), StickyParser())
+    other = Collector(RecordingTransport("events", calls), StickyParser())
+    monkeypatch.setattr(
+        provider_module, "get_collector", lambda name, *args, **kwargs: metadata if name == "vllm_metadata" else other
+    )
+    manager = CollectorManager(CollectorConfig(), ["events"], metadata_servers={"a": "handle"})
+    try:
+        manager.start()
+        assert calls == [("start", "metadata"), ("initial", 5.0), ("start", "events")]
+    finally:
+        manager.stop()

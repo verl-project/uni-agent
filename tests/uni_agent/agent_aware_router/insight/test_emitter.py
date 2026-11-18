@@ -154,6 +154,19 @@ def test_on_route_emits_global_latency_histogram(enabled_emitter: FakeRLInsight)
     assert call["labels"] == {}  # global — no replica label
 
 
+def test_cache_diagnostics_emit_reason_counts_and_capability_state(enabled_emitter: FakeRLInsight):
+    emitter.on_cache_diagnostic("n0", "native_identity", "digest_mismatch", count=3)
+    emitter.on_cache_capability("n0", "native_identity", False)
+    emitter.on_cache_capability("n0", "native_identity", True)
+
+    calls = enabled_emitter.calls
+    assert [(call["method"], call["value"]) for call in calls] == [("counter", 3), ("gauge", 0), ("gauge", 1)]
+    assert calls[0]["name"] == EmitKey.CACHE_DIAGNOSTICS
+    assert calls[0]["labels"] == {"replica": "n0", "stage": "native_identity", "reason": "digest_mismatch"}
+    assert calls[1]["name"] == calls[2]["name"] == EmitKey.CACHE_CAPABILITY_READY
+    assert calls[1]["labels"] == calls[2]["labels"] == {"replica": "n0", "capability": "native_identity"}
+
+
 # ── B-class: on_write by kind ────────────────────────────────────────
 
 

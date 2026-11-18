@@ -25,6 +25,7 @@ from uni_agent.agent_aware_router.collectors import _loop_runner as loop_runner_
 from uni_agent.agent_aware_router.collectors.collector import Collector
 from uni_agent.agent_aware_router.collectors.parse.base import Parser
 from uni_agent.agent_aware_router.collectors.transport.base import Transport
+from uni_agent.agent_aware_router.types.kv_cache import KVCacheUpdate
 
 pytestmark = [pytest.mark.cpu, pytest.mark.level0]
 
@@ -43,6 +44,58 @@ class IdleTransport(Transport):
 class NoopParser(Parser):
     def parse(self, raw_data, replica_id):
         return None
+
+
+def test_kv_write_drains_diagnostics_and_emits_current_capabilities(monkeypatch):
+    from uni_agent.agent_aware_router.collectors import collector as collector_module
+
+    collector = Collector(IdleTransport(), NoopParser())
+    diagnostics, capabilities, writes = [], [], []
+    status = {
+        "a": {
+            "matching": "registered",
+            "gated": True,
+            "native": "paused",
+            "capacity_known": True,
+            "budget_known": False,
+        }
+    }
+    pending = [("a", "native_identity", "digest_mismatch", 2)]
+
+    def drain():
+        rows = list(pending)
+        pending.clear()
+        return rows
+
+    collector._data_store = SimpleNamespace(
+        apply_kv_update=writes.append, drain_cache_diagnostics=drain, get_cache_status=lambda: status
+    )
+    monkeypatch.setattr(
+        collector_module,
+        "emitter",
+        SimpleNamespace(
+            on_cache_diagnostic=lambda *args: diagnostics.append(args),
+            on_cache_capability=lambda *args: capabilities.append(args),
+        ),
+    )
+    update = KVCacheUpdate("a")
+    collector._write_kv_update(update)
+    assert writes == [update] and diagnostics == [("a", "native_identity", "digest_mismatch", 2)]
+    assert capabilities == [
+        ("a", "matching", False),
+        ("a", "native_identity", False),
+        ("a", "capacity", True),
+        ("a", "budget", False),
+    ]
+    collector._write_kv_update(update)
+    assert len(diagnostics) == 1
+    other = Collector(IdleTransport(), NoopParser())
+    other._data_store = collector._data_store
+    status["a"]["gated"] = False
+    other._emit_cache_diagnostics()
+    status["a"]["gated"] = True
+    collector._emit_cache_diagnostics()
+    assert [ready for _, capability, ready in capabilities if capability == "matching"][-1] is False
 
 
 @pytest.mark.parametrize("loop_running", [False, True], ids=["delayed-loop", "running-loop"])
