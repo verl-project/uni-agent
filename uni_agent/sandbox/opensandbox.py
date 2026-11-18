@@ -117,7 +117,10 @@ class OpenSandboxSandbox(Sandbox):
             # create a fresh instance instead of reporting the stale one ready.
             pending = self._destroy_task
             try:
-                await pending
+                # Shielded: a cancel of this start() must not cancel the
+                # retained destroy itself -- later retries would then see a
+                # cancelled teardown they can never complete.
+                await asyncio.shield(pending)
             except Exception:
                 logger.warning(
                     "OpenSandbox destroy failed during start() retry (sandbox %s)",

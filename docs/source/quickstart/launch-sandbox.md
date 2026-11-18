@@ -239,17 +239,14 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
     API key in cleartext, which is only appropriate for trusted local
     connections. The URL scheme covers the management API only -- command and
     filesystem traffic follows `ConnectionConfig.protocol` (default `http`).
-    To encrypt sandbox traffic as well, pass a connection config:
-
-    ```python
-    sandbox_kwargs={
-        "connection_config": ConnectionConfig(protocol="https"),
-    }
-    ```
+    The full configuration below passes `ConnectionConfig(protocol="https")`
+    to encrypt sandbox traffic as well.
 
     Start from an OCI image, or resume a previously created snapshot:
 
     ```python
+    from opensandbox.config import ConnectionConfig
+
     from uni_agent.sandbox import SandboxConfig
 
     config = SandboxConfig(
@@ -260,6 +257,8 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
             "ready_timeout": 120,
             "cpu": 2,
             "memory_gb": 4,
+            # Encrypt command and filesystem traffic, not just the management API.
+            "connection_config": ConnectionConfig(protocol="https"),
             # Optional: cap outbound traffic without setting a process-wide
             # proxy in the training worker. Domain targets match every port;
             # a port restriction needs an IP/CIDR target (and opensandbox>=1.2).

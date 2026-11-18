@@ -599,6 +599,51 @@ async def test_overlapping_stops_share_one_destroy_and_restart_keeps_new_handle(
     assert restarted.destroy_calls == 0  # the old stops must not tear it down
 
 
+@pytest.mark.asyncio
+@pytest.mark.cpu
+@pytest.mark.level0
+async def test_cancelling_restart_does_not_cancel_retained_destroy(fake_opensandbox: _FakeOpensandbox, monkeypatch):
+    # Cancelling a start() that is waiting for the retained destroy must not
+    # cancel the destroy itself: the teardown stays completable and a later
+    # start() creates a fresh sandbox.
+    created = _FakeSDKSandbox()
+    release = asyncio.Event()
+
+    async def slow_destroy():
+        created.destroy_calls += 1
+        await release.wait()
+
+    created.destroy = slow_destroy
+    fake_opensandbox.create_results.append(created)
+    monkeypatch.setenv("SANDBOX_STOP_TIMEOUT", "0.05")
+    sandbox = OpenSandboxSandbox(image="python:3.12")
+
+    async def broken_setup(executable_paths):
+        raise RuntimeError("executable setup failed")
+
+    sandbox._setup_executable_paths = broken_setup
+    with pytest.raises(RuntimeError, match="executable setup failed"):
+        await sandbox.start()  # stop() hits the deadline, handle stays attached
+
+    restart = asyncio.create_task(sandbox.start())
+    # let the restart reach the shielded destroy await
+    await asyncio.sleep(0.05)
+    restart.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await restart
+
+    assert created.destroy_calls == 1  # the destroy task was not cancelled away
+    release.set()
+    await asyncio.sleep(0.05)  # let the retained destroy finish
+
+    async def ok_setup(executable_paths):
+        return None
+
+    sandbox._setup_executable_paths = ok_setup
+    await sandbox.start()
+    assert len(fake_opensandbox.create_calls) == 2  # the restart succeeds afterwards
+
+
 # --------------------------- liveness and timeout recognition ---------------------------
 
 
