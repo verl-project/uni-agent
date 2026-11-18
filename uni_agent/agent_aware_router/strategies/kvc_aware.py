@@ -314,8 +314,8 @@ class KVCacheAwareStrategy:
         yet seen). Returns 0 when unavailable, in which case the caller ranks by
         in-flight request count.
         """
-        for node_id in store.get_metric_node_ids():
-            nblk = store.get_metric(node_id, MetricKey.NUM_GPU_BLOCKS)
+        for replica_id in store.get_metric_replica_ids():
+            nblk = store.get_metric(replica_id, MetricKey.NUM_GPU_BLOCKS)
             if nblk and nblk > 0:
                 block_size = store.get_block_size() or 16
                 return int(nblk) * int(block_size)

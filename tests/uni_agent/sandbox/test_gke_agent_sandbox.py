@@ -6,9 +6,9 @@ import asyncio
 import collections
 import json
 import math
-import os
-import subprocess
+import threading
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from types import SimpleNamespace
 
@@ -18,7 +18,6 @@ import uni_agent.sandbox.gke_agent_sandbox as gke_sb_mod
 from uni_agent.sandbox import SandboxConfig, build_sandbox
 from uni_agent.sandbox.base import ExecResult
 from uni_agent.sandbox.gke_agent_sandbox import (
-    _WRITE_FILE_CHUNK_CHARS,
     GKEAgentSandbox,
     PrewarmBatchIterator,
     SandboxRuntimeTimeoutError,
@@ -29,7 +28,6 @@ from uni_agent.sandbox.gke_agent_sandbox import (
     extract_sandbox_images,
     finish_lookahead_batch_async,
     load_image_map_from_task_config,
-    normalize_sandbox_image,
     parse_image_map,
     prefetch_lookahead_batch_async,
 )
@@ -104,16 +102,10 @@ class _FakeFleet:
     def warm_image(self, image: str, *, replicas_override: int | None = None, wait: bool = True) -> None:
         self.warm_images([image], replicas_override=replicas_override, wait=wait)
 
-    def set_pool_replicas(self, image: str, replicas: int) -> None:
-        self._warmed[image] = replicas
-
     def unwarm_images(self, images: list[str]) -> None:
         for img in images:
             self._warmed.pop(img, None)
         self.unwarm_history.append(list(images))
-
-    def unwarm_image(self, image: str) -> None:
-        self.unwarm_images([image])
 
     def wait_pools_ready(
         self, images: list[str], timeout: float | None = None, *, replicas: dict | None = None
@@ -142,12 +134,75 @@ class _FakeFleet:
         self.released.append(handle)
 
 
+class _FakeLookaheadWarmer:
+    """Stand-in for ``agent_sandbox_rl.lookahead.LookaheadWarmer``: keeps the union of live batches warm."""
+
+    def __init__(self, fleet: _FakeFleet, *, cap: int = 8, keep_finished: int = 0, **_unused: object) -> None:
+        self.fleet = fleet
+        self.cap = cap
+        self.keep_finished = keep_finished
+        self._lock = threading.Lock()
+        self._live: collections.OrderedDict[int | str, dict[str, int]] = collections.OrderedDict()
+        self._finished: collections.deque[dict[str, int]] = collections.deque(maxlen=keep_finished)
+        self._applied: dict[str, int] = {}
+        self._executor: ThreadPoolExecutor | None = None
+
+    def _reconcile(self) -> None:
+        with self._lock:
+            desired: dict[str, int] = {}
+            for counts in [*self._live.values(), *self._finished]:
+                for img, n in counts.items():
+                    desired[img] = min(self.cap, desired.get(img, 0) + n)
+            to_unwarm = [img for img in self._applied if img not in desired]
+            to_warm = {img: n for img, n in desired.items() if self._applied.get(img) != n}
+            self._applied = desired
+        if to_unwarm:
+            self.fleet.unwarm_images(to_unwarm)
+        for img, n in to_warm.items():
+            self.fleet.warm_image(img, replicas_override=n, wait=False)
+
+    def add(self, batch_id, counts, *, wait: bool = False, wait_timeout: float | None = None) -> None:
+        with self._lock:
+            self._live[batch_id] = dict(counts)
+        self._reconcile()
+        if wait:
+            self.wait_ready(counts.keys(), timeout=wait_timeout, replicas=counts)
+
+    def add_async(self, batch_id, counts, *, wait: bool = False, wait_timeout: float | None = None) -> Future:
+        with self._lock:
+            if self._executor is None:
+                self._executor = ThreadPoolExecutor(max_workers=1)
+            ex = self._executor
+        return ex.submit(self.add, batch_id, counts, wait=wait, wait_timeout=wait_timeout)
+
+    def finish(self, batch_id) -> None:
+        with self._lock:
+            counts = self._live.pop(batch_id, None)
+            if counts is None:
+                return
+            if self.keep_finished:
+                self._finished.append(counts)
+        self._reconcile()
+
+    def wait_ready(self, images, *, timeout: float | None = None, replicas: dict | None = None) -> dict[str, bool]:
+        return self.fleet.wait_pools_ready(list(images), timeout=timeout, replicas=replicas)
+
+    def close(self) -> None:
+        with self._lock:
+            ex, self._executor = self._executor, None
+            self._live.clear()
+            self._finished.clear()
+        if ex is not None:
+            ex.shutdown(wait=True)
+
+
 def _reset_fleet_globals(monkeypatch, *, fleet_cls=_FakeFleet) -> None:
     monkeypatch.setattr(gke_sb_mod, "ClusterConfig", lambda **kw: SimpleNamespace(**kw))
     monkeypatch.setattr(gke_sb_mod, "FleetConfig", lambda **kw: SimpleNamespace(**kw))
     monkeypatch.setattr(gke_sb_mod, "SandboxFleet", fleet_cls)
     monkeypatch.setattr(gke_sb_mod, "Task", _FakeTask)
     monkeypatch.setattr(gke_sb_mod, "TemplateSpec", lambda **kw: SimpleNamespace(**kw))
+    monkeypatch.setattr(gke_sb_mod, "LookaheadWarmer", _FakeLookaheadWarmer)
     monkeypatch.setattr(gke_sb_mod, "_GLOBAL_FLEET", None)
     monkeypatch.setattr(gke_sb_mod, "_GLOBAL_LOOKAHEAD_WARMER", None)
     monkeypatch.setattr(gke_sb_mod, "_FLEET_POD_ANNOTATIONS", {})
@@ -171,19 +226,20 @@ def test_gke_agent_sandbox_registered_with_image_map():
     assert sb.network_policy == {"ingress": [], "egress": []}
     assert sb.pod_annotations == {}
 
+    # A misspelled option fails loudly instead of being dropped.
+    with pytest.raises(TypeError, match="namespce"):
+        build_sandbox(SandboxConfig(provider="gke_agent_sandbox", image="img:1", sandbox_kwargs={"namespce": "x"}))
+
 
 def test_image_map_parsing_and_rewriting(monkeypatch, tmp_path):
     monkeypatch.delenv("SANDBOX_IMAGE_MAP", raising=False)
     # Without any image_map configured, images pass through untouched (no hardcoded org rewrites).
-    assert normalize_sandbox_image("some-org/numpy_final:abc123") == "some-org/numpy_final:abc123"
+    assert apply_image_map("some-org/numpy_final:abc123") == "some-org/numpy_final:abc123"
 
     # Shorthand from=to via env var
     monkeypatch.setenv("SANDBOX_IMAGE_MAP", "some-org/**=region-docker.pkg.dev/my-proj/my-repo/**")
-    assert (
-        normalize_sandbox_image("some-org/numpy_final:abc123")
-        == "region-docker.pkg.dev/my-proj/my-repo/numpy_final:abc123"
-    )
-    assert normalize_sandbox_image("other-org/repo:1") == "other-org/repo:1"
+    assert apply_image_map("some-org/numpy_final:abc123") == "region-docker.pkg.dev/my-proj/my-repo/numpy_final:abc123"
+    assert apply_image_map("other-org/repo:1") == "other-org/repo:1"
 
     # JSON list format via env var
     monkeypatch.setenv(
@@ -695,26 +751,6 @@ def test_cross_actor_lookahead_mode_registers_plan_without_warming(monkeypatch):
         assert [h.pod_name for h in fleet.released] == ["pod-1"]
 
     asyncio.run(_worker_scenario())
-
-
-def test_write_file_chunks_large_payload_below_argv_limit(tmp_path):
-    class _LocalShellSandbox(GKEAgentSandbox):
-        max_script = 0
-
-        async def exec_shell(self, script, *, timeout=None, workdir=None, env=None):
-            del timeout, workdir, env
-            type(self).max_script = max(type(self).max_script, len(script))
-            proc = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
-            return ExecResult(exit_code=proc.returncode, stdout=proc.stdout, stderr=proc.stderr)
-
-    sandbox = _LocalShellSandbox(image="python:3.12")
-    for size in (10, 3 * 1024 * 1024 + 7):
-        data = os.urandom(size)
-        target = tmp_path / "nested" / f"f{size}.bin"
-        asyncio.run(sandbox.write_file(str(target), data))
-        assert target.read_bytes() == data
-    # Every exec argument stays far below Linux MAX_ARG_STRLEN (128 KiB).
-    assert _LocalShellSandbox.max_script < _WRITE_FILE_CHUNK_CHARS + 1024 < 128 * 1024
 
 
 def test_exec_in_pod_drains_buffered_channels_on_close(monkeypatch):

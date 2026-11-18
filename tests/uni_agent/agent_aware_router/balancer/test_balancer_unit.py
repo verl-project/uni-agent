@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-from threading import Barrier
+from threading import Barrier, Event
 from types import SimpleNamespace
 
 import httpx
@@ -262,7 +262,60 @@ class TestBalancerProtocol:
             "route_calls": 0,
             "sticky_size": 0,
             "total_inflight": 0,
+            "collectors": [],
         }
+
+    @pytest.mark.parametrize("completion", ["error", "empty-zmq"])
+    def test_status_exposes_completed_subscriptions(self, monkeypatch, caplog, completion):
+        from uni_agent.agent_aware_router.collectors import provider as provider_module
+        from uni_agent.agent_aware_router.collectors.collector import Collector
+        from uni_agent.agent_aware_router.collectors.parse.basic.sticky import StickyParser
+        from uni_agent.agent_aware_router.collectors.provider import CollectorManager
+        from uni_agent.agent_aware_router.collectors.transport.base import Transport
+        from uni_agent.agent_aware_router.collectors.transport.zmq import ZMQTransport
+        from uni_agent.agent_aware_router.config.collector import CollectorConfig
+
+        error = ValueError("subscription failed before serving")
+
+        class FailingTransport(Transport):
+            async def subscribe(self, handler):
+                raise error
+
+            def stop(self):
+                pass
+
+        transport = ZMQTransport({}) if completion == "empty-zmq" else FailingTransport()
+        collector = Collector(transport, StickyParser())
+        monkeypatch.setattr(provider_module, "get_collector", lambda *args, **kwargs: collector)
+        manager = CollectorManager(CollectorConfig(), ["probe"])
+        balancer = KVCAwareBalancer({"a": "server"}, _router_config(), provider_factory=lambda *args, **kwargs: manager)
+        runner = collector._loop_runner
+        try:
+            if completion == "error":
+                with pytest.raises(ValueError) as raised:
+                    runner.subscription_future.result(timeout=1)
+                assert raised.value is error
+            else:
+                assert runner.subscription_future.result(timeout=1) is None
+            barrier = Event()
+            runner.loop.call_soon_threadsafe(barrier.set)
+            assert barrier.wait(1)
+            assert balancer.get_status()["collectors"] == [
+                {
+                    "name": "probe",
+                    "transport": type(transport).__name__,
+                    "subscription": {
+                        "active": False,
+                        "error": "ValueError: subscription failed before serving" if completion == "error" else None,
+                    },
+                    "streams": {},
+                }
+            ]
+            assert runner.thread.is_alive() and balancer.get_all_servers() == ["a"]
+            errors = [record for record in caplog.records if record.name.endswith("._loop_runner") and record.exc_info]
+            assert [record.exc_info[1] for record in errors] == ([error] if completion == "error" else [])
+        finally:
+            manager.stop()
 
     def test_acquire_delegates_and_maps_selected_handle(self, monkeypatch):
         seen = {}

@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -94,3 +95,6 @@ class TestKVCAwareRouterE2E:
         assert "mean rm_score" in log, "run_infer.sh did not complete (no rm_score)"
         assert "inference summary" in log, "run_infer.sh did not finish (no inference summary)"
         assert "load_threshold=0.8" in log, "load-threshold != 0.8, the config not work."
+        assert re.search(r"scored sessions\s+8\s*/\s*8\b", log), "Expected all 8 sessions to be scored"
+        failed_session_counts = re.findall(r"\bnum_failed_sessions=(\d+)\b", log)
+        assert failed_session_counts and all(int(count) == 0 for count in failed_session_counts), "Sessions failed"

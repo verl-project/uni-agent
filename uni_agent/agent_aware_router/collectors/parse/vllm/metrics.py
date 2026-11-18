@@ -71,12 +71,12 @@ class VLLMMetricsParser(Parser):
         # separately in ``parse`` (label-as-value).
     }
 
-    def parse(self, raw_data: bytes | str, node_id: str) -> MetricsUpdate | None:
+    def parse(self, raw_data: bytes | str, replica_id: str) -> MetricsUpdate | None:
         """Parse Prometheus text and return structured metrics.
 
         Args:
             raw_data: HTTP response text (Prometheus exposition format).
-            node_id: Source endpoint identifier.
+            replica_id: Source endpoint identifier.
 
         Returns:
             MetricsUpdate with parsed metrics, or None if parsing failed.
@@ -134,8 +134,8 @@ class VLLMMetricsParser(Parser):
                 value_type = METRIC_SPECS[canonical].get("value_type", float)
                 result[canonical] = value_type(value)
 
-        logger.debug(f"vllm-metrics replica={node_id} polled: {result}")
-        return MetricsUpdate(node_id=node_id, metrics=result)
+        logger.debug(f"vllm-metrics replica={replica_id} polled: {result}")
+        return MetricsUpdate(replica_id=replica_id, metrics=result)
 
     @staticmethod
     def _resolve_canonical(raw_name: str, labels: dict[str, str]) -> str | None:
