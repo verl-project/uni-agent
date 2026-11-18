@@ -33,6 +33,7 @@ dependencies = [
 [project.optional-dependencies]
 modal = ["modal"]
 e2b = ["e2b"]
+opensandbox = ["opensandbox>=1.0"]
 vefaas = ["volcengine-python-sdk", "swe-rex"]
 swebench = ["swebench==4.1.0"]
 insight = ["rl-insight"]

@@ -221,6 +221,55 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
         egress allowlist; a private worker address or `127.0.0.1` is not
         reachable from the E2B cloud.
 
+=== "OpenSandbox"
+
+    **Remote or self-hosted service.** [OpenSandbox](https://github.com/alibaba/opensandbox)
+    provides OS-level isolated sandboxes with a managed control plane.
+
+    Install the SDK and configure the endpoint and API key through environment
+    variables (or pass an `opensandbox.ConnectionConfig` via `sandbox_kwargs.connection_config`):
+
+    ```bash
+    pip install "opensandbox>=1.0"
+    export OPEN_SANDBOX_DOMAIN="<management-endpoint>"
+    export OPEN_SANDBOX_API_KEY="<api-key>"
+    ```
+
+    Start from an OCI image, or resume a previously created snapshot:
+
+    ```python
+    from uni_agent.sandbox import SandboxConfig
+
+    config = SandboxConfig(
+        provider="opensandbox",
+        image="python:3.12",
+        runtime_timeout=3600,
+        executable_paths={"tool": "/opt/tool/bin/tool"},
+        sandbox_kwargs={
+            "ready_timeout": 120,
+            "cpu": 2,
+            "memory_gb": 4,
+            # Optional: cap outbound traffic without setting a process-wide
+            # proxy in the training worker.
+            "network_policy": {
+                "default_action": "deny",
+                "egress": [{"action": "allow", "target": "pypi.org", "ports": [443]}],
+            },
+        },
+    )
+    ```
+
+    The instance lifetime is enforced server-side: `stop()` destroys the
+    sandbox, and a worker that dies before `stop()` still gets the instance
+    reclaimed at `runtime_timeout`. Commands run as native argv on the sandbox
+    (no shell wrapping); a caller-set `timeout` is enforced by the server, and
+    the deadline kill is reported as a command timeout. File operations use the
+    SDK's filesystem API and create parent directories on write. Ports are
+    exposed through the SDK's endpoint service; when an endpoint requires
+    request headers, read them via `sandbox.get_port_endpoint(port)`. Image
+    mounts are not supported -- bake tool images into the sandbox image or use
+    SDK volumes instead.
+
 === "OpenYuanrong"
 
     **Remote or self-hosted service.** [OpenYuanrong](https://docs.openyuanrong.org/zh-cn/latest/index.html) provides elastic sandbox management for distributed agent workloads.

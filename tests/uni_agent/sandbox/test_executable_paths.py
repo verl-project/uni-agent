@@ -114,6 +114,20 @@ def test_e2b_receives_executable_path_overrides_from_config():
 
 @pytest.mark.cpu
 @pytest.mark.level0
+def test_opensandbox_receives_executable_path_overrides_from_config():
+    config = SandboxConfig(
+        provider="opensandbox",
+        image="python:3.12",
+        executable_paths={"claude": "/opt/claude-code/bin/claude"},
+    )
+
+    sandbox = build_sandbox(config)
+
+    assert sandbox.executable_paths == {"claude": "/opt/claude-code/bin/claude"}
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_e2b_defaults_to_root_user():
     from uni_agent.sandbox.e2b import E2BSandbox
 
