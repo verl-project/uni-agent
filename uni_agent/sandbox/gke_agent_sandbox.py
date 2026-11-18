@@ -63,6 +63,10 @@ _WRITE_FILE_CHUNK_CHARS = 64 * 1024
 _DEFAULT_NETWORK_POLICY_MANAGEMENT = "Managed"
 _VALID_NETWORK_POLICY_MODES = ("Managed", "Unmanaged")
 _DENY_ALL_NETWORK_POLICY: dict[str, list[Any]] = {"ingress": [], "egress": []}
+_AGENT_SANDBOX_RL_INSTALL_HINT = (
+    "GKEAgentSandbox requires 'agent_sandbox_rl', which is not installed. "
+    "Install 'uni-agent[gke]' and 'agent-sandbox-rl' (see docs/source/concepts/sandbox.md)."
+)
 
 _AGENT_SANDBOX_EXT_GROUP = "extensions.agents.x-k8s.io"
 _AGENT_SANDBOX_EXT_VERSION = "v1beta1"
@@ -253,12 +257,27 @@ def _resolve_default_pod_annotations(pod_annotations: Mapping[str, str] | None =
     return merged
 
 
+def _getenv_int(name: str, default: int) -> int:
+    raw = (os.getenv(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        raise ValueError(f"{name} must be an integer, got {raw!r}") from None
+
+
+def _require_agent_sandbox_rl() -> None:
+    if ClusterConfig is None or FleetConfig is None or SandboxFleet is None or Task is None:
+        raise ImportError(_AGENT_SANDBOX_RL_INSTALL_HINT)
+
+
 def _resolve_network_policy_management(mode: str | None = None) -> str:
-    resolved = (
-        mode.strip()
-        if isinstance(mode, str) and mode.strip()
-        else os.getenv("SANDBOX_NETWORK_POLICY_MANAGEMENT", _DEFAULT_NETWORK_POLICY_MANAGEMENT).strip()
-    )
+    if isinstance(mode, str) and mode.strip():
+        resolved = mode.strip()
+    else:
+        env_val = (os.getenv("SANDBOX_NETWORK_POLICY_MANAGEMENT") or "").strip()
+        resolved = env_val or _DEFAULT_NETWORK_POLICY_MANAGEMENT
     if resolved not in _VALID_NETWORK_POLICY_MODES:
         raise ValueError(f"network_policy_management must be one of {_VALID_NETWORK_POLICY_MODES}, got {resolved!r}")
     return resolved
@@ -428,11 +447,7 @@ def _get_or_init_fleet_locked(
     global _GLOBAL_FLEET, _RECENT_BATCH_IMAGES, _FLEET_POD_ANNOTATIONS
     if _GLOBAL_FLEET is not None:
         return _GLOBAL_FLEET
-    if ClusterConfig is None or FleetConfig is None or SandboxFleet is None:
-        raise ImportError(
-            "GKEAgentSandbox requires 'agent_sandbox_rl' and 'kubernetes'. "
-            "Install kubernetes/k8s-agent-sandbox (pip install 'uni-agent[gke]') and agent_sandbox_rl."
-        )
+    _require_agent_sandbox_rl()
 
     resolved_annotations = _resolve_default_pod_annotations(pod_annotations)
     resolved_np_mgmt = _resolve_network_policy_management(network_policy_management)
@@ -448,10 +463,10 @@ def _get_or_init_fleet_locked(
     run_id = os.getenv("SANDBOX_RUN_ID", "uni-agent-shared").strip() or None
     default_isolation = "none" if (adopt_existing or run_id in (None, "uni-agent-shared")) else "names"
     run_isolation = os.getenv("SANDBOX_RUN_ISOLATION", default_isolation).strip() or default_isolation
-    max_concurrent = max(1, int(os.getenv("SANDBOX_MAX_CONCURRENT", "512")))
-    max_warmpool_size = max(1, int(os.getenv("SANDBOX_MAX_WARMPOOL_SIZE", "8")))
+    max_concurrent = max(1, _getenv_int("SANDBOX_MAX_CONCURRENT", 512))
+    max_warmpool_size = max(1, _getenv_int("SANDBOX_MAX_WARMPOOL_SIZE", 8))
     colocate_replicas = os.getenv("SANDBOX_COLOCATE_REPLICAS", "1").strip().lower() in ("1", "true", "yes")
-    pinned_batches = max(1, int(os.getenv("SANDBOX_PINNED_BATCHES", "4")))
+    pinned_batches = max(1, _getenv_int("SANDBOX_PINNED_BATCHES", 4))
     _RECENT_BATCH_IMAGES = collections.deque(_RECENT_BATCH_IMAGES, maxlen=pinned_batches)
 
     fleet_kwargs: dict[str, Any] = {
@@ -568,7 +583,7 @@ def _evict_excess_warmpools_locked(fleet: Any) -> list[str]:
         return []
     if getattr(getattr(fleet, "config", None), "adopt_existing", False) or not hasattr(fleet, "unwarm_images"):
         return []
-    max_warm_images = int(os.getenv("SANDBOX_MAX_WARM_IMAGES", "128"))
+    max_warm_images = _getenv_int("SANDBOX_MAX_WARM_IMAGES", 128)
     if max_warm_images <= 0:
         return []
     warmed_map = getattr(fleet, "_warmed", None)
@@ -863,8 +878,7 @@ def ensure_lookahead_batch_warm(
     image_map: Sequence[ImageMap | Mapping[str, Any]] | Mapping[str, Any] | str | None = None,
 ) -> None:
     """Ensure ``batch_id`` is registered and warmed (awaiting any prior background prefetch for ``batch_id``)."""
-    if ClusterConfig is None or FleetConfig is None or SandboxFleet is None or Task is None:
-        return
+    _require_agent_sandbox_rl()
     resolved_ns = _resolve_default_namespace(namespace)
     resolved_sel = _resolve_default_node_selector(node_selector)
     with _FLEET_LOCK:
@@ -914,8 +928,7 @@ def prefetch_lookahead_batch_async(
     image_map: Sequence[ImageMap | Mapping[str, Any]] | Mapping[str, Any] | str | None = None,
 ) -> None:
     """Start warming ``batch_id``'s sandbox pools asynchronously in the background via ``LookaheadWarmer``."""
-    if ClusterConfig is None or FleetConfig is None or SandboxFleet is None or Task is None:
-        return
+    _require_agent_sandbox_rl()
     resolved_ns = _resolve_default_namespace(namespace)
     resolved_sel = _resolve_default_node_selector(node_selector)
     with _FLEET_LOCK:
@@ -1097,8 +1110,7 @@ def prewarm_sandbox_images(
     image_map: Sequence[ImageMap | Mapping[str, Any]] | Mapping[str, Any] | str | None = None,
 ) -> None:
     """Pre-warm a batch of sandbox images in parallel and pin them against LRU eviction."""
-    if ClusterConfig is None or FleetConfig is None or SandboxFleet is None or Task is None:
-        return
+    _require_agent_sandbox_rl()
     if _is_lookahead_mode_enabled():
         return
     normalized = [apply_image_map(img, image_map=image_map) for img in images if img]
@@ -1209,11 +1221,7 @@ def _acquire_from_fleet(
     network_policy_management: str,
     network_policy: dict[str, Any],
 ) -> Any:
-    if Task is None:
-        raise ImportError(
-            "GKEAgentSandbox requires 'agent_sandbox_rl' and 'kubernetes'. "
-            "Install kubernetes/k8s-agent-sandbox (pip install 'uni-agent[gke]') and agent_sandbox_rl."
-        )
+    _require_agent_sandbox_rl()
     task_obj = Task(id=image, image=image, metadata={"ds": {"docker_image": image}})
     with _FLEET_LOCK:
         fleet = _get_or_init_fleet_locked(
