@@ -227,10 +227,10 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
     provides OS-level isolated sandboxes with a managed control plane.
 
     Install the SDK and configure the endpoint and API key through environment
-    variables (or pass an `opensandbox.ConnectionConfig` via `sandbox_kwargs.connection_config`):
+    variables (or pass an `opensandbox.config.ConnectionConfig` via `sandbox_kwargs.connection_config`):
 
     ```bash
-    pip install "opensandbox>=1.0"
+    pip install "opensandbox>=1.2"
     export OPEN_SANDBOX_DOMAIN="<management-endpoint>"
     export OPEN_SANDBOX_API_KEY="<api-key>"
     ```
@@ -244,13 +244,13 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
         provider="opensandbox",
         image="python:3.12",
         runtime_timeout=3600,
-        executable_paths={"tool": "/opt/tool/bin/tool"},
         sandbox_kwargs={
             "ready_timeout": 120,
             "cpu": 2,
             "memory_gb": 4,
             # Optional: cap outbound traffic without setting a process-wide
             # proxy in the training worker.
+            # "ports" restrictions need opensandbox>=1.2; older SDKs ignore them.
             "network_policy": {
                 "default_action": "deny",
                 "egress": [{"action": "allow", "target": "pypi.org", "ports": [443]}],
