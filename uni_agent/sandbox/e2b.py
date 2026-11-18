@@ -6,10 +6,13 @@ import inspect
 import logging
 import re
 import shlex
+import threading
+import time
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
-from .base import ExecResult, Sandbox, _to_str
+from .base import _DEFAULT_STARTUP_TIMEOUT, ExecResult, Sandbox, _env_number, _to_str
 from .registry import register_sandbox
 
 if TYPE_CHECKING:
@@ -35,16 +38,118 @@ def _ensure_template(
     digest = hashlib.sha256(image.encode()).hexdigest()[:12]
     name = f"uni-agent-{slug}-{cpu_count}c-{memory_mb}mb-{digest}"
     connection_kwargs = {"proxy": proxy} if proxy is not None else {}
-    if not e2b.Template.exists(name, **connection_kwargs):
-        e2b.Template.build(
-            e2b.Template().from_image(image),
-            name,
-            cpu_count=cpu_count,
-            memory_mb=memory_mb,
-            on_build_logs=None,
-            **connection_kwargs,
-        )
+
+    # ponytail: the lock only serializes builds within one process. Workers in
+    # other processes may build the same name concurrently; E2B then rejects
+    # all but one alias insert, and the loser waits for the winner below. A
+    # build itself has no deadline beyond the caller's startup timeout, and its
+    # thread keeps running if that caller is cancelled; prebuild templates
+    # before large fan-out (see the E2B sandbox docs).
+    arrived = time.monotonic()
+    with _build_lock(name):
+        failed = _failed_builds.get(name)
+        if failed is not None and failed[0] > arrived:
+            # A build that started after this call arrived just failed; do not
+            # queue another identical build behind it.
+            raise failed[1]
+        if _wait_for_build(name, connection_kwargs) == "ready":
+            return name
+        try:
+            e2b.Template.build(
+                e2b.Template().from_image(image),
+                name,
+                cpu_count=cpu_count,
+                memory_mb=memory_mb,
+                on_build_logs=None,
+                **connection_kwargs,
+            )
+        except Exception as exc:
+            # Another process may have created the alias first and be building it.
+            if _wait_for_build(name, connection_kwargs) == "ready":
+                return name
+            _failed_builds[name] = (time.monotonic(), exc)
+            raise
+        _failed_builds.pop(name, None)
     return name
+
+
+_build_locks: dict[str, threading.Lock] = {}
+_build_locks_guard = threading.Lock()
+_failed_builds: dict[str, tuple[float, BaseException]] = {}
+_BUILD_POLL_INTERVAL = 2.0
+
+
+def _build_lock(name: str) -> threading.Lock:
+    with _build_locks_guard:
+        return _build_locks.setdefault(name, threading.Lock())
+
+
+def _build_status(name: str, connection_kwargs: dict[str, Any]) -> str | None:
+    """Status of the build behind the template's ``default`` tag, or ``None`` if there is none.
+
+    The alias and the ``default`` tag exist as soon as a build is requested, even
+    while it is running or after it failed, so only the build status says whether
+    sandboxes can be created from the template.
+    """
+    import e2b
+
+    template_id = _template_id(name, connection_kwargs)
+    if template_id is None:
+        return None
+    if template_id == "":
+        # The alias belongs to another team; we cannot see its builds.
+        return "ready"
+    build_id = next((t.build_id for t in e2b.Template.get_tags(name, **connection_kwargs) if t.tag == "default"), None)
+    if build_id is None:
+        return None
+    try:
+        status = e2b.Template.get_build_status(
+            SimpleNamespace(template_id=template_id, build_id=build_id), **connection_kwargs
+        ).status
+    except Exception as exc:
+        if "not found" in str(exc).lower():
+            # Right after a build is requested its status can briefly be missing.
+            return "building"
+        raise
+    return str(getattr(status, "value", status)).lower()
+
+
+def _template_id(name: str, connection_kwargs: dict[str, Any]) -> str | None:
+    """Template ID behind alias ``name``; ``None`` if there is no such alias, ``""`` if it is not ours.
+
+    The build-status endpoint needs the template ID; the SDK has no public lookup
+    from name to ID, so this uses the same generated API call as
+    ``Template.exists``.
+    """
+    from e2b.api.client.api.templates import get_templates_aliases_alias
+    from e2b.api.client_sync import get_api_client
+    from e2b.connection_config import ConnectionConfig
+
+    client = get_api_client(ConnectionConfig(**connection_kwargs))
+    res = get_templates_aliases_alias.sync_detailed(alias=name, client=client)
+    if res.status_code == 404:
+        return None
+    if res.status_code == 403:
+        return ""
+    if res.status_code >= 300 or res.parsed is None:
+        raise RuntimeError(f"E2B template alias lookup for {name!r} failed: HTTP {res.status_code}")
+    return str(res.parsed.template_id)
+
+
+def _wait_for_build(name: str, connection_kwargs: dict[str, Any]) -> str | None:
+    """Wait while the template's build is running; return its final status (``None`` if no build).
+
+    Bounded by ``SANDBOX_STARTUP_TIMEOUT``; a value ``<= 0`` disables the bound, as for ``start()``.
+    """
+    timeout = _env_number("SANDBOX_STARTUP_TIMEOUT", _DEFAULT_STARTUP_TIMEOUT)
+    deadline = time.monotonic() + timeout if timeout > 0 else None
+    while True:
+        status = _build_status(name, connection_kwargs)
+        if status not in ("building", "waiting"):
+            return status
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError(f"E2B template {name!r} is still building")
+        time.sleep(_BUILD_POLL_INTERVAL)
 
 
 @register_sandbox("e2b")
