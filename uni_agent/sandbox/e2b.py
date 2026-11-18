@@ -73,6 +73,17 @@ def _ensure_template(
     return name
 
 
+def ensure_template(image: str, cpu_count: int = 2, memory_mb: int = 4096, proxy: str | None = None) -> str:
+    """Build the E2B template that ``E2BSandbox(image=...)`` uses, if it is not ready yet.
+
+    Returns the template name. Call it ahead of a run (for example from
+    ``examples/quickstart/sandbox/prebuild_e2b_templates.py``) so that sandbox
+    startup does not wait for, or race on, first-time template builds. The
+    defaults match ``E2BSandbox``.
+    """
+    return _ensure_template(image, cpu_count, memory_mb, proxy)
+
+
 _build_locks: dict[str, threading.Lock] = {}
 _build_locks_guard = threading.Lock()
 _failed_builds: dict[str, tuple[float, BaseException]] = {}
