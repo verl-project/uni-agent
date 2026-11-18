@@ -60,22 +60,39 @@ On each `acquire_server(request_id, prompt_ids)`, the balancer scores the candid
 The scoring "picks the replica with the most capacity left after this request's prefill, among those that still have spare capacity." The computation is:
 
 ```
-cap          = num_gpu_blocks × block_size                   # first positive poll wins; block_size learned from the first KV event (default 16)
-avail[i]     = cap - inflight_blocks[i] × block_size         # free capacity, from the router's own pin book
-need[i]      = len(prompt_ids) × (1 - gpu_hit[i])            # tokens to recompute at replica i
-remaining[i] = avail[i] - need[i]                            # remaining after assignment
-eligible[i]  = avail[i] >= cap × (1 - load_threshold)        # pure capacity hard gate
-pick         = soft-pick(max remaining among eligible)       # random within a small tie tolerance
+cap[i]       = replica i's allocatable shared-pool blocks
+held[i]      = distinct group-qualified prefix references + private group budgets
+avail[i]     = cap[i] - held[i]
+saved[i]     = common reusable prefix tokens - required replay tokens
+need[i]      = sum((prompt_tokens - saved[i]) / group_block_size for shared groups)
+               + request-private group budgets
+remaining[i] = avail[i] - need[i]
+eligible[i]  = avail[i] >= cap[i] × (1 - load_threshold)
+pick         = soft-pick(max remaining among eligible)
              (no eligible replica → soft-pick min need)
 ```
 
-- `inflight_blocks[i]` is the router's own load account: a per-replica pin book of the KV blocks held by in-flight requests, ref-counted at acquire (pin the request's full-block prefix hashes) and at release (unpin the snapshotted set; a shared prefix block leaves the book when its last holder releases). kv-events carry no request identity, so engine-side residency alone cannot separate "cached and idle" from "held and about to grow" — the pin book is the occupancy signal the router owns synchronously on the acquire/release path. `avail` is deliberately not derived from the polled `kv_cache_usage_perc`: that is an async snapshot with cold-start blind spots, while the pin book is up to date at decision time.
-- `gpu_hit[i]` comes from the per-replica remote→local block-hash index built from kv-events (extended at dispatch time with the request's own prefix), so a returning session is ranked with its real hit rate.
+- The pin book counts physical pool blocks independently of the local hash unit. Shared prefixes are deduplicated within each cache group, while request-private state, including Mamba `align` state, is reserved per request. Bounded attention groups conservatively retain complete prompt-prefix reservations until release. This is a dispatch estimate rather than sampled engine occupancy.
+- Disabling prefix caching keeps capacity routing available for known layouts with usable budgets. Cache savings are zero, and prompt blocks are reserved separately for each request, including requests with identical prompts.
+- Capacity is per replica. The router prefers the native reservation profile's allocatable block count and otherwise uses that replica's normalized `cache_config_info` metric. Replicas with unknown capacity or private budgets are excluded while fully known candidates exist. If no candidate has usable capacity and budgets, the router falls back to least-inflight selection. Another replica's capacity is never borrowed.
+- Cache estimates intersect all required groups using their own Full, Sliding, Chunked or Mamba matching rules. The final prompt token remains available for recomputation. Bounded replay reduces the saved prefill work. Dispatch predictions can contribute provisional cache benefit before native events confirm the corresponding endpoints.
 - Prefill hit rate participates via the `need` term: a replica with a higher hit rate needs fewer recomputed tokens, so `remaining` is larger and it wins among eligible replicas.
 - Load balancing first filters via the pure-capacity hard gate `eligible` — replicas that are full are filtered out and no longer assigned. If no replica passes (all under water), the pick switches to `min need`: deficit magnitudes would dominate a `remaining` ranking (`|avail| ≫ plen`) and drown the cache signal, so the saturated pick is the cheapest assignment instead — the replica where this request recomputes the fewest tokens.
 - Ranking participates via the `avail` term: among eligible replicas, one with higher `avail` has lower load and thus larger `remaining`.
 - The final pick goes through `soft-pick`: among candidates within a small tie tolerance of the best `remaining`, one is drawn at random, spreading new sessions over near-ties instead of stampeding a single replica.
 
+
+### Native hybrid metadata and recovery
+
+The inference entry point registers the metadata-enabled vLLM replica before creating the server manager. Custom verl entry points using this router should call `register_vllm_metadata_replica()` from `uni_agent.agent_aware_router.server` before `LLMServerManager` creation. Install the current uni-agent package in every engine environment so the `uni_agent_native_hash` general plugin is discoverable; an explicit `VLLM_PLUGINS` allowlist must include that name. The engine's reported `native_hash_config.unit` is the authoritative hash granularity, including the effective `prefix_match_unit`. Group metadata describes matching rules, alignment and allocation budgets; missing metadata is never replaced by an inferred Single-Full layout.
+
+The metadata collector waits up to five seconds during startup, then continues recovery in the background without blocking routing. Engine metadata RPCs share a four-second budget. Failed sources retry after 1, 2, 4, 8, 16 and 30 seconds, then every 30 seconds until recovery or removal. There is at most one outstanding metadata call per replica. Successful identical snapshots preserve cache state; a changed source profile rebuilds only the affected replica. Requests dispatched before allocation metadata is available retain an unknown reservation until release, so recovery cannot mistake them for zero occupancy.
+
+Native hash reconstruction is a separate capability from reading the engine's unit. Unsupported reconstruction returns its reason while preserving the unit and usable capacity information. An event with an invalid native digest is rejected and pauses reconstruction only for its source replica; verified shared identities and other replicas remain usable. Background metadata verification can restore that replica without replaying an unchanged profile. `get_status()` exposes cache capabilities and metadata recovery diagnostics; `cache_diagnostics` counters and `cache_capability_ready` gauges distinguish degradation from an actual cache miss. Warnings are emitted on degradation and periodically during persistent failures, with an information log on recovery.
+
+Transport reconnects discard the affected replica's resident index. Estimates and predictions are gated while replay rebuilds it. When the publisher is unavailable, fresh dispatch predictions may resume from an empty view; a new replay gates them again. Native Clear events reset residency while preserving active request reservations and readiness. Explicit full replica cleanup also removes request reservations. Neither operation changes another replica's cache view.
+
+The collector source set is fixed when the balancer is constructed. Initial endpoints may be discovered after startup if a query times out, but an installed address is not replaced. Changes to the routing pool do not change collector subscriptions: a newly added replica has no cache-event source, and replacing an initial replica's server handle requires a new balancer. Same-source reconnect and replay do not require a new balancer.
 
 ### Optional sticky short-circuit (off by default)
 
@@ -84,10 +101,10 @@ The sticky binding maps `request_id → replica_id` and is still recorded on eve
 When re-enabled (the `do_shortcut` strategy knob), a binding hit dispatches the turn straight back to the bound replica. The overload check behind it is a per-replica verdict, not a pool-relative gate:
 
 ```
-avail[i] = cap - inflight_blocks[i] × block_size
-gate[i]  = avail[i] >= cap × (1 - load_threshold)        # ≥ 50% headroom at the default 0.5
+avail[i] = cap[i] - held[i]
+gate[i]  = avail[i] >= cap[i] × (1 - load_threshold)        # ≥ 50% headroom at the default 0.5
 ```
 
 - Bound replica passes the gate → not overloaded → keep sticky.
 - Bound replica under water → overloaded → fall through to capacity-token-aware scoring, unconditionally: the verdict is local to the bound replica, and the routing pool is not consulted.
-- `cap` unknown (first `num_gpu_blocks` poll not in yet) → keep sticky — no gate can be evaluated, so missing data never breaks sticky.
+- `cap[i]` unknown (native and sampled capacity are unavailable) → keep sticky — no gate can be evaluated, so missing data never breaks sticky.

@@ -55,6 +55,11 @@ class HTTPTransport(Transport):
         self._http_timeout = http_timeout
         self._client: httpx.AsyncClient | None = None
 
+    def register_endpoints(self, endpoints: dict[str, str]) -> None:
+        """Install previously undiscovered startup sources on the polling loop."""
+        for replica_id, address in endpoints.items():
+            self._endpoints.setdefault(replica_id, f"http://{address}/metrics")
+
     async def subscribe(self, handler: Callable[[bytes | str, str], None]) -> None:
         """Start the HTTP polling loop — delivers response text to handler."""
         self._client = httpx.AsyncClient(timeout=self._http_timeout, trust_env=False)
