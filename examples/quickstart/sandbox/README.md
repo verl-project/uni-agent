@@ -47,4 +47,8 @@ export E2B_API_KEY="<e2b-api-key>"
 DEBUG_MODE=1 SANDBOX_PROVIDER=e2b IMAGE=python:3.12 python examples/quickstart/sandbox/demo.py
 ```
 
+For datasets with one image per sample, build the templates before the run
+with `prebuild_e2b_templates.py`; see
+[Verify Oracle Solutions](../../../docs/source/quickstart/oracle-verification.md#run-on-e2b).
+
 See the [Launch a Sandbox](../../../docs/source/quickstart/launch-sandbox.md) guide for a step-by-step explanation.

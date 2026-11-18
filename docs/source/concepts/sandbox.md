@@ -24,7 +24,7 @@ sandbox = build_sandbox(config)
 The standard fields are:
 
 - `provider`: registered backend name.
-- `image`: container image used by image-backed providers such as Docker and Modal.
+- `image`: container image used by image-backed providers such as Docker, Modal and E2B.
 - `image_map`: optional rewrite from the dataset image name to the image your cluster can pull (see below).
 - `image_mounts`: optional runtime images mounted into the task sandbox.
 - `executable_paths`: command names mapped to executables supplied by the task or mounted images.

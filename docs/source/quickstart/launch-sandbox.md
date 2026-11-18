@@ -199,7 +199,27 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
     ```
 
     CPU and memory are part of the generated template name. Changing either
-    value builds and uses a separate template.
+    value builds and uses a separate template. When both `template` and
+    `image` are set, `template` is used and `image`, `cpu_count` and
+    `memory_mb` are ignored.
+
+    The first sandbox for a new image waits for its template build. Other
+    sandboxes for the same image wait for that build instead of starting
+    their own, and a failed build is retried by the next sandbox that needs
+    the template. For datasets with one image per sample, such as SWE-Bench,
+    build the templates before the run so that sandbox startup does not
+    include build time:
+
+    ```bash
+    python examples/quickstart/sandbox/prebuild_e2b_templates.py \
+        --data-path ~/data/uni_agent/swe_bench_verified.parquet \
+        --task-config examples/quickstart/oracle/task_config_oracle.yaml \
+        --limit 3
+    ```
+
+    The script resolves each sample the way the runners do, including
+    `image_map` and `sandbox_kwargs`, and skips templates that are already
+    built.
 
     `sandbox_kwargs.proxy` is forwarded to E2B template operations, sandbox
     creation, and subsequent SDK requests. It does not set proxy variables
@@ -211,15 +231,23 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
 
     E2B does not provide OCI image mounts. Build a composite E2B template
     when the task needs a separate runtime image; configuring `image_mounts`
-    is rejected explicitly. `executable_paths` remains available for binaries
-    already present in the selected image or template.
+    raises `NotImplementedError`. `executable_paths` remains available for
+    binaries already present in the selected image or template.
+
+    E2B runs commands through a login shell, so a `PATH` passed in a
+    command's `env` is reset by `/etc/profile`; export `PATH` inside the
+    script instead. When a command times out or is cancelled, the provider
+    kills the command's whole process group, including children started by
+    `exec_shell` scripts; this needs `setsid` in the image (images without it
+    fall back to killing only the command itself).
 
     !!! warning "Gateway reachability"
         Host-side agents such as ReAct only use E2B for tools. Agents launched
         inside the sandbox, such as Claude Code, must be able to reach their
         model endpoint from E2B. Use a routable HTTPS Gateway address and an
         egress allowlist; a private worker address or `127.0.0.1` is not
-        reachable from the E2B cloud.
+        reachable from the E2B cloud. The E2B provider does not support the
+        Gateway reverse tunnel (`sandbox_kwargs.proxy_port`).
 
 === "OpenYuanrong"
 
