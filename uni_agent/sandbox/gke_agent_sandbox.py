@@ -337,10 +337,11 @@ def _is_allow_all_egress_rule(rule: Any) -> bool:
     return not to and not ports
 
 
-def _policy_restricts_egress(policy: Any) -> bool:
+def _egress_isolation(policy: Any) -> tuple[bool, bool]:
+    """Return ``(isolates_egress, allows_all_egress)`` for one NetworkPolicy."""
     spec = policy.get("spec") if isinstance(policy, Mapping) else getattr(policy, "spec", None)
     if spec is None:
-        return False
+        return False, False
     if isinstance(spec, Mapping):
         policy_types = spec.get("policyTypes") or spec.get("policy_types") or []
         egress = spec.get("egress")
@@ -348,12 +349,12 @@ def _policy_restricts_egress(policy: Any) -> bool:
         policy_types = getattr(spec, "policy_types", None) or []
         egress = getattr(spec, "egress", None)
 
-    applies_to_egress = ("Egress" in policy_types) or (egress is not None)
-    if not applies_to_egress:
-        return False
-    if egress and any(_is_allow_all_egress_rule(rule) for rule in egress):
-        return False
-    return True
+    # policyTypes decides the direction. The API server defaults it (Egress only when egress rules exist), so the
+    # same default is applied here to manifests that leave it out.
+    isolates = "Egress" in policy_types if policy_types else bool(egress)
+    if not isolates:
+        return False, False
+    return True, any(_is_allow_all_egress_rule(rule) for rule in egress or [])
 
 
 def _verify_unmanaged_network_policy(namespace: str, pod_labels: Mapping[str, str]) -> None:
@@ -374,6 +375,9 @@ def _verify_unmanaged_network_policy(namespace: str, pod_labels: Mapping[str, st
             "or grant list access on networking.k8s.io/networkpolicies."
         ) from exc
 
+    # NetworkPolicies are additive: a pod may send whatever any policy selecting it allows. So egress is restricted
+    # only if some policy isolates egress for the sandbox pods and none of those policies allows all of it.
+    isolated = allows_all = False
     for policy in policies:
         spec = policy.get("spec") if isinstance(policy, Mapping) else getattr(policy, "spec", None)
         selector = (
@@ -381,10 +385,21 @@ def _verify_unmanaged_network_policy(namespace: str, pod_labels: Mapping[str, st
             if spec is not None
             else None
         )
-        if _pod_selector_covers(selector, pod_labels) and _policy_restricts_egress(policy):
-            return
+        if not _pod_selector_covers(selector, pod_labels):
+            continue
+        policy_isolates, policy_allows_all = _egress_isolation(policy)
+        isolated = isolated or policy_isolates
+        allows_all = allows_all or policy_allows_all
+    if isolated and not allows_all:
+        return
 
     wanted = ",".join(f"{k}={v}" for k, v in sorted(pod_labels.items()))
+    if allows_all:
+        raise RuntimeError(
+            f"Refusing to run with network_policy_management='Unmanaged': a NetworkPolicy in namespace {namespace!r} "
+            f"allows all egress for sandbox pods ({wanted}), which overrides any deny-all policy. Remove that rule "
+            "or use the default network_policy_management='Managed' mode."
+        )
     raise RuntimeError(
         f"Refusing to run with network_policy_management='Unmanaged': no egress-restricting NetworkPolicy in "
         f"namespace {namespace!r} selects sandbox pods ({wanted}). Apply a namespace-wide deny-all NetworkPolicy "
@@ -726,7 +741,10 @@ def _build_image_counts(
     max_replicas: int = 8,
     image_map: Sequence[ImageMap | Mapping[str, Any]] | Mapping[str, Any] | str | None = None,
 ) -> tuple[list[str], dict[str, int]]:
-    normalized = [apply_image_map(img, image_map=image_map) for img in images if img]
+    # Lookahead callers pass final image references (``extract_sandbox_images`` already applied the rules). Mapping
+    # them again would warm a pool the sandbox never claims when rules chain (a -> b, b -> c), so rules are applied
+    # here only when the caller passes them explicitly for raw references.
+    normalized = [apply_image_map(img, image_map=image_map) if image_map is not None else img for img in images if img]
     unique_images = list(dict.fromkeys(normalized))
     per_prompt = max(1, min(int(replicas_override), max_replicas)) if replicas_override is not None else max_replicas
     counts: dict[str, int] = collections.OrderedDict()
@@ -749,7 +767,11 @@ def ensure_lookahead_batch_warm(
     network_policy: Mapping[str, Any] | None = None,
     image_map: Sequence[ImageMap | Mapping[str, Any]] | Mapping[str, Any] | str | None = None,
 ) -> None:
-    """Ensure ``batch_id`` is registered and warmed (awaiting any prior background prefetch for ``batch_id``)."""
+    """Ensure ``batch_id`` is registered and warmed (awaiting any prior background prefetch for ``batch_id``).
+
+    ``images`` are final image references, as ``extract_sandbox_images`` returns them. Pass ``image_map`` only to
+    rewrite raw dataset references here; ``SANDBOX_IMAGE_MAP`` is not applied implicitly.
+    """
     _require_agent_sandbox_rl()
     resolved_ns = _resolve_default_namespace(namespace)
     resolved_sel = _resolve_default_node_selector(node_selector)
@@ -797,7 +819,10 @@ def prefetch_lookahead_batch_async(
     network_policy: Mapping[str, Any] | None = None,
     image_map: Sequence[ImageMap | Mapping[str, Any]] | Mapping[str, Any] | str | None = None,
 ) -> None:
-    """Start warming ``batch_id``'s sandbox pools asynchronously in the background via ``LookaheadWarmer``."""
+    """Start warming ``batch_id``'s sandbox pools asynchronously in the background via ``LookaheadWarmer``.
+
+    ``images`` and ``image_map`` follow the same contract as in ``ensure_lookahead_batch_warm``.
+    """
     _require_agent_sandbox_rl()
     resolved_ns = _resolve_default_namespace(namespace)
     resolved_sel = _resolve_default_node_selector(node_selector)
@@ -1029,18 +1054,20 @@ def _patch_claim_lifecycle(handle: Any, runtime_timeout: float) -> None:
     )
     if custom_api is None or not hasattr(custom_api, "patch_namespaced_custom_object"):
         return
-    shutdown_time = (datetime.now(timezone.utc) + timedelta(seconds=max(1, math.ceil(runtime_timeout)))).strftime(
-        "%Y-%m-%dT%H:%M:%SZ"
-    )
-    body = {
-        "spec": {
-            "lifecycle": {
-                "shutdownTime": shutdown_time,
-                "shutdownPolicy": "Delete",
+    # Everything below is best effort, including building the timestamp (a very long runtime_timeout overflows it):
+    # an error here must not reach the acquire retry loop, which would claim a second sandbox and leak this one.
+    try:
+        shutdown_time = (datetime.now(timezone.utc) + timedelta(seconds=max(1, math.ceil(runtime_timeout)))).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        body = {
+            "spec": {
+                "lifecycle": {
+                    "shutdownTime": shutdown_time,
+                    "shutdownPolicy": "Delete",
+                }
             }
         }
-    }
-    try:
         custom_api.patch_namespaced_custom_object(
             group=_AGENT_SANDBOX_EXT_GROUP,
             version=_AGENT_SANDBOX_EXT_VERSION,
@@ -1145,7 +1172,9 @@ class _GKEStatefulShell:
             f"export -p > {self._env_file} 2>/dev/null || true\n"
             "exit $__ec"
         )
-        res = await self._sandbox.exec(["bash", "-c", wrapped], timeout=timeout, workdir=self.cwd, env=self.env)
+        # No workdir/env here: the wrapper does its own ``cd`` (falling back to / when the directory is missing) and
+        # restores the environment from the saved file, so variables the agent unset stay unset.
+        res = await self._sandbox.exec(["bash", "-c", wrapped], timeout=timeout)
         m = re.search(rf"\n?{re.escape(_PWD_SENTINEL)}:([^\r\n]+)\r?\n?$", res.stdout or "")
         stdout = res.stdout or ""
         if m:
@@ -1303,6 +1332,7 @@ class GKEAgentSandbox(Sandbox):
         wrapped_argv = ["/bin/sh", "-c", f"timeout {timeout_int}s /bin/sh -c {shlex.quote(full_cmd)}"]
 
         api = self._get_core_v1_api()
+        started = time.monotonic()
         resp = k8s_stream(
             api.connect_get_namespaced_pod_exec,
             self._pod_name,
@@ -1345,7 +1375,9 @@ class GKEAgentSandbox(Sandbox):
         exit_code = int(rc) if rc is not None else 0
         stdout_str = "".join(stdout_chunks)
         stderr_str = "".join(stderr_chunks)
-        if exit_code == 124:
+        # ``timeout`` exits 124 when it kills the command, but a command can also exit 124 by itself. Only treat it
+        # as a timeout once the limit has actually passed, so an early 124 keeps its status and output.
+        if exit_code == 124 and time.monotonic() - started >= timeout_int:
             raise TimeoutError(stdout_str or stderr_str or f"Command timed out after {timeout}s")
         return ExecResult(exit_code=exit_code, stdout=stdout_str, stderr=stderr_str)
 
