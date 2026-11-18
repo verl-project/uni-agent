@@ -64,7 +64,7 @@ _DEFAULT_NETWORK_POLICY_MANAGEMENT = "Managed"
 _VALID_NETWORK_POLICY_MODES = ("Managed", "Unmanaged")
 _DENY_ALL_NETWORK_POLICY: dict[str, list[Any]] = {"ingress": [], "egress": []}
 _AGENT_SANDBOX_RL_INSTALL_HINT = (
-    "GKEAgentSandbox requires 'agent_sandbox_rl' and 'kubernetes'. "
+    "GKEAgentSandbox requires 'agent_sandbox_rl', which is not installed. "
     "Install 'uni-agent[gke]' and 'agent-sandbox-rl' (see docs/source/concepts/sandbox.md)."
 )
 
@@ -259,7 +259,12 @@ def _resolve_default_pod_annotations(pod_annotations: Mapping[str, str] | None =
 
 def _getenv_int(name: str, default: int) -> int:
     raw = (os.getenv(name) or "").strip()
-    return int(raw) if raw else default
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        raise ValueError(f"{name} must be an integer, got {raw!r}") from None
 
 
 def _require_agent_sandbox_rl() -> None:

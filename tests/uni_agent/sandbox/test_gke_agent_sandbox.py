@@ -778,6 +778,14 @@ def test_empty_env_vars_fall_back_to_defaults(monkeypatch):
         gke_sb_mod._resolve_network_policy_management()
 
 
+def test_non_integer_env_var_names_the_variable(monkeypatch):
+    monkeypatch.setenv("SANDBOX_MAX_CONCURRENT", "lots")
+    with pytest.raises(ValueError, match="SANDBOX_MAX_CONCURRENT must be an integer, got 'lots'"):
+        gke_sb_mod._getenv_int("SANDBOX_MAX_CONCURRENT", 512)
+    monkeypatch.setenv("SANDBOX_MAX_CONCURRENT", " 64 ")
+    assert gke_sb_mod._getenv_int("SANDBOX_MAX_CONCURRENT", 512) == 64
+
+
 def test_missing_agent_sandbox_rl_raises_clear_import_error(monkeypatch):
     monkeypatch.setattr(gke_sb_mod, "ClusterConfig", None)
     monkeypatch.setattr(gke_sb_mod, "FleetConfig", None)
