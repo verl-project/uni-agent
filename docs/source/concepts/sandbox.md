@@ -101,7 +101,19 @@ await sandbox.download(remote_path, local_path)
 await sandbox.expose_port(port)
 ```
 
-The base class provides portable command, file, and directory-transfer implementations. Providers may override file methods when they have a native data plane. For example, Local uses the host filesystem directly, Docker uses `docker cp`, and Modal uses its filesystem API for absolute paths.
+The base class provides portable command, file, and directory-transfer implementations. Providers may override file methods when they have a native data plane. For example, Local uses the host filesystem directly, Docker uses `docker cp` for file upload/download and stdin for `write_file`, and Modal uses its filesystem API for absolute paths.
+
+Docker `write_file` sends raw bytes through `docker exec -i`, avoiding host command-argument size limits. The task image needs `bash`, `mkdir`, `dirname`, and `cat`. Writes overwrite in place (including through symlinks), preserve existing file permissions, and are not atomic. If a write is cancelled, its Docker client is killed and reaped; the task owner must still call `stop()` to guarantee container-side cleanup. A cancelled or failed write may leave a partial file.
+
+To run the focused real-Docker regressions on Linux with 4 KiB pages:
+
+```bash
+docker pull ubuntu:24.04
+UNI_AGENT_DOCKER_WRITE_IMAGE=ubuntu:24.04 PYTHONPATH=. python -m pytest -q \
+  tests/uni_agent/sandbox/test_docker_write_integration.py
+```
+
+These checks require the normal test dependencies, including `pytest`, `pydantic`, and `jsonschema`; they run containers with networking disabled and remove them on teardown.
 
 ## Error Policy
 

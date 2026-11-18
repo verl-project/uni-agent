@@ -39,14 +39,14 @@ class KVCacheUpdate:
     to write the store.
 
     Attributes:
-        node_id: Target endpoint identifier.
+        replica_id: Target endpoint identifier.
         add_blocks: layer → block hashes accumulated to add.
         remove_blocks: layer → block hashes accumulated to remove.
         clear_all: If True, clear all blocks for this node.
         block_size: Block size learned from the first BlockStored (None until then).
     """
 
-    node_id: str
+    replica_id: str
     add_blocks: dict[Layer, list[str]] = field(default_factory=dict)
     remove_blocks: dict[Layer, list[str]] = field(default_factory=dict)
     clear_all: bool = False
@@ -61,8 +61,10 @@ class KVCacheUpdate:
         self.remove_blocks.setdefault(layer, []).extend(block_hashes)
 
     def clear(self) -> None:
-        """Mark the replica for a full block clear."""
+        """Clear the replica, superseding block operations accumulated so far."""
         self.clear_all = True
+        self.add_blocks.clear()
+        self.remove_blocks.clear()
 
     def set_block_size(self, size: int) -> None:
         """Set the learned block size (first BlockStored wins; set by the parser)."""
@@ -74,7 +76,7 @@ class MetricsUpdate:
     """Structured update command for PerReplicaStore.
 
     Attributes:
-        node_id: Target endpoint identifier.
+        replica_id: Target endpoint identifier.
         metrics: Dict of canonical_key → value.
         is_delta: When ``False`` (default, ``VLLMMetricsParser``) the values
             are absolute gauges applied via ``refresh`` (merge overwrite). When
@@ -86,7 +88,7 @@ class MetricsUpdate:
             (``None`` when the update isn't request-scoped).
     """
 
-    node_id: str
+    replica_id: str
     metrics: dict[str, Any]
     is_delta: bool = False
     request_id: str | None = None
@@ -105,7 +107,7 @@ class InflightBlockUpdate:
     dispatch pinned.
 
     Attributes:
-        node_id: Replica the request landed on — the ``pin`` target;
+        replica_id: Replica the request landed on — the ``pin`` target;
             informational for ``unpin`` / ``stale_unpin`` (whose replica comes
             from the marker row and may be a previous one).
         request_id: The routing request id the command is scoped to.
@@ -116,7 +118,7 @@ class InflightBlockUpdate:
             prefix immediately instead of trailing the kv-event stream.
     """
 
-    node_id: str
+    replica_id: str
     request_id: str
     action: str
     block_hashes: list[str] = field(default_factory=list)
@@ -159,7 +161,7 @@ class Parser(ABC):
 
     @abstractmethod
     def parse(
-        self, raw_data: bytes | str | Any, node_id: str
+        self, raw_data: bytes | str | Any, replica_id: str
     ) -> KVCacheUpdate | MetricsUpdate | StickyUpdate | InflightBlockUpdate | list | None:
         """Parse raw data and return a structured update (or list of them).
 
@@ -167,7 +169,7 @@ class Parser(ABC):
             raw_data: Raw payload — ``bytes`` (from ZMQ) / ``str`` (from HTTP
                 response text) for network transports, or a ``StatisticEvent``
                 for the callback transport (sticky / inflight parsers).
-            node_id: Source endpoint identifier (empty string for the callback
+            replica_id: Source endpoint identifier (empty string for the callback
                 transport — the event carries its own request/replica ids).
 
         Returns:
