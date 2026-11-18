@@ -53,7 +53,7 @@ Install the SDK and point it at an OpenSandbox service:
 
 ```bash
 pip install "opensandbox>=1.2"
-export OPEN_SANDBOX_DOMAIN="<management-endpoint>"
+export OPEN_SANDBOX_DOMAIN="https://<management-endpoint>"
 export OPEN_SANDBOX_API_KEY="<api-key>"
 DEBUG_MODE=1 SANDBOX_PROVIDER=opensandbox IMAGE=python:3.12 python examples/quickstart/sandbox/demo.py
 ```

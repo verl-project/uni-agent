@@ -16,6 +16,7 @@ Covered here:
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import types
 from datetime import timedelta
@@ -431,6 +432,67 @@ async def test_stop_swallows_destroy_failure(fake_opensandbox: _FakeOpensandbox)
 
     assert sdk_sandbox.destroy_calls == 1
     assert sandbox._sandbox is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.cpu
+@pytest.mark.level0
+async def test_cancelled_start_finishes_pending_destroy(fake_opensandbox: _FakeOpensandbox):
+    # The destroy runs shielded: a caller cancel during a pending destroy still
+    # waits for the remote kill, then propagates (the base failed-start cleanup
+    # would otherwise find no handle to retry with).
+    created = _FakeSDKSandbox()
+    release = asyncio.Event()
+
+    async def slow_destroy():
+        created.destroy_calls += 1
+        await release.wait()
+
+    created.destroy = slow_destroy
+    fake_opensandbox.create_results.append(created)
+    sandbox = OpenSandboxSandbox(image="python:3.12")
+
+    async def broken_setup(executable_paths):
+        raise RuntimeError("executable setup failed")
+
+    sandbox._setup_executable_paths = broken_setup
+    task = asyncio.create_task(sandbox.start())
+    while created.destroy_calls == 0:
+        await asyncio.sleep(0.01)
+    task.cancel()
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert created.destroy_calls == 1
+    assert sandbox._sandbox is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.cpu
+@pytest.mark.level0
+async def test_stop_timeout_keeps_handle_for_retry(fake_opensandbox: _FakeOpensandbox, monkeypatch):
+    # Expiry leaves the handle attached so a later stop() can retry; the
+    # server-side lifetime still reclaims the instance meanwhile.
+    created = _FakeSDKSandbox()
+    release = asyncio.Event()
+
+    async def slow_destroy():
+        created.destroy_calls += 1
+        await release.wait()
+
+    created.destroy = slow_destroy
+    fake_opensandbox.create_results.append(created)
+    monkeypatch.setenv("SANDBOX_STOP_TIMEOUT", "0.05")
+    sandbox = OpenSandboxSandbox(image="python:3.12")
+    await sandbox.start()
+
+    await sandbox.stop()  # returns at the bound, without clearing the handle
+    assert sandbox._sandbox is created
+
+    release.set()
+    await sandbox.stop()  # retry completes once destroy finishes
+    assert sandbox._sandbox is None
+    assert created.destroy_calls == 2  # both attempts ran
 
 
 # --------------------------- liveness and timeout recognition ---------------------------
