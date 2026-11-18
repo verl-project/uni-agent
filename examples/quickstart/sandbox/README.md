@@ -58,4 +58,9 @@ export OPEN_SANDBOX_API_KEY="<api-key>"
 DEBUG_MODE=1 SANDBOX_PROVIDER=opensandbox IMAGE=python:3.12 python examples/quickstart/sandbox/demo.py
 ```
 
+The URL scheme covers the management API; command and filesystem traffic
+follows `ConnectionConfig.protocol` (default `http`). Pass
+`sandbox_kwargs.connection_config` with `protocol="https"` to encrypt sandbox
+traffic too.
+
 See the [Launch a Sandbox](../../../docs/source/quickstart/launch-sandbox.md) guide for a step-by-step explanation.
