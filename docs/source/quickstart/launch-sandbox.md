@@ -231,9 +231,13 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
 
     ```bash
     pip install "opensandbox>=1.2"
-    export OPEN_SANDBOX_DOMAIN="<management-endpoint>"
+    export OPEN_SANDBOX_DOMAIN="https://<management-endpoint>"
     export OPEN_SANDBOX_API_KEY="<api-key>"
     ```
+
+    Use an `https://` endpoint: scheme-less or `http://` endpoints send the
+    API key and sandbox traffic in cleartext, which is only appropriate for
+    trusted local connections.
 
     Start from an OCI image, or resume a previously created snapshot:
 
@@ -249,11 +253,11 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
             "cpu": 2,
             "memory_gb": 4,
             # Optional: cap outbound traffic without setting a process-wide
-            # proxy in the training worker.
-            # "ports" restrictions need opensandbox>=1.2; older SDKs ignore them.
+            # proxy in the training worker. Domain targets match every port;
+            # a port restriction needs an IP/CIDR target (and opensandbox>=1.2).
             "network_policy": {
                 "default_action": "deny",
-                "egress": [{"action": "allow", "target": "pypi.org", "ports": [443]}],
+                "egress": [{"action": "allow", "target": "pypi.org"}],
             },
         },
     )

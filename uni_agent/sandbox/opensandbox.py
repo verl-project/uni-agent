@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from .base import ExecResult, Sandbox, _to_str
+from .base import _DEFAULT_STOP_TIMEOUT, ExecResult, Sandbox, _env_number, _to_str
 from .registry import register_sandbox
 
 if TYPE_CHECKING:
@@ -142,15 +143,59 @@ class OpenSandboxSandbox(Sandbox):
             raise
 
     async def stop(self) -> None:
-        sandbox, self._sandbox = self._sandbox, None
-        sandbox_id, self.sandbox_id = self.sandbox_id, None
+        """Destroy the sandbox and release local resources.
+
+        The destroy runs in a retained task shielded from caller cancellation:
+        a cancel during the await still waits for the remote kill to finish
+        before propagating, so the base failed-start cleanup never finds a
+        handle whose destruction it cannot retry. The wait is bounded by
+        ``SANDBOX_STOP_TIMEOUT`` (``<=0`` disables); on expiry the handle stays
+        attached so a later ``stop()`` retries, and the server-side lifetime
+        still reclaims the instance. Destroy failures are logged, not raised.
+        """
+        sandbox = self._sandbox
         if sandbox is None:
             return
-        try:
-            await sandbox.destroy()
-        except Exception as exc:
+        task = asyncio.create_task(self._destroy_sandbox(sandbox))
+        timeout = _env_number("SANDBOX_STOP_TIMEOUT", _DEFAULT_STOP_TIMEOUT)
+        deadline = None if timeout <= 0 else asyncio.get_running_loop().time() + timeout
+        cancelled = False
+        destroy_error: BaseException | None = None
+        while not task.done():
+            remaining = None if deadline is None else deadline - asyncio.get_running_loop().time()
+            if remaining is not None and remaining <= 0:
+                logger.warning(
+                    "OpenSandbox destroy exceeded SANDBOX_STOP_TIMEOUT=%gs (sandbox %s); "
+                    "a later stop() retries and the server-side lifetime still reclaims it",
+                    timeout,
+                    self.sandbox_id or "?",
+                )
+                return
+            try:
+                # wait_for bounds the wait; shield keeps the destroy alive when
+                # the timeout or a caller cancel interrupts the outer await.
+                await asyncio.wait_for(asyncio.shield(task), timeout=remaining)
+            except asyncio.TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                cancelled = True
+            except Exception as exc:
+                destroy_error = exc
+        self._sandbox = None
+        self.sandbox_id = None
+        if destroy_error is None:
+            try:
+                await task
+            except Exception as exc:
+                destroy_error = exc
+        if destroy_error is not None:
             # The server-side lifetime still reclaims the instance if destroy fails.
-            logger.warning("Failed to destroy OpenSandbox sandbox %s: %s", sandbox_id or "?", exc)
+            logger.warning("Failed to destroy OpenSandbox sandbox %s: %s", sandbox.id, destroy_error)
+        if cancelled:
+            raise asyncio.CancelledError()
+
+    async def _destroy_sandbox(self, sandbox: Any) -> None:
+        await sandbox.destroy()
 
     def _require_sandbox(self) -> Any:
         if self._sandbox is None:
