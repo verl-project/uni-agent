@@ -61,6 +61,12 @@ Install the client package for the sandbox backend you plan to use, for example:
     pip install e2b
     ```
 
+=== "OpenSandbox"
+
+    ```bash
+    pip install "opensandbox>=1.0"
+    ```
+
 === "veFaaS"
 
     ```bash

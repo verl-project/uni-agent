@@ -47,4 +47,15 @@ export E2B_API_KEY="<e2b-api-key>"
 DEBUG_MODE=1 SANDBOX_PROVIDER=e2b IMAGE=python:3.12 python examples/quickstart/sandbox/demo.py
 ```
 
+## Run with OpenSandbox
+
+Install the SDK and point it at an OpenSandbox service:
+
+```bash
+pip install "opensandbox>=1.0"
+export OPEN_SANDBOX_DOMAIN="<management-endpoint>"
+export OPEN_SANDBOX_API_KEY="<api-key>"
+DEBUG_MODE=1 SANDBOX_PROVIDER=opensandbox IMAGE=python:3.12 python examples/quickstart/sandbox/demo.py
+```
+
 See the [Launch a Sandbox](../../../docs/source/quickstart/launch-sandbox.md) guide for a step-by-step explanation.
