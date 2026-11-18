@@ -754,3 +754,50 @@ def test_exec_in_pod_drains_buffered_channels_on_close(monkeypatch):
     assert res.stdout == "tail-stdout"
     assert res.stderr == "tail-stderr"
     assert fake_resp.closed is True
+
+
+def test_empty_env_vars_fall_back_to_defaults(monkeypatch):
+    _reset_fleet_globals(monkeypatch)
+    monkeypatch.setenv("SANDBOX_NETWORK_POLICY_MANAGEMENT", "")
+    monkeypatch.setenv("SANDBOX_MAX_CONCURRENT", "   ")
+    monkeypatch.setenv("SANDBOX_MAX_WARMPOOL_SIZE", "")
+    monkeypatch.setenv("SANDBOX_PINNED_BATCHES", "")
+    monkeypatch.setenv("SANDBOX_MAX_WARM_IMAGES", "")
+
+    assert gke_sb_mod._resolve_network_policy_management() == "Managed"
+    assert gke_sb_mod._resolve_network_policy_management("   ") == "Managed"
+
+    fleet = gke_sb_mod._get_or_init_fleet_locked(namespace="default", node_selector=None)
+    assert fleet.config.max_concurrent == 512
+    assert fleet.config.max_warmpool_size == 8
+    assert fleet.config.template.network_policy_management == "Managed"
+    assert gke_sb_mod._getenv_int("SANDBOX_MAX_WARM_IMAGES", 128) == 128
+
+    monkeypatch.setenv("SANDBOX_NETWORK_POLICY_MANAGEMENT", "InvalidMode")
+    with pytest.raises(ValueError, match="network_policy_management must be one of"):
+        gke_sb_mod._resolve_network_policy_management()
+
+
+def test_missing_agent_sandbox_rl_raises_clear_import_error(monkeypatch):
+    monkeypatch.setattr(gke_sb_mod, "ClusterConfig", None)
+    monkeypatch.setattr(gke_sb_mod, "FleetConfig", None)
+    monkeypatch.setattr(gke_sb_mod, "SandboxFleet", None)
+    monkeypatch.setattr(gke_sb_mod, "Task", None)
+    monkeypatch.setattr(gke_sb_mod, "_GLOBAL_FLEET", None)
+
+    for call in (
+        lambda: ensure_lookahead_batch_warm("b0", ["img:1"]),
+        lambda: prefetch_lookahead_batch_async("b0", ["img:1"]),
+        lambda: gke_sb_mod.prewarm_sandbox_images(["img:1"]),
+        lambda: gke_sb_mod._acquire_from_fleet(
+            "img:1",
+            namespace="default",
+            node_selector=None,
+            runtime_timeout=60.0,
+            pod_annotations={},
+            network_policy_management="Managed",
+            network_policy={"ingress": [], "egress": []},
+        ),
+    ):
+        with pytest.raises(ImportError, match="agent-sandbox-rl"):
+            call()

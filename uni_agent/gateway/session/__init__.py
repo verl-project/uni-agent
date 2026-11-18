@@ -6,9 +6,11 @@ serves: trajectory buffering and message encoding/decoding.
 ``InternalGenerationRequest`` is the adapter-to-session request boundary.
 """
 
+# Bind pure-data types before importing .codec (which imports verl and may trigger
+# VERL_USE_EXTERNAL_MODULES hooks that import uni_agent.framework -> Trajectory).
+from .types import AgentContext, InternalGenerationRequest, SessionHandle, Trajectory  # noqa: I001
 from .codec import MessageCodec
 from .session import GatewaySession, TrajectoryBuffer
-from .types import AgentContext, InternalGenerationRequest, SessionHandle, Trajectory
 
 __all__ = [
     "AgentContext",
