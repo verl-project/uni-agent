@@ -180,6 +180,8 @@ def test_sub_or_incomplete_replay_disconnect_retires_the_whole_session(disconnec
     asyncio.run(run())
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_stop_then_publisher_restart_does_not_reuse_the_previous_cursor():
     async def run():
         with _source() as source:
@@ -187,30 +189,24 @@ def test_stop_then_publisher_restart_does_not_reuse_the_previous_cursor():
             transport = _transport(
                 source.endpoints, on_stream_reset=resets.put_nowait, on_stream_ready=ready.put_nowait
             )
-            received, task = _observe(transport)
-            second = None
-            try:
+            async with _subscription(transport) as (received, _):
                 await _next(resets)
                 await _subscribed(source.pub)
                 await _respond(source.router, [(40, b"before stop")])
                 await _next(ready)
                 await _next(received)
-                await _stop(transport, task)
-                assert not transport._replay_cursors
-                source.close_socket("pub")
-                source.close_socket("router")
-                # The stopped transport has no monitor that could observe this restart.
-                source.reopen("pub")
-                source.reopen("router")
-                received, second = _observe(transport)
+            assert not transport._replay_cursors
+            addresses = source.addresses
+
+        # Exiting the old publisher waits for context termination before rebinding.
+        with _source(addresses=addresses) as restarted:
+            async with _subscription(transport) as (received, _):
                 assert await _next(resets) == "a"
-                await _subscribed(source.pub)
-                await _respond(source.router, [(0, b"after restart")])
+                await _subscribed(restarted.pub)
+                await _respond(restarted.router, [(0, b"after restart")])
                 await _next(ready)
                 assert await _next(received) == ("a", b"after restart")
                 assert transport._replay_cursors == {"a": 0}
-            finally:
-                await _stop(transport, second if second is not None else task)
 
     asyncio.run(run())
 
