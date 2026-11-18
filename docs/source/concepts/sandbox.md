@@ -152,6 +152,8 @@ sandbox:
       cloud.google.com/gke-nodepool: sandbox-cpu-pool
 ```
 
+This provider needs Python 3.11 or 3.12, because both client packages below require Python 3.11 or newer.
+
 Install the client dependencies (since `agent-sandbox-rl` is not on PyPI yet, install both client packages from `kubernetes-sigs/agent-sandbox`):
 
 ```bash

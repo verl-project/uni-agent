@@ -6,6 +6,8 @@ import asyncio
 import collections
 import json
 import math
+import shlex
+import subprocess
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
@@ -340,7 +342,7 @@ def test_unmanaged_network_policy_fails_closed_without_namespace_egress_policy(m
         "k8s_client",
         SimpleNamespace(NetworkingV1Api=lambda: _FakeNetApi([allow_all_egress, ingress_only])),
     )
-    with pytest.raises(RuntimeError, match="no egress-restricting NetworkPolicy"):
+    with pytest.raises(RuntimeError, match="allows all egress"):
         asyncio.run(sb.start())
 
     # 3. Namespace-wide deny-all Egress policy selecting app=agent-sandbox-rl -> allowed
@@ -484,6 +486,7 @@ def test_lru_warmpool_eviction_and_epoch2_rewarm(monkeypatch):
     monkeypatch.setenv("SANDBOX_MAX_WARM_IMAGES", "2")
     monkeypatch.setenv("SANDBOX_PINNED_BATCHES", "1")
     monkeypatch.setenv("SANDBOX_MAX_WARMPOOL_SIZE", "8")
+    monkeypatch.delenv("VERL_SANDBOX_LOOKAHEAD", raising=False)  # this test covers the on-demand (non-lookahead) path
 
     _reset_fleet_globals(monkeypatch)
     monkeypatch.setattr(gke_sb_mod, "_RECENT_BATCH_IMAGES", collections.deque(maxlen=1))
@@ -638,7 +641,8 @@ def test_lookahead_iterator_and_just_in_time_eval_pools(monkeypatch):
     _reset_fleet_globals(monkeypatch)
 
     try:
-        eval_imgs = [f"upstream/pillow_final:eval_{i}" for i in range(3)]
+        # Lookahead calls take final image references, as extract_sandbox_images returns them.
+        eval_imgs = extract_sandbox_images([f"upstream/pillow_final:eval_{i}" for i in range(3)])
         eval_pools = [f"mirror.example.com/repo/pillow_final:eval_{i}" for i in range(3)]
 
         batches = [
@@ -845,3 +849,165 @@ def test_missing_agent_sandbox_rl_raises_clear_import_error(monkeypatch):
     ):
         with pytest.raises(ImportError, match="agent-sandbox-rl"):
             call()
+
+
+def _net_policy(*, labels, policy_types, egress):
+    return SimpleNamespace(
+        spec=SimpleNamespace(
+            pod_selector=SimpleNamespace(match_labels=labels, match_expressions=None),
+            policy_types=policy_types,
+            egress=egress,
+        )
+    )
+
+
+def test_unmanaged_network_policy_uses_policy_types_and_combines_policies(monkeypatch):
+    monkeypatch.setattr(gke_sb_mod, "_load_kube_config_once", lambda: None)
+    labels = {"app": "agent-sandbox-rl"}
+    allow_all_rule = SimpleNamespace(to=None, ports=None)
+    deny_all = _net_policy(labels=labels, policy_types=["Ingress", "Egress"], egress=[])
+    allow_all = _net_policy(labels=labels, policy_types=["Egress"], egress=[allow_all_rule])
+    # Declares only Ingress, so Kubernetes ignores its egress list: it does not isolate egress.
+    ingress_only_with_egress_list = _net_policy(labels=labels, policy_types=["Ingress"], egress=[])
+    # Selects other pods, so its allow-all rule does not apply to sandboxes.
+    allow_all_elsewhere = _net_policy(labels={"app": "other"}, policy_types=["Egress"], egress=[allow_all_rule])
+
+    def verify(items):
+        api = SimpleNamespace(list_namespaced_network_policy=lambda namespace: SimpleNamespace(items=items))
+        monkeypatch.setattr(gke_sb_mod, "k8s_client", SimpleNamespace(NetworkingV1Api=lambda: api))
+        gke_sb_mod._verify_unmanaged_network_policy("ns", labels)
+
+    with pytest.raises(RuntimeError, match="no egress-restricting NetworkPolicy"):
+        verify([ingress_only_with_egress_list])
+    # Policies are additive: an allow-all policy on the same pods cancels the deny-all one.
+    with pytest.raises(RuntimeError, match="allows all egress"):
+        verify([deny_all, allow_all])
+    verify([deny_all])
+    verify([deny_all, allow_all_elsewhere, ingress_only_with_egress_list])
+    # Manifest-style dicts without policyTypes follow the Kubernetes default: Egress only if egress rules exist.
+    verify([{"spec": {"podSelector": {}, "egress": [{"to": [{"ipBlock": {"cidr": "10.0.0.0/8"}}]}]}}])
+    with pytest.raises(RuntimeError, match="no egress-restricting NetworkPolicy"):
+        verify([{"spec": {"podSelector": {}, "egress": []}}])
+
+
+def test_lookahead_does_not_map_already_mapped_images_twice(monkeypatch):
+    # Chained rules: mapping twice would turn a/app:1 into c/app:1, while the sandbox claims b/app:1.
+    monkeypatch.setenv("SANDBOX_IMAGE_MAP", "a/**=b/**,b/**=c/**")
+    monkeypatch.setenv("SANDBOX_RUN_ID", "test-chained-map")
+    _reset_fleet_globals(monkeypatch)
+    try:
+        images = extract_sandbox_images(["a/app:1"])
+        assert images == ["b/app:1"]
+        ensure_lookahead_batch_warm("train_step_1", images)
+        fleet = gke_sb_mod._GLOBAL_FLEET
+        assert set(fleet._warmed) == {"b/app:1"}
+
+        sb = GKEAgentSandbox(image="a/app:1")
+        assert sb.image == "b/app:1"
+        asyncio.run(sb.start())  # the fake fleet asserts the claimed image is warm
+        asyncio.run(sb.stop())
+
+        # Raw references are still rewritten when the caller passes the rules explicitly.
+        prefetch_lookahead_batch_async("train_step_2", ["a/app:2"], image_map="a/**=b/**")
+        ensure_lookahead_batch_warm("train_step_2", ["a/app:2"], image_map="a/**=b/**")
+        assert set(fleet._warmed) == {"b/app:1", "b/app:2"}
+    finally:
+        close_lookahead_warmer()
+
+
+class _LocalExecSandbox(GKEAgentSandbox):
+    """Runs the provider's exec wrapper in a local shell: env exports, then ``cd workdir``, then the command."""
+
+    def __init__(self) -> None:
+        super().__init__(image="dummy")
+        self.calls: list[tuple[str | None, dict | None]] = []
+
+    async def _exec(self, argv, *, timeout=None, workdir=None, env=None):
+        del timeout
+        self.calls.append((workdir, env))
+        parts = [f"export {k}={shlex.quote(str(v))}" for k, v in (env or {}).items()]
+        if workdir:
+            parts.append(f"cd {shlex.quote(workdir)}")
+        inner = " ".join(shlex.quote(a) for a in argv)
+        full = (" && ".join(parts) + f" && exec {inner}") if parts else inner
+        proc = subprocess.run(["/bin/sh", "-c", full], capture_output=True, text=True)
+        return ExecResult(exit_code=proc.returncode, stdout=proc.stdout, stderr=proc.stderr)
+
+
+def test_stateful_shell_works_without_testbed_and_keeps_unset_variables(tmp_path):
+    async def _scenario():
+        sb = _LocalExecSandbox()
+        shell = _GKEStatefulShell(sb, env={"FOO": "bar"})
+        assert shell.cwd == "/testbed"  # the default; it does not exist on this machine
+        try:
+            res = await shell.run('echo "$FOO"')
+            assert (res.exit_code, res.stdout.strip()) == (0, "bar")
+            assert shell.cwd == "/"
+
+            res = await shell.run(f"cd {shlex.quote(str(tmp_path))} && unset FOO && export BAR='b c'")
+            assert res.exit_code == 0
+            assert shell.cwd == str(tmp_path)
+
+            res = await shell.run('echo "[${FOO-unset}] [$BAR]"; pwd; exit 7')
+            assert res.exit_code == 7
+            assert res.stdout.splitlines() == ["[unset] [b c]", str(tmp_path)]
+        finally:
+            await shell.close()
+
+    asyncio.run(_scenario())
+
+
+def test_exec_exit_status_124_is_a_timeout_only_at_the_deadline(monkeypatch):
+    class _ClosedResp:
+        def __init__(self):
+            self._channels = {1: "partial output", 2: ""}
+            self.returncode = 124
+
+        def is_open(self):
+            return False
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(gke_sb_mod, "k8s_stream", lambda *args, **kwargs: _ClosedResp())
+    sb = GKEAgentSandbox(image="python:3.12")
+    sb._pod_name = "test-pod"
+    sb._handle = SimpleNamespace(
+        _cluster=SimpleNamespace(exec_core_api=lambda: SimpleNamespace(connect_get_namespaced_pod_exec=object()))
+    )
+
+    # The command itself exited 124 well before the 10 s limit: report it as a normal result.
+    res = sb._exec_in_pod_sync(["sh", "-c", "exit 124"], timeout=10.0, workdir=None, env=None)
+    assert (res.exit_code, res.stdout) == (124, "partial output")
+
+    # Same status once the limit has passed: that is `timeout` killing the command.
+    ticks = iter([0.0] + [1000.0] * 10)
+    monkeypatch.setattr(gke_sb_mod.time, "monotonic", lambda: next(ticks))
+    with pytest.raises(TimeoutError, match="partial output"):
+        sb._exec_in_pod_sync(["sleep", "60"], timeout=10.0, workdir=None, env=None)
+
+
+def test_claim_is_kept_when_the_lifecycle_patch_cannot_be_built(monkeypatch):
+    acquired: list[str] = []
+
+    class _CountingFleet(_FakeFleet):
+        def acquire(self, task, *, pod_annotations=None):
+            acquired.append(task.image)
+            return super().acquire(task, pod_annotations=pod_annotations)
+
+    monkeypatch.delenv("VERL_SANDBOX_LOOKAHEAD", raising=False)
+    _reset_fleet_globals(monkeypatch, fleet_cls=_CountingFleet)
+    monkeypatch.setattr(gke_sb_mod.time, "sleep", lambda seconds: pytest.fail("acquisition was retried"))
+    # A lifetime this long overflows the shutdown timestamp; the TTL patch is best effort, so the claim stands.
+    handle = gke_sb_mod._acquire_from_fleet(
+        "img:1",
+        namespace="default",
+        node_selector=None,
+        runtime_timeout=1e12,
+        pod_annotations={},
+        network_policy_management="Managed",
+        network_policy={"ingress": [], "egress": []},
+    )
+    assert handle.claim_name == "claim-1"
+    assert acquired == ["img:1"]
+    assert gke_sb_mod._GLOBAL_FLEET.custom_api.patches == []
