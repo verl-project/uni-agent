@@ -58,7 +58,7 @@ Install the client package for the sandbox backend you plan to use, for example:
 === "E2B"
 
     ```bash
-    pip install e2b
+    pip install "e2b>=2.26,<3"
     ```
 
 === "veFaaS"
