@@ -236,8 +236,16 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
     ```
 
     Use an `https://` endpoint: scheme-less or `http://` endpoints send the
-    API key and sandbox traffic in cleartext, which is only appropriate for
-    trusted local connections.
+    API key in cleartext, which is only appropriate for trusted local
+    connections. The URL scheme covers the management API only -- command and
+    filesystem traffic follows `ConnectionConfig.protocol` (default `http`).
+    To encrypt sandbox traffic as well, pass a connection config:
+
+    ```python
+    sandbox_kwargs={
+        "connection_config": ConnectionConfig(protocol="https"),
+    }
+    ```
 
     Start from an OCI image, or resume a previously created snapshot:
 

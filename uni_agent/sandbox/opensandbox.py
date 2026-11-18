@@ -94,6 +94,7 @@ class OpenSandboxSandbox(Sandbox):
         self.executable_paths = dict(executable_paths or {})
 
         self._sandbox: Any | None = None
+        self._destroy_task: asyncio.Task | None = None
         self.sandbox_id: str | None = None
 
     @classmethod
@@ -109,7 +110,24 @@ class OpenSandboxSandbox(Sandbox):
     # ----- control plane -----
     async def start(self) -> None:
         if self._sandbox is not None:
-            return
+            if self._destroy_task is None:
+                return
+            # The handle belongs to a sandbox whose teardown was requested (a
+            # stop() that hit SANDBOX_STOP_TIMEOUT): wait for the destroy, then
+            # create a fresh instance instead of reporting the stale one ready.
+            pending = self._destroy_task
+            try:
+                await pending
+            except Exception:
+                logger.warning(
+                    "OpenSandbox destroy failed during start() retry (sandbox %s)",
+                    self.sandbox_id or "?",
+                    exc_info=True,
+                )
+            if self._destroy_task is pending:
+                self._destroy_task = None
+            self._sandbox = None
+            self.sandbox_id = None
         import opensandbox
         from opensandbox.models.sandboxes import NetworkPolicy
 
@@ -150,13 +168,19 @@ class OpenSandboxSandbox(Sandbox):
         before propagating, so the base failed-start cleanup never finds a
         handle whose destruction it cannot retry. The wait is bounded by
         ``SANDBOX_STOP_TIMEOUT`` (``<=0`` disables); on expiry the handle stays
-        attached so a later ``stop()`` retries, and the server-side lifetime
-        still reclaims the instance. Destroy failures are logged, not raised.
+        attached with the destroy in flight -- a later ``stop()`` joins it and
+        ``start()`` waits for it before creating a fresh instance -- while the
+        server-side lifetime still reclaims the instance. Destroy failures are
+        logged, not raised.
         """
         sandbox = self._sandbox
         if sandbox is None:
             return
-        task = asyncio.create_task(self._destroy_sandbox(sandbox))
+        if self._destroy_task is not None and not self._destroy_task.done():
+            task = self._destroy_task  # join the in-flight destroy, don't stack a second one
+        else:
+            task = asyncio.create_task(self._destroy_sandbox(sandbox))
+            self._destroy_task = task
         timeout = _env_number("SANDBOX_STOP_TIMEOUT", _DEFAULT_STOP_TIMEOUT)
         deadline = None if timeout <= 0 else asyncio.get_running_loop().time() + timeout
         cancelled = False
@@ -170,6 +194,8 @@ class OpenSandboxSandbox(Sandbox):
                     timeout,
                     self.sandbox_id or "?",
                 )
+                if cancelled:
+                    raise asyncio.CancelledError()
                 return
             try:
                 # wait_for bounds the wait; shield keeps the destroy alive when
@@ -181,8 +207,11 @@ class OpenSandboxSandbox(Sandbox):
                 cancelled = True
             except Exception as exc:
                 destroy_error = exc
-        self._sandbox = None
-        self.sandbox_id = None
+        if self._sandbox is sandbox:  # a restart must not lose its newer handle
+            self._sandbox = None
+            self.sandbox_id = None
+        if self._destroy_task is task:
+            self._destroy_task = None
         if destroy_error is None:
             try:
                 await task

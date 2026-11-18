@@ -490,9 +490,113 @@ async def test_stop_timeout_keeps_handle_for_retry(fake_opensandbox: _FakeOpensa
     assert sandbox._sandbox is created
 
     release.set()
-    await sandbox.stop()  # retry completes once destroy finishes
+    await sandbox.stop()  # retry joins the in-flight destroy
     assert sandbox._sandbox is None
-    assert created.destroy_calls == 2  # both attempts ran
+    assert created.destroy_calls == 1  # the retry joined, it did not stack a second destroy
+
+
+@pytest.mark.asyncio
+@pytest.mark.cpu
+@pytest.mark.level0
+async def test_cancel_plus_stop_timeout_propagates_cancellation(fake_opensandbox: _FakeOpensandbox, monkeypatch):
+    # A caller cancel followed by deadline expiry must still raise
+    # CancelledError; the handle stays attached so a later stop() can retry.
+    created = _FakeSDKSandbox()
+    release = asyncio.Event()
+
+    async def slow_destroy():
+        created.destroy_calls += 1
+        await release.wait()
+
+    created.destroy = slow_destroy
+    fake_opensandbox.create_results.append(created)
+    monkeypatch.setenv("SANDBOX_STOP_TIMEOUT", "0.05")
+    sandbox = OpenSandboxSandbox(image="python:3.12")
+    await sandbox.start()
+
+    stop_task = asyncio.create_task(sandbox.stop())
+    while created.destroy_calls == 0:
+        await asyncio.sleep(0.01)
+    stop_task.cancel()  # caller gives up while destroy is pending
+    with pytest.raises(asyncio.CancelledError):
+        await stop_task  # deadline expires mid-cancellation: propagate it
+
+    assert sandbox._sandbox is created  # handle kept for the retry
+    release.set()
+    await sandbox.stop()
+    assert sandbox._sandbox is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.cpu
+@pytest.mark.level0
+async def test_start_retry_after_stop_timeout_creates_fresh_sandbox(fake_opensandbox: _FakeOpensandbox, monkeypatch):
+    # __aenter__ retries start() on the same instance; a handle whose teardown
+    # is in flight must not be reported ready -- wait for the destroy, then
+    # create a fresh sandbox.
+    created = _FakeSDKSandbox()
+    release = asyncio.Event()
+
+    async def slow_destroy():
+        created.destroy_calls += 1
+        await release.wait()
+
+    created.destroy = slow_destroy
+    fake_opensandbox.create_results.append(created)
+    monkeypatch.setenv("SANDBOX_STOP_TIMEOUT", "0.05")
+    sandbox = OpenSandboxSandbox(image="python:3.12")
+
+    async def broken_setup(executable_paths):
+        raise RuntimeError("executable setup failed")
+
+    sandbox._setup_executable_paths = broken_setup
+    with pytest.raises(RuntimeError, match="executable setup failed"):
+        await sandbox.start()  # attempt 1: cleanup stop() hits the deadline
+    assert sandbox._sandbox is created  # stale handle kept by the timeout path
+
+    release.set()  # the retained destroy finishes during the backoff
+    await asyncio.sleep(0.05)
+
+    async def ok_setup(executable_paths):
+        return None
+
+    sandbox._setup_executable_paths = ok_setup
+    await sandbox.start()  # attempt 2
+
+    assert len(fake_opensandbox.create_calls) == 2  # a fresh sandbox was created
+    assert sandbox._sandbox is not created
+    assert sandbox._destroy_task is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.cpu
+@pytest.mark.level0
+async def test_overlapping_stops_share_one_destroy_and_restart_keeps_new_handle(fake_opensandbox: _FakeOpensandbox):
+    created = _FakeSDKSandbox()
+    release = asyncio.Event()
+
+    async def slow_destroy():
+        created.destroy_calls += 1
+        await release.wait()
+
+    created.destroy = slow_destroy
+    fake_opensandbox.create_results.append(created)
+    sandbox = OpenSandboxSandbox(image="python:3.12")
+    await sandbox.start()
+
+    stop_a = asyncio.create_task(sandbox.stop())
+    stop_b = asyncio.create_task(sandbox.stop())
+    while created.destroy_calls == 0:
+        await asyncio.sleep(0.01)
+    release.set()
+    await asyncio.gather(stop_a, stop_b)
+    assert sandbox._sandbox is None
+    assert created.destroy_calls == 1  # both stops joined one destroy
+
+    await sandbox.start()  # restart with a fresh sandbox
+    restarted = sandbox._sandbox
+    assert restarted is not created
+    assert restarted.destroy_calls == 0  # the old stops must not tear it down
 
 
 # --------------------------- liveness and timeout recognition ---------------------------
