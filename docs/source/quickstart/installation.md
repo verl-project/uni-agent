@@ -64,7 +64,7 @@ Install the client package for the sandbox backend you plan to use, for example:
 === "OpenSandbox"
 
     ```bash
-    pip install "opensandbox>=1.0"
+    pip install "opensandbox>=1.2"
     ```
 
 === "veFaaS"

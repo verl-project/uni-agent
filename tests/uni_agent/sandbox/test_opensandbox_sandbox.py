@@ -29,9 +29,6 @@ from uni_agent.sandbox.base import ExecResult, Sandbox, SandboxConfig
 from uni_agent.sandbox.opensandbox import OpenSandboxSandbox
 from uni_agent.sandbox.registry import SANDBOX_MODULES, build_sandbox
 
-pytestmark = [pytest.mark.cpu, pytest.mark.level0]
-
-
 # --------------------------- fake opensandbox package ---------------------------
 
 
@@ -65,12 +62,13 @@ def _module(name: str) -> types.ModuleType:
 class _FakeSDKSandbox:
     """Stand-in for an ``opensandbox.Sandbox`` instance (what the provider calls)."""
 
-    def __init__(self, *, sandbox_id: str = "sbx-fake-1"):
+    def __init__(self, *, sandbox_id: str = "sbx-fake-1", protocol: str = "http"):
         self.id = sandbox_id
         self.runs: list[dict] = []
         self.run_error: Exception | None = None
         self.executions: list[object] = []
         self.files = SimpleNamespace(read_bytes=None, write_file=None)
+        self.connection_config = SimpleNamespace(protocol=protocol)
         self.endpoint_answers: dict[int, object] = {}
         self.destroy_calls = 0
         self.destroy_error: Exception | None = None
@@ -177,6 +175,8 @@ def _attach(sandbox: OpenSandboxSandbox, sdk_sandbox: _FakeSDKSandbox) -> _FakeS
 # --------------------------- registry wiring ---------------------------
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_registry_builds_opensandbox_sandbox_from_config():
     config = SandboxConfig(
         provider="opensandbox",
@@ -200,6 +200,8 @@ def test_registry_builds_opensandbox_sandbox_from_config():
     assert OpenSandboxSandbox.exec is Sandbox.exec
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_from_config_accepts_snapshot_id_and_resource_override():
     config = SandboxConfig(
         provider="opensandbox",
@@ -216,11 +218,15 @@ def test_from_config_accepts_snapshot_id_and_resource_override():
 # --------------------------- constructor validation ---------------------------
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_rejects_image_and_snapshot_id_together():
     with pytest.raises(ValueError, match="exactly one of image or snapshot_id"):
         OpenSandboxSandbox(image="python:3.12", snapshot_id="snap-1")
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_requires_image_or_snapshot_id():
     with pytest.raises(ValueError, match="exactly one of image or snapshot_id"):
         OpenSandboxSandbox()
@@ -237,11 +243,15 @@ def test_requires_image_or_snapshot_id():
         {"image": "python:3.12", "memory_gb": 0},
     ],
 )
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_rejects_invalid_budgets(kwargs):
     with pytest.raises(ValueError):
         OpenSandboxSandbox(**kwargs)
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_rejects_image_mounts_explicitly():
     with pytest.raises(NotImplementedError, match="image mounts"):
         OpenSandboxSandbox(image="python:3.12", image_mounts=[{"image": "tools:1", "mount_path": "/opt/tool"}])
@@ -251,6 +261,8 @@ def test_rejects_image_mounts_explicitly():
 
 
 @pytest.mark.asyncio
+@pytest.mark.cpu
+@pytest.mark.level0
 async def test_start_creates_sandbox_from_image_with_budgets(fake_opensandbox: _FakeOpensandbox):
     sandbox = OpenSandboxSandbox(
         image="python:3.12",
@@ -282,6 +294,8 @@ async def test_start_creates_sandbox_from_image_with_budgets(fake_opensandbox: _
 
 
 @pytest.mark.asyncio
+@pytest.mark.cpu
+@pytest.mark.level0
 async def test_start_creates_sandbox_from_snapshot_id(fake_opensandbox: _FakeOpensandbox):
     sandbox = OpenSandboxSandbox(snapshot_id="snap-7")
 
@@ -293,6 +307,8 @@ async def test_start_creates_sandbox_from_snapshot_id(fake_opensandbox: _FakeOpe
 
 
 @pytest.mark.asyncio
+@pytest.mark.cpu
+@pytest.mark.level0
 async def test_start_resource_override_wins_over_cpu_memory(fake_opensandbox: _FakeOpensandbox):
     sandbox = OpenSandboxSandbox(image="python:3.12", cpu=2, memory_gb=4, resource={"cpu": "8", "memory": "32Gi"})
 
@@ -302,6 +318,8 @@ async def test_start_resource_override_wins_over_cpu_memory(fake_opensandbox: _F
 
 
 @pytest.mark.asyncio
+@pytest.mark.cpu
+@pytest.mark.level0
 async def test_start_converts_network_policy_dict(fake_opensandbox: _FakeOpensandbox):
     sandbox = OpenSandboxSandbox(
         image="python:3.12",
@@ -317,6 +335,8 @@ async def test_start_converts_network_policy_dict(fake_opensandbox: _FakeOpensan
 
 
 @pytest.mark.asyncio
+@pytest.mark.cpu
+@pytest.mark.level0
 async def test_start_passes_network_policy_object_through(fake_opensandbox: _FakeOpensandbox):
     policy = _FakeNetworkPolicy(default_action="allow")
     sandbox = OpenSandboxSandbox(image="python:3.12", network_policy=policy)
@@ -327,6 +347,8 @@ async def test_start_passes_network_policy_object_through(fake_opensandbox: _Fak
 
 
 @pytest.mark.asyncio
+@pytest.mark.cpu
+@pytest.mark.level0
 async def test_start_is_idempotent(fake_opensandbox: _FakeOpensandbox):
     sandbox = OpenSandboxSandbox(image="python:3.12")
 
@@ -337,6 +359,8 @@ async def test_start_is_idempotent(fake_opensandbox: _FakeOpensandbox):
 
 
 @pytest.mark.asyncio
+@pytest.mark.cpu
+@pytest.mark.level0
 async def test_start_propagates_create_failure(fake_opensandbox: _FakeOpensandbox):
     fake_opensandbox.create_results.append(RuntimeError("quota exhausted"))
     sandbox = OpenSandboxSandbox(image="python:3.12")
@@ -346,10 +370,34 @@ async def test_start_propagates_create_failure(fake_opensandbox: _FakeOpensandbo
     assert sandbox._sandbox is None
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_start_failure_after_create_destroys_partial_sandbox(fake_opensandbox: _FakeOpensandbox):
+    # A partially set-up sandbox must not survive a failed start(); the handle
+    # would otherwise stay attached and a retry would early-return on it.
+    created = _FakeSDKSandbox()
+    fake_opensandbox.create_results.append(created)
+    sandbox = OpenSandboxSandbox(image="python:3.12")
+
+    async def broken_setup(executable_paths):
+        raise RuntimeError("executable setup failed")
+
+    sandbox._setup_executable_paths = broken_setup
+    with pytest.raises(RuntimeError, match="executable setup failed"):
+        await sandbox.start()
+
+    assert sandbox._sandbox is None
+    assert created.destroy_calls == 1  # the partial sandbox was reclaimed
+    assert fake_opensandbox.create_calls[0]["image"] == "python:3.12"  # create did happen first
+
+
 # --------------------------- stop lifecycle ---------------------------
 
 
 @pytest.mark.asyncio
+@pytest.mark.cpu
+@pytest.mark.level0
 async def test_stop_destroys_and_clears_state(fake_opensandbox: _FakeOpensandbox):
     sandbox = OpenSandboxSandbox(image="python:3.12")
     await sandbox.start()
@@ -363,12 +411,16 @@ async def test_stop_destroys_and_clears_state(fake_opensandbox: _FakeOpensandbox
 
 
 @pytest.mark.asyncio
+@pytest.mark.cpu
+@pytest.mark.level0
 async def test_stop_is_idempotent_before_start():
     sandbox = OpenSandboxSandbox(image="python:3.12")
     await sandbox.stop()  # must not raise
 
 
 @pytest.mark.asyncio
+@pytest.mark.cpu
+@pytest.mark.level0
 async def test_stop_swallows_destroy_failure(fake_opensandbox: _FakeOpensandbox):
     sandbox = OpenSandboxSandbox(image="python:3.12")
     await sandbox.start()
@@ -385,11 +437,15 @@ async def test_stop_swallows_destroy_failure(fake_opensandbox: _FakeOpensandbox)
 
 
 @pytest.mark.asyncio
+@pytest.mark.cpu
+@pytest.mark.level0
 async def test_is_alive_false_before_start():
     assert await OpenSandboxSandbox(image="python:3.12").is_alive() is False
 
 
 @pytest.mark.asyncio
+@pytest.mark.cpu
+@pytest.mark.level0
 async def test_is_alive_follows_health_probe():
     sandbox = OpenSandboxSandbox(image="python:3.12")
     sdk_sandbox = _attach(sandbox, _FakeSDKSandbox())
@@ -402,6 +458,8 @@ async def test_is_alive_follows_health_probe():
     assert await sandbox.is_alive() is False  # must never raise
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_recognizes_sdk_transport_timeout_by_name():
     sandbox = OpenSandboxSandbox(image="python:3.12")
     timeout_type = type("SandboxTimeoutException", (Exception,), {})
@@ -420,6 +478,8 @@ def _setup_exec(sandbox: OpenSandboxSandbox, sdk_sandbox: _FakeSDKSandbox, execu
 
 
 @pytest.mark.asyncio
+@pytest.mark.cpu
+@pytest.mark.level0
 async def test_exec_preserves_zero_and_nonzero_exit_codes():
     sandbox = OpenSandboxSandbox(image="python:3.12")
     sdk_sandbox = _attach(sandbox, _FakeSDKSandbox())
@@ -439,6 +499,8 @@ async def test_exec_preserves_zero_and_nonzero_exit_codes():
 
 
 @pytest.mark.asyncio
+@pytest.mark.cpu
+@pytest.mark.level0
 async def test_exec_forwards_opts_to_sdk():
     sandbox = OpenSandboxSandbox(image="python:3.12")
     sdk_sandbox = _attach(sandbox, _FakeSDKSandbox())
@@ -454,6 +516,8 @@ async def test_exec_forwards_opts_to_sdk():
 
 
 @pytest.mark.asyncio
+@pytest.mark.cpu
+@pytest.mark.level0
 async def test_exec_without_budget_omits_timeout():
     sandbox = OpenSandboxSandbox(image="python:3.12")
     sdk_sandbox = _attach(sandbox, _FakeSDKSandbox())
@@ -467,6 +531,8 @@ async def test_exec_without_budget_omits_timeout():
 
 
 @pytest.mark.asyncio
+@pytest.mark.cpu
+@pytest.mark.level0
 async def test_exec_maps_budgeted_signal_termination_to_timeout():
     # The server kills the command at the caller deadline; execd reports -1.
     sandbox = OpenSandboxSandbox(image="python:3.12")
@@ -482,6 +548,8 @@ async def test_exec_maps_budgeted_signal_termination_to_timeout():
 
 
 @pytest.mark.asyncio
+@pytest.mark.cpu
+@pytest.mark.level0
 async def test_exec_unbudgeted_signal_termination_downgrades_while_alive():
     # No caller budget: the signal came from elsewhere (e.g. OOM) -> 127 while alive.
     sandbox = OpenSandboxSandbox(image="python:3.12")
@@ -496,6 +564,8 @@ async def test_exec_unbudgeted_signal_termination_downgrades_while_alive():
 
 
 @pytest.mark.asyncio
+@pytest.mark.cpu
+@pytest.mark.level0
 async def test_exec_maps_legacy_kill_shape_to_timeout_when_budgeted():
     # Servers predating error.exit_code omit the code and carry "signal: killed".
     sandbox = OpenSandboxSandbox(image="python:3.12")
@@ -510,6 +580,8 @@ async def test_exec_maps_legacy_kill_shape_to_timeout_when_budgeted():
 
 
 @pytest.mark.asyncio
+@pytest.mark.cpu
+@pytest.mark.level0
 async def test_exec_surfaces_lost_results_as_errors():
     sandbox = OpenSandboxSandbox(image="python:3.12")
     sdk_sandbox = _attach(sandbox, _FakeSDKSandbox())
@@ -530,6 +602,8 @@ async def test_exec_surfaces_lost_results_as_errors():
 
 
 @pytest.mark.asyncio
+@pytest.mark.cpu
+@pytest.mark.level0
 async def test_exec_reraises_when_sandbox_died():
     sandbox = OpenSandboxSandbox(image="python:3.12")
     sdk_sandbox = _attach(sandbox, _FakeSDKSandbox())
@@ -545,6 +619,8 @@ async def test_exec_reraises_when_sandbox_died():
 
 
 @pytest.mark.asyncio
+@pytest.mark.cpu
+@pytest.mark.level0
 async def test_read_file_returns_bytes():
     sandbox = OpenSandboxSandbox(image="python:3.12")
     sdk_sandbox = _attach(sandbox, _FakeSDKSandbox())
@@ -560,6 +636,8 @@ async def test_read_file_returns_bytes():
 
 
 @pytest.mark.asyncio
+@pytest.mark.cpu
+@pytest.mark.level0
 async def test_write_file_encodes_strings_and_keeps_bytes():
     sandbox = OpenSandboxSandbox(image="python:3.12")
     sdk_sandbox = _attach(sandbox, _FakeSDKSandbox())
@@ -579,6 +657,8 @@ async def test_write_file_encodes_strings_and_keeps_bytes():
 
 
 @pytest.mark.asyncio
+@pytest.mark.cpu
+@pytest.mark.level0
 async def test_upload_file_streams_local_file(tmp_path: Path):
     sandbox = OpenSandboxSandbox(image="python:3.12")
     sdk_sandbox = _attach(sandbox, _FakeSDKSandbox())
@@ -598,6 +678,8 @@ async def test_upload_file_streams_local_file(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.cpu
+@pytest.mark.level0
 async def test_download_file_creates_local_parents(tmp_path: Path):
     sandbox = OpenSandboxSandbox(image="python:3.12")
     sdk_sandbox = _attach(sandbox, _FakeSDKSandbox())
@@ -616,15 +698,31 @@ async def test_download_file_creates_local_parents(tmp_path: Path):
 
 
 @pytest.mark.asyncio
-async def test_expose_port_normalizes_and_returns_raw_endpoint():
+@pytest.mark.cpu
+@pytest.mark.level0
+async def test_expose_port_uses_connection_protocol_for_scheme_less_endpoints():
+    # Scheme-less endpoints take the connection protocol (http by default), not https.
     sandbox = OpenSandboxSandbox(image="python:3.12")
-    sdk_sandbox = _attach(sandbox, _FakeSDKSandbox())
+    sdk_sandbox = _attach(sandbox, _FakeSDKSandbox(protocol="http"))
+    sdk_sandbox.endpoint_answers = {8080: SimpleNamespace(endpoint="8080.example.svc.cluster.local", headers={})}
+    assert await sandbox.expose_port(8080) == "http://8080.example.svc.cluster.local"
+
+    sandbox = OpenSandboxSandbox(image="python:3.12")
+    sdk_sandbox = _attach(sandbox, _FakeSDKSandbox(protocol="https"))
+    sdk_sandbox.endpoint_answers = {8080: SimpleNamespace(endpoint="8080.example.svc.cluster.local", headers={})}
+    assert await sandbox.expose_port(8080) == "https://8080.example.svc.cluster.local"
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_expose_port_preserves_explicit_schemes_and_returns_raw_endpoint():
+    sandbox = OpenSandboxSandbox(image="python:3.12")
+    sdk_sandbox = _attach(sandbox, _FakeSDKSandbox(protocol="http"))
     sdk_sandbox.endpoint_answers = {
-        8080: SimpleNamespace(endpoint="8080.example.svc.cluster.local", headers={"X-Route": "a"}),
-        9000: SimpleNamespace(endpoint="https://9000.example.svc.cluster.local", headers={}),
+        9000: SimpleNamespace(endpoint="https://9000.example.svc.cluster.local", headers={"X-Route": "a"}),
     }
 
-    assert await sandbox.expose_port(8080) == "https://8080.example.svc.cluster.local"
     assert await sandbox.expose_port(9000) == "https://9000.example.svc.cluster.local"
-    endpoint = await sandbox.get_port_endpoint(8080)
+    endpoint = await sandbox.get_port_endpoint(9000)
     assert endpoint.headers == {"X-Route": "a"}

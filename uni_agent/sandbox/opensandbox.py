@@ -132,7 +132,14 @@ class OpenSandboxSandbox(Sandbox):
             create_kwargs["snapshot_id"] = self.snapshot_id
         self._sandbox = await opensandbox.Sandbox.create(**create_kwargs)
         self.sandbox_id = str(self._sandbox.id)
-        await self._setup_executable_paths(self.executable_paths)
+        try:
+            await self._setup_executable_paths(self.executable_paths)
+        except BaseException:
+            # A partially set-up sandbox must not survive a failed start(): the
+            # next start() would early-return on the attached-but-unready handle.
+            # __aenter__'s failed-start cleanup becomes a no-op after this.
+            await self.stop()
+            raise
 
     async def stop(self) -> None:
         sandbox, self._sandbox = self._sandbox, None
@@ -233,10 +240,19 @@ class OpenSandboxSandbox(Sandbox):
         return await self.get_port_url(port)
 
     async def get_port_url(self, port: int) -> str:
-        """Return the host-reachable URL for an in-sandbox ``port``."""
+        """Return the host-reachable URL for an in-sandbox ``port``.
+
+        Scheme-less endpoints (what the SDK returns for host:port addresses)
+        take the scheme of the active connection (``http`` by default), not a
+        hardcoded https; endpoints that already carry a scheme pass through.
+        """
         endpoint = await self.get_port_endpoint(port)
         url = str(getattr(endpoint, "endpoint", endpoint))
-        return url if "://" in url else f"https://{url}"
+        if "://" in url:
+            return url
+        connection = getattr(self._require_sandbox(), "connection_config", None)
+        protocol = str(getattr(connection, "protocol", "") or "http")
+        return f"{protocol}://{url}"
 
     async def get_port_endpoint(self, port: int) -> Any:
         """Return the raw SDK endpoint (URL plus any required request headers)."""
