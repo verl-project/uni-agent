@@ -23,14 +23,21 @@ _KILL_TIMEOUT = 10.0
 def _session_command(argv: list[str]) -> str:
     """Shell command that runs ``argv`` as the leader of a new session.
 
-    E2B runs command strings through a shell and does not start a new process
-    group. ``exec`` replaces that shell with the requested process, keeping the
-    pid the SDK handle reports; ``setsid`` then makes that pid a session and
-    process-group leader (the shell is not a group leader, so ``setsid`` does
-    not fork). Images without ``setsid`` fall back to a plain ``exec``.
+    E2B runs command strings through a Bash shell and does not start a new
+    process group. ``exec`` replaces that shell with the requested process,
+    keeping the pid the SDK handle reports; ``setsid`` then makes that pid a
+    session and process-group leader (the shell is not a group leader, so
+    ``setsid`` does not fork). ``setsid`` runs ``argv`` through ``bash -c 'exec
+    "$@"'`` so that scripts without a shebang still run under Bash, as they do
+    with a plain ``exec`` in Bash, rather than under ``/bin/sh``. Images without
+    ``setsid`` fall back to a plain ``exec``.
     """
     quoted = shlex.join(argv)
-    return f"if command -v setsid >/dev/null 2>&1; then exec setsid {quoted}; else exec {quoted}; fi"
+    return (
+        "if command -v setsid >/dev/null 2>&1; "
+        f"then exec setsid bash -c 'exec \"$@\"' bash {quoted}; "
+        f"else exec {quoted}; fi"
+    )
 
 
 def _ensure_template(
@@ -249,21 +256,20 @@ class E2BSandbox(Sandbox):
         kill also covers children that switched user.
         """
 
-        async def _kill() -> None:
-            try:
-                await self._require_sandbox().commands.run(
+        try:
+            await asyncio.wait_for(
+                self._require_sandbox().commands.run(
                     f"kill -KILL -- -{int(handle.pid)} 2>/dev/null || true",
                     user="root",
                     timeout=_KILL_TIMEOUT,
                     request_timeout=_KILL_TIMEOUT,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "Failed to kill E2B process group %s in sandbox %s: %s", handle.pid, self.sandbox_id, exc
-                )
-            await handle.kill()
-
-        await asyncio.wait_for(_kill(), timeout=2 * _KILL_TIMEOUT)
+                ),
+                timeout=_KILL_TIMEOUT,
+            )
+        except Exception as exc:
+            logger.warning("Failed to kill E2B process group %s in sandbox %s: %s", handle.pid, self.sandbox_id, exc)
+        # Kill the leader as well, also when the group kill failed or stalled.
+        await asyncio.wait_for(handle.kill(), timeout=_KILL_TIMEOUT)
 
     async def read_file(self, path: str) -> bytes:
         data = await self._require_sandbox().files.read(
