@@ -182,7 +182,7 @@ def _normalize_message(message: Any) -> dict[str, Any]:
         if not isinstance(name, str):
             raise MalformedRequestError("message.name must be a string")
         normalized["name"] = name
-    if "tool_calls" in message:
+    if message.get("tool_calls") is not None:
         normalized["tool_calls"] = _normalize_tool_calls(message["tool_calls"])
     if "tool_call_id" in message:
         normalized["tool_call_id"] = str(message["tool_call_id"])
