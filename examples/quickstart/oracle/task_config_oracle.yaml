@@ -21,3 +21,9 @@
   sandbox:
     provider: modal
     runtime_timeout: 3600
+
+- name: r2e_gym
+  run_oracle_solution: true
+  sandbox:
+    provider: modal
+    runtime_timeout: 3600

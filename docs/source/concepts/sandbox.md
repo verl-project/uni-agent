@@ -171,6 +171,27 @@ Key behaviors and options:
 
 See `examples/quickstart/training/task_config_react_gke.yaml` for a full ReAct training config.
 
+To [verify oracle solutions](../quickstart/oracle-verification.md) on this provider, select it with `SANDBOX_PROVIDER` and give the run its own ID:
+
+```bash
+export SANDBOX_PROVIDER=gke_agent_sandbox
+export SANDBOX_RUN_ID="oracle-$(date +%m%d-%H%M%S)"
+export SANDBOX_MAX_WARMPOOL_SIZE=1  # each oracle sample claims one sandbox for its image
+python examples/inference/parallel_run_oracle.py \
+    --data-path ~/data/uni_agent/r2e_gym_subset.parquet \
+    --task-config examples/quickstart/oracle/task_config_oracle.yaml \
+    --num-workers 8 \
+    --concurrency 64
+```
+
+The oracle runner does not tear the warm pools down when it exits. Remove them afterwards with the reaper from `agent-sandbox-rl`:
+
+```bash
+python -m agent_sandbox_rl.reaper --namespace "${SANDBOX_NAMESPACE:-default}" --run-id "${SANDBOX_RUN_ID}"
+```
+
+Sandboxes have no network access by default, so oracle samples whose tests need DNS or outside hosts report as unsolved.
+
 ## Custom Backend
 
 A minimal backend implements `start()`, `stop()`, and `_exec()`:

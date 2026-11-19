@@ -29,7 +29,7 @@ Use the provided Task Config `examples/quickstart/oracle/task_config_oracle.yaml
     runtime_timeout: 3600
 ```
 
-The complete file also contains entries for `swe_bench_multilingual`, `swe_rebench`, and `terminal_bench`.
+The complete file also contains entries for `swe_bench_multilingual`, `swe_rebench`, `terminal_bench`, and `r2e_gym`.
 
 The runner uses the sandbox provider and runtime timeout from the resolved Task Config. Set `SANDBOX_PROVIDER` only when you need to override the configured provider for a run.
 
