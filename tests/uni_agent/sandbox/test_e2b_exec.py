@@ -68,12 +68,30 @@ def test_session_command_quotes_argv_and_falls_back_without_setsid():
 
     assert command == (
         "if command -v setsid >/dev/null 2>&1; "
-        "then exec setsid printf '%s|' 'a b' 'c'\"'\"'d' '$HOME' ''; "
+        "then exec setsid bash -c 'exec \"$@\"' bash printf '%s|' 'a b' 'c'\"'\"'d' '$HOME' ''; "
         "else exec printf '%s|' 'a b' 'c'\"'\"'d' '$HOME' ''; fi"
     )
     # The wrapper must not change what runs, whichever branch this host takes.
     out = subprocess.run(["bash", "-c", command], capture_output=True, text=True, check=True).stdout
     assert out == "a b|c'd|$HOME||"
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_session_command_runs_scripts_without_a_shebang_under_bash(tmp_path):
+    from uni_agent.sandbox.e2b import _session_command
+
+    script = tmp_path / "noshebang"
+    script.write_text('arr=(alpha beta)\necho "${arr[1]}"\n')
+    script.chmod(0o755)
+
+    # With setsid present, execvp alone would hand this script to /bin/sh (dash on
+    # Debian/Ubuntu), which rejects the Bash array.
+    result = subprocess.run(
+        ["bash", "-c", _session_command(["./noshebang"])], cwd=tmp_path, capture_output=True, text=True
+    )
+
+    assert (result.returncode, result.stdout) == (0, "beta\n"), result.stderr
 
 
 @pytest.mark.cpu
@@ -174,3 +192,4 @@ def test_hanging_group_kill_is_bounded(monkeypatch):
     result = asyncio.run(main())
 
     assert result.exit_code == -1
+    assert commands.handle.killed  # the leader is still killed when the group kill stalls
