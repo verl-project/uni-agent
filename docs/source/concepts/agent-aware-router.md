@@ -95,9 +95,11 @@ Callers must maintain acquire/release ordering for each request. Unattributed
 callbacks (`request_id=None`) release anonymous acquires in FIFO order on that
 replica. An unmatched anonymous release is ignored. Named acquires require the
 same request ID on release, including when both callback forms are used on one
-replica. Engine cache clearing and transport recovery preserve the active request
-pins and markers. The individual stores retain their locks, with no rollback
-across stores on arbitrary write failures.
+replica. If a replica is removed and re-added, late releases for earlier
+anonymous acquires do not debit its new drain count. Engine cache clearing and
+transport recovery preserve the active request pins and markers. The individual
+stores retain their locks, with no rollback across stores on arbitrary write
+failures.
 
 `CollectorObserver` receives successful applications and post-write metric
 values. It owns `WriteEvent` construction, metric emission and evidence-log

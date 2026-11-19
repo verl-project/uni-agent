@@ -164,3 +164,17 @@ def test_removed_replica_release_does_not_debit_readded_replica_work():
     _assert_active(balancer, {"s0": (1, 1, 1)})
     balancer.release_server("s0", "new")
     _assert_active(balancer, {"s0": (0, 0, 0)})
+
+
+def test_anonymous_release_of_removed_work_does_not_debit_readded_replica():
+    balancer = _make_balancer({"s0": "h0"})
+    balancer.acquire_server(None, [1, 2])
+    balancer.remove_servers(["s0"])
+    assert balancer.get_total_inflight() == 0
+    balancer.add_servers({"s0": "new-h0"})
+    balancer.acquire_server(None, [1])
+
+    balancer.release_server("s0")
+    _assert_active(balancer, {"s0": (1, 1, 0)})
+    balancer.release_server("s0")
+    _assert_active(balancer, {"s0": (0, 0, 0)})
