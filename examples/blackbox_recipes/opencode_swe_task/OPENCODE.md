@@ -5,9 +5,7 @@ already provisioned Sandbox. The gate accepts numeric release triplets only;
 prereleases, custom build suffixes, malformed versions, and other release lines
 are rejected before a prompt is sent. `result.info["cli_version"]` records the
 actual detected version (or `None` when preflight did not succeed).
-The SWE-rebench training recipe in
-[`examples/blackbox_recipes/opencode_swe_task`](../blackbox_recipes/opencode_swe_task/README.md)
-runs the sidecar image on E2B.
+The [SWE-rebench training recipe](README.md) runs the sidecar image on E2B.
 It accepts exactly one non-blank text user message and returns the CLI's JSON
 events and generated text. The Task owns provisioning, verification, reward, and
 Sandbox teardown. The adapter only launches the harness and removes its own
@@ -123,7 +121,7 @@ and explicitly select a provisioned OpenCode 1.19.3 executable:
 
 ```bash
 python -m pip install -e . pydantic PyYAML
-python -m examples.opencode.smoke_task \
+python -m examples.blackbox_recipes.opencode_swe_task.smoke_task \
   --opencode-bin /opt/opencode/node_modules/.bin/opencode
 ```
 
@@ -140,7 +138,7 @@ The normal run exits 0 and prints `reward: 1.0`, `finished: true`,
 The negative control deliberately returns a final answer without editing:
 
 ```bash
-python -m examples.opencode.smoke_task \
+python -m examples.blackbox_recipes.opencode_swe_task.smoke_task \
   --opencode-bin /opt/opencode/node_modules/.bin/opencode --scenario no-edit
 ```
 
@@ -232,7 +230,7 @@ native CLI, so a green CPU job alone does not establish black-box compatibility.
 
 The original CLI probe above records leaks and uses emergency PID cleanup; its
 passing result is not a cleanup guarantee. The separate
-[`test_opencode_process_cleanup.py`](../../tests/uni_agent/agents/test_opencode_process_cleanup.py)
+[`test_opencode_process_cleanup.py`](../../../tests/uni_agent/agents/test_opencode_process_cleanup.py)
 checks request and active-tool timeout/cancellation with the real pinned CLI.
 It asserts that tracked processes have exited **before** emergency cleanup, and
 a passing case must send no rescue signals. See

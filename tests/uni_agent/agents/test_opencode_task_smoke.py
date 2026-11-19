@@ -4,7 +4,7 @@ import os
 
 import pytest
 
-from examples.opencode.smoke_task import run_smoke
+from examples.blackbox_recipes.opencode_swe_task.smoke_task import run_smoke
 
 pytestmark = [pytest.mark.cpu, pytest.mark.level0, pytest.mark.asyncio]
 

@@ -3,7 +3,7 @@
   "recipes": {
     "opencode": {
       "context": ".",
-      "dockerfile": "Dockerfile",
+      "dockerfile": "Dockerfile.opencode-tool",
       "image": "opencode-tool",
       "tag": "{OPENCODE_VERSION}",
       "platform": "linux/amd64",

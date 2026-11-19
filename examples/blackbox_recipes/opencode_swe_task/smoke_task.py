@@ -1,7 +1,8 @@
 """A local Task lifecycle demo with real OpenCode and scripted model responses.
 
-Run from the repository root with ``python -m examples.opencode.smoke_task
---opencode-bin /path/to/opencode``. No provider account, model, GPU, Gateway, or
+Run from the repository root with
+``python -m examples.blackbox_recipes.opencode_swe_task.smoke_task --opencode-bin /path/to/opencode``.
+No provider account, model, GPU, Gateway, or
 training dependencies are used. The scripted patch is a fixture, not evidence
 of model task-solving ability. LocalSandbox runs on the host, not in a container.
 """

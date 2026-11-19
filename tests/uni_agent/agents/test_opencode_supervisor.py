@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 pytestmark = [pytest.mark.cpu, pytest.mark.level0]
-PATH = Path(__file__).resolve().parents[3] / "examples/sidecar/opencode/standalone.py"
+PATH = Path(__file__).resolve().parents[3] / "examples/blackbox_recipes/opencode_swe_task/standalone.py"
 spec = importlib.util.spec_from_file_location("opencode_supervisor", PATH)
 supervisor = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(supervisor)

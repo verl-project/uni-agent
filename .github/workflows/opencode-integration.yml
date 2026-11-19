@@ -10,8 +10,7 @@ on:
       - "uni_agent/sandbox/**"
       - "tests/uni_agent/agents/**"
       - "tests/uni_agent/sandbox/**"
-      - "examples/opencode/**"
-      - "examples/sidecar/opencode/**"
+      - "examples/blackbox_recipes/opencode_swe_task/**"
       - "scripts/validation/**"
       - ".github/workflows/opencode-integration.yml"
 permissions:
@@ -70,7 +69,9 @@ jobs:
             checksum=7170f580067e4d399d137b675b2e6a3ecb598eb9db3e0d2b3d4c2d70778b69e07e298c50584a227b573cf2862665f43e45623afbff8b2c5d05536f54c9dd4daf
           fi
           args=(--build-arg "OPENCODE_VERSION=$CLI_VERSION" --build-arg "OPENCODE_SHA512=$checksum")
-          docker build --progress=plain "${args[@]}" -t ua-opencode-integration examples/sidecar/opencode 2>&1 | tee results/build.log
+          TOOL_IMAGE=ua-opencode-integration TOOL_TAG=latest \
+            bash examples/blackbox_recipes/opencode_swe_task/build_tool.sh \
+              --progress=plain "${args[@]}" 2>&1 | tee results/build.log
           docker image inspect ua-opencode-integration > results/image.json
           cid=$(docker create ua-opencode-integration /bin/true)
           mkdir -p "$RUNNER_TEMP/payload"
