@@ -18,8 +18,8 @@ templates built here are the ones ``E2BSandbox.start()`` looks up.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 from uni_agent.sandbox import SandboxConfig
@@ -41,6 +41,25 @@ def collect_templates(
     return list(needed)
 
 
+async def build_all(templates: list[tuple[str, int, int, str | None]], concurrency: int) -> int:
+    """Build the templates, at most ``concurrency`` at a time; return how many failed."""
+    limit = asyncio.Semaphore(max(1, concurrency))
+
+    async def build(spec: tuple[str, int, int, str | None]) -> bool:
+        async with limit:
+            begin = time.monotonic()
+            try:
+                name = await ensure_template(*spec)
+            except Exception as exc:
+                print(f"failed  {spec[0]}: {type(exc).__name__}: {exc}", flush=True)
+                return False
+            print(f"ready   {name}  ({spec[0]}, {time.monotonic() - begin:.0f}s)", flush=True)
+            return True
+
+    results = await asyncio.gather(*(build(spec) for spec in templates))
+    return results.count(False)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--data-path", required=True, help="Preprocessed parquet file.")
@@ -56,21 +75,7 @@ def main() -> None:
     templates = collect_templates(samples, resolver)
     print(f"{len(samples)} samples need {len(templates)} E2B templates", flush=True)
 
-    def build(spec: tuple[str, int, int, str | None]) -> tuple[str, float]:
-        begin = time.monotonic()
-        return ensure_template(*spec), time.monotonic() - begin
-
-    failed = 0
-    with ThreadPoolExecutor(max_workers=max(1, args.concurrency)) as pool:
-        futures = {pool.submit(build, spec): spec for spec in templates}
-        for future in as_completed(futures):
-            image = futures[future][0]
-            try:
-                name, seconds = future.result()
-                print(f"ready   {name}  ({image}, {seconds:.0f}s)", flush=True)
-            except Exception as exc:
-                failed += 1
-                print(f"failed  {image}: {type(exc).__name__}: {exc}", flush=True)
+    failed = asyncio.run(build_all(templates, args.concurrency))
     print(f"{len(templates) - failed} ready, {failed} failed", flush=True)
     if failed:
         raise SystemExit(1)

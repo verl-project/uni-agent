@@ -46,7 +46,12 @@ def test_prebuild_matches_the_templates_start_uses(monkeypatch):
     collected = _load_script().collect_templates(samples, resolver)
 
     started = []
-    monkeypatch.setattr(e2b_module, "_ensure_template", lambda *args: started.append(args) or "tpl")
+
+    async def ensure(*args):
+        started.append(args)
+        return "tpl"
+
+    monkeypatch.setattr(e2b_module, "_ensure_template", ensure)
 
     class _AsyncSandbox:
         @classmethod
@@ -74,3 +79,31 @@ def test_prebuild_skips_samples_with_a_ready_template():
     )
 
     assert _load_script().collect_templates([_sample("swebench/a:latest")], resolver) == []
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_prebuild_reports_failures_and_respects_concurrency(monkeypatch, capsys):
+    import uni_agent.sandbox.e2b as e2b_module
+
+    running, peak = 0, 0
+
+    async def ensure(image, cpu_count, memory_mb, proxy):
+        nonlocal running, peak
+        running += 1
+        peak = max(peak, running)
+        await asyncio.sleep(0)
+        running -= 1
+        if image == "bad":
+            raise RuntimeError("build failed")
+        return f"tpl-{image}"
+
+    monkeypatch.setattr(e2b_module, "_ensure_template", ensure)
+    specs = [(image, 2, 4096, None) for image in ("a", "bad", "b", "c")]
+
+    failed = asyncio.run(_load_script().build_all(specs, concurrency=2))
+
+    assert failed == 1
+    assert peak == 2
+    out = capsys.readouterr().out
+    assert "failed  bad: RuntimeError: build failed" in out and out.count("ready   tpl-") == 3
