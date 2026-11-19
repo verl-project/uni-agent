@@ -80,6 +80,13 @@ def e2b_module(monkeypatch):
     return install
 
 
+async def _keeps_polling_while_building(templates):
+    """Return once the caller has polled ``building`` twice, i.e. it kept waiting after the first poll."""
+    await asyncio.wait_for(templates.saw_building.wait(), 2)
+    templates.saw_building.clear()
+    await asyncio.wait_for(templates.saw_building.wait(), 2)
+
+
 def _name(module, image="python:3.12"):
     async def main():
         return await module._ensure_template(image, 2, 4096)
@@ -127,7 +134,7 @@ def test_waits_while_another_process_is_building(e2b_module):
     async def main():
         templates.saw_building = asyncio.Event()
         call = asyncio.create_task(module._ensure_template("python:3.12", 2, 4096))
-        await asyncio.wait_for(templates.saw_building.wait(), 2)
+        await _keeps_polling_while_building(templates)
         assert not call.done()  # it is waiting on the running build, not returning early
         templates.status[name] = "ready"
         return await asyncio.wait_for(call, 2)
@@ -183,6 +190,33 @@ def test_callers_that_joined_a_failed_build_get_its_error_and_the_next_call_rebu
 
 @pytest.mark.cpu
 @pytest.mark.level0
+def test_callers_with_another_proxy_do_not_share_a_failed_attempt(e2b_module):
+    templates = _Templates(fail_builds=1)
+    module = e2b_module(templates)
+
+    async def main():
+        templates.release_build = asyncio.Event()
+        templates.build_started = asyncio.Event()
+        first = asyncio.create_task(module._ensure_template("python:3.12", 2, 4096, "http://proxy-a:8080"))
+        await asyncio.wait_for(templates.build_started.wait(), 2)
+        # A start through another proxy arrives while the first build is running.
+        templates.saw_building = asyncio.Event()
+        second = asyncio.create_task(module._ensure_template("python:3.12", 2, 4096, "http://proxy-b:8080"))
+        await _keeps_polling_while_building(templates)
+        templates.release_build.set()
+        return await asyncio.gather(first, second, return_exceptions=True)
+
+    first, second = asyncio.run(main())
+
+    # The failed build reaches only the caller that made it; the other proxy runs its
+    # own attempt, sees the failure in the build status and builds again.
+    assert isinstance(first, RuntimeError) and "build failed" in str(first)
+    assert second == next(iter(templates.status))
+    assert len(templates.builds) == 2
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_cancelled_caller_does_not_cancel_the_shared_build(e2b_module):
     templates = _Templates()
     module = e2b_module(templates)
@@ -215,7 +249,7 @@ def test_lost_alias_race_waits_for_the_running_winner(e2b_module):
     async def main():
         templates.saw_building = asyncio.Event()
         call = asyncio.create_task(module._ensure_template("python:3.12", 2, 4096))
-        await asyncio.wait_for(templates.saw_building.wait(), 2)
+        await _keeps_polling_while_building(templates)
         assert not call.done()  # the winner is still building; the loser waits
         name = next(iter(templates.status))
         templates.status[name] = "ready"
@@ -305,7 +339,8 @@ def test_non_positive_startup_timeout_waits_for_a_running_build(e2b_module, monk
     async def main():
         templates.saw_building = asyncio.Event()
         call = asyncio.create_task(module._ensure_template("python:3.12", 2, 4096))
-        await asyncio.wait_for(templates.saw_building.wait(), 2)
+        await _keeps_polling_while_building(templates)
+        assert not call.done()
         templates.status[name] = "ready"
         return await asyncio.wait_for(call, 2)
 
