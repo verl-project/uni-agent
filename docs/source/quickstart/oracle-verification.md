@@ -69,7 +69,7 @@ python examples/inference/parallel_run_oracle.py \
 
 ### Run on E2B
 
-The Task Config above selects Modal. To verify the same samples on [E2B](launch-sandbox.md), install the E2B SDK, set `E2B_API_KEY`, and override the provider with `SANDBOX_PROVIDER=e2b`. SWE-Bench uses one image per sample, and the E2B provider builds a template from each image the first time it is used, so build the templates first. The oracle run starts only if every template was built; use the same `--limit` (or none) for both commands so that every sample has a template:
+The Task Config above selects Modal. To verify the same samples on [E2B](launch-sandbox.md), install the E2B SDK, set `E2B_API_KEY`, and override the provider with `SANDBOX_PROVIDER=e2b`. SWE-Bench uses one image per sample, and the E2B provider builds a template from each image the first time it is used, so build the templates first. The `&&` starts the oracle run only if the prebuild succeeds; use the same `--limit` (or none) for both commands so that every sample has a template:
 
 ```bash
 export SANDBOX_PROVIDER=e2b
@@ -85,7 +85,7 @@ python examples/inference/parallel_run_oracle.py \
     --limit 3
 ```
 
-On first use, building the three SWE-Bench Verified templates (about 1 GiB each) took 76 to 94 seconds, in parallel. Re-running the prebuild step finds them ready in about a second each. One oracle run then reported (timings vary between runs):
+On first use, the three SWE-Bench Verified templates (images of about 1 GiB each) build in parallel; in our two runs a single template took between 28 seconds and about 4 minutes. Re-running the prebuild step finds them ready in about a second each. One oracle run then reported (timings vary between runs):
 
 ```text
 ----------------- oracle summary -----------------
