@@ -41,15 +41,19 @@ class Transport(ABC):
 
     is_async: bool = True
 
+    def get_stream_status(self) -> dict:
+        """Return stream diagnostics when supported by the transport."""
+        return {}
+
     @abstractmethod
     async def subscribe(self, handler: Callable[[bytes | str, str], None]) -> None:
         """Start data acquisition and deliver each item to handler.
 
         Args:
-            handler: Callback that receives (raw_data, node_id).
+            handler: Callback that receives (raw_data, replica_id).
                 raw_data is ``bytes`` (ZMQ) / ``str`` (HTTP response text),
                 or a ``StatisticEvent`` (callback transport).
-                node_id identifies the source endpoint/node (empty for the
+                replica_id identifies the source endpoint/node (empty for the
                 callback transport — the event carries its own ids).
         """
 

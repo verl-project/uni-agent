@@ -254,3 +254,27 @@ def test_openai_to_internal_normalizes_messages_sampling_and_tools():
         allowed_sampling_keys=ALLOWED_SAMPLING_KEYS,
     )
     assert without_tools["tools"] is None
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_openai_to_internal_treats_null_tool_calls_as_absent():
+    """A text-only assistant turn echoed through the OpenAI SDK's ``model_dump()``
+    carries ``tool_calls: null``; it lowers like the same turn without the field."""
+    from uni_agent.gateway.adapters.openai_chat import openai_to_internal
+
+    echoed = {
+        "content": "FIRST",
+        "refusal": None,
+        "role": "assistant",
+        "annotations": None,
+        "audio": None,
+        "function_call": None,
+        "tool_calls": None,
+    }
+    req = openai_to_internal(
+        {"messages": [{"role": "user", "content": "hi"}, echoed, {"role": "user", "content": "more"}]},
+        base_sampling_params={},
+        allowed_sampling_keys=ALLOWED_SAMPLING_KEYS,
+    )
+    assert req["messages"][1] == {"role": "assistant", "content": "FIRST"}

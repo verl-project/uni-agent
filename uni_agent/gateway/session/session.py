@@ -945,8 +945,9 @@ class GatewaySession:
             raise RuntimeError("length-exhausted chain id is missing")
         chain_index, chain = self._find_active_chain(encoded.chain_id)
         self._record_rollback_stats(encoded, chain)
-        if encoded.rollback_applied and chain.last_assistant_start.response_ids_len == 0:
-            # No trainable response prefix survives this rollback.
+        if encoded.rollback_applied and not any(encoded.buffer.response_mask):
+            # A nonempty response prefix can contain only observation tokens.
+            # Check the rolled-back mask for surviving model output.
             del self.active_chains[chain_index]
             return
         chain_to_materialize = chain

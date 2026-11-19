@@ -36,8 +36,8 @@ from ...collectors.transport.base import Transport
 class StatisticEvent:
     """Packed Balancer callback — the payload the callback transport delivers.
 
-    The three Balancer hook points do not share a stable ``node_id`` and differ
-    in arity, so they cannot be forced into ``(raw, node_id)``:
+    The three Balancer hook points do not share a stable ``replica_id`` and differ
+    in arity, so they cannot be forced into ``(raw, replica_id)``:
 
     - ``on_acquire(request_id, chosen, prompt_ids)``  → two strings + a token list
     - ``on_release(server_id, request_id)``           → string + optional id
@@ -77,20 +77,21 @@ class CallbackTransport(Transport):
 
     is_async = False
 
-    def __init__(self, balancer_handler: Any) -> None:
+    def __init__(self, balancer_handler: Any, *, accounting: bool = False) -> None:
         self._balancer = balancer_handler
+        self._accounting = accounting
         self._registered: list[tuple[str, Callable]] = []
 
     async def subscribe(self, handler: Callable[[bytes | str, str], None]) -> None:
         """Register three callbacks on the Balancer; no loop, returns at once.
 
         Each callback packs its arguments into a ``StatisticEvent`` and hands
-        it to ``handler`` with an empty ``node_id`` (the event carries its own
-        ids; the sticky/inflight parsers ignore ``node_id``).
+        it to ``handler`` with an empty ``replica_id`` (the event carries its own
+        ids; the sticky/inflight parsers ignore ``replica_id``).
         """
         balancer = self._balancer
 
-        def _on_acquire(request_id: str, chosen: str, prompt_ids: list[int] | None = None) -> None:
+        def _on_acquire(request_id: str | None, chosen: str, prompt_ids: list[int] | None = None) -> None:
             handler(
                 StatisticEvent(
                     "on_acquire",
@@ -114,11 +115,14 @@ class CallbackTransport(Transport):
         def _on_servers_removed(server_ids: list[str]) -> None:
             handler(StatisticEvent("on_servers_removed", server_ids=tuple(server_ids)), "")
 
-        self._registered = [
-            ("on_acquire", _on_acquire),
-            ("on_release", _on_release),
-            ("on_servers_removed", _on_servers_removed),
-        ]
+        if self._accounting:
+            self._registered = [("on_account_acquire", _on_acquire), ("on_account_release", _on_release)]
+        else:
+            self._registered = [
+                ("on_acquire", _on_acquire),
+                ("on_release", _on_release),
+                ("on_servers_removed", _on_servers_removed),
+            ]
         for event, fn in self._registered:
             balancer.register_call_back(event, fn)
 

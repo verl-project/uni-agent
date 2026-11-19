@@ -91,6 +91,19 @@ def test_store_resolves_using_block_size_learned_after_fact_creation(store):
     assert store.inflight_block_count("s0") == 0
 
 
+def test_replacement_pins_its_actual_prefix_even_with_same_length_routing_memo(store):
+    store.set_block_size(2)
+    old_hashes, old_parent = get_prefix_hashes_incremental([1, 2], 2, 0, 0)
+    store.inflight.apply(InflightUpdate("acquire", "s0", "r", (1, 2)))
+    store.requests.set_prefix_cache("r", {"hash_strs": [str(h) for h in old_hashes], "parent_hash": old_parent})
+
+    store.inflight.apply(InflightUpdate("acquire", "s1", "r", (3, 4)))
+
+    new_hashes, _ = get_prefix_hashes_incremental([3, 4], 2, 0, 0)
+    assert store.get_marker("r") == {"replica": "s1", "hashes": [str(h) for h in new_hashes]}
+    assert store.inflight_block_count("s0") == 0
+
+
 @pytest.mark.parametrize("existing", [False, True])
 def test_failed_cross_replica_resolution_leaves_entire_old_dispatch_intact(store, existing):
     store.set_block_size(2)
@@ -110,10 +123,34 @@ def test_failed_cross_replica_resolution_leaves_entire_old_dispatch_intact(store
     assert store.inflight_block_count("s0") == 0
 
 
-def test_legacy_unattributed_release_remains_count_only(store):
+def test_anonymous_releases_balance_only_anonymous_acquires(store):
     store.set_block_size(2)
+    store.inflight.apply(InflightUpdate("acquire", "s0", "named", (1, 2, 3, 4)))
     store.inflight.apply(InflightUpdate("acquire", "s0", prompt_ids=(1, 2)))
+    store.inflight.apply(InflightUpdate("acquire", "s0", prompt_ids=(3,)))
     store.inflight.apply(InflightUpdate("release", "s0"))
-    assert_booking(store, "s0", 0, 2, 0)
-    assert store.get_metric("s0", MetricKey.COMPLETED_COUNT) == 1
+    assert_booking(store, "s0", 2, 5, 1)
+    store.inflight.apply(InflightUpdate("release", "s0"))
+    assert store.inflight.apply(InflightUpdate("release", "s0")).metrics == []
+    assert_booking(store, "s0", 1, 4, 1)
+    assert store.inflight_block_count("s0") == 2
+    store.inflight.apply(InflightUpdate("release", "s0", "named"))
+    assert_booking(store, "s0", 0, 0, 0)
+    assert store.get_metric("s0", MetricKey.COMPLETED_COUNT) == 3
+    assert store.inflight_block_count("s0") == 0
+
+
+def test_new_facade_can_release_live_booking_after_resident_clear(store):
+    store.set_block_size(2)
+    store.inflight.apply(InflightUpdate("acquire", "s0", "r", (1, 2)))
+    marker = store.get_marker("r")
+    recreated = DataStore()
+    recreated.clear_kv_resident_blocks("s0")
+    assert recreated.per_replica_block_counts().get("s0", 0) == 0
+    assert recreated.inflight_block_count("s0") == 1
+    assert recreated.get_marker("r") == marker
+
+    recreated.inflight.apply(InflightUpdate("release", "s0", "r"))
+    assert_booking(store, "s0", 0, 0, 0)
+    assert store.get_marker("r") is None
     assert store.inflight_block_count("s0") == 0

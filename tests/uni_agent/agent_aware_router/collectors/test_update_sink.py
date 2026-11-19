@@ -86,7 +86,6 @@ def run_collector(parser, sink, payloads):
         collector.start()
     finally:
         collector.stop()
-        collector._loop.close()
         assert transport.stopped
 
 

@@ -45,33 +45,38 @@ class StoreUpdater:
     def apply_inflight(self, update: InflightUpdate) -> None:
         """Delegate the whole transition to DataStore, then observe applied effects."""
         result = self._inflight.apply(update)
-        if result.blocks_recorded is not None:
-            self._observer.on_blocks_recorded(result.blocks_recorded)
-        for applied in result.metrics:
-            self._observer.on_metrics_applied(
-                MetricsUpdate(applied.node_id, applied.deltas, is_delta=True, request_id=update.request_id),
-                applied.values,
-            )
+        try:
+            if result.blocks_recorded is not None:
+                self._observer.on_blocks_recorded(result.blocks_recorded)
+            for applied in result.metrics:
+                self._observer.on_metrics_applied(
+                    MetricsUpdate(applied.node_id, applied.deltas, is_delta=True, request_id=update.request_id),
+                    applied.values,
+                )
+        except Exception:
+            # Accounting has committed. An observer failure must not leave the
+            # balancer treating the completed transition as failed.
+            logger.exception("failed to observe inflight %s", update.action)
 
     def apply_kv(self, update: KVCacheUpdate) -> None:
         if update.block_size is not None:
             self._kv.set_block_size(update.block_size)
         if update.clear_all:
-            self._kv.clear_kv_node(update.node_id)
+            self._kv.clear_kv_resident_blocks(update.replica_id)
         for layer, hashes in update.remove_blocks.items():
             if hashes:
-                self._kv.remove_kv_blocks(update.node_id, hashes, layer=layer)
+                self._kv.remove_kv_blocks(update.replica_id, hashes, layer=layer)
         for layer, hashes in update.add_blocks.items():
             if hashes:
-                self._kv.add_kv_blocks(update.node_id, hashes, layer=layer)
+                self._kv.add_kv_blocks(update.replica_id, hashes, layer=layer)
 
         self._observer.on_kv_applied(update)
 
     def apply_metrics(self, update: MetricsUpdate) -> None:
         if update.is_delta:
-            values = self._metrics.incr_metrics(update.node_id, update.metrics)
+            values = self._metrics.incr_metrics(update.replica_id, update.metrics)
         else:
-            values = self._metrics.refresh_metrics({update.node_id: update.metrics}).get(update.node_id, {})
+            values = self._metrics.refresh_metrics({update.replica_id: update.metrics}).get(update.replica_id, {})
         self._observer.on_metrics_applied(update, values)
 
     def apply_sticky(self, update: StickyUpdate) -> None:

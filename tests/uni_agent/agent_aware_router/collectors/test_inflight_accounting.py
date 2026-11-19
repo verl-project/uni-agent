@@ -61,7 +61,6 @@ def running(monkeypatch):
         yield callbacks, store, collector
     finally:
         collector.stop()
-        collector._loop.close()
         assert callbacks.callbacks == {}
 
 

@@ -38,7 +38,7 @@ class Observer:
         self.calls = []
 
     def on_metrics_applied(self, update, values):
-        assert all(self.store.metrics.get_metric(update.node_id, key) == value for key, value in values.items())
+        assert all(self.store.metrics.get_metric(update.replica_id, key) == value for key, value in values.items())
         self.calls.append(("metrics", values))
 
     def on_kv_applied(self, update):
@@ -156,8 +156,7 @@ def test_observer_failure_cannot_leave_an_applied_dispatch_unbooked(application,
         raise RuntimeError("observer unavailable")
 
     monkeypatch.setattr(observer, "on_metrics_applied", fail)
-    with pytest.raises(RuntimeError, match="observer unavailable"):
-        updater.apply_inflight(InflightUpdate("acquire", "s0", "r", (1, 2)))
+    updater.apply_inflight(InflightUpdate("acquire", "s0", "r", (1, 2)))
     # DataStore finishes the transition before the updater starts observations.
     assert store.requests.get_turn("r") == 1
     assert store.get_metric("s0", MetricKey.INFLIGHT_COUNT) == 1

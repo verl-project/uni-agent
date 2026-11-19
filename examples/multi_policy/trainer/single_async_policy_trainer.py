@@ -12,6 +12,8 @@ gives us:
 
 from __future__ import annotations
 
+from copy import deepcopy
+
 from verl.checkpoint_engine import CheckpointEngineManager
 from verl.trainer.ppo.v1.trainer_base import PPOTrainer
 from verl.trainer.ppo.v1.trainer_separate_async import (
@@ -38,8 +40,17 @@ class SingleAsyncPPOTrainer(PPOTrainerSeparateAsync):
     def init_standalone_rollout_runtime(self) -> None:
         """Initialize the native v1 standalone rollout runtime."""
         hybrid_num_replicas = len(self.llm_server_manager.rollout_replicas)
+
+        # Standalone replicas have dedicated GPUs; keep their memory budget
+        # separate from the hybrid replicas that share GPUs with training.
+        standalone_config = deepcopy(self.config)
+        standalone_rollout_config = standalone_config.actor_rollout_ref.rollout
+        standalone_memory = standalone_rollout_config.get("standalone_gpu_memory_utilization")
+        if standalone_memory is not None:
+            standalone_rollout_config.gpu_memory_utilization = standalone_memory
+
         self.standalone_server_manager = LLMServerManager.create(
-            config=self.config,
+            config=standalone_config,
             start_rank=hybrid_num_replicas,
         )
 
@@ -50,8 +61,13 @@ class SingleAsyncPPOTrainer(PPOTrainerSeparateAsync):
             replicas=self.standalone_server_manager.get_replicas(),
         )
 
-        self.current_mode = HybridEngineMode.ROLLOUT
-        self.add_replicas_to_balancer()
+        if self._enable_hybrid_replicas:
+            self.current_mode = HybridEngineMode.ROLLOUT
+            self.add_replicas_to_balancer()
+        else:
+            # Rollout is served exclusively by the standalone pool; there are no
+            # colocated replicas on the training GPUs to switch into ROLLOUT mode.
+            self.current_mode = HybridEngineMode.TRAINER
 
     def _build_replay_buffer(self):
         """The outer trainer owns the shared async replay buffer."""

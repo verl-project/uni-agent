@@ -71,13 +71,14 @@ turn/prompt length on release. Direct DataStore callers use the same logic.
 `StoreUpdater` translates the returned applied effects into observer calls; it
 does not decide accounting amounts.
 
-DataStore resolves the new prefix before making any writes, so invalid token
-hashing leaves an old dispatch intact. It commits booking state after block and
-metric writes succeed, then returns the applied metric deltas and their post-write
-values for observation. A handler lock serializes parsing through application,
-including callbacks arriving from different threads. Each inflight collector owns
-one DataStore inflight capability through its updater; this lock does not
-coordinate separate collectors or processes sharing the underlying singletons.
+DataStore resolves the new prefix before making any writes. It hashes all full
+blocks in linear time because the routing checkpoint assumes append-only prompts
+and a replacement may rewrite earlier tokens. The Balancer applies this booking
+before changing its drain counters or publishing the best-effort routing callbacks.
+Failed prefix resolution therefore leaves the old booking, pins and drain counts
+intact. The inflight capability serializes transitions across DataStore instances
+sharing the same process-local backing stores, so a replacement collector can
+release an outstanding booking. Observer failures are logged after accounting commits.
 
 The inflight capability keeps active dispatch bookings (replica, turn and prompt
 length) until release or re-acquire, independently of request memo LRU eviction
@@ -85,16 +86,18 @@ and block markers. Duplicate/unknown releases are ignored, including releases
 from a stale replica after migration. Re-acquire reverses the old replica's count,
 tokens and turn contribution before charging the new dispatch, even without pinned
 blocks. Unpinning uses the acquire-time marker. A missing release retains the
-active booking until re-acquire or capability teardown. Historical turn counts
+active booking until re-acquire or router process teardown. Historical turn counts
 and other optional request memos remain LRU-bounded.
 
 Callbacks carry no dispatch generation: a delayed release from an earlier turn
 on the *same* replica cannot be distinguished from the current turn's release.
 Callers must maintain acquire/release ordering for each request. Unattributed
-callbacks (`request_id=None`) retain the legacy count-only release behavior.
-The existing store locks remain in place; a sequence of commands is not an atomic
-transaction across stores and arbitrary write/observer failures are not rolled
-back.
+callbacks (`request_id=None`) release anonymous acquires in FIFO order on that
+replica. An unmatched anonymous release is ignored. Named acquires require the
+same request ID on release, including when both callback forms are used on one
+replica. Engine cache clearing and transport recovery preserve the active request
+pins and markers. The individual stores retain their locks, with no rollback
+across stores on arbitrary write failures.
 
 `CollectorObserver` receives successful applications and post-write metric
 values. It owns `WriteEvent` construction, metric emission and evidence-log

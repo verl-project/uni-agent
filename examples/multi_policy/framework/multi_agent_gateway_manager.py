@@ -139,10 +139,18 @@ class MultiAgentGatewayManager(GatewayManager):
                 )
                 role_base_urls[role_name] = handle.base_url
         except BaseException:
+            # Keep group state until the shielded abort finishes; abort_session()
+            # drops it when cleanup completes. Dropping in a finally here would
+            # race with the shield and can remove the only record of created roles.
             try:
                 await asyncio.shield(self.abort_session(session_group_id))
-            finally:
-                self._drop_group_state(session_group_id)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception(
+                    "Failed to abort partially-created group %s",
+                    session_group_id,
+                )
             raise
 
         return SessionGroupHandle(

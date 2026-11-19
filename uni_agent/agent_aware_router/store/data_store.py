@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+from threading import Lock
 from typing import Any
 
 from ..types import Layer
@@ -43,22 +44,36 @@ class DataStore:
         store.add_kv_blocks('node1', ['hash1', 'hash2'])
     """
 
+    _lock = Lock()
+    _inflight_backing: tuple[PerReplicaStore, KVCacheStore, PerRequestStore] | None = None
+    _inflight: InflightState | None = None
+
     def __init__(self) -> None:
-        self._metrics = PerReplicaStore.singleton()
-        self._kv = KVCacheStore.singleton()
-        self._per_request = PerRequestStore.singleton()
+        with DataStore._lock:
+            self._metrics = PerReplicaStore.singleton()
+            self._kv = KVCacheStore.singleton()
+            self._per_request = PerRequestStore.singleton()
+            self._init_capabilities()
+
+    def _init_capabilities(self) -> None:
         self.metrics = MetricsState(self._metrics)
         self.kv = KVState(self._kv, self.metrics)
         self.requests = RequestState(self._per_request)
-        self.inflight = InflightState(self.metrics, self.kv, self.requests)
+        backing = (self._metrics, self._kv, self._per_request)
+        inflight = DataStore._inflight
+        if inflight is None or DataStore._inflight_backing != backing:
+            inflight = InflightState(self.metrics, self.kv, self.requests)
+            DataStore._inflight_backing = backing
+            DataStore._inflight = inflight
+        self.inflight = inflight
 
     # ── PerReplicaStore operations ─────────────────────────────────────────
 
-    def get_metric(self, node_id: str, key: str) -> Any:
+    def get_metric(self, replica_id: str, key: str) -> Any:
         """Query a single metric by canonical key.
 
         Args:
-            node_id: Target node.
+            replica_id: Target node.
             key: Canonical metric key (e.g., ``MetricKey.KV_CACHE_USAGE_PERC``).
 
         Returns:
@@ -67,20 +82,20 @@ class DataStore:
         Raises:
             KeyError: If key is not a valid canonical key.
         """
-        return self.metrics.get_metric(node_id, key)
+        return self.metrics.get_metric(replica_id, key)
 
-    def get_metrics(self, node_id: str) -> dict[str, Any]:
+    def get_metrics(self, replica_id: str) -> dict[str, Any]:
         """Get a node's full metrics snapshot.
 
         Args:
-            node_id: Target node.
+            replica_id: Target node.
 
         Returns:
             Dict of canonical_key → value; empty dict if node is absent.
         """
-        return self.metrics.get_metrics(node_id)
+        return self.metrics.get_metrics(replica_id)
 
-    def get_metric_node_ids(self) -> list[str]:
+    def get_metric_replica_ids(self) -> list[str]:
         """Return all node IDs that have metrics in the store."""
         return self.metrics.get_metric_node_ids()
 
@@ -92,10 +107,10 @@ class DataStore:
         are left untouched.
 
         Args:
-            new_data: Dict of {node_id: {canonical_key: value}}.
+            new_data: Dict of {replica_id: {canonical_key: value}}.
 
         Returns:
-            ``{node_id: full_merged_snapshot}`` (see ``PerReplicaStore.refresh``).
+            ``{replica_id: full_merged_snapshot}`` (see ``PerReplicaStore.refresh``).
         """
         return self.metrics.refresh_metrics(new_data)
 
@@ -117,17 +132,17 @@ class DataStore:
         """
         return self.kv.set_block_size(size)
 
-    def add_kv_blocks(self, node_id: str, block_hashes: list[str], layer: Layer = Layer.GPU) -> None:
+    def add_kv_blocks(self, replica_id: str, block_hashes: list[str], layer: Layer = Layer.GPU) -> None:
         """Add KV cache blocks to a node.
 
         Args:
-            node_id: Target node.
+            replica_id: Target node.
             block_hashes: List of local prefix hashes to add.
             layer: Cache layer (``Layer.GPU``/``Layer.CPU``/``Layer.SSD``).
         """
-        return self.kv.add_kv_blocks(node_id, block_hashes, layer)
+        return self.kv.add_kv_blocks(replica_id, block_hashes, layer)
 
-    def record_dispatch_blocks(self, node_id: str, block_hashes: list[str]) -> int:
+    def record_dispatch_blocks(self, replica_id: str, block_hashes: list[str]) -> int:
         """Mark a dispatched request's prefix blocks resident on a node (GPU).
 
         The acquire path calls this so the resident index learns the prefix
@@ -135,39 +150,51 @@ class DataStore:
         against the later ``BlockStored``.
 
         Args:
-            node_id: The replica the request was dispatched to.
+            replica_id: The replica the request was dispatched to.
             block_hashes: The request's full-block chained prefix hashes.
 
         Returns:
             Number of blocks this call newly made resident (0 for a full hit).
         """
-        return self.kv.record_dispatch_blocks(node_id, block_hashes)
+        return self.kv.record_dispatch_blocks(replica_id, block_hashes)
 
-    def remove_kv_blocks(self, node_id: str, block_hashes: list[str], layer: Layer = Layer.GPU) -> None:
+    def remove_kv_blocks(self, replica_id: str, block_hashes: list[str], layer: Layer = Layer.GPU) -> None:
         """Remove KV cache blocks from a node.
 
         Args:
-            node_id: Target node.
+            replica_id: Target node.
             block_hashes: List of local prefix hashes to remove.
             layer: Cache layer (``Layer.GPU``/``Layer.CPU``/``Layer.SSD``).
         """
-        return self.kv.remove_kv_blocks(node_id, block_hashes, layer)
+        return self.kv.remove_kv_blocks(replica_id, block_hashes, layer)
 
-    def clear_kv_node(self, node_id: str) -> None:
-        """Clear all KV cache state for a node: resident blocks, block refs, markers.
+    def clear_kv_resident_blocks(self, replica_id: str) -> None:
+        """Clear resident blocks without changing request accounting or readiness."""
+        self.kv.clear_kv_resident_blocks(replica_id)
 
-        Args:
-            node_id: Target node.
+    def invalidate_kv_replica(self, replica_id: str) -> None:
+        """Clear untrusted resident blocks while preserving request refs and markers.
+
+        Prefix hits and dispatch-based resident writes stay disabled while
+        the transport rebuilds its view.
         """
-        return self.kv.clear_kv_node(node_id)
+        self._kv.invalidate_replica(replica_id)
+
+    def mark_kv_replica_ready(self, replica_id: str) -> None:
+        """Enable prefix hits from a replica's rebuilt resident index."""
+        self._kv.mark_replica_ready(replica_id)
+
+    def enable_kv_dispatch_estimates(self, replica_id: str) -> None:
+        """Discard untrusted residency and allow new dispatch estimates."""
+        self._kv.enable_dispatch_estimates(replica_id)
 
     def get_kv_block_count(self) -> int:
         """Return the number of unique block hashes currently cached."""
         return self.kv.get_kv_block_count()
 
-    def kv_node_has_blocks(self, node_id: str) -> bool:
-        """Return True if node_id appears in at least one cached block."""
-        return self.kv.kv_node_has_blocks(node_id)
+    def kv_replica_has_blocks(self, replica_id: str) -> bool:
+        """Return True if the replica appears in at least one resident block."""
+        return self.kv.kv_node_has_blocks(replica_id)
 
     def has_kv_block(self, block_hash: str) -> bool:
         """Return True if block_hash is present in the cache index."""
@@ -177,14 +204,14 @@ class DataStore:
 
     def get_layer_prefix_hit_rate(
         self,
-        node_id: str,
+        replica_id: str,
         hash_strs: list[str],
         layer: Layer = Layer.GPU,
     ) -> float:
         """Query prefix-cache hit rate for a node at a given layer.
 
         Args:
-            node_id: Target node.
+            replica_id: Target node.
             hash_strs: Precomputed ``str(h)`` chain of the prompt's full-block
                 prefix hashes (computed once by the caller and shared across
                 replicas/layers).
@@ -196,11 +223,11 @@ class DataStore:
         Returns:
             Hit rate 0.0–1.0.
         """
-        return self.kv.get_layer_prefix_hit_rate(node_id, hash_strs, layer)
+        return self.kv.get_layer_prefix_hit_rate(replica_id, hash_strs, layer)
 
     # ── KV-cache load (load signal) ─────────────────────────────────────
 
-    def kv_cache_load(self, node_id: str) -> float:
+    def kv_cache_load(self, replica_id: str) -> float:
         """KV-cache load = ``retained_blocks / num_gpu_blocks`` (∈ [0,1]).
 
         Retained blocks (free-pool blocks hash-marked for reuse) over the GPU
@@ -208,7 +235,7 @@ class DataStore:
         LRU eviction. Returns 0.0 when retained blocks or ``num_gpu_blocks`` is
         unavailable (e.g. mc-off groups emit no kv-events).
         """
-        return self.kv.kv_cache_load(node_id)
+        return self.kv.kv_cache_load(replica_id)
 
     def per_replica_block_counts(self) -> dict[str, int]:
         """Return ``{replica_id: number of distinct prefix blocks it retains}``.
@@ -249,7 +276,7 @@ class DataStore:
 
     # ── PerReplicaStore incremental write ──────────────────────────────────
 
-    def incr_metric(self, node_id: str, key: str, delta: int | float = 1) -> int | float:
+    def incr_metric(self, replica_id: str, key: str, delta: int | float = 1) -> int | float:
         """Apply a signed delta to one metric for one node (inflight ±1).
 
         Routes to ``PerReplicaStore.incr`` (not ``refresh``) so callers can apply deltas
@@ -258,9 +285,9 @@ class DataStore:
         Returns:
             The new value of ``key``.
         """
-        return self.metrics.incr_metric(node_id, key, delta)
+        return self.metrics.incr_metric(replica_id, key, delta)
 
-    def incr_metrics(self, node_id: str, deltas: dict[str, int | float]) -> dict[str, int | float]:
+    def incr_metrics(self, replica_id: str, deltas: dict[str, int | float]) -> dict[str, int | float]:
         """Apply multiple signed deltas to one node under a single lock.
 
         Batched variant of :meth:`incr_metric` for inflight accounting,
@@ -270,7 +297,7 @@ class DataStore:
         Returns:
             ``{canonical_key: new_value}`` for every key in ``deltas``.
         """
-        return self.metrics.incr_metrics(node_id, deltas)
+        return self.metrics.incr_metrics(replica_id, deltas)
 
     # ── Request-state compatibility delegates ─────────────────────────
 

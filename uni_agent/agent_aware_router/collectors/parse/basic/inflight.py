@@ -26,7 +26,7 @@ from .. import Parser
 class InflightParser(Parser):
     """Normalize supported callbacks without reading or deriving store state."""
 
-    def parse(self, raw_data: bytes | str | Any, node_id: str) -> InflightUpdate | None:
+    def parse(self, raw_data: bytes | str | Any, replica_id: str) -> InflightUpdate | None:
         if not isinstance(raw_data, StatisticEvent) or raw_data.replica_id is None:
             return None
         if raw_data.event == "on_acquire":

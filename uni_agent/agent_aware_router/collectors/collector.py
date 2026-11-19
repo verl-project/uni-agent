@@ -19,13 +19,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-from concurrent.futures import Future
 from typing import Any
 
 from ..config.collector import CollectorConfig
 from ..debug import get_debug_var, is_debug_enabled
+from ..store.data_store import DataStore
 from ..types import InflightUpdate
 from ..utils.knob import coerce_knob_value
+from ._loop_runner import _LoopRunner
 from .parse import KVCacheUpdate, MetricsUpdate, Parser, StickyUpdate
 from .parse.basic.inflight import InflightParser
 from .sink import UpdateSink
@@ -44,7 +45,7 @@ DEFAULT_COLLECTOR_KNOBS: dict[str, float | int] = {
 
 
 class Collector:
-    """Transport lifecycle and typed parse dispatch, with an injectable application sink."""
+    """Transport lifecycle and typed parse dispatch with an injectable application sink."""
 
     def __init__(self, transport: Transport, parser: Parser, sink: UpdateSink | None = None) -> None:
         if sink is None:
@@ -52,33 +53,66 @@ class Collector:
 
             sink = default_updater(lambda: getattr(parser, "stats", None))
         self._transport = transport
-        self._sink = sink
         self._parser = parser
-        self._future: Future | None = None
-        self._loop: asyncio.AbstractEventLoop = asyncio.new_event_loop()
-        self._loop_thread: threading.Thread | None = None
+        self._sink = sink
         self._dispatch_lock = threading.Lock()
+        self._loop_runner = _LoopRunner(transport) if getattr(transport, "is_async", True) else None
+        self._sync_started = False
+        self._sync_subscription_error: str | None = None
+
+    def _ensure_startable(self) -> None:
+        if self._loop_runner is not None:
+            self._loop_runner._ensure_startable()
+        elif self._sync_started:
+            raise RuntimeError("stop the collector before starting it again")
 
     def start(self) -> None:
         """Start the collector — launch event-loop thread and subscribe."""
+        self._ensure_startable()
+        if self._loop_runner is not None:
+            if not self._loop_runner.start():
+                try:
+                    self.stop()
+                except Exception as exc:
+                    raise TimeoutError("collector event loop startup timed out") from exc
+                raise TimeoutError("collector event loop startup timed out")
+            self._loop_runner.subscribe(self._handle_raw_data)
+        else:
+            # CallbackTransport: subscribe only registers callbacks — run it on a
+            # throwaway loop; stop() just unregisters.
+            self._sync_subscription_error = None
+            tmp_loop = asyncio.new_event_loop()
+            # A failed subscribe may have registered only some callbacks.
+            self._sync_started = True
+            try:
+                tmp_loop.run_until_complete(self._transport.subscribe(self._handle_raw_data))
+            except Exception as exc:
+                self._sync_subscription_error = f"{type(exc).__name__}: {exc}"
+                raise
+            finally:
+                tmp_loop.close()
 
-        def run_loop() -> None:
-            asyncio.set_event_loop(self._loop)
-            self._loop.run_forever()
+    def get_status(self) -> dict:
+        """Return independent subscription and per-source stream diagnostics."""
+        subscription = (
+            self._loop_runner.get_status()
+            if self._loop_runner is not None
+            else {
+                "active": self._sync_started and self._sync_subscription_error is None,
+                "error": self._sync_subscription_error,
+            }
+        )
+        return {
+            "transport": type(self._transport).__name__,
+            "subscription": subscription,
+            "streams": self._transport.get_stream_status(),
+        }
 
-        def handler(raw_data: bytes | str, node_id: str) -> None:
-            # Callback transports may enter from multiple caller threads. Keep
-            # parsing and all applications in one ordered unit.
-            with self._dispatch_lock:
-                dispatch(raw_data, node_id)
-
-        def dispatch(raw_data: bytes | str, node_id: str) -> None:
-            """Handler: parse and dispatch each update to the right store write path."""
-            result = self._parser.parse(raw_data, node_id)
+    def _handle_raw_data(self, raw_data: Any, replica_id: str) -> None:
+        """Parse and apply each message in order, including synchronous callbacks."""
+        with self._dispatch_lock:
+            result = self._parser.parse(raw_data, replica_id)
             if result is None:
-                # None is normal for statistic parsers that skip an event
-                # (e.g. StickyParser on_release); demote to debug to avoid per-turn noise.
-                logger.debug(f"parser.parse returned no update: {result}")
                 return
             updates = result if isinstance(result, list) else [result]
             for update in updates:
@@ -91,59 +125,20 @@ class Collector:
                 elif isinstance(update, InflightUpdate):
                     self._sink.apply_inflight(update)
                 else:
-                    logger.debug(f"parser.parse returned an unknown update: {update}")
+                    logger.debug("parser returned an unknown update: %r", update)
 
-        if getattr(self._transport, "is_async", True):
-            self._loop_thread = threading.Thread(
-                target=run_loop,
-                daemon=True,
-            )
-            self._loop_thread.start()
-
-            self._future = asyncio.run_coroutine_threadsafe(
-                self._transport.subscribe(handler),
-                self._loop,
-            )
-        else:
-            # CallbackTransport: subscribe only registers callbacks — run it on a
-            # throwaway loop; stop() just unregisters.
-            tmp_loop = asyncio.new_event_loop()
-            try:
-                tmp_loop.run_until_complete(self._transport.subscribe(handler))
-            finally:
-                tmp_loop.close()
-
-    def stop(self) -> None:
+    def stop(self, timeout: float = 15.0) -> None:
         """
         Stop the collector — cancel tasks, drain cleanup, stop event-loop thread.
+
+        Timeouts remain retryable. A dead-loop failure is reported once; later
+        calls are no-ops, status retains the error, and the collector must be replaced.
         """
-        # Transport closes protocol-level resources (sockets/clients);
-        # we own task cancellation and finally-block draining below.
-        self._transport.stop()
-
-        if self._loop.is_running():
-            # Cancel all tasks and wait for their finally blocks inside the loop
-            # so that aclose() runs while the loop is still alive.
-            async def _cancel_and_drain() -> None:
-                current = asyncio.current_task()
-                tasks = [t for t in asyncio.all_tasks() if not t.done() and t is not current]
-                for t in tasks:
-                    t.cancel()
-                await asyncio.gather(*tasks, return_exceptions=True)
-
-            drain = asyncio.run_coroutine_threadsafe(_cancel_and_drain(), self._loop)
-            try:
-                drain.result(timeout=15)
-            except Exception as exc:
-                logger.debug(f"Error draining tasks on stop: {exc}")
-
-            self._loop.call_soon_threadsafe(self._loop.stop)
-
-        if self._loop_thread is not None:
-            self._loop_thread.join(timeout=10)
-            self._loop_thread = None
-
-        self._future = None
+        if self._loop_runner is not None:
+            self._loop_runner.stop(timeout)
+        else:
+            self._transport.stop()
+        self._sync_started = False
 
 
 # ── Factory function ───────────────────────────────────────────────────
@@ -177,9 +172,9 @@ def get_collector(
     Args:
         name: Collector type — ``"vllm_metrics"`` or ``"vllm_zmq"``.
         collectors_config: ``CollectorConfig`` carrying connection-type knobs.
-        server_addresses: ``{node_id: ip:port}`` for HTTP transport
+        server_addresses: ``{replica_id: ip:port}`` for HTTP transport
             (used by ``"vllm_metrics"``).
-        kv_event_endpoints: ``{node_id: [sub_addr, replay_addr]}`` for ZMQ
+        kv_event_endpoints: ``{replica_id: [sub_addr, replay_addr]}`` for ZMQ
             transport (used by ``"vllm_zmq"``).
 
     Returns:
@@ -203,14 +198,29 @@ def get_collector(
         from .parse.vllm.kv import VLLMKVParser
         from .transport.zmq import ZMQTransport
 
+        kv_parser = VLLMKVParser()
+        data_store = DataStore()
+
+        def reset_stream(replica_id: str) -> None:
+            # Gate routing reads before discarding the parser's old hash chain.
+            data_store.invalidate_kv_replica(replica_id)
+            kv_parser.reset_replica(replica_id)
+
+        def unavailable_stream(replica_id: str) -> None:
+            reset_stream(replica_id)
+            data_store.enable_kv_dispatch_estimates(replica_id)
+
         transport = ZMQTransport(
             endpoints=kv_event_endpoints or {},
+            on_stream_reset=reset_stream,
+            on_stream_ready=data_store.mark_kv_replica_ready,
+            on_stream_unavailable=unavailable_stream,
             base_retry_delay=_debug_knob("base_retry_delay"),
             max_retry_delay=_debug_knob("max_retry_delay"),
             max_retry_attempts=_debug_knob("max_retry_attempts"),
             retry_backoff_factor=_debug_knob("retry_backoff_factor"),
         )
-        return Collector(transport, VLLMKVParser())
+        return Collector(transport, kv_parser)
 
     if name == "sticky_stat":
         from .parse.basic.sticky import StickyParser
@@ -221,7 +231,7 @@ def get_collector(
     if name == "inflight_stat":
         from .transport.callback import CallbackTransport
 
-        return Collector(CallbackTransport(balancer_handler), InflightParser())
+        return Collector(CallbackTransport(balancer_handler, accounting=True), InflightParser())
 
     raise ValueError(
         f"Unknown collector: '{name}'. Available: ['vllm_metrics', 'vllm_zmq', 'sticky_stat', 'inflight_stat']"

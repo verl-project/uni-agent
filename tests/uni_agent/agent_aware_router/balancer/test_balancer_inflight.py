@@ -16,6 +16,8 @@
 
 from __future__ import annotations
 
+import struct
+
 import pytest
 
 from uni_agent.agent_aware_router.types import MetricKey
@@ -116,6 +118,38 @@ def test_duplicate_release_does_not_debit_another_request_on_same_replica():
     balancer.acquire_server("first", [1, 2, 3])
     _assert_active(balancer, {"s0": (1, 3, 2)})
     balancer.release_server("s0", "first")
+    _assert_active(balancer, {"s0": (0, 0, 0)})
+
+
+def test_failed_replacement_keeps_old_drain_and_store_booking(monkeypatch):
+    from uni_agent.agent_aware_router import balancer as balancer_module
+
+    choices = iter(("s0", "s1"))
+    monkeypatch.setattr(balancer_module, "route", lambda *_args: [next(choices)])
+    balancer = _make_balancer()
+    balancer._store.set_block_size(2)
+    balancer.acquire_server("r", [1, 2])
+    marker = balancer._store.get_marker("r")
+
+    with pytest.raises(struct.error):
+        balancer.acquire_server("r", [-1, 2])
+
+    _assert_active(balancer, {"s0": (1, 2, 1), "s1": (0, 0, 0)})
+    assert balancer._store.get_marker("r") == marker
+    assert balancer._store.get_sticky_binding("r") == "s0"
+    balancer.release_server("s0", "r")
+    _assert_active(balancer, {"s0": (0, 0, 0), "s1": (0, 0, 0)})
+
+
+def test_legacy_and_named_releases_keep_drain_and_metrics_in_sync():
+    balancer = _make_balancer({"s0": "h0"})
+    balancer.acquire_server("r", [1])
+    balancer.acquire_server(None, [2, 3])
+    _assert_active(balancer, {"s0": (2, 3, 1)})
+    balancer.release_server("s0")
+    balancer.release_server("s0")
+    _assert_active(balancer, {"s0": (1, 1, 1)})
+    balancer.release_server("s0", "r")
     _assert_active(balancer, {"s0": (0, 0, 0)})
 
 

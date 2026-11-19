@@ -166,13 +166,9 @@ class KVState:
         """
         self._kv.remove_blocks(node_id, block_hashes, layer=layer)
 
-    def clear_kv_node(self, node_id: str) -> None:
-        """Clear all KV cache state for a node: resident blocks, block refs, markers.
-
-        Args:
-            node_id: Target node.
-        """
-        self._kv.clear_replica(node_id)
+    def clear_kv_resident_blocks(self, replica_id: str) -> None:
+        """Clear residency while preserving live request pins and stream readiness."""
+        self._kv.clear_resident_blocks(replica_id)
 
     def get_kv_block_count(self) -> int:
         """Return the number of unique block hashes currently cached."""

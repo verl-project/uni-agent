@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import math
+import time
 from collections import defaultdict
 from collections.abc import Mapping
 from concurrent.futures import Future, ThreadPoolExecutor, wait
@@ -10,7 +12,6 @@ from uuid import uuid4
 
 import numpy as np
 import ray
-import torch
 import transfer_queue as tq
 from hydra import compose, initialize_config_module
 from omegaconf import DictConfig, OmegaConf, open_dict
@@ -89,6 +90,7 @@ class MultiPolicyTrainer:
         # Set before any training phase so cleanup is safe during partial setup.
         self.agent_loop_manager = None
         self.global_steps = 0
+        self._restored_tq_prompt_count = 0
         self.timing_raw: dict[str, Any] = {}
 
         self._create_policy_trainers()
@@ -842,60 +844,7 @@ class MultiPolicyTrainer:
     ) -> KVBatchMeta:
         advantage_trainer = next(iter(self.policy_trainers.values()))
         multi_agent_batch = advantage_trainer._compute_advantage(multi_agent_batch, metrics=metrics)
-        self._add_advantage_metrics(multi_agent_batch, metrics)
         return multi_agent_batch
-
-    def _add_advantage_metrics(self, batch: KVBatchMeta, metrics: dict[str, Any]) -> None:
-        """Log per-policy advantage distribution stats from the TransferQueue.
-
-        verl's per-policy ``_compute_advantage`` writes token-level
-        ``advantages``/``returns`` back to the shared trajectory records but
-        does not emit any advantage metrics itself. This reads them back (one
-        extra TQ fetch per step) and aggregates masked distribution stats per
-        policy, so GRPO group-normalized advantages become observable.
-        """
-        if batch is None or not getattr(batch, "keys", None) or not getattr(batch, "tags", None):
-            return
-        try:
-            data = tq.kv_batch_get(
-                keys=batch.keys,
-                partition_id=getattr(batch, "partition_id", "train"),
-                select_fields=["advantages", "response_mask"],
-            )
-            padded = data.to_padded_tensor()
-            advantages = padded["advantages"].detach().cpu().float()
-            response_mask = padded["response_mask"].to(bool).cpu()
-        except Exception as exc:
-            logger.warning("failed to compute advantage metrics: %s", exc)
-            return
-
-        per_policy: dict[str, list[torch.Tensor]] = {policy: [] for policy in self.policy_trainers}
-        for i, tag in enumerate(batch.tags):
-            policy_name = tag.get("policy_name")
-            if policy_name not in per_policy:
-                continue
-            values = advantages[i][response_mask[i]]
-            if values.numel() == 0:
-                continue
-            per_policy[policy_name].append(values)
-
-        for policy_name, tensors in per_policy.items():
-            if not tensors:
-                continue
-            values = torch.cat(tensors)
-            stats = {
-                "advantages_mean": values.mean().item(),
-                # Population std (correction=0): a single value or all-equal
-                # advantages yields 0.0 instead of NaN (torch's default
-                # sample std with correction=1 returns NaN for n=1).
-                "advantages_std": values.std(correction=0).item(),
-                "advantages_min": values.min().item(),
-                "advantages_max": values.max().item(),
-                "advantages_abs_mean": values.abs().mean().item(),
-                "advantages_positive_ratio": (values > 0).float().mean().item(),
-            }
-            for key, value in stats.items():
-                metrics[f"{policy_name}/actor/{key}"] = value
 
     def _add_data_metrics(
         self,
@@ -1215,14 +1164,16 @@ class MultiPolicyTrainer:
         return str(filter_metric)
 
     def _load_checkpoint(self) -> None:
-        global_step = self.checkpoint_manager.load(
+        result = self.checkpoint_manager.load(
             policy_trainers=self.policy_trainers,
             train_dataloader=self.train_dataloader,
         )
-        if global_step is None:
+        if result is None:
             self.global_steps = 0
+            self._restored_tq_prompt_count = 0
             return
-        self.global_steps = global_step
+        self.global_steps = result.global_step
+        self._restored_tq_prompt_count = result.restored_prompt_count
         self._sync_policy_runtime_context()
 
     def _reissue_inflight_prompts(self, partition_id: str = "train") -> int:
@@ -1537,6 +1488,38 @@ class MultiPolicyTrainer:
             if self.trainer_mode == "sync":
                 trainer.timing_raw = self.timing_raw
 
+    def _add_async_warmup_batches(self, num_warmup_batches: int | float) -> None:
+        """Fill the async prefetch window while preserving restored prompt groups.
+
+        Mirrors ``PPOTrainer._add_async_warmup_batches`` from verl v1.
+        """
+        if num_warmup_batches <= 0:
+            return
+        if bool(OmegaConf.select(self.config, "skip.rollout_tq.enable", default=False)):
+            return
+
+        # The outer dataloader is forced to one prompt per fetch in async mode;
+        # use its actual granularity so _next_train_batch receives whole chunks.
+        gen_batch_size = int(getattr(self.train_dataloader, "batch_size", None) or self.train_batch_size)
+        target_chunks = math.floor(num_warmup_batches * self.train_batch_size / gen_batch_size)
+        target_prompts = target_chunks * gen_batch_size
+        missing_prompts = max(0, target_prompts - self._restored_tq_prompt_count)
+        if missing_prompts == 0:
+            logger.info(
+                "Skipping async warmup: %d restored prompt groups already fill the %.2f-batch target",
+                self._restored_tq_prompt_count,
+                num_warmup_batches,
+            )
+            return
+
+        self._add_prompts_to_generate(missing_prompts)
+        logger.info(
+            "Added %d warmup prompts after restoring %d prompt groups (target %.2f batches)",
+            missing_prompts,
+            self._restored_tq_prompt_count,
+            num_warmup_batches,
+        )
+
     def on_train_begin(self) -> None:
         if self.config.get("skip") is not None:
             SkipManager.init(self.config)
@@ -1551,8 +1534,42 @@ class MultiPolicyTrainer:
             policy_trainer.curr_step_profile = False
             policy_trainer.next_step_profile = False
         num_warmup_batches = self.config.trainer.v1.separate_async.num_warmup_batches
-        for _ in range(num_warmup_batches):
-            self._add_batch_to_generate()
+        self._add_async_warmup_batches(num_warmup_batches)
+        self._wait_for_warmup_barrier(num_warmup_batches)
+
+    def _wait_for_warmup_barrier(self, num_warmup_batches: int | float) -> None:
+        """Wait for the first step's samples before switching hybrid to trainer.
+
+        With ``enable_switch=false``, ``on_step_begin`` would otherwise switch
+        hybrid replicas before ``step()`` waits, leaving training GPUs idle. This
+        one-shot barrier waits for ``train_batch_size`` sampleable prompt groups,
+        then switches every policy to trainer mode.
+        """
+        barrier_config = self.config.get("warmup_barrier") or {}
+        if not barrier_config.get("enable", False) or self.trainer_mode != "separate_async":
+            return
+        if bool(OmegaConf.select(self.config, "skip.rollout_tq.enable", default=False)):
+            return
+        if self.replay_buffer is None or not any(
+            getattr(trainer, "_enable_hybrid_replicas", False) for trainer in self.policy_trainers.values()
+        ):
+            return
+
+        if num_warmup_batches < 1:
+            logger.warning("warmup barrier skipped: num_warmup_batches=%s", num_warmup_batches)
+            return
+
+        required_sampleable_prompts = self.train_batch_size
+
+        logger.info("warmup barrier: waiting for %d sampleable prompt groups", required_sampleable_prompts)
+        start = time.monotonic()
+        self.replay_buffer.wait_for_sampleable(self.global_steps, "train", required_sampleable_prompts)
+        logger.info(
+            "warmup barrier: %d sampleable prompt groups reached in %.2fs; switching hybrid to trainer",
+            required_sampleable_prompts,
+            time.monotonic() - start,
+        )
+        self._dispatch_policy_hook("switch_to_trainer")
 
     def on_train_end(self) -> None:
         # Shut down dataloader workers while the interpreter is still alive.

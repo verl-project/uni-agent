@@ -108,7 +108,7 @@ class CollectorObserver:
             emitter.on_write(
                 WriteEvent(
                     kind=WriteKind.KV_REMOVED,
-                    node=update.node_id,
+                    node=update.replica_id,
                     deltas={EmitKey.KV_EVICTIONS: n_removed},
                 )
             )
@@ -136,7 +136,7 @@ class CollectorObserver:
                 emitter.on_write(
                     WriteEvent(
                         kind=WriteKind.ACQUIRE if is_acquire else WriteKind.RELEASE,
-                        node=update.node_id,
+                        node=update.replica_id,
                         deltas=update.metrics,
                         new_values=values,
                         turn_sum=values.get(MetricKey.INFLIGHT_TURN_SUM),
@@ -148,9 +148,9 @@ class CollectorObserver:
         emitter.on_write(
             WriteEvent(
                 kind=WriteKind.POLL,
-                node=update.node_id,
+                node=update.replica_id,
                 new_values=values,
-                load=self._kv.kv_cache_load(update.node_id),
+                load=self._kv.kv_cache_load(update.replica_id),
             )
         )
 
@@ -160,7 +160,7 @@ class CollectorObserver:
         if self._metrics_poll_count % _METRICS_LOG_INTERVAL_S == 0:
             # Emit evidence for ALL known replicas, not just the one that happened
             # to be polled at this poll-count tick. Metrics polling is serial
-            # (one replica per poll), so emitting only ``update.node_id`` here
+            # (one replica per poll), so emitting only ``update.replica_id`` here
             # sampled ~1/N of replicas per window → some replicas never got an
             # evidence line (e.g. 4/8 seen). Each replica keeps its own
             # ``_metrics_prev`` baseline, so windowed deltas stay correct.

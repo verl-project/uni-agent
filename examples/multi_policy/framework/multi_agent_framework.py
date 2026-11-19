@@ -10,8 +10,10 @@ from __future__ import annotations
 
 import copy
 import logging
+import re
 from collections.abc import Mapping
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 from omegaconf import DictConfig, OmegaConf
@@ -192,3 +194,27 @@ class MultiAgentGatewayFramework(GatewayAgentFramework):
             "policy_name": trajectory.extra_fields.get("policy_name"),
             "session_group_id": trajectory.extra_fields.get("session_group_id"),
         }
+
+    def _dump_trajectories(self, run_dir: Path, session_id: str, trajectories: list[Trajectory]) -> None:
+        """Persist each role's JSON/NPZ trajectory dump under ``agents/<role>/``.
+
+        The base framework writes one aggregate dump per session group. A
+        multi-agent group has several roles, so keep each role's artifacts
+        separate and reuse the base serializer for every role directory.
+        """
+        grouped: dict[str, list[Trajectory]] = {}
+        for trajectory in trajectories:
+            role = str(trajectory.extra_fields.get("role") or "unknown")
+            grouped.setdefault(role, []).append(trajectory)
+
+        used_dirnames: set[str] = set()
+        for role, role_trajectories in grouped.items():
+            dirname = re.sub(r"[^A-Za-z0-9_.-]+", "_", role).strip("._-") or "unknown"
+            candidate = dirname
+            # Sanitization may collapse distinct role names; suffix to avoid overwriting.
+            suffix = 2
+            while candidate in used_dirnames:
+                candidate = f"{dirname}_{suffix}"
+                suffix += 1
+            used_dirnames.add(candidate)
+            super()._dump_trajectories(run_dir / "agents" / candidate, session_id, role_trajectories)
