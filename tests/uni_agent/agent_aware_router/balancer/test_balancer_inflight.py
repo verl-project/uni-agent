@@ -168,13 +168,31 @@ def test_removed_replica_release_does_not_debit_readded_replica_work():
 
 def test_anonymous_release_of_removed_work_does_not_debit_readded_replica():
     balancer = _make_balancer({"s0": "h0"})
+    store = balancer._store
     balancer.acquire_server(None, [1, 2])
+    balancer.acquire_server(None, [1, 2, 3])
     balancer.remove_servers(["s0"])
     assert balancer.get_total_inflight() == 0
     balancer.add_servers({"s0": "new-h0"})
-    balancer.acquire_server(None, [1])
+    balancer.acquire_server(None, list(range(5)))
+    balancer.acquire_server(None, list(range(7)))
+    assert balancer.get_total_inflight() == 2
+
+    # Late releases clear the retired bookings in FIFO order.
+    balancer.release_server("s0")
+    assert balancer.get_total_inflight() == 2
+    assert store.get_metric("s0", MetricKey.INFLIGHT_COUNT) == 3
+    assert store.get_metric("s0", MetricKey.INFLIGHT_TOKENS) == 15
+    balancer.release_server("s0")
+    _assert_active(balancer, {"s0": (2, 12, 0)})
+    assert store.get_metric("s0", MetricKey.COMPLETED_COUNT) == 2
 
     balancer.release_server("s0")
-    _assert_active(balancer, {"s0": (1, 1, 0)})
+    _assert_active(balancer, {"s0": (1, 7, 0)})
     balancer.release_server("s0")
     _assert_active(balancer, {"s0": (0, 0, 0)})
+    assert store.get_metric("s0", MetricKey.COMPLETED_COUNT) == 4
+
+    balancer.release_server("s0")
+    _assert_active(balancer, {"s0": (0, 0, 0)})
+    assert store.get_metric("s0", MetricKey.COMPLETED_COUNT) == 4
