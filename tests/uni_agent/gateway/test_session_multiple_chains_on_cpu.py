@@ -417,6 +417,68 @@ async def test_first_assistant_rollback_drops_chain_when_replacement_exceeds_cap
 @pytest.mark.cpu
 @pytest.mark.level0
 @pytest.mark.asyncio
+@pytest.mark.parametrize("keep_earlier_output", [False, True])
+async def test_repeated_rollback_at_capacity_keeps_only_trainable_prefixes(keep_earlier_output):
+    """An observation-only response prefix is not a trainable trajectory."""
+    initial_messages = [{"role": "user", "content": "start"}]
+    first_messages = list(initial_messages)
+    steps = []
+    if keep_earlier_output:
+        first_messages += [
+            {"role": "assistant", "content": "KEEP"},
+            {"role": "user", "content": "next"},
+        ]
+        steps.append(("KEEP", 7, 7))
+    rewrite_messages = [*first_messages, {"role": "user", "content": "retry one"}]
+    exhausted_messages = [*rewrite_messages, {"role": "user", "content": "retry two " * 8}]
+    total_capacity = _prompt_length(exhausted_messages) - 1
+    session = _session(
+        "repeated-rollback-capacity",
+        prompt_length=1,
+        response_length=total_capacity - 1,
+        sampling_params={"logprobs": True},
+        enable_last_assistant_rollback=True,
+    )
+    backend = _VersionedBackend(steps + [("FIRST", 8, 8), ("SECOND", 9, 9), ("SHOULD_NOT_RUN", 10, 10)])
+
+    if keep_earlier_output:
+        await _run(session, backend, initial_messages)
+    await _run(session, backend, first_messages)
+    await _run(session, backend, rewrite_messages)
+
+    [chain] = session.active_chains
+    # The earlier rollback left observation tokens before the latest output.
+    boundary = chain.last_assistant_start.response_ids_len
+    assert boundary > 0
+    assert 0 in chain.buffer.response_mask[:boundary]
+    assert any(chain.buffer.response_mask[:boundary]) is keep_earlier_output
+
+    outcome = await _run(session, backend, exhausted_messages)
+    assert outcome.finish_reason == "length"
+    assert backend.steps == [("SHOULD_NOT_RUN", 10, 10)]
+    state = session.snapshot_state()
+    assert state["active_chain_ids"] == []
+    assert state["rollback_count"] == 2
+    assert state["rollback_dropped_trainable_tokens_total"] == len("FIRSTSECOND")
+
+    trajectories = await session.finalize()
+    if not keep_earlier_output:
+        assert trajectories == []
+    else:
+        [trajectory] = trajectories
+        trainable_ids = [
+            token for token, mask in zip(trajectory.response_ids, trajectory.response_mask, strict=False) if mask
+        ]
+        assert trainable_ids == _ids("KEEP")
+        assert len(trajectory.response_ids) == len(trajectory.response_mask) == len(trajectory.response_logprobs)
+        assert trajectory.extra_fields["min_global_steps"] == 7
+        assert trajectory.extra_fields["max_global_steps"] == 7
+        assert trajectory.extra_fields["materialization_reason"] == "max_trajectory_length"
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
 async def test_first_assistant_rewrite_with_assistant_tool_context_reuses_chain():
     """Replace a first-turn assistant/tool context in the existing chain."""
     session = _session("rollback-first-assistant-tool", enable_last_assistant_rollback=True)

@@ -70,6 +70,9 @@ def build_policy_gateway_configs(
             enable_last_assistant_rollback=agent_framework_config.get("enable_last_assistant_rollback", True),
             allowed_request_sampling_param_keys=allowed_sampling_keys,
             coalesce_reserved_exact_requests=agent_framework_config.get("coalesce_reserved_exact_requests", True),
+            # Not wired for multi-policy yet: all roles in a session group share
+            # one log_dir, so TreeGatewaySession snapshots would collide.
+            use_tree_trajectory_manager=False,
         )
     return policy_gateway_configs
 

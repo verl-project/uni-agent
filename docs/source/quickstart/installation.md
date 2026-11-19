@@ -91,3 +91,9 @@ ray job submit --runtime-env runtime_env.yaml -- python entrypoint.py
 ```
 
 Next, you can [launch a sandbox and run some code](launch-sandbox.md).
+
+## Reproducible uv environment
+
+For a fresh environment, use the [uv workspace guide](uv.md) to resolve Uni-Agent
+and its bundled verl from a single lock, including selectable CPU/GPU backends
+and optional task, sandbox and RL-Insight packages.

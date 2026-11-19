@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from examples.multi_policy.external_mas.external_mas_runner import (
+from examples.multi_policy.external_mas.execution import (
     _build_command,
     _format_values,
 )

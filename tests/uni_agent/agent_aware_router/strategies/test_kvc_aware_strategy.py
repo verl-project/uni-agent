@@ -129,7 +129,7 @@ class FakeRouteDataProvider:
     def inflight_block_count(self, replica_id: str) -> int:
         return int(self._data.get(replica_id, {}).get("inflight_blocks", 0))
 
-    def get_metric_node_ids(self) -> list[str]:
+    def get_metric_replica_ids(self) -> list[str]:
         return list(self._data.keys())
 
     def get_block_size(self) -> int | None:
