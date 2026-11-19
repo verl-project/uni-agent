@@ -6,8 +6,8 @@ import inspect
 import logging
 import re
 import shlex
-import threading
 import time
+import weakref
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
@@ -21,15 +21,20 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def _ensure_template(
+async def _ensure_template(
     image: str,
     cpu_count: int,
     memory_mb: int,
     proxy: str | None = None,
 ) -> str:
-    """Build the image-backed template once and return its deterministic name."""
-    import e2b
+    """Return the deterministic name of the image-backed template, building it if it is not ready.
 
+    Concurrent callers on the same event loop share one in-flight attempt per
+    template name and connection. The attempt runs on the event loop through the
+    async E2B SDK, so waiting for a build holds no executor thread. A cancelled
+    caller does not cancel the shared attempt; callers that joined an attempt that
+    fails receive its error, and the next caller starts a new attempt.
+    """
     image = image.strip()
     if not image:
         raise ValueError("image must be a non-empty string")
@@ -39,52 +44,68 @@ def _ensure_template(
     name = f"uni-agent-{slug}-{cpu_count}c-{memory_mb}mb-{digest}"
     connection_kwargs = {"proxy": proxy} if proxy is not None else {}
 
-    # ponytail: the lock only serializes builds within one process. Workers in
-    # other processes may build the same name concurrently; E2B then rejects
-    # all but one alias insert, and the loser waits for the winner below. A
-    # build itself has no deadline beyond the caller's startup timeout, and its
-    # thread keeps running if that caller is cancelled; prebuild templates
-    # before large fan-out (see the E2B sandbox docs).
-    arrived = time.monotonic()
-    with _build_lock(name):
-        failed = _failed_builds.get(name)
-        if failed is not None and failed[0] > arrived:
-            # A build that started after this call arrived just failed; do not
-            # queue another identical build behind it.
-            raise failed[1]
-        if _wait_for_build(name, connection_kwargs) == "ready":
-            return name
-        try:
-            e2b.Template.build(
-                e2b.Template().from_image(image),
-                name,
-                cpu_count=cpu_count,
-                memory_mb=memory_mb,
-                on_build_logs=None,
-                **connection_kwargs,
-            )
-        except Exception as exc:
-            # Another process may have created the alias first and be building it.
-            if _wait_for_build(name, connection_kwargs) == "ready":
-                return name
-            _failed_builds[name] = (time.monotonic(), exc)
-            raise
-        _failed_builds.pop(name, None)
-    return name
+    attempts = _attempts_for_running_loop()
+    key = (name, proxy)
+    attempt = attempts.get(key)
+    if attempt is None:
+        attempt = asyncio.ensure_future(_build_if_not_ready(image, name, cpu_count, memory_mb, connection_kwargs))
+        attempts[key] = attempt
+        attempt.add_done_callback(lambda done: _forget_attempt(attempts, key, done))
+    return await asyncio.shield(attempt)
 
 
-_build_locks: dict[str, threading.Lock] = {}
-_build_locks_guard = threading.Lock()
-_failed_builds: dict[str, tuple[float, BaseException]] = {}
+# ponytail: attempts are shared per event loop only. Workers in other processes
+# may build the same name concurrently; E2B then rejects all but one alias
+# insert, and the loser waits for the winning build. An attempt keeps running
+# after its last caller is cancelled, until the build or the startup-timeout
+# wait ends; prebuild templates before large fan-out (see the E2B sandbox docs).
+_attempts_by_loop: weakref.WeakKeyDictionary[
+    asyncio.AbstractEventLoop, dict[tuple[str, str | None], asyncio.Future]
+] = weakref.WeakKeyDictionary()
 _BUILD_POLL_INTERVAL = 2.0
 
 
-def _build_lock(name: str) -> threading.Lock:
-    with _build_locks_guard:
-        return _build_locks.setdefault(name, threading.Lock())
+def _attempts_for_running_loop() -> dict[tuple[str, str | None], asyncio.Future]:
+    return _attempts_by_loop.setdefault(asyncio.get_running_loop(), {})
 
 
-def _build_status(name: str, connection_kwargs: dict[str, Any]) -> str | None:
+def _forget_attempt(attempts: dict, key: tuple[str, str | None], done: asyncio.Future) -> None:
+    if attempts.get(key) is done:
+        del attempts[key]
+    if not done.cancelled():
+        done.exception()  # retrieved here, so a failed attempt with no callers left is not logged as unhandled
+
+
+async def _build_if_not_ready(
+    image: str, name: str, cpu_count: int, memory_mb: int, connection_kwargs: dict[str, Any]
+) -> str:
+    import e2b
+
+    if await _wait_for_build(name, connection_kwargs) == "ready":
+        return name
+    try:
+        await e2b.AsyncTemplate.build(
+            e2b.AsyncTemplate().from_image(image),
+            name,
+            cpu_count=cpu_count,
+            memory_mb=memory_mb,
+            on_build_logs=None,
+            **connection_kwargs,
+        )
+    except Exception as build_error:
+        # Another process may have created the alias first and be building it.
+        try:
+            recovered = await _wait_for_build(name, connection_kwargs) == "ready"
+        except Exception:
+            logger.warning("E2B template %s: status check after a failed build also failed", name, exc_info=True)
+            recovered = False
+        if recovered:
+            return name
+        raise build_error
+    return name
+
+
+async def _build_status(name: str, connection_kwargs: dict[str, Any]) -> str | None:
     """Status of the build behind the template's ``default`` tag, or ``None`` if there is none.
 
     The alias and the ``default`` tag exist as soon as a build is requested, even
@@ -93,40 +114,44 @@ def _build_status(name: str, connection_kwargs: dict[str, Any]) -> str | None:
     """
     import e2b
 
-    template_id = _template_id(name, connection_kwargs)
+    template_id = await _template_id(name, connection_kwargs)
     if template_id is None:
         return None
     if template_id == "":
-        # The alias belongs to another team; we cannot see its builds.
-        return "ready"
-    build_id = next((t.build_id for t in e2b.Template.get_tags(name, **connection_kwargs) if t.tag == "default"), None)
+        raise RuntimeError(
+            f"E2B template name {name!r} belongs to another team, so its build cannot be verified; "
+            "use another image or set sandbox_kwargs.template"
+        )
+    tags = await e2b.AsyncTemplate.get_tags(name, **connection_kwargs)
+    build_id = next((t.build_id for t in tags if t.tag == "default"), None)
     if build_id is None:
         return None
     try:
-        status = e2b.Template.get_build_status(
+        build = await e2b.AsyncTemplate.get_build_status(
             SimpleNamespace(template_id=template_id, build_id=build_id), **connection_kwargs
-        ).status
+        )
     except Exception as exc:
         if "not found" in str(exc).lower():
             # Right after a build is requested its status can briefly be missing.
             return "building"
         raise
+    status = build.status
     return str(getattr(status, "value", status)).lower()
 
 
-def _template_id(name: str, connection_kwargs: dict[str, Any]) -> str | None:
+async def _template_id(name: str, connection_kwargs: dict[str, Any]) -> str | None:
     """Template ID behind alias ``name``; ``None`` if there is no such alias, ``""`` if it is not ours.
 
     The build-status endpoint needs the template ID; the SDK has no public lookup
     from name to ID, so this uses the same generated API call as
-    ``Template.exists``.
+    ``AsyncTemplate.exists``.
     """
     from e2b.api.client.api.templates import get_templates_aliases_alias
-    from e2b.api.client_sync import get_api_client
+    from e2b.api.client_async import get_api_client
     from e2b.connection_config import ConnectionConfig
 
     client = get_api_client(ConnectionConfig(**connection_kwargs))
-    res = get_templates_aliases_alias.sync_detailed(alias=name, client=client)
+    res = await get_templates_aliases_alias.asyncio_detailed(alias=name, client=client)
     if res.status_code == 404:
         return None
     if res.status_code == 403:
@@ -136,7 +161,7 @@ def _template_id(name: str, connection_kwargs: dict[str, Any]) -> str | None:
     return str(res.parsed.template_id)
 
 
-def _wait_for_build(name: str, connection_kwargs: dict[str, Any]) -> str | None:
+async def _wait_for_build(name: str, connection_kwargs: dict[str, Any]) -> str | None:
     """Wait while the template's build is running; return its final status (``None`` if no build).
 
     Bounded by ``SANDBOX_STARTUP_TIMEOUT``; a value ``<= 0`` disables the bound, as for ``start()``.
@@ -144,12 +169,16 @@ def _wait_for_build(name: str, connection_kwargs: dict[str, Any]) -> str | None:
     timeout = _env_number("SANDBOX_STARTUP_TIMEOUT", _DEFAULT_STARTUP_TIMEOUT)
     deadline = time.monotonic() + timeout if timeout > 0 else None
     while True:
-        status = _build_status(name, connection_kwargs)
+        status = await _build_status(name, connection_kwargs)
         if status not in ("building", "waiting"):
             return status
-        if deadline is not None and time.monotonic() >= deadline:
-            raise TimeoutError(f"E2B template {name!r} is still building")
-        time.sleep(_BUILD_POLL_INTERVAL)
+        delay = _BUILD_POLL_INTERVAL
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"E2B template {name!r} is still building")
+            delay = min(delay, remaining)
+        await asyncio.sleep(delay)
 
 
 @register_sandbox("e2b")
@@ -236,13 +265,7 @@ class E2BSandbox(Sandbox):
         template = self.template
         if template is None:
             assert self.image is not None
-            template = await asyncio.to_thread(
-                _ensure_template,
-                self.image,
-                self.cpu_count,
-                self.memory_mb,
-                self.proxy,
-            )
+            template = await _ensure_template(self.image, self.cpu_count, self.memory_mb, self.proxy)
 
         create_kwargs: dict[str, Any] = {
             "template": template,
