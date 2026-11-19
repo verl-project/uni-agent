@@ -142,6 +142,25 @@ def _real_installer_running() -> bool:
     return False
 
 
+def _wait_for_comm(pid: int, expected: str, timeout: float = 5.0) -> None:
+    """Block until the fake installer's comm is set (no startup race).
+
+    Popen returns before the child's interpreter has executed PR_SET_NAME;
+    starting the lock-wait fragment in that window lets it scan /proc before
+    the fake installer is visible, which made this test flaky on slow CI hosts.
+    """
+    expected = expected[:15]
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            if Path(f"/proc/{pid}/comm").read_text().strip() == expected:
+                return
+        except OSError:
+            pass
+        time.sleep(0.05)
+    raise AssertionError(f"fake installer pid {pid} did not reach comm {expected!r}")
+
+
 @pytest.mark.cpu
 @pytest.mark.level0
 @pytest.mark.skipif(sys.platform != "linux", reason="requires /proc comm inspection")
@@ -157,9 +176,10 @@ def test_apt_lock_wait_blocks_until_existing_installer_exits(fake_name):
         [
             sys.executable,
             "-c",
-            f"import ctypes, time; ctypes.CDLL(None).prctl(15, b'{fake_name}', 0, 0, 0); time.sleep(3)",
+            f"import ctypes, time; ctypes.CDLL(None).prctl(15, b'{fake_name}', 0, 0, 0); time.sleep(6)",
         ]
     )
+    _wait_for_comm(proc.pid, fake_name)
     try:
         start = time.monotonic()
         result = subprocess.run(
