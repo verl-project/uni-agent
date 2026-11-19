@@ -146,14 +146,20 @@ def _real_installer_running() -> bool:
 @pytest.mark.level0
 @pytest.mark.skipif(sys.platform != "linux", reason="requires /proc comm inspection")
 @pytest.mark.parametrize("fake_name", ["apt-get", "unattended-upgrades"])
-def test_apt_lock_wait_blocks_until_existing_installer_exits(tmp_path, fake_name):
+def test_apt_lock_wait_blocks_until_existing_installer_exits(fake_name):
     if _real_installer_running():
         pytest.skip("unrelated apt/dpkg installer active on host")
-    # A symlink makes the kernel report comm after the link name; names longer
-    # than 15 characters are truncated (unattended-upgrades -> unattended-upgr).
-    fake_apt = tmp_path / fake_name
-    fake_apt.symlink_to("/bin/sleep")
-    proc = subprocess.Popen([str(fake_apt), "3"])
+    # PR_SET_NAME (=15) writes comm directly and the kernel truncates it to
+    # 15 characters (unattended-upgrades -> unattended-upgr). Setting the name
+    # explicitly is more portable than relying on symlink/exec filename
+    # semantics, which vary across kernels and container runtimes.
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            f"import ctypes, time; ctypes.CDLL(None).prctl(15, b'{fake_name}', 0, 0, 0); time.sleep(3)",
+        ]
+    )
     try:
         start = time.monotonic()
         result = subprocess.run(
