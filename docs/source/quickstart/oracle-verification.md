@@ -69,15 +69,14 @@ python examples/inference/parallel_run_oracle.py \
 
 ### Run on E2B
 
-The Task Config above selects Modal. To verify the same samples on [E2B](launch-sandbox.md), install the E2B SDK, set `E2B_API_KEY`, and override the provider with `SANDBOX_PROVIDER=e2b`. SWE-Bench uses one image per sample, and the E2B provider builds a template from each image the first time it is used, so build the templates first. Use the same `--limit` (or none) for both commands so that every sample has a template before the run starts:
+The Task Config above selects Modal. To verify the same samples on [E2B](launch-sandbox.md), install the E2B SDK, set `E2B_API_KEY`, and override the provider with `SANDBOX_PROVIDER=e2b`. SWE-Bench uses one image per sample, and the E2B provider builds a template from each image the first time it is used, so build the templates first. The oracle run starts only if every template was built; use the same `--limit` (or none) for both commands so that every sample has a template:
 
 ```bash
 export SANDBOX_PROVIDER=e2b
 python examples/quickstart/sandbox/prebuild_e2b_templates.py \
     --data-path ~/data/uni_agent/swe_bench_verified.parquet \
     --task-config examples/quickstart/oracle/task_config_oracle.yaml \
-    --limit 3
-
+    --limit 3 &&
 python examples/inference/parallel_run_oracle.py \
     --data-path ~/data/uni_agent/swe_bench_verified.parquet \
     --task-config examples/quickstart/oracle/task_config_oracle.yaml \

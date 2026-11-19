@@ -200,8 +200,9 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
 
     CPU and memory are part of the generated template name. Changing either
     value builds and uses a separate template. When both `template` and
-    `image` are set, `template` is used and `image`, `cpu_count` and
-    `memory_mb` are ignored.
+    `image` are set, the sandbox starts from `template`; `image`, `cpu_count`
+    and `memory_mb` do not affect which template is used, but they are still
+    validated (for example, `memory_mb` must be at least 512).
 
     The first sandbox for a new image waits for its template build. Other
     sandboxes for the same image wait for that build instead of starting
@@ -236,10 +237,7 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
 
     E2B runs commands through a login shell, so a `PATH` passed in a
     command's `env` is reset by `/etc/profile`; export `PATH` inside the
-    script instead. When a command times out or is cancelled, the provider
-    kills the command's whole process group, including children started by
-    `exec_shell` scripts; this needs `setsid` in the image (images without it
-    fall back to killing only the command itself).
+    script instead.
 
     !!! warning "Gateway reachability"
         Host-side agents such as ReAct only use E2B for tools. Agents launched
