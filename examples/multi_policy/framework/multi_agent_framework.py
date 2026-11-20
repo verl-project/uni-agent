@@ -168,8 +168,15 @@ class MultiAgentGatewayFramework(GatewayAgentFramework):
         *,
         metadata: dict[str, object] | None = None,
         sampling_params: object = None,
+        pass_through_message_history: bool = False,
     ) -> SessionGroupHandle:
-        """Create a session group with one session per role."""
+        """Create a session group with one session per role.
+
+        ``pass_through_message_history`` is accepted for signature compatibility
+        with the base hook and ignored: a group creates one gateway session per
+        role, and this manager does not forward the flag to them.
+        """
+        del pass_through_message_history
         return await self.gateway_manager.create_session(
             session_id,
             role_policy_mapping=self._role_policy_mapping,

@@ -250,15 +250,16 @@ def test_omitted_dispatch_mode_uses_mainline_inline_default():
 
 @pytest.mark.cpu
 @pytest.mark.level0
-def test_selection_is_over_the_whole_session_group():
+@pytest.mark.asyncio
+async def test_selection_is_over_the_whole_session_group():
     from uni_agent.framework.framework import _select_session_trajectories
 
     trajectories = [
         Trajectory([1], [2], [1], extra_fields={"policy_name": "p1", "role": "planner"}),
         Trajectory([1], [2, 3], [1, 1], extra_fields={"policy_name": "p2", "role": "answerer"}),
     ]
-    assert _select_session_trajectories("group-1", trajectories, "all") == trajectories
-    selected = _select_session_trajectories("group-1", trajectories, "longest")
+    assert await _select_session_trajectories("group-1", trajectories, "all") == trajectories
+    selected = await _select_session_trajectories("group-1", trajectories, "longest")
     assert len(selected) == 1
     assert selected[0] is trajectories[1]
 

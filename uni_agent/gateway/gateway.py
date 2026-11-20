@@ -385,6 +385,7 @@ class _GatewayActor:
         metadata: dict[str, Any] | None = None,
         sampling_params: dict[str, Any] | None = None,
         policy_name: str | None = None,
+        pass_through_message_history: bool = False,
     ) -> SessionHandle:
         """Create an actor-owned session and return its provider-compatible handle."""
         self._require_started()
@@ -412,6 +413,7 @@ class _GatewayActor:
             sampling_params=sampling_params,
             enable_last_assistant_rollback=config.enable_last_assistant_rollback,
             coalesce_reserved_exact_requests=config.coalesce_reserved_exact_requests,
+            pass_through_message_history=pass_through_message_history,
             metadata=metadata,
         )
         self._session_policies[session_id] = policy_name

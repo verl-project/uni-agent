@@ -34,6 +34,13 @@ from verl.utils.transferqueue_utils import tq
 
 from .base import AgentFramework
 from .multi_modal_postprocess import compute_multi_modal_inputs, compute_position_ids
+from .trajectory_selection import (
+    TrajectorySelectFunction,
+    _CustomSelectFunction,
+    _load_select_function,
+    _parse_trajectory_selection,
+    _select_session_trajectories,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -48,6 +55,7 @@ class _RunnerConfig:
     dispatch_mode: str
     max_concurrent_sessions: int
     trajectory_selection: str = "all"
+    custom_select_function: _CustomSelectFunction | None = None
     session_timeout_seconds: float | None = None
 
     def __post_init__(self) -> None:
@@ -59,6 +67,10 @@ class _RunnerConfig:
             raise ValueError(f"max_concurrent_sessions must be non-negative, got {self.max_concurrent_sessions}")
         if self.trajectory_selection not in {"all", "longest"}:
             raise ValueError(f"Unknown trajectory selection: {self.trajectory_selection}. Expected 'all' or 'longest'")
+        if self.custom_select_function is not None and not (
+            self.custom_select_function.path and self.custom_select_function.name
+        ):
+            raise ValueError("custom_select_function requires non-empty 'path' and 'name'")
         if self.session_timeout_seconds is not None and self.session_timeout_seconds <= 0:
             raise ValueError(f"session_timeout_seconds must be positive, got {self.session_timeout_seconds}")
 
@@ -78,7 +90,7 @@ class _RunnerConfig:
             runner_kwargs["tool_config"] = tool_config
         dispatch_mode = str(runner_cfg.get("dispatch_mode", "inline_async"))
         max_concurrent_sessions = int(runner_cfg.get("max_concurrent_sessions", 0) or 0)
-        trajectory_selection = str(runner_cfg.get("trajectory_selection", "all"))
+        trajectory_selection, custom_select_function = _parse_trajectory_selection(runner_name, runner_cfg)
         raw_timeout = runner_cfg.get("session_timeout_seconds")
         session_timeout_seconds = None if raw_timeout is None else float(raw_timeout)
         try:
@@ -88,6 +100,7 @@ class _RunnerConfig:
                 dispatch_mode=dispatch_mode,
                 max_concurrent_sessions=max_concurrent_sessions,
                 trajectory_selection=trajectory_selection,
+                custom_select_function=custom_select_function,
                 session_timeout_seconds=session_timeout_seconds,
             )
         except ValueError as exc:
@@ -150,36 +163,6 @@ def _session_tq_schema():
         # so session markers must not be written for them.
         return None
     return tq_schema
-
-
-def _select_session_trajectories(
-    session_id: str,
-    trajectories: list[Trajectory],
-    selection: str,
-) -> list[Trajectory]:
-    """Apply the runner's trajectory-retention policy before scoring and TQ writes."""
-    if selection == "all" or len(trajectories) <= 1:
-        return trajectories
-
-    index, trajectory = max(
-        enumerate(trajectories),
-        key=lambda item: (
-            sum(item[1].response_mask),
-            len(item[1].response_ids),
-            item[1].num_turns,
-            item[0],
-        ),
-    )
-    logger.info(
-        "session %s: selected longest trajectory index=%s model_tokens=%s response_tokens=%s turns=%s candidates=%s",
-        session_id,
-        index,
-        sum(trajectory.response_mask),
-        len(trajectory.response_ids),
-        trajectory.num_turns,
-        len(trajectories),
-    )
-    return [trajectory]
 
 
 _TQ_NESTED_SEQUENCE_FIELDS = {
@@ -373,6 +356,16 @@ class GatewayAgentFramework(AgentFramework):
         self._mask_unfinished_episode = mask_unfinished_episode
         self._trajectory_postprocessor = trajectory_postprocessor
         self._trajectory_postprocessor_kwargs = trajectory_postprocessor_kwargs or {}
+        # Preloaded so a bad reference fails at start-up, and kept per runner so a
+        # multi-agent deployment can mix select functions.
+        self._select_functions: dict[str, TrajectorySelectFunction] = {}
+        for runner_name, runner_config in runner_registry.items():
+            if runner_config.custom_select_function is None:
+                continue
+            try:
+                self._select_functions[runner_name] = _load_select_function(runner_config.custom_select_function)
+            except (TypeError, ValueError) as exc:
+                raise type(exc)(f"agent_runners.{runner_name}: {exc}") from exc
 
     @classmethod
     def from_config(
@@ -543,6 +536,7 @@ class GatewayAgentFramework(AgentFramework):
         *,
         metadata: dict[str, object] | None = None,
         sampling_params: object = None,
+        pass_through_message_history: bool = False,
     ) -> object:
         """Create the session for one runner execution and return its handle.
 
@@ -550,11 +544,16 @@ class GatewayAgentFramework(AgentFramework):
         session group whose roles each own a Gateway session instead. Subclasses
         that return a different shape from ``_build_session_sampling_params``
         override this hook to consume it.
+
+        ``pass_through_message_history`` is set only for runners that configured a
+        select function; it asks the gateway to copy each chain's chat text onto
+        the materialized trajectory so the selector can read it.
         """
         return await self.gateway_manager.create_session(
             session_id,
             metadata=metadata,
             sampling_params=sampling_params,
+            pass_through_message_history=pass_through_message_history,
         )
 
     async def generate_sequences(self, prompts: TensorDict) -> None:
@@ -890,11 +889,14 @@ class GatewayAgentFramework(AgentFramework):
         tools_kwargs = sample_fields.get("tools_kwargs")
         tools_kwargs = dict(tools_kwargs or {})
         tools_kwargs["_trace_identity"] = trace_identity
+        # Runners without a function never load one and pay no message copy.
+        select_fn = self._select_functions.get(runner_name)
         async with _log_scope(parent_log):
             session = await self._create_session(
                 session_id,
                 metadata={"_trace_identity": trace_identity, "_log_dir": str(run_dir) if run_dir is not None else None},
                 sampling_params=dict(sampling_params),
+                pass_through_message_history=select_fn is not None,
             )
             logger.info(
                 "session %s start: runner=%s sample_index=%s session_index=%s global_steps=%s",
@@ -949,11 +951,22 @@ class GatewayAgentFramework(AgentFramework):
                         f"Agent runner {runner_name!r} must return TaskResult or None, got {type(task_result).__name__}"
                     )
                 session_trajectories = await self.gateway_manager.finalize_session(session_id)
-                session_trajectories = _select_session_trajectories(
+                # Audit only: the full list the policy chose from, so the dump can
+                # report what it discarded. Skipped entirely when logging is off.
+                audit_candidates = list(session_trajectories) if run_dir is not None else []
+                session_trajectories = await _select_session_trajectories(
                     session_id,
                     session_trajectories,
                     runner_config.trajectory_selection,
+                    select_fn=select_fn,
                 )
+                dropped_trajectories: list[Trajectory] = []
+                if audit_candidates:
+                    # Matched on chain_id, not id(): a select function may return copies.
+                    kept_chain_ids = {trajectory.chain_id for trajectory in session_trajectories}
+                    dropped_trajectories = [
+                        trajectory for trajectory in audit_candidates if trajectory.chain_id not in kept_chain_ids
+                    ]
             except asyncio.CancelledError:
                 # Parent shutdown/cancellation must not leave the Gateway route
                 # and actor-owned session live after the runner task is gone.
@@ -992,6 +1005,9 @@ class GatewayAgentFramework(AgentFramework):
                 session_trajectories = await self._apply_trajectory_postprocessor(session_trajectories, task_result)
 
             if not session_trajectories:
+                # A selector that dropped everything still leaves an audit trail.
+                if dropped_trajectories:
+                    await asyncio.to_thread(self._dump_trajectories, run_dir, session_id, [], dropped_trajectories)
                 session_trace.finish(
                     runner_name=runner_name,
                     status="empty",
@@ -1024,7 +1040,13 @@ class GatewayAgentFramework(AgentFramework):
 
             self._log_trajectory_summary(session_id, result_trajectories)
             if run_dir is not None:
-                await asyncio.to_thread(self._dump_trajectories, run_dir, session_id, result_trajectories)
+                await asyncio.to_thread(
+                    self._dump_trajectories,
+                    run_dir,
+                    session_id,
+                    result_trajectories,
+                    dropped_trajectories,
+                )
             session_trace.finish(
                 runner_name=runner_name,
                 status="success",
@@ -1123,7 +1145,13 @@ class GatewayAgentFramework(AgentFramework):
                 )
         logger.info("\n".join(lines))
 
-    def _dump_trajectories(self, run_dir: Path, session_id: str, trajectories: list[Trajectory]) -> None:
+    def _dump_trajectories(
+        self,
+        run_dir: Path,
+        session_id: str,
+        trajectories: list[Trajectory],
+        dropped_trajectories: list[Trajectory] | None = None,
+    ) -> None:
         """Persist finalized trajectories next to ``task.log``.
 
         Split by cost: a small human-readable summary (reward, turns, lengths) is written
@@ -1132,33 +1160,49 @@ class GatewayAgentFramework(AgentFramework):
         (token ids repeat, the mask is runs of 0/1), so this is far smaller and faster than
         the old indented-JSON dump -- which matters most on a network / HDFS log_dir.
 
+        Discarded trajectories go to ``dropped_trajectory.*`` in the same shape, so a
+        chain the policy dropped stays inspectable.
+
         Runs off the event loop (caller wraps this in ``asyncio.to_thread``) and is
         best-effort: an IO / serialization error is logged but never aborts the rollout.
         """
         try:
             run_dir.mkdir(parents=True, exist_ok=True)
-            meta = {
-                "session_id": session_id,
-                "num_trajectories": len(trajectories),
-                "trajectories": [self._trajectory_meta(traj) for traj in trajectories],
-            }
-            (run_dir / "trajectory.json").write_text(
-                json.dumps(meta, ensure_ascii=False, separators=(",", ":"), default=_json_default),
-                encoding="utf-8",
-            )
-            arrays: dict[str, np.ndarray] = {}
-            for i, traj in enumerate(trajectories):
-                arrays[f"traj{i}_prompt_ids"] = np.asarray(traj.prompt_ids, dtype=np.int32)
-                arrays[f"traj{i}_response_ids"] = np.asarray(traj.response_ids, dtype=np.int32)
-                arrays[f"traj{i}_response_mask"] = np.asarray(traj.response_mask, dtype=np.int8)
-                if traj.response_logprobs is not None:
-                    arrays[f"traj{i}_response_logprobs"] = np.asarray(traj.response_logprobs, dtype=np.float32)
-
-            buf = io.BytesIO()
-            np.savez_compressed(buf, **arrays)
-            (run_dir / "trajectory.npz").write_bytes(buf.getvalue())
+            if trajectories:
+                self._write_trajectory_group(run_dir, session_id, "trajectory", trajectories)
+            if dropped_trajectories:
+                self._write_trajectory_group(run_dir, session_id, "dropped_trajectory", dropped_trajectories)
         except Exception:
             logger.exception("session %s: failed to write trajectory dump under %s", session_id, run_dir)
+
+    def _write_trajectory_group(
+        self,
+        run_dir: Path,
+        session_id: str,
+        stem: str,
+        trajectories: list[Trajectory],
+    ) -> None:
+        """Write one ``<stem>.json`` summary plus its ``<stem>.npz`` token arrays."""
+        meta = {
+            "session_id": session_id,
+            "num_trajectories": len(trajectories),
+            "trajectories": [self._trajectory_meta(traj) for traj in trajectories],
+        }
+        (run_dir / f"{stem}.json").write_text(
+            json.dumps(meta, ensure_ascii=False, separators=(",", ":"), default=_json_default),
+            encoding="utf-8",
+        )
+        arrays: dict[str, np.ndarray] = {}
+        for i, traj in enumerate(trajectories):
+            arrays[f"traj{i}_prompt_ids"] = np.asarray(traj.prompt_ids, dtype=np.int32)
+            arrays[f"traj{i}_response_ids"] = np.asarray(traj.response_ids, dtype=np.int32)
+            arrays[f"traj{i}_response_mask"] = np.asarray(traj.response_mask, dtype=np.int8)
+            if traj.response_logprobs is not None:
+                arrays[f"traj{i}_response_logprobs"] = np.asarray(traj.response_logprobs, dtype=np.float32)
+
+        buf = io.BytesIO()
+        np.savez_compressed(buf, **arrays)
+        (run_dir / f"{stem}.npz").write_bytes(buf.getvalue())
 
     def _trajectory_meta(self, traj: Trajectory) -> dict[str, object]:
         """Small, human-readable per-trajectory summary; the token arrays live in the npz."""
