@@ -129,7 +129,6 @@ class InflightParser(Parser):
                     request_id=event.request_id,
                     action="pin",
                     block_hashes=hash_strs,
-                    mark_resident=True,
                 )
             )
         updates.append(

@@ -31,6 +31,7 @@ import zmq.asyncio
 from zmq.utils.monitor import recv_monitor_message
 
 from ...collectors.transport.base import Transport
+from ...types.kv_cache import InvalidKVEventPayload
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +81,7 @@ class ZMQTransport(Transport):
         base_retry_delay: Initial retry delay in seconds.
         max_retry_delay: Maximum retry delay cap in seconds.
         max_retry_attempts: Retries per recovery round, and retries for invalid
-            framing before the endpoint stops. Recovery rounds cool down and
+            framing or undecodable KV payloads before the endpoint stops. Recovery rounds cool down and
             continue until stopped.
         retry_backoff_factor: Exponential backoff multiplier.
         on_stream_reset: Gate and clear the replica's view before rebuilding,
@@ -139,6 +140,7 @@ class ZMQTransport(Transport):
         self._endpoint_sockets: dict[str, _EndpointSocketSet] = {}
         self._retry_counts: dict[str, int] = {}
         self._malformed_counts: dict[str, int] = {}
+        self._decode_failures: dict[str, int] = {}
         self._stream_states: dict[str, str] = {}
         self._stream_reasons: dict[str, str | None] = {}
         self._stream_status_lock = threading.Lock()
@@ -157,6 +159,7 @@ class ZMQTransport(Transport):
         self._stopped = False
         self._retry_counts.clear()
         self._malformed_counts.clear()
+        self._decode_failures.clear()
         with self._stream_status_lock:
             self._stream_states.clear()
             self._stream_reasons.clear()
@@ -287,14 +290,18 @@ class ZMQTransport(Transport):
             self._replay_cursors.pop(replica_id, None)
             self._transition_stream(replica_id, "unavailable")
             while not self._stopped and self._sub_tasks.get(replica_id) is asyncio.current_task():
-                malformed = False
+                malformed_kind = None
                 reason = None
                 sockets = await self._connect_zmq_for(replica_id)
                 if sockets is not None:
                     try:
                         await self._consume_session(sockets, handler)
-                    except _StreamReset as exc:
-                        malformed = isinstance(exc, _MalformedFrame)
+                    except (_StreamReset, InvalidKVEventPayload) as exc:
+                        # A failed decode may hide a removal. Rebuild the index just as for a gap.
+                        if isinstance(exc, _MalformedFrame):
+                            malformed_kind = "malformed-frame"
+                        elif isinstance(exc, InvalidKVEventPayload):
+                            malformed_kind = "invalid-payload"
                         reason = f"{type(exc).__name__}: {exc}"
                         logger.warning("ZMQ stream interrupted for %s: %s", replica_id, exc)
                     finally:
@@ -302,15 +309,17 @@ class ZMQTransport(Transport):
                 if self._stopped or self._sub_tasks.get(replica_id) is not asyncio.current_task():
                     return
                 self._replay_cursors.pop(replica_id, None)
-                if malformed:
-                    failures = self._malformed_counts.get(replica_id, 0) + 1
-                    self._malformed_counts[replica_id] = failures
+                failures = 0
+                if malformed_kind is not None:
+                    counts = self._decode_failures if malformed_kind == "invalid-payload" else self._malformed_counts
+                    failures = counts.get(replica_id, 0) + 1
+                    counts[replica_id] = failures
                     if failures > self._max_retry_attempts:
-                        self._transition_stream(replica_id, "fatal", f"malformed-frame retries exhausted: {reason}")
-                        logger.warning("ZMQ malformed-frame retries exhausted for replica %s", replica_id)
+                        self._transition_stream(replica_id, "fatal", f"{malformed_kind} retries exhausted: {reason}")
+                        logger.warning("ZMQ %s retries exhausted for replica %s", malformed_kind, replica_id)
                         return
                 self._transition_stream(replica_id, "unavailable", reason)
-                await self._wait_to_retry(replica_id, malformed)
+                await self._wait_to_retry(replica_id, failures)
         except asyncio.CancelledError:
             pass
         except Exception as exc:
@@ -326,10 +335,10 @@ class ZMQTransport(Transport):
             if sockets is not None:
                 self._close_zmq_sockets_for(sockets)
 
-    async def _wait_to_retry(self, replica_id: str, malformed: bool) -> None:
+    async def _wait_to_retry(self, replica_id: str, protocol_failures: int) -> None:
         """Bound recovery bursts without letting healthy replay hide invalid framing."""
-        if malformed:
-            retry_count = self._malformed_counts[replica_id] - 1
+        if protocol_failures:
+            retry_count = protocol_failures - 1
         else:
             retry_count = self._retry_counts.get(replica_id, 0)
             if retry_count >= self._max_retry_attempts:
@@ -362,6 +371,9 @@ class ZMQTransport(Transport):
             await self._consume_replay(sockets, poller, handler)
         await self._merge_pending_live(sockets, poller, handler)
         self._transition_stream(sockets.replica_id, "ready")
+        # Reaching ready ends this decode-recovery episode, even on a quiet
+        # subscription. Valid replay frames before a failed batch do not.
+        self._decode_failures.pop(sockets.replica_id, None)
         logger.info("ZMQ replica %s ready", sockets.replica_id)
         await self._consume_live(sockets, poller, handler)
 

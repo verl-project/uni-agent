@@ -19,6 +19,8 @@ from __future__ import annotations
 from typing import Any
 
 from ..types import Layer, MetricKey
+from ..types.kv_cache import KVCacheUpdate, NativeHashCodecFactory
+from .cache_registry import CacheRegistryState
 from .kv_cache_store import KVCacheStore
 from .per_replica_store import PerReplicaStore
 from .per_request_store import PerRequestStore
@@ -38,8 +40,8 @@ class DataStore:
         store.refresh_metrics({'node1': {'kv_cache_usage_perc': 45.0}})
         # Read metrics
         value = store.get_metric('node1', 'kv_cache_usage_perc')
-        # Write KV cache blocks
-        store.add_kv_blocks('node1', ['hash1', 'hash2'])
+        # Inspect reported cache residency
+        store.per_replica_block_counts()
     """
 
     def __init__(self) -> None:
@@ -96,6 +98,22 @@ class DataStore:
 
     # ── KVCacheStore operations ─────────────────────────────────────────
 
+    def cache_registry_state(self, replica_id) -> CacheRegistryState:
+        """This replica's layout used by group-aware indexing and matching."""
+        return self._kv.registry_state(replica_id)
+
+    def refresh_replica_metadata(self, replica_id, metadata):
+        return self._kv.refresh_replica_metadata(replica_id, metadata)
+
+    def metadata_status(self, replica_id):
+        return self._kv.metadata_status(replica_id)
+
+    def get_cache_status(self):
+        return self._kv.get_cache_status()
+
+    def set_native_hash_codec_factory(self, factory: NativeHashCodecFactory) -> None:
+        self._kv.set_native_hash_codec_factory(factory)
+
     def get_block_size(self) -> int | None:
         """Get learned block size.
 
@@ -113,108 +131,39 @@ class DataStore:
         if self._kv.block_size is None:
             self._kv.block_size = size
 
-    def add_kv_blocks(self, replica_id: str, block_hashes: list[str], layer: Layer = Layer.GPU) -> None:
-        """Add KV cache blocks to a node.
+    def hash_schema(self) -> tuple[int, int | None, int]:
+        return self._kv.hash_schema()
 
-        Args:
-            replica_id: Target node.
-            block_hashes: List of local prefix hashes to add.
-            layer: Cache layer (``Layer.GPU``/``Layer.CPU``/``Layer.SSD``).
-        """
-        self._kv.add_blocks(replica_id, block_hashes, layer=layer)
+    def apply_kv_update(self, update: KVCacheUpdate) -> None:
+        self._kv.apply_update(update)
 
-    def record_dispatch_blocks(self, replica_id: str, block_hashes: list[str]) -> int:
-        """Mark a dispatched request's prefix blocks resident on a node (GPU).
-
-        The acquire path calls this so the resident index learns the prefix
-        immediately instead of waiting for the engine's kv-events; idempotent
-        against the later ``BlockStored``.
-
-        Args:
-            replica_id: The replica the request was dispatched to.
-            block_hashes: The request's full-block chained prefix hashes.
-
-        Returns:
-            Number of blocks this call newly made resident (0 for a full hit).
-        """
-        return self._kv.record_dispatch_blocks(replica_id, block_hashes)
-
-    def remove_kv_blocks(self, replica_id: str, block_hashes: list[str], layer: Layer = Layer.GPU) -> None:
-        """Remove KV cache blocks from a node.
-
-        Args:
-            replica_id: Target node.
-            block_hashes: List of local prefix hashes to remove.
-            layer: Cache layer (``Layer.GPU``/``Layer.CPU``/``Layer.SSD``).
-        """
-        self._kv.remove_blocks(replica_id, block_hashes, layer=layer)
-
-    def clear_kv_resident_blocks(self, replica_id: str) -> None:
-        """Clear resident blocks without changing request accounting or readiness."""
-        self._kv.clear_resident_blocks(replica_id)
+    def estimate_prefixes(self, replica_ids, hashes, query_tokens):
+        return self._kv.estimate_prefixes(replica_ids, hashes, query_tokens)
 
     def invalidate_kv_replica(self, replica_id: str) -> None:
-        """Clear untrusted resident blocks while preserving request refs and markers.
-
-        Prefix hits and dispatch-based resident writes stay disabled while
-        the transport rebuilds its view.
-        """
+        """Clear the replica index and gate hits and dispatch predictions."""
         self._kv.invalidate_replica(replica_id)
 
     def mark_kv_replica_ready(self, replica_id: str) -> None:
-        """Enable prefix hits from a replica's rebuilt resident index."""
+        """Expose residency restored by the completed event replay."""
         self._kv.mark_replica_ready(replica_id)
 
     def enable_kv_dispatch_estimates(self, replica_id: str) -> None:
-        """Discard untrusted residency and allow new dispatch estimates."""
+        """Discard incomplete replay state and permit new dispatch estimates."""
         self._kv.enable_dispatch_estimates(replica_id)
 
-    def get_kv_block_count(self) -> int:
-        """Return the number of unique block hashes currently cached."""
-        return len(self._kv.replicas_by_block)
-
-    def kv_replica_has_blocks(self, replica_id: str) -> bool:
-        """Return True if replica_id appears in at least one cached block."""
-        return any(replica_id in replicas for replicas in self._kv.replicas_by_block.values())
-
-    def has_kv_block(self, block_hash: str) -> bool:
-        """Return True if block_hash is present in the cache index."""
-        return block_hash in self._kv.replicas_by_block
-
-    # ── KV cache prefix hit rate queries ────────────────────────────────
-
-    def get_layer_prefix_hit_rate(
-        self,
-        replica_id: str,
-        hash_strs: list[str],
-        layer: Layer = Layer.GPU,
-    ) -> float:
-        """Query prefix-cache hit rate for a node at a given layer.
-
-        Args:
-            replica_id: Target node.
-            hash_strs: Precomputed ``str(h)`` chain of the prompt's full-block
-                prefix hashes (computed once by the caller and shared across
-                replicas/layers).
-            layer: Cache layer (``Layer.GPU``/``Layer.CPU``/``Layer.SSD``).
-
-        Only the GPU layer is backed by a reverse index today; CPU/SSD return
-        0.0 (see ``KVCacheStore.get_layer_prefix_hit_rate``).
-
-        Returns:
-            Hit rate 0.0–1.0.
-        """
-        return self._kv.get_layer_prefix_hit_rate(replica_id, hash_strs, layer)
+    def clear_kv_resident_blocks(self, replica_id: str) -> None:
+        """Clear reported residency without discarding request reservations."""
+        self._kv.clear_resident_blocks(replica_id)
 
     # ── KV-cache load (load signal) ─────────────────────────────────────
 
     def kv_cache_load(self, replica_id: str) -> float:
-        """KV-cache load = ``retained_blocks / num_gpu_blocks`` (∈ [0,1]).
+        """Estimate retention pressure from event counts / GPU pool blocks.
 
-        Retained blocks (free-pool blocks hash-marked for reuse) over the GPU
-        block pool — rises as distinct prefixes accumulate and signals impending
-        LRU eviction. Returns 0.0 when retained blocks or ``num_gpu_blocks`` is
-        unavailable (e.g. mc-off groups emit no kv-events).
+        This differs from native in-use occupancy: unreferenced blocks can still
+        retain reusable cache. Hybrid partial aliases are not physical-block
+        deduplicated. Missing pool capacity keeps the original zero default.
         """
         retained = self._kv.per_replica_block_counts().get(replica_id, 0)
         if retained <= 0:
@@ -225,14 +174,31 @@ class DataStore:
         return min(1.0, retained / float(total))
 
     def per_replica_block_counts(self) -> dict[str, int]:
-        """Return ``{replica_id: number of distinct prefix blocks it retains}``.
+        """Return per-replica GPU cache retention estimates from events.
 
         Thin pass-through to ``KVCacheStore``; used by the periodic kv-events
         tally log to surface retained-block counts per replica.
         """
         return self._kv.per_replica_block_counts()
 
-    # ── Block reference counts and per-request markers ──────────────────
+    def record_dispatch_blocks(self, replica_id: str, hashes: list[str]) -> int:
+        return self._kv.record_dispatch_blocks(replica_id, hashes)
+
+    def get_layer_prefix_hit_rate(
+        self, replica_id: str, hash_strs: list[str], layer: Layer = Layer.GPU, *, query_tokens: int | None = None
+    ) -> float:
+        if layer != Layer.GPU or not hash_strs:
+            return 0.0
+        if query_tokens is None:
+            _, unit, lookahead = self.hash_schema()
+            if not unit:
+                return 0.0
+            extent = len(hash_strs) * unit
+            # Legacy hash-only callers supplied complete blocks and expected
+            # their matched fraction. Supply the tail required by the engine.
+            estimate = self.estimate_prefixes([replica_id], hash_strs, extent + max(1, lookahead))[replica_id]
+            return estimate.estimated_saved_tokens / extent
+        return self.estimate_prefixes([replica_id], hash_strs, query_tokens)[replica_id].saved_token_rate
 
     def incr_block_refs(self, replica_id: str, hash_strs: list[str]) -> None:
         """Add one reference to every hash on a replica (multiset insert).

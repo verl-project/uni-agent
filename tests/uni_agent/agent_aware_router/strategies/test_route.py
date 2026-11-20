@@ -111,12 +111,24 @@ class FakeRouteDataProvider:
         self._data = data or {}
 
     def get_metrics(self, replica_id):
-        return {}
+        return self._data.get(replica_id, {})
 
     def get_metric(self, replica_id, key):
-        return 0.0
+        return self.get_metrics(replica_id).get(key, 0.0)
 
-    def get_layer_prefix_hit_rate(self, replica_id, prompt_ids, layer):
+    def get_metric_replica_ids(self):
+        return list(self._data)
+
+    def get_block_size(self):
+        return 16
+
+    def hash_schema(self):
+        return 0, 16, 0
+
+    def inflight_block_count(self, replica_id):
+        return self.get_metrics(replica_id).get("held", 0)
+
+    def get_layer_prefix_hit_rate(self, replica_id, prompt_ids, layer, *, query_tokens=None):
         return 0.0
 
     def kv_cache_load(self, replica_id):
@@ -178,37 +190,23 @@ class TestRoute:
         )
         assert ranking == ["rep_b", "rep_a", "rep_c"]
 
-    def test_overloaded_present_in_ranking(self):
-        """
-        Feature: all replicas remain present in the ranking
-        """
-        strat = _strat()
+    @pytest.mark.cpu
+    @pytest.mark.level0
+    def test_overloaded_present_in_ranking(self, monkeypatch):
+        def unexpected_shuffle(*args):
+            pytest.fail("capacity scoring entered the exception fallback")
+
+        monkeypatch.setattr("random.shuffle", unexpected_shuffle)
+        strat = _strat(tie_tolerance=0)
         provider = FakeRouteDataProvider(
             {
-                "rep_a": {
-                    "kv_cache_usage_perc": 0.3,
-                    "num_requests_running": 1,
-                    "num_requests_waiting": 0,
-                    "gpu_hit_pct": 80,
-                    "tiers": {"cpu": 0.0, "ssd": 0.0},
-                },
-                "rep_b": {
-                    "kv_cache_usage_perc": 0.5,
-                    "num_requests_running": 1,
-                    "num_requests_waiting": 0,
-                    "gpu_hit_pct": 30,
-                    "tiers": {"cpu": 0.0, "ssd": 0.0},
-                },
-                "overloaded": {
-                    "kv_cache_usage_perc": 0.92,
-                    "num_requests_running": 0,
-                    "num_requests_waiting": 0,
-                    "gpu_hit_pct": 90,
-                    "tiers": {"cpu": 0.0, "ssd": 0.0},
-                },
+                "rep_a": {"num_gpu_blocks": 10, "held": 0},
+                "rep_b": {"num_gpu_blocks": 10, "held": 4},
+                "overloaded": {"num_gpu_blocks": 10, "held": 10},
             }
         )
-        ranking = route(strat, PROMPT_IDS, provider, _replicas("rep_a", "rep_b", "overloaded"))
+        ranking = route(strat, PROMPT_IDS, provider, _replicas("rep_a", "rep_b", "overloaded"), None)
+        assert ranking[0] == "rep_a"
         assert set(ranking) == {"rep_a", "rep_b", "overloaded"}
 
     def test_empty_pool_raises(self):

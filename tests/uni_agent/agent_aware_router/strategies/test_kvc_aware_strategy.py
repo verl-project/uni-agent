@@ -115,7 +115,9 @@ class FakeRouteDataProvider:
             MetricKey.INFLIGHT_COUNT: entry.get("inflight_count", 0),
         }
 
-    def get_layer_prefix_hit_rate(self, replica_id: str, hash_strs: list[str], layer: str = Layer.GPU) -> float:
+    def get_layer_prefix_hit_rate(
+        self, replica_id: str, hash_strs: list[str], layer: str = Layer.GPU, *, query_tokens=None
+    ) -> float:
         entry = self._data.get(replica_id, {})
         if layer == Layer.GPU:
             return entry.get("gpu_hit_pct", 0) / 100.0
@@ -131,6 +133,9 @@ class FakeRouteDataProvider:
 
     def get_metric_replica_ids(self) -> list[str]:
         return list(self._data.keys())
+
+    def hash_schema(self):
+        return 0, self.get_block_size(), 0
 
     def get_block_size(self) -> int | None:
         # Block size is learned from KV events; tests default to vLLM's 16.
@@ -745,6 +750,39 @@ class TestCapacityTokenAware:
         kwargs.setdefault("load_threshold", 0.9)
         kwargs.setdefault("seed", SOFT_PICK_SEED)
         return _strat(**kwargs)
+
+    @pytest.mark.cpu
+    @pytest.mark.level0
+    @pytest.mark.parametrize("mixed", [False, True], ids=["full", "mixed"])
+    def test_collected_cache_events_change_the_winner(
+        self, monkeypatch, layout, install_metadata, parse, stored, removed, mixed
+    ):
+        from uni_agent.agent_aware_router.store.data_store import DataStore
+        from uni_agent.agent_aware_router.store.kv_cache_store import KVCacheStore
+        from uni_agent.agent_aware_router.store.per_replica_store import PerReplicaStore
+        from uni_agent.agent_aware_router.store.per_request_store import PerRequestStore
+        from uni_agent.agent_aware_router.types.kv_cache import KVCacheUpdate
+
+        for cls in (KVCacheStore, PerReplicaStore, PerRequestStore):
+            monkeypatch.setattr(cls, "_instance", None)
+        cache_store = DataStore()
+        groups = (("full_attention", 4), ("mamba", 8)) if mixed else (("full_attention", 4),)
+        raw = layout(groups)
+        strat = self._cap_strat(do_shortcut=False, tie_tolerance=0)
+        prompt, replicas = list(range(17)), _replicas("a", "b")
+        for node, endpoint in (("a", 8), ("b", 16)):
+            install_metadata(cache_store, node, raw)
+            events = (
+                [stored(1, "mamba", 8, hashes=[f"r{endpoint}"]), stored()]
+                if mixed
+                else [stored(tokens=list(range(endpoint)))]
+            )
+            cache_store.apply_kv_update(KVCacheUpdate(node, parse(events, node)))
+            cache_store.refresh_metrics({node: {MetricKey.NUM_GPU_BLOCKS: 100}})
+        assert strat.score(prompt, cache_store, replicas) == [0, STICKY_TOP_SCORE]
+        removal = removed(1, ["r16"]) if mixed else removed(0, ["r4"])
+        cache_store.apply_kv_update(KVCacheUpdate("b", parse([removal], "b")))
+        assert strat.score(prompt, cache_store, replicas) == [STICKY_TOP_SCORE, 0]
 
     def test_gate_filters_booked_replicas_and_picks_max_remaining(self):
         """Eligible = ``avail >= cap·(1-load_threshold)``; the largest ``remaining = avail - need`` wins.

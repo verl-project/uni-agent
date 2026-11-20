@@ -16,17 +16,58 @@
 
 import asyncio
 
+import msgpack
 import pytest
 import zmq
 from conftest import BLOCK_SIZE, kv_payload, make_stored_event
 
 from tests.uni_agent.agent_aware_router.collectors.zmq_helpers import Publisher
 from uni_agent.agent_aware_router.collectors.collector import get_collector
+from uni_agent.agent_aware_router.collectors.parse.vllm.kv import VLLMKVParser
 from uni_agent.agent_aware_router.config.collector import CollectorConfig
 from uni_agent.agent_aware_router.store.data_store import DataStore
 from uni_agent.agent_aware_router.utils.hash import get_prefix_hashes_incremental
 
-pytestmark = [pytest.mark.cpu, pytest.mark.level0]
+
+def create_store(layout, block_size, install_metadata):
+    store = DataStore()
+    install_metadata(store, "a", layout((("full_attention", block_size),), unit=block_size))
+    install_metadata(store, "other", layout((("full_attention", block_size),), unit=block_size))
+    return store
+
+
+def seed(store, replica_id, tokens):
+    block = store.hash_schema()[1]
+    hashes = [f"seed-{replica_id}-{end}" for end in range(block, len(tokens) + 1, block)]
+    event = ["BlockStored", hashes, None, tokens, block, None, "GPU"]
+    update = VLLMKVParser().parse(msgpack.packb([0, [event]]), replica_id)
+    store.apply_kv_update(update)
+
+
+def pin(store, request_id, replica_id, hashes):
+    store.incr_block_refs(replica_id, hashes)
+    store.put_marker(request_id, replica_id, hashes)
+
+
+def predict(store, replica_id, hashes):
+    return store.record_dispatch_blocks(replica_id, hashes)
+
+
+def hit_rate(store, replica_id, hashes):
+    unit = store.hash_schema()[1]
+    if not unit or not hashes:
+        return 0.0
+    length = len(hashes) * unit
+    return store.estimate_prefixes([replica_id], hashes, length + 1)[replica_id].estimated_hit_tokens / length
+
+
+def has_blocks(store, replica_id):
+    return bool(store.per_replica_block_counts().get(replica_id))
+
+
+def remote_hashes(store, replica_id):
+    index = store._kv.group_caches.get(replica_id)
+    return set(index.anchors) if index is not None else set()
 
 
 async def until(predicate):
@@ -37,8 +78,10 @@ async def until(predicate):
     await asyncio.wait_for(wait(), 5)
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.parametrize("new_sequence", [0, 200], ids=["numbering-reset", "already-past-old-cursor"])
-def test_same_address_publisher_restart_rebuilds_only_its_cache(new_sequence):
+def test_same_address_publisher_restart_rebuilds_only_its_cache(new_sequence, layout, install_metadata):
     async def run():
         publisher = Publisher()
         addresses = publisher.addresses
@@ -49,7 +92,7 @@ def test_same_address_publisher_restart_rebuilds_only_its_cache(new_sequence):
         )
         collector._transport._base_retry_delay = 0.01
         collector._transport._max_retry_delay = 0.02
-        store = DataStore()
+        store = create_store(layout, BLOCK_SIZE, install_metadata)
         old_tokens = list(range(BLOCK_SIZE))
         new_tokens = list(range(BLOCK_SIZE, 2 * BLOCK_SIZE))
         estimated_tokens = list(range(2 * BLOCK_SIZE, 3 * BLOCK_SIZE))
@@ -59,27 +102,23 @@ def test_same_address_publisher_restart_rebuilds_only_its_cache(new_sequence):
         old_hashes = [str(value) for value in old_hashes]
         new_hashes = [str(value) for value in new_hashes]
         estimated_hashes = [str(value) for value in estimated_hashes]
-        store.add_kv_blocks("other", old_hashes)
+        seed(store, "other", list(range(BLOCK_SIZE)))
         try:
             collector.start()
             identity, start = await publisher.requested_start()
             assert start == 0
             await publisher.batch(identity, 100, kv_payload(make_stored_event("old-remote", old_tokens)))
-            await until(lambda: "old-remote" in collector._parser.remote_to_local_block_hash.get("a", {}))
-            assert store.get_layer_prefix_hit_rate("a", old_hashes) == 0
+            await until(lambda: "old-remote" in remote_hashes(store, "a"))
+            assert hit_rate(store, "a", old_hashes) == 0
             await publisher.end(identity)
-            await until(lambda: store.get_layer_prefix_hit_rate("a", old_hashes) == 1)
-            store.incr_block_refs("a", old_hashes)
-            store.put_marker("request", "a", old_hashes)
+            await until(lambda: hit_rate(store, "a", old_hashes) == 1)
+            pin(store, "request", "a", old_hashes)
 
             publisher.close()
             publisher = None
-            await until(
-                lambda: store.get_layer_prefix_hit_rate("a", old_hashes) == 0
-                and "a" not in collector._parser.remote_to_local_block_hash
-            )
-            await until(lambda: store.record_dispatch_blocks("a", estimated_hashes) == 1)
-            assert store.get_layer_prefix_hit_rate("a", estimated_hashes) == 1.0
+            await until(lambda: hit_rate(store, "a", old_hashes) == 0 and not remote_hashes(store, "a"))
+            await until(lambda: predict(store, "a", estimated_hashes) == 1)
+            assert hit_rate(store, "a", estimated_hashes) == 1.0
 
             # Rebind exactly the same endpoint addresses, as a restarted vLLM does.
             async def rebind():
@@ -94,20 +133,20 @@ def test_same_address_publisher_restart_rebuilds_only_its_cache(new_sequence):
             publisher = await asyncio.wait_for(rebind(), 3)
             identity, start = await publisher.requested_start()
             assert start == 0  # Never resume this replacement publisher at the old 101.
-            assert not store.kv_replica_has_blocks("a")
+            assert not has_blocks(store, "a")
             await publisher.batch(identity, new_sequence, kv_payload(make_stored_event("new-remote", new_tokens)))
-            await until(lambda: "new-remote" in collector._parser.remote_to_local_block_hash.get("a", {}))
-            assert store.get_layer_prefix_hit_rate("a", new_hashes) == 0
-            assert store.record_dispatch_blocks("a", old_hashes) == 0
+            await until(lambda: "new-remote" in remote_hashes(store, "a"))
+            assert hit_rate(store, "a", new_hashes) == 0
+            assert predict(store, "a", old_hashes) == 0
             await publisher.end(identity)
-            await until(lambda: store.get_layer_prefix_hit_rate("a", new_hashes) == 1)
+            await until(lambda: hit_rate(store, "a", new_hashes) == 1)
 
-            assert store.get_layer_prefix_hit_rate("a", old_hashes) == 0
-            assert store.get_layer_prefix_hit_rate("a", estimated_hashes) == 0
-            assert store.get_layer_prefix_hit_rate("other", old_hashes) == 1
+            assert hit_rate(store, "a", old_hashes) == 0
+            assert hit_rate(store, "a", estimated_hashes) == 0
+            assert hit_rate(store, "other", old_hashes) == 1
             assert store.inflight_block_count("a") == 1
             assert store.get_marker("request")["replica"] == "a"
-            assert set(collector._parser.remote_to_local_block_hash["a"]) == {"new-remote"}
+            assert remote_hashes(store, "a") == {"new-remote"}
         finally:
             collector.stop(timeout=2)
             if publisher is not None:
@@ -116,7 +155,9 @@ def test_same_address_publisher_restart_rebuilds_only_its_cache(new_sequence):
     asyncio.run(run())
 
 
-def test_unreachable_publisher_recovers_after_retry_budget_without_restarting_collector():
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_unreachable_publisher_recovers_after_retry_budget_without_restarting_collector(layout, install_metadata):
     async def run():
         publisher = Publisher()
         addresses = publisher.addresses
@@ -140,38 +181,37 @@ def test_unreachable_publisher_recovers_after_retry_budget_without_restarting_co
             return await connect(replica_id)
 
         transport._connect_zmq_for = counted_connect
-        store = DataStore()
+        store = create_store(layout, BLOCK_SIZE, install_metadata)
         hashes, _ = get_prefix_hashes_incremental(list(range(BLOCK_SIZE)), BLOCK_SIZE, 0, 0)
         hashes = [str(value) for value in hashes]
-        store.set_block_size(BLOCK_SIZE)
-        store.add_kv_blocks("other", hashes)
-        store.add_kv_blocks("a", ["stale-before-first-connect"])
-        store.incr_block_refs("a", hashes)
-        store.put_marker("request", "a", hashes)
+
+        seed(store, "other", list(range(BLOCK_SIZE)))
+        seed(store, "a", list(range(BLOCK_SIZE)))
+        pin(store, "request", "a", hashes)
         try:
             collector.start()
             # More attempts than the initial connection and its one retry.
             await until(lambda: len(attempts) >= 3)
-            assert not store.kv_replica_has_blocks("a")
-            assert store.record_dispatch_blocks("a", hashes) == 1
-            assert store.get_layer_prefix_hit_rate("a", hashes) == 1.0
-            assert store.get_layer_prefix_hit_rate("other", hashes) == 1.0
+            assert not has_blocks(store, "a")
+            assert predict(store, "a", hashes) == 1
+            assert hit_rate(store, "a", hashes) == 1.0
+            assert hit_rate(store, "other", hashes) == 1.0
             assert store.inflight_block_count("a") == 1
             assert store.get_marker("request")["replica"] == "a"
             await until(lambda: len(attempts) >= 5)
-            assert store.get_layer_prefix_hit_rate("a", hashes) == 1.0
+            assert hit_rate(store, "a", hashes) == 1.0
 
             publisher = Publisher(addresses)
             identity, start = await publisher.requested_start()
             assert start == 0
-            assert not store.kv_replica_has_blocks("a")
-            assert store.get_layer_prefix_hit_rate("a", hashes) == 0.0
-            assert store.record_dispatch_blocks("a", hashes) == 0
+            assert not has_blocks(store, "a")
+            assert hit_rate(store, "a", hashes) == 0.0
+            assert predict(store, "a", hashes) == 0
             await publisher.batch(identity, 0, kv_payload(make_stored_event("new", list(range(BLOCK_SIZE)))))
-            await until(lambda: "new" in collector._parser.remote_to_local_block_hash.get("a", {}))
-            assert store.get_layer_prefix_hit_rate("a", hashes) == 0.0
+            await until(lambda: "new" in remote_hashes(store, "a"))
+            assert hit_rate(store, "a", hashes) == 0.0
             await publisher.end(identity)
-            await until(lambda: store.get_layer_prefix_hit_rate("a", hashes) == 1.0)
+            await until(lambda: hit_rate(store, "a", hashes) == 1.0)
             assert store.inflight_block_count("a") == 1
             assert store.get_marker("request")["replica"] == "a"
         finally:
@@ -182,7 +222,9 @@ def test_unreachable_publisher_recovers_after_retry_budget_without_restarting_co
     asyncio.run(run())
 
 
-def test_failed_partial_replay_returns_to_fresh_dispatch_estimates():
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_failed_partial_replay_returns_to_fresh_dispatch_estimates(layout, install_metadata):
     async def run():
         publisher = Publisher()
         collector = get_collector(
@@ -192,32 +234,29 @@ def test_failed_partial_replay_returns_to_fresh_dispatch_estimates():
         )
         collector._transport._base_retry_delay = 0.2
         collector._transport._max_retry_delay = 0.2
-        store = DataStore()
+        store = create_store(layout, BLOCK_SIZE, install_metadata)
         partial_tokens = list(range(BLOCK_SIZE))
         estimated_tokens = list(range(BLOCK_SIZE, 2 * BLOCK_SIZE))
         partial, _ = get_prefix_hashes_incremental(partial_tokens, BLOCK_SIZE, 0, 0)
         estimated, _ = get_prefix_hashes_incremental(estimated_tokens, BLOCK_SIZE, 0, 0)
         partial = [str(value) for value in partial]
         estimated = [str(value) for value in estimated]
-        store.incr_block_refs("a", ["held"])
-        store.put_marker("request", "a", ["held"])
+        pin(store, "request", "a", ["held"])
         try:
             collector.start()
             identity, _ = await publisher.requested_start()
             await publisher.batch(identity, 0, kv_payload(make_stored_event("partial", partial_tokens)))
-            await until(lambda: "partial" in collector._parser.remote_to_local_block_hash.get("a", {}))
-            assert store.get_layer_prefix_hit_rate("a", partial) == 0.0
-            assert store.record_dispatch_blocks("a", estimated) == 0
+            await until(lambda: "partial" in remote_hashes(store, "a"))
+            assert hit_rate(store, "a", partial) == 0.0
+            assert predict(store, "a", estimated) == 0
 
             await publisher.batch(identity, 2, kv_payload(make_stored_event("gap", estimated_tokens)))
-            await until(
-                lambda: not store.kv_replica_has_blocks("a") and "a" not in collector._parser.remote_to_local_block_hash
-            )
+            await until(lambda: not has_blocks(store, "a") and not remote_hashes(store, "a"))
             publisher.close()
             publisher = None
-            await until(lambda: store.record_dispatch_blocks("a", estimated) == 1)
-            assert store.get_layer_prefix_hit_rate("a", estimated) == 1.0
-            assert store.get_layer_prefix_hit_rate("a", partial) == 0.0
+            await until(lambda: predict(store, "a", estimated) == 1)
+            assert hit_rate(store, "a", estimated) == 1.0
+            assert hit_rate(store, "a", partial) == 0.0
             assert store.inflight_block_count("a") == 1
             assert store.get_marker("request")["replica"] == "a"
         finally:
@@ -228,7 +267,9 @@ def test_failed_partial_replay_returns_to_fresh_dispatch_estimates():
     asyncio.run(run())
 
 
-def test_consumer_failure_discards_partial_cache_and_keeps_dispatch_gated():
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_consumer_failure_discards_partial_cache_and_keeps_dispatch_gated(layout, install_metadata):
     async def run():
         publisher = Publisher()
         collector = get_collector(
@@ -243,12 +284,11 @@ def test_consumer_failure_discards_partial_cache_and_keeps_dispatch_gated():
             raise ValueError("consumer failed after writing")
 
         collector._write_kv_update = write_then_fail
-        store = DataStore()
+        store = create_store(layout, BLOCK_SIZE, install_metadata)
         tokens = list(range(BLOCK_SIZE))
         hashes, _ = get_prefix_hashes_incremental(tokens, BLOCK_SIZE, 0, 0)
         hashes = [str(value) for value in hashes]
-        store.incr_block_refs("a", ["held"])
-        store.put_marker("request", "a", ["held"])
+        pin(store, "request", "a", ["held"])
         try:
             collector.start()
             identity, _ = await publisher.requested_start()
@@ -260,10 +300,10 @@ def test_consumer_failure_discards_partial_cache_and_keeps_dispatch_gated():
                 "subscription": {"active": False, "error": None},
                 "streams": {"a": {"state": "fatal", "reason": "ValueError: consumer failed after writing"}},
             }
-            assert not store.kv_replica_has_blocks("a")
-            assert "a" not in collector._parser.remote_to_local_block_hash
-            assert store.record_dispatch_blocks("a", hashes) == 0
-            assert store.get_layer_prefix_hit_rate("a", hashes) == 0.0
+            assert not has_blocks(store, "a")
+            assert not remote_hashes(store, "a")
+            assert predict(store, "a", hashes) == 0
+            assert hit_rate(store, "a", hashes) == 0.0
             assert store.inflight_block_count("a") == 1
             assert store.get_marker("request")["replica"] == "a"
         finally:
@@ -273,70 +313,156 @@ def test_consumer_failure_discards_partial_cache_and_keeps_dispatch_gated():
     asyncio.run(run())
 
 
-def test_replayed_clear_preserves_requests_created_after_the_original_clear():
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_live_clear_does_not_enter_replay_gate(layout, install_metadata):
     async def run():
         publisher = Publisher()
         collector = get_collector("vllm_zmq", CollectorConfig(), kv_event_endpoints=publisher.endpoints)
         collector._transport._base_retry_delay = 0.01
         collector._transport._max_retry_delay = 0.02
-        store = DataStore()
+        store = create_store(layout, BLOCK_SIZE, install_metadata)
         tokens = list(range(BLOCK_SIZE))
         hashes, _ = get_prefix_hashes_incremental(tokens, BLOCK_SIZE, 0, 0)
         hashes = [str(value) for value in hashes]
         clear = kv_payload(["AllBlocksCleared"])
         stored = kv_payload(make_stored_event("resident", tokens))
-        marker = {"replica": "a", "hashes": hashes}
-        store.add_kv_blocks("other", hashes)
+        seed(store, "other", list(range(BLOCK_SIZE)))
         try:
             collector.start()
             identity, start = await publisher.requested_start()
             assert start == 0
-            await publisher.batch(identity, 10, clear)
-            await publisher.batch(identity, 11, stored)
+            await asyncio.wait_for(publisher.pub.recv(), 3)
+            await publisher.batch(identity, 10, stored)
             await publisher.end(identity)
-            await until(lambda: store.get_layer_prefix_hit_rate("a", hashes) == 1.0)
-            assert collector._kv_event_counts["clear"] == 1
-            store.incr_block_refs("a", hashes)
-            store.put_marker("request-r", "a", hashes)
+            await until(lambda: hit_rate(store, "a", hashes) == 1.0)
+            await publisher.publish(11, clear)
+            await until(lambda: collector._kv_event_counts["clear"] == 1)
+            assert not has_blocks(store, "a")
+            await publisher.publish(12, stored)
+            await until(lambda: "resident" in remote_hashes(store, "a"))
+            assert hit_rate(store, "a", hashes) == 1.0
+            assert predict(store, "a", ["after-live-clear"]) == 1
+            assert hit_rate(store, "other", hashes) == 1.0
+            assert store.hash_schema()[1] == BLOCK_SIZE
+        finally:
+            collector.stop(timeout=2)
+            publisher.close()
 
-            # Interrupt only SUB; replay retains the original history and ROUTER.
-            publisher.close_socket("pub")
-            await until(lambda: store.record_dispatch_blocks("a", ["fallback"]) == 1)
-            assert store.inflight_block_count("a") == 1
-            assert store.get_marker("request-r") == marker
-            publisher.reopen("pub")
+    asyncio.run(run())
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize("phase", ["replay", "live"])
+def test_invalid_payload_rebuilds_replica_from_replay(phase, layout, install_metadata):
+    async def run():
+        publisher = Publisher()
+        collector = get_collector("vllm_zmq", CollectorConfig(), kv_event_endpoints=publisher.endpoints)
+        collector._transport._base_retry_delay = 0.01
+        collector._transport._max_retry_delay = 0.02
+        store = create_store(layout, BLOCK_SIZE, install_metadata)
+        tokens = list(range(BLOCK_SIZE))
+        first_batch = kv_payload(make_stored_event("before", tokens))
+        recovered_batch = kv_payload(make_stored_event("after", tokens))
+        try:
+            collector.start()
             identity, start = await publisher.requested_start()
             assert start == 0
-            await asyncio.wait_for(publisher.pub.recv(), 3)
+            await publisher.batch(identity, 10, first_batch)
+            await until(lambda: "before" in remote_hashes(store, "a"))
+            if phase == "live":
+                await publisher.end(identity)
+                await until(lambda: collector.get_status()["streams"]["a"]["state"] == "ready")
+                await asyncio.wait_for(publisher.pub.recv(), 3)
+                await publisher.publish(11, b"\xc1")
+            else:
+                await publisher.batch(identity, 11, b"\xc1")
 
-            await publisher.batch(identity, 10, clear)
-            await until(lambda: collector._kv_event_counts["clear"] == 2)
-            assert store.inflight_block_count("a") == 1
-            assert store.get_marker("request-r") == marker
-            assert store.get_layer_prefix_hit_rate("other", hashes) == 1.0
-            await publisher.batch(identity, 11, stored)
-            await until(lambda: "resident" in collector._parser.remote_to_local_block_hash.get("a", {}))
-            assert store.get_layer_prefix_hit_rate("a", hashes) == 0.0
-            assert store.record_dispatch_blocks("a", ["during-replay"]) == 0
-            await publisher.end(identity)
-            await until(lambda: store.get_layer_prefix_hit_rate("a", hashes) == 1.0)
-            assert store.record_dispatch_blocks("a", ["after-replay"]) == 1
+            next_identity, start = await publisher.requested_start()
+            assert start == 0 and next_identity != identity
+            assert not has_blocks(store, "a")
+            assert "a" not in collector._transport._replay_cursors
+            assert predict(store, "a", ["while-rebuilding"]) == 0
+            await publisher.batch(next_identity, 11, recovered_batch)
+            await publisher.end(next_identity)
+            hashes, _ = get_prefix_hashes_incremental(tokens, BLOCK_SIZE, 0, 0)
+            local_hashes = [str(value) for value in hashes]
+            await until(lambda: hit_rate(store, "a", local_hashes) == 1.0)
+            assert remote_hashes(store, "a") == {"after"}
+            assert predict(store, "a", ["after-recovery"]) == 1
+        finally:
+            collector.stop(timeout=2)
+            publisher.close()
 
-            # A live clear discards residency without starting another replay gate.
-            await publisher.publish(12, clear)
-            await until(lambda: collector._kv_event_counts["clear"] == 3)
-            assert not store.kv_replica_has_blocks("a")
-            assert store.inflight_block_count("a") == 1
-            assert store.get_marker("request-r") == marker
-            await publisher.publish(13, stored)
-            await until(lambda: "resident" in collector._parser.remote_to_local_block_hash.get("a", {}))
-            assert store.get_layer_prefix_hit_rate("a", hashes) == 1.0
-            assert store.record_dispatch_blocks("a", ["after-live-clear"]) == 1
-            assert store.get_layer_prefix_hit_rate("other", hashes) == 1.0
-            assert store.get_block_size() == BLOCK_SIZE
-            assert store.pop_marker("request-r") == marker
-            store.decr_block_refs("a", hashes)
-            assert store.inflight_block_count("a") == 0
+    asyncio.run(run())
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_decode_retry_budget_resets_after_subscription_only_recovery(layout, install_metadata):
+    async def run():
+        publisher = Publisher(replay=False)
+        collector = get_collector("vllm_zmq", CollectorConfig(), kv_event_endpoints=publisher.endpoints)
+        transport = collector._transport
+        transport._base_retry_delay = 0.01
+        transport._max_retry_attempts = 1
+        store = create_store(layout, BLOCK_SIZE, install_metadata)
+
+        async def subscribed():
+            while await publisher.pub.recv() != b"\x01topic":
+                pass
+            await until(lambda: transport.get_stream_status()["a"]["state"] == "ready")
+
+        try:
+            collector.start()
+            for _ in range(2):
+                await asyncio.wait_for(subscribed(), 5)
+                # The first event after each successful recovery fails to decode.
+                await publisher.publish(0, b"\xc1")
+
+            await asyncio.wait_for(subscribed(), 5)
+            await publisher.publish(0, kv_payload(make_stored_event("healthy", list(range(BLOCK_SIZE)))))
+            await until(lambda: "healthy" in remote_hashes(store, "a"))
+        finally:
+            collector.stop(timeout=2)
+            publisher.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_repeated_unapplied_removal_exhausts_replay_budget(layout, install_metadata):
+    async def run():
+        publisher = Publisher()
+        collector = get_collector("vllm_zmq", CollectorConfig(), kv_event_endpoints=publisher.endpoints)
+        transport = collector._transport
+        transport._base_retry_delay = 0.01
+        transport._max_retry_attempts = 1
+        store = create_store(layout, BLOCK_SIZE, install_metadata)
+        tokens = list(range(BLOCK_SIZE))
+        first = kv_payload(make_stored_event("resident", tokens))
+        invalid_removal = kv_payload(["BlockRemoved", ["resident"], "GPU", -1])
+        valid_live = kv_payload(make_stored_event("later", tokens))
+        seed(store, "other", tokens)
+        try:
+            collector.start()
+            for _ in range(2):
+                identity, start = await publisher.requested_start()
+                assert start == 0
+                await publisher.batch(identity, 10, first)
+                await until(lambda: transport._replay_cursors.get("a") == 10)
+                await publisher.batch(identity, 11, invalid_removal)
+
+            await until(lambda: collector._loop_runner.subscription_future.done())
+            assert collector.get_status()["streams"]["a"]["state"] == "fatal"
+            assert "invalid-payload retries exhausted" in collector.get_status()["streams"]["a"]["reason"]
+            await publisher.publish(12, valid_live)
+            assert "a" not in transport._replay_cursors
+            assert not has_blocks(store, "a")
+            assert predict(store, "a", ["after-failure"]) == 0
+            assert has_blocks(store, "other")
         finally:
             collector.stop(timeout=2)
             publisher.close()
