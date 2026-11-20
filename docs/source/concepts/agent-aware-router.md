@@ -124,6 +124,18 @@ count-only; it cannot identify or retire a named booking. Without a dispatch
 generation, a delayed release from an earlier turn on the same replica is still
 indistinguishable from the current release, so per-request ordering is required.
 
+### Optional vLLM cache metadata
+
+Before creating the verl server manager, a custom inference entry point can call `register_vllm_metadata_replica()` from `uni_agent.agent_aware_router.server`. The registered replica exposes `get_kv_cache_metadata()` on its server actor. Entry points using the default replica continue to use verl's original server.
+
+Install uni-agent in the engine environment so vLLM can discover the `uni_agent_native_hash` general plugin. Include that name in any explicit `VLLM_PLUGINS` allowlist. Before engine startup, the metadata server adds its opt-in flag (`UNI_AGENT_ENABLE_NATIVE_HASH_METADATA`) to `VLLM_RAY_EXTRA_ENV_VARS_TO_COPY` so Ray EngineCore actors receive it alongside any user-specified variables. The server exposes group metadata and reports optional native hash or allocation profiles separately when the engine supports them.
+
+Group discovery requires `EngineCore.get_kv_cache_group_metadata()`, available in vLLM 0.23.0, 0.29.0 and 0.33.0. If the installed engine lacks this method, as in stock vLLM 0.30.0, `get_kv_cache_metadata()` returns `status="unsupported"` with reason `group_metadata_method_unavailable` before issuing any engine queries. Otherwise, all three queries run concurrently with individual four-second timeouts. The response includes the results of the queries that succeed.
+
+`cache_config.enable_prefix_caching` reports the effective setting from EngineCore, or `null` when the engine value is unavailable. For prefix matching, `native_hash_config.unit` gives the number of tokens per hash and `native_hash_config.hit_alignment` gives the token multiple the engine can reuse. For capacity scoring, `cache_reservation_profile.capacity_blocks` gives the allocatable blocks in the shared device pool. If any group uses a separate host pool, `cache_reservation_profile` is `null`.
+
+Changes to `cache_config.hash_block_size` or `cache_config.prefix_match_unit` can invalidate a cached profile. Before reusing a profile after a partial refresh, consumers must also verify that the cache layout still matches.
+
 ## Routing decision flow
 
 On each `acquire_server(request_id, prompt_ids)`, the balancer scores the candidate replicas and dispatches the request to the top-ranked one. The default path goes straight to capacity-token-aware scoring — the sticky short-circuit is disabled by default (`do_shortcut=False`):
