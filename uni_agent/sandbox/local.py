@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import os
+import signal
+import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -10,13 +14,23 @@ from .registry import register_sandbox
 if TYPE_CHECKING:
     from .base import SandboxConfig
 
+logger = logging.getLogger(__name__)
+
+# Retain deferred spawn cleanups even after their cancelled caller has returned.
+_cleanup_tasks: set[asyncio.Future[None]] = set()
+
 
 @register_sandbox("local")
 class LocalSandbox(Sandbox):
     """Runs commands on the host via ``asyncio`` subprocesses (no container).
 
-    File operations use the host filesystem directly.
+    Command execution requires POSIX process groups. File operations use the
+    host filesystem directly.
     """
+
+    def __init__(self) -> None:
+        self._pending_spawns: set[asyncio.Future[asyncio.subprocess.Process]] = set()
+        self._pending_drains: set[asyncio.Task[None]] = set()
 
     @classmethod
     def from_config(cls, config: SandboxConfig) -> LocalSandbox:
@@ -32,7 +46,39 @@ class LocalSandbox(Sandbox):
         pass
 
     async def stop(self) -> None:
-        pass
+        """Drain this instance's cancelled commands before closing its event loop.
+
+        Owners must first cancel/join their exec callers; stop does not cancel
+        independently running exec calls. Spawning and executor queueing must
+        make progress. Repeated cancellation cannot abandon this drain.
+        """
+        await _await_cleanup(asyncio.create_task(self._drain_pending()))
+
+    async def _drain_pending(self) -> None:
+        while self._pending_spawns or self._pending_drains:
+            await asyncio.gather(*self._pending_spawns, *self._pending_drains, return_exceptions=True)
+            # Python 3.12 gather may finish synchronously when inputs are done.
+            # Give their queued callbacks a turn to retire them / register drains.
+            await asyncio.sleep(0)
+
+    def _kill_spawned(self, spawn: asyncio.Future[asyncio.subprocess.Process]) -> None:
+        try:
+            if not spawn.cancelled() and spawn.exception() is None:
+                self._schedule_cleanup(spawn.result())
+        finally:
+            self._pending_spawns.discard(spawn)
+
+    def _schedule_cleanup(self, proc: asyncio.subprocess.Process) -> asyncio.Future[None]:
+        worker = _start_cleanup(proc)
+        drain = asyncio.create_task(_drain_process(proc, worker))
+        self._pending_drains.add(drain)
+        drain.add_done_callback(self._drain_finished)
+        return worker
+
+    def _drain_finished(self, task: asyncio.Task[None]) -> None:
+        self._pending_drains.discard(task)
+        if not task.cancelled() and (error := task.exception()) is not None:
+            logger.warning("local exec transport drain failed: %s", error)
 
     async def read_file(self, path: str) -> bytes:
         """Read directly from the host filesystem without base64 transport."""
@@ -57,21 +103,148 @@ class LocalSandbox(Sandbox):
         workdir: str | None = None,
         env: dict[str, str] | None = None,
     ) -> ExecResult:
-        import os
-
-        proc = await asyncio.create_subprocess_exec(
-            *argv,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            cwd=workdir,
-            env={**os.environ, **env} if env else None,
+        if os.name != "posix":
+            raise NotImplementedError("LocalSandbox command execution requires POSIX process groups")
+        # A new session gives the command its own process group, so a timeout or
+        # cancellation also kills its background children.
+        spawn = asyncio.ensure_future(
+            asyncio.create_subprocess_exec(
+                *argv,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=workdir,
+                env={**os.environ, **env} if env else None,
+                start_new_session=True,
+            )
         )
+        try:
+            # A cancelled spawn would kill only the child and then block until
+            # every pipe closes, which a background grandchild can delay.
+            proc = await asyncio.shield(spawn)
+        except asyncio.CancelledError:
+            self._pending_spawns.add(spawn)
+            spawn.add_done_callback(self._kill_spawned)
+            raise
+        # No proc.wait() after the kill: it also waits for the pipes, which a
+        # process that left the group may hold. The event loop reaps the child.
         try:
             out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         except asyncio.TimeoutError:
-            try:
-                proc.kill()
-            except ProcessLookupError:
-                pass
+            await _await_cleanup(self._schedule_cleanup(proc))
             return ExecResult(exit_code=-1, stdout="", stderr=f"local exec timed out after {timeout}s")
+        except BaseException:
+            await _await_cleanup(self._schedule_cleanup(proc))
+            raise
         return ExecResult(exit_code=proc.returncode or 0, stdout=_to_str(out), stderr=_to_str(err))
+
+
+def _kill_group(pid: int) -> None:
+    try:
+        os.killpg(pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
+def _kill_command(proc: asyncio.subprocess.Process) -> None:
+    """Kill the original group and groups found in its still-active process tree.
+
+    Snapshot before killing the leader: detached tools retain PPID ancestry until
+    their parents exit. This is best-effort cleanup, not security containment:
+    already-reparented daemons and children created after the snapshot can escape.
+    Extra groups need a recorded member still present; unobserved forks after
+    recorded members exit can be missed, and PID/PGID reuse is not fully fenced.
+    Called in the default executor: the one-second ps timeout does not block the
+    event loop. Successful commands do not pay this cost. No pipes are awaited.
+    """
+    groups: dict[int, set[int]] = {proc.pid: {proc.pid}}
+    if proc.returncode is None:
+        try:
+            snapshot = subprocess.run(
+                ["ps", "-A", "-o", "pid=,ppid=,pgid="],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                check=True,
+                timeout=1,
+            )
+            children: dict[int, list[tuple[int, int]]] = {}
+            for line in snapshot.stdout.splitlines():
+                child, parent, group = map(int, line.split())
+                children.setdefault(parent, []).append((child, group))
+            pending, seen = [proc.pid], {proc.pid}
+            while pending:
+                for child, group in children.get(pending.pop(), []):
+                    if child not in seen:
+                        seen.add(child)
+                        pending.append(child)
+                        groups.setdefault(group, set()).add(child)
+        except (OSError, subprocess.SubprocessError, ValueError) as exc:
+            logger.warning("local exec descendant snapshot failed; killing original group only: %s", exc)
+    own_group = os.getpgrp()
+    for group in [proc.pid, *sorted(groups.keys() - {proc.pid})]:
+        if group > 1 and group != own_group:
+            if group != proc.pid and not any(_still_in_group(pid, group) for pid in groups[group]):
+                continue
+            try:
+                _kill_group(group)
+            except OSError as exc:
+                logger.warning("local exec could not terminate process group %s: %s", group, exc)
+
+
+def _still_in_group(pid: int, group: int) -> bool:
+    try:
+        return os.getpgid(pid) == group
+    except (ProcessLookupError, PermissionError):
+        return False
+
+
+async def _drain_process(proc: asyncio.subprocess.Process, worker: asyncio.Future[None]) -> None:
+    await asyncio.shield(worker)
+    try:
+        # Read buffered output too: paused pipe readers can otherwise prevent
+        # transport closure even after every target process has exited.
+        await asyncio.wait_for(proc.communicate(), timeout=1)
+    except asyncio.TimeoutError:
+        logger.warning("local exec pipe drain timed out for PID %s; closing local transports", proc.pid)
+        # asyncio.Process has no public close method. This fallback only releases
+        # our pipe resources; it is not proof that an escaped descendant exited.
+        proc._transport.close()  # type: ignore[attr-defined]
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=1)
+        except asyncio.TimeoutError:
+            logger.warning("local exec process exit was not observed for PID %s", proc.pid)
+
+
+def _start_cleanup(proc: asyncio.subprocess.Process) -> asyncio.Future[None]:
+    # Submit immediately: a deferred coroutine could be cancelled by loop
+    # shutdown before ever submitting its worker. asyncio.run drains this
+    # executor on shutdown, including cleanups detached from spawn callers.
+    task = asyncio.get_running_loop().run_in_executor(None, _kill_command, proc)
+    _cleanup_tasks.add(task)
+    task.add_done_callback(_cleanup_finished)
+    return task
+
+
+def _cleanup_finished(task: asyncio.Future[None]) -> None:
+    _cleanup_tasks.discard(task)
+    if not task.cancelled() and (error := task.exception()) is not None:
+        logger.warning("local exec deferred cleanup failed: %s", error)
+
+
+async def _await_cleanup(task: asyncio.Future[None]) -> None:
+    # shield prevents a second cancellation from cancelling the wrapper task
+    # while its thread still owns live process cleanup. Keep waiting for that
+    # same task; do not start duplicate snapshots or return before signalling.
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if task.cancelled():
+                raise
+            cancelled = True
+    task.result()
+    if cancelled:
+        raise asyncio.CancelledError

@@ -1,0 +1,71 @@
+# OpenCode SWE-rebench recipe on an E2B-compatible sandbox backend.
+#
+# Rows from `uni_agent.tasks.swe_rebench.preprocess` carry only the canonical task
+# image (`sandbox.image`) and metadata; TaskConfigResolver layers these defaults
+# under the sample, then binds agent.model.* to the live Gateway session. The
+# sandbox reaches that session URL directly (no reverse tunnel), so the Ray
+# node IPs and Gateway ports must be routable from the sandbox network.
+#
+# Replace the registry placeholders before use:
+# - image_map.to: where the task images were pushed (see the preparation notes).
+# - image_mounts.image: the OpenCode 1.19.3 tool image in the same registry.
+#
+# Sandbox options (uni_agent.sandbox.e2b):
+# - image_as_template: the mapped image ref is passed as the E2B template id
+#   instead of building a template through the E2B Template API. Point image_map
+#   at the backend's template names if they differ from image refs.
+# - backend_image_mounts: the backend (or its template) already provides the
+#   declared mounts; startup only checks that each mount_path exists. Set
+#   image_mounts_metadata_key to also send the declared mounts as JSON metadata.
+# - envs: sandbox-wide environment. The SWE-rebench images default PATH to
+#   /opt/conda/bin; OpenCode's shell tool must find the testbed environment.
+- name: swe_rebench
+  eval_timeout: 900
+  sandbox:
+    provider: e2b
+    runtime_timeout: 7200
+    image_map:
+      - from: "swerebench/sweb.eval.x86_64.**"
+        to: "registry.example.internal/swe-rebench/sweb.eval.x86_64.**:latest"
+    image_mounts:
+      - image: registry.example.internal/swe-rebench/opencode-tool:1.19.3
+        mount_path: /opt/opencode
+    sandbox_kwargs:
+      image_as_template: true
+      backend_image_mounts: true
+      # image_mounts_metadata_key: uni-agent.image-mounts
+      user: root
+      envs:
+        PATH: /opt/miniconda3/envs/testbed/bin:/opt/miniconda3/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+        CONDA_DEFAULT_ENV: testbed
+        CONDA_PREFIX: /opt/miniconda3/envs/testbed
+  agent:
+    name: opencode
+    opencode_bin: /opt/opencode/bin/opencode
+    run_timeout: 3600
+    # Keep context_limit <= MAX_PROMPT_LENGTH + MAX_RESPONSE_LENGTH in run_train.sh.
+    context_limit: 65536
+    output_limit: 8192
+  prompt_template:
+    - role: user
+      content: |-
+        You are a senior software engineer fixing a bug in the repository at /testbed.
+
+        <issue_description>
+        {problem_statement}
+        </issue_description>
+
+        The repository is already checked out at /testbed with its development environment fully set up. Make the minimal changes to non-test source files so the issue is resolved.
+
+        Work through the problem as follows:
+        1. Explore the relevant code and identify the root cause.
+        2. Reproduce the failure when practical.
+        3. Implement the minimal, idiomatic fix.
+        4. Run the relevant tests and verify the fix.
+        5. Briefly summarize the root cause and changes when complete.
+
+        Constraints:
+        - Do not commit changes.
+        - Do not install or modify packages.
+        - Do not modify, remove, or add test files.
+        - Work only inside /testbed.
