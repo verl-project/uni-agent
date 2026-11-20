@@ -52,7 +52,7 @@ class StatisticEvent:
             both as "the replica this event is about".
         server_ids: Removed server ids (``on_servers_removed``).
         prompt_ids: The acquiring request's input token ids (empty when the
-            caller forwarded none). The inflight parser derives the prompt
+            caller forwarded none). DataStore derives the prompt
             length from them and resolves the dispatch's block-hash chain to
             pin its blocks on the chosen replica (the router's held-block
             account). Set on ``on_acquire`` only.
@@ -77,8 +77,9 @@ class CallbackTransport(Transport):
 
     is_async = False
 
-    def __init__(self, balancer_handler: Any) -> None:
+    def __init__(self, balancer_handler: Any, *, accounting: bool = False) -> None:
         self._balancer = balancer_handler
+        self._accounting = accounting
         self._registered: list[tuple[str, Callable]] = []
 
     async def subscribe(self, handler: Callable[[bytes | str, str], None]) -> None:
@@ -90,7 +91,7 @@ class CallbackTransport(Transport):
         """
         balancer = self._balancer
 
-        def _on_acquire(request_id: str, chosen: str, prompt_ids: list[int] | None = None) -> None:
+        def _on_acquire(request_id: str | None, chosen: str, prompt_ids: list[int] | None = None) -> None:
             handler(
                 StatisticEvent(
                     "on_acquire",
@@ -114,11 +115,14 @@ class CallbackTransport(Transport):
         def _on_servers_removed(server_ids: list[str]) -> None:
             handler(StatisticEvent("on_servers_removed", server_ids=tuple(server_ids)), "")
 
-        self._registered = [
-            ("on_acquire", _on_acquire),
-            ("on_release", _on_release),
-            ("on_servers_removed", _on_servers_removed),
-        ]
+        if self._accounting:
+            self._registered = [("on_account_acquire", _on_acquire), ("on_account_release", _on_release)]
+        else:
+            self._registered = [
+                ("on_acquire", _on_acquire),
+                ("on_release", _on_release),
+                ("on_servers_removed", _on_servers_removed),
+            ]
         for event, fn in self._registered:
             balancer.register_call_back(event, fn)
 

@@ -16,17 +16,14 @@
 
 from __future__ import annotations
 
-from typing import Any
-
+from ..store.contracts import RoutingState
 from .hash import get_prefix_hashes_incremental
-
-_PREFIX_HASH_KEY = "prefix_hashes"
 
 
 def resolve_prefix_hashes(
     prompt_ids: list[int],
     request_id: str | None,
-    store: Any,
+    store: RoutingState,
 ) -> list[str]:
     """Return ``str(h)`` for each full-block chained prefix hash of ``prompt_ids``.
 
@@ -35,25 +32,23 @@ def resolve_prefix_hashes(
     later turns. Assumes multi-turn prompts are append-only; a shrunk prompt
     triggers a full recompute. Returns ``[]`` when ``block_size`` is unknown.
     """
-    block_size = store.get_block_size()
+    block_size = store.kv.get_block_size()
     if not block_size or block_size <= 0:
         return []
 
-    cached = store.get_per_request(request_id, _PREFIX_HASH_KEY) if request_id else None
+    cached = store.requests.get_prefix_cache(request_id) if request_id is not None else None
     if cached and len(prompt_ids) // block_size >= len(cached["hash_strs"]):
-        # cached is the live store row (get returns a reference, not a copy):
-        # the in-place extend + parent update persist, and get() already touched
-        # LRU recency — no write-back needed.
         tail, new_parent = get_prefix_hashes_incremental(
             prompt_ids, block_size, cached["parent_hash"], len(cached["hash_strs"])
         )
         cached["hash_strs"].extend([str(h) for h in tail])
         cached["parent_hash"] = new_parent
+        store.requests.set_prefix_cache(request_id, cached)
         return cached["hash_strs"]
 
     # full recompute (miss / shrink)
     hashes, parent = get_prefix_hashes_incremental(prompt_ids, block_size, 0, 0)
     hash_strs = [str(h) for h in hashes]
-    if request_id:
-        store.set_per_request(request_id, _PREFIX_HASH_KEY, {"hash_strs": hash_strs, "parent_hash": parent})
+    if request_id is not None:
+        store.requests.set_prefix_cache(request_id, {"hash_strs": hash_strs, "parent_hash": parent})
     return hash_strs

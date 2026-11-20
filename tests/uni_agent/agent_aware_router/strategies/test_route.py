@@ -26,6 +26,7 @@ import pytest
 from uni_agent.agent_aware_router.config.strategy import KVCAwareStrategyConfig
 from uni_agent.agent_aware_router.strategies import ReplicaInfo, StrategyRegistry, route
 from uni_agent.agent_aware_router.strategies.kvc_aware import KVCacheAwareStrategy
+from uni_agent.agent_aware_router.types import Layer
 
 pytestmark = [pytest.mark.level0, pytest.mark.cpu]
 
@@ -109,15 +110,26 @@ class TestStrategyRegistry:
 class FakeRouteDataProvider:
     def __init__(self, data=None):
         self._data = data or {}
+        self.metrics = self.kv = self.requests = self
+
+    def get_metric_node_ids(self):
+        return list(self._data)
+
+    def get_block_size(self):
+        return 16
+
+    def inflight_block_count(self, replica_id):
+        return self._data.get(replica_id, {}).get("inflight_blocks", 0)
 
     def get_metrics(self, replica_id):
-        return {}
+        return self._data.get(replica_id, {})
 
     def get_metric(self, replica_id, key):
-        return 0.0
+        return self._data.get(replica_id, {}).get(key, 0.0)
 
     def get_layer_prefix_hit_rate(self, replica_id, prompt_ids, layer):
-        return 0.0
+        entry = self._data.get(replica_id, {})
+        return entry.get("gpu_hit_pct", 0) / 100 if layer == Layer.GPU else 0.0
 
     def kv_cache_load(self, replica_id):
         return 0.0
@@ -178,15 +190,17 @@ class TestRoute:
         )
         assert ranking == ["rep_b", "rep_a", "rep_c"]
 
-    def test_overloaded_present_in_ranking(self):
+    def test_overloaded_present_in_ranking(self, caplog):
         """
         Feature: all replicas remain present in the ranking
         """
-        strat = _strat()
+        strat = _strat(tie_tolerance=0.0)
         provider = FakeRouteDataProvider(
             {
                 "rep_a": {
                     "kv_cache_usage_perc": 0.3,
+                    "num_gpu_blocks": 100,
+                    "inflight_blocks": 10,
                     "num_requests_running": 1,
                     "num_requests_waiting": 0,
                     "gpu_hit_pct": 80,
@@ -194,6 +208,7 @@ class TestRoute:
                 },
                 "rep_b": {
                     "kv_cache_usage_perc": 0.5,
+                    "inflight_blocks": 50,
                     "num_requests_running": 1,
                     "num_requests_waiting": 0,
                     "gpu_hit_pct": 30,
@@ -201,6 +216,7 @@ class TestRoute:
                 },
                 "overloaded": {
                     "kv_cache_usage_perc": 0.92,
+                    "inflight_blocks": 95,
                     "num_requests_running": 0,
                     "num_requests_waiting": 0,
                     "gpu_hit_pct": 90,
@@ -210,6 +226,8 @@ class TestRoute:
         )
         ranking = route(strat, PROMPT_IDS, provider, _replicas("rep_a", "rep_b", "overloaded"))
         assert set(ranking) == {"rep_a", "rep_b", "overloaded"}
+        assert ranking[0] == "rep_a"
+        assert "falling back to random" not in caplog.text
 
     def test_empty_pool_raises(self):
         """

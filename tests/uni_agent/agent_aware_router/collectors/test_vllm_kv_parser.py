@@ -200,7 +200,7 @@ def test_clear_keeps_only_later_stores_and_they_remain_removable(wire_format, re
         payload = [[index, [event]] for index, event in enumerate(events)] if replay else [0, events]
         update = parser.parse(msgpack.packb(payload), "replica-a")
         assert update is not None
-        collector._write_kv_update(update)
+        collector._sink.apply_kv(update)
         return update
 
     try:
@@ -560,7 +560,7 @@ def test_truncated_replay_ready_keeps_missing_prefix_unknown_until_rebuilt(recov
     def apply(events):
         update = parser.parse(msgpack.packb([0, events]), "replica-a")
         assert update is not None
-        collector._write_kv_update(update)
+        collector._sink.apply_kv(update)
 
     try:
         apply(chain)
