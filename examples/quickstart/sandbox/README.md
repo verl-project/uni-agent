@@ -47,4 +47,69 @@ export E2B_API_KEY="<e2b-api-key>"
 DEBUG_MODE=1 SANDBOX_PROVIDER=e2b IMAGE=python:3.12 python examples/quickstart/sandbox/demo.py
 ```
 
+## Run with AgentEnv
+
+AgentEnv serves an E2B-compatible API, so it reuses the E2B client and the
+`e2b` extra. All three connection settings are required; each one falls back to
+its `E2B_*` counterpart when the `AGENTENV_*` variable is unset:
+
+```bash
+pip install "e2b>=2.26,<3"
+export AGENTENV_API_URL="<agentenv-api-url>"
+export AGENTENV_SANDBOX_URL="<agentenv-sandbox-url>"
+export AGENTENV_API_KEY="<agentenv-api-key>"
+```
+
+Reuse an existing template on the deployment. `sandbox_kwargs.template` takes
+priority and skips E2B's template-build API:
+
+```yaml
+sandbox:
+  provider: agentenv
+  runtime_timeout: 3600
+  sandbox_kwargs:
+    template: uni-agent-swe
+```
+
+Passing `image` instead requires the deployment to implement template builds.
+`expose_port` needs a reachable `domain`, because the SDK derives the exposed
+host as `{port}-{sandbox_id}.{domain}`.
+
+## Split Traffic between Providers
+
+The composite `routes` provider starts exactly one child sandbox from a weighted
+list. Routing is deterministic: the same `salt` and `route_key` always select
+the same route, and the task runner injects the Gateway session id as the
+routing key. Copy this `sandbox` block into a task config:
+
+```yaml
+sandbox:
+  provider: routes
+  sandbox_kwargs:
+    strategy: weighted        # "weighted" (default) or "primary"
+    salt: rollout-2026-11
+    fallback: true
+    routes:
+      - name: e2b-prod
+        weight: 90
+        config:
+          provider: e2b
+          runtime_timeout: 3600
+          sandbox_kwargs: {template: uni-agent-swe}
+      - name: agentenv-canary
+        weight: 10
+        config:
+          provider: agentenv
+          runtime_timeout: 3600
+          sandbox_kwargs: {template: uni-agent-swe}
+```
+
+Each route's `config` is a full sandbox config, so put `image`, mounts, and
+`runtime_timeout` there; the routes-level config only reads `sandbox_kwargs`.
+Startup failover tries the remaining routes in declaration order on transient
+errors, while configuration/SDK/permission errors are raised. The active route
+is logged and never changes during an episode. Outside the framework, set
+`sandbox_kwargs.route_key` to a stable value (such as `uuid.uuid4().hex` per
+episode) so retries stay on the same route.
+
 See the [Launch a Sandbox](../../../docs/source/quickstart/launch-sandbox.md) guide for a step-by-step explanation.

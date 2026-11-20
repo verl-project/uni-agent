@@ -23,6 +23,8 @@ SANDBOX_MODULES: dict[str, str] = {
     "vefaas": "uni_agent.sandbox.vefaas",
     "openyuanrong": "uni_agent.sandbox.openyuanrong",
     "agent_dx": "uni_agent.sandbox.agent_dx",
+    "agentenv": "uni_agent.sandbox.agentenv",
+    "routes": "uni_agent.sandbox.routes",
 }
 
 

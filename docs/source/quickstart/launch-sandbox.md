@@ -221,6 +221,62 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
         egress allowlist; a private worker address or `127.0.0.1` is not
         reachable from the E2B cloud.
 
+=== "AgentEnv"
+
+    **Self-hosted, E2B-compatible service.** AgentEnv exposes an E2B-compatible
+    control plane and an `envd` data plane, so the provider reuses the E2B SDK
+    and only needs the deployment's connection settings.
+
+    AgentEnv reuses the `e2b` extra; there is no separate `agentenv` extra:
+
+    ```bash
+    pip install 'uni-agent[e2b]'
+    ```
+
+    Configure the deployment with environment variables. All three are required:
+
+    ```bash
+    export AGENTENV_API_URL="<agentenv-api-url>"
+    export AGENTENV_SANDBOX_URL="<agentenv-sandbox-url>"
+    export AGENTENV_API_KEY="<agentenv-api-key>"
+    ```
+
+    Each variable falls back to its `E2B_*` counterpart (`E2B_API_URL`,
+    `E2B_SANDBOX_URL`, `E2B_API_KEY`) when the `AGENTENV_*` one is unset or
+    blank, so one E2B-protocol deployment can be selected either way. Prefer the
+    `AGENTENV_*` names when `e2b` and `agentenv` sandboxes coexist in the same
+    worker. The values are read per sandbox and can also be passed explicitly as
+    `sandbox_kwargs.api_url`, `sandbox_kwargs.sandbox_url`, and
+    `sandbox_kwargs.api_key`; explicit values win over both environment
+    variables. Missing settings fail sandbox construction with an error that
+    names the setting and the variables to set, without echoing any value.
+    `api_url` and `sandbox_url` are deprecated E2B SDK parameters; AgentEnv
+    still requires them because the deployment exposes E2B-compatible URLs.
+
+    Use an existing template on the deployment:
+
+    ```yaml
+    sandbox:
+      provider: agentenv
+      runtime_timeout: 3600
+      sandbox_kwargs:
+        # Recommended: an existing template alias on the deployment.
+        template: uni-agent-swe
+    ```
+
+    `sandbox_kwargs.template` takes priority: startup uses that template as-is
+    and never calls E2B's `Template.exists` / `Template.build`. Passing `image`
+    without `template` goes through the E2B template API, so the AgentEnv
+    deployment must implement template builds in that case; otherwise pass
+    `template` instead. Image mounts are not supported either; build a composite
+    AgentEnv/E2B template and reference it with `template`.
+
+    `expose_port` requires a reachable `domain`: the E2B SDK derives the exposed
+    host as `{port}-{sandbox_id}.{domain}` (or from `sandbox_url`), so the
+    returned URL is only routable when the deployment's domain is configured and
+    reachable. Commands, file operations, and lifecycle settings are otherwise
+    inherited from the E2B provider.
+
 === "OpenYuanrong"
 
     **Remote or self-hosted service.** [OpenYuanrong](https://docs.openyuanrong.org/zh-cn/latest/index.html) provides elastic sandbox management for distributed agent workloads.
@@ -316,6 +372,108 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
 `image_mounts` allows Uni-Agent to attach self-contained runtime images for black-box
 agent harnesses to task sandboxes while keeping harness dependencies isolated
 from task images; `executable_paths` exposes selected runtime commands.
+
+### Traffic splitting between sandbox providers
+
+The `routes` provider is a composite backend: it owns no environment of its
+own, starts exactly one child sandbox, and delegates the whole data plane to
+that child. Use it to grey-release a new deployment (for example an AgentEnv
+canary) beside an existing provider without changing the task itself.
+
+```yaml
+sandbox:
+  provider: routes
+  sandbox_kwargs:
+    strategy: weighted          # "weighted" (default) or "primary"
+    salt: rollout-2026-11       # keep fixed for the duration of a rollout
+    fallback: true
+    routes:
+      - name: e2b-prod
+        weight: 90
+        config:
+          provider: e2b
+          runtime_timeout: 3600
+          sandbox_kwargs: {template: uni-agent-swe}
+      - name: agentenv-canary
+        weight: 10
+        config:
+          provider: agentenv
+          runtime_timeout: 3600
+          sandbox_kwargs: {template: uni-agent-swe}
+```
+
+Each entry in `routes` is a full child sandbox config:
+
+- `name` (optional): route name, unique per sandbox; defaults to `route-{index}`.
+- `weight` (default `1.0`, must be positive): relative share under the
+  `weighted` strategy.
+- `config` (required): a complete `SandboxConfig`, so `image`, `image_map`,
+  `image_mounts`, `executable_paths`, and `runtime_timeout` belong here. The
+  top-level `routes` config only reads `sandbox_kwargs`: `image`, `image_map`,
+  `image_mounts`, and `executable_paths` set there are rejected, and a
+  top-level `runtime_timeout` is not used.
+- `start_timeout` (optional, positive seconds): overrides the routes-level
+  `start_timeout` for this route, which in turn falls back to
+  `SANDBOX_STARTUP_TIMEOUT`.
+- A route's `config.provider` must not be `routes`: nested traffic splits are
+  rejected, so list every backend as a route of one `routes` sandbox instead.
+
+`strategy` selects the primary route:
+
+- `weighted` (default): splits sessions proportionally to `weight`.
+- `primary`: always selects the first route; the remaining routes are only used
+  as startup fallbacks, and weights are ignored. Use it to pin production while
+  keeping the canary listed for failover.
+
+Selection is deterministic. The provider hashes the configured `salt` and a
+routing key with SHA-256, takes the first 8 digest bytes as a 64-bit bucket, and
+maps the bucket onto cumulative weight intervals in declaration order. The same
+`(salt, route_key)` always selects the same route, across processes and hosts.
+Keep `salt` fixed while a rollout runs: changing a weight only moves the
+sessions whose bucket falls into the changed interval, while changing `salt`
+reshuffles every session.
+
+`route_key` is runtime data and is normally injected by the framework: `run_task`
+sets `sandbox_kwargs.route_key` to the Gateway session id when the task uses
+`provider: routes`, so each session stays pinned to one route while an explicit
+`route_key` always wins. When you build a routes sandbox outside the framework
+(`build_sandbox`/`SandboxConfig`), generate a stable key yourself, such as
+`uuid.uuid4().hex` per episode; without one the provider generates a random key
+once per sandbox instance, so retries of that instance stay on the same route
+but different instances are routed independently.
+
+Startup and failover:
+
+- `start()` tries the primary route first, then the other routes in circular
+  declaration order starting after the primary. Set `fallback: false` to try the
+  primary route only.
+- A route that fails with a transient error (infrastructure error, timeout) is
+  stopped and the next route is tried.
+- Configuration, SDK, and permission failures (`ValueError`, `TypeError`,
+  `ImportError`, `NotImplementedError`, `PermissionError`) are raised
+  immediately and never masked by failover.
+- If every route fails, the last start error is raised. Entering the sandbox
+  context retries at most two passes, so a broken deployment costs at most two
+  startup sweeps over the configured routes.
+
+Routing happens once, at startup. The active route stays fixed for the entire
+sandbox lifetime; a failure after startup is surfaced as a sandbox error and is
+never migrated to another route, because the filesystem, installed packages, and
+running processes cannot move. Weight changes and `salt` therefore apply to new
+sandboxes only: an existing session keeps its route until it stops, and because
+its `route_key` is stable, restarting it with the same salt and weights lands on
+the same route again.
+
+The active route is logged at `INFO` level as
+`sandbox route selected: <name> (key=<route-key> strategy=<strategy>)`; failed
+attempts are logged as warnings and an all-routes failure logs the attempt list.
+The route key is a session id or a generated key, not a credential.
+
+The gateway reverse tunnel (`sandbox_kwargs.proxy_port`, with `upstream`
+supplied by the task runner) requires every configured route provider to declare
+`supports_reverse_tunnel = True`; otherwise startup fails instead of silently
+sending some sessions to a provider that cannot reach the Gateway. The tunnel
+arguments are forwarded to the active child.
 
 ### Start and Stop the Sandbox
 
@@ -445,6 +603,17 @@ After configuring a supported backend above, run the complete connectivity and p
 
     ```bash
     DEBUG_MODE=1 SANDBOX_PROVIDER=e2b IMAGE=python:3.12 \
+      python examples/quickstart/sandbox/demo.py
+    ```
+
+=== "AgentEnv"
+
+    The demo configures `image`, so the AgentEnv deployment must implement the
+    E2B template build API. To reuse an existing template instead, run a task
+    config that passes `sandbox_kwargs.template` as shown above.
+
+    ```bash
+    DEBUG_MODE=1 SANDBOX_PROVIDER=agentenv IMAGE=python:3.12 \
       python examples/quickstart/sandbox/demo.py
     ```
 
