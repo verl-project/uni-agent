@@ -1,0 +1,11 @@
+# PD decode selector exposed through uni-agent's verl router adapter.
+router_class: uni_agent.rollout.router_balancer.SelectorRouter
+selector_class: uni_agent.rollout.decode_selectors.SessionStickyDecodeSelector
+kv_hard_stop: 0.95
+wait_budget: 32
+inflight_token_budget: 2000000
+kv_high_watermark: 0.8
+snapshot_interval_secs: 1.0
+snapshot_timeout_secs: 0.15
+snapshot_stale_secs: 3.0
+log_interval_secs: 60

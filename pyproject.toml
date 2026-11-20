@@ -125,6 +125,7 @@ include = ["uni_agent*"]
 
 [tool.setuptools.package-data]
 uni_agent = ["version/*"]
+"uni_agent.rollout" = ["configs/*.yaml"]
 "uni_agent.agent_aware_router" = [
   "configs/*.yaml",
 ]

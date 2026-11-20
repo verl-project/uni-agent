@@ -1,0 +1,3 @@
+router_class: uni_agent.rollout.router_balancer.SelectorRouter
+selector_class: uni_agent.rollout.decode_selectors.LeastLoadDecodeSelector
+sample_size: 2

@@ -1,0 +1,2 @@
+router_class: uni_agent.rollout.router_balancer.SelectorRouter
+selector_class: uni_agent.rollout.decode_selectors.RendezvousHashDecodeSelector
