@@ -237,6 +237,8 @@ async def test_from_config_warns_for_unsupported_colocated_hybrid_reward(
         ),
         ({}, {"enable_tool_parser_cache": False}, True, False, {}, {}),
         ({}, {"coalesce_reserved_exact_requests": False}, True, True, {}, {}),
+        ({}, {"gateway_bind_address": "127.0.0.1"}, True, True, {}, {}),
+        ({}, {"gateway_bind_address_by_node": {"192.0.2.1": "2001:db8::1"}}, True, True, {}, {}),
     ],
 )
 def test_build_gateway_manager_wires_gateway_config_defaults(
@@ -318,6 +320,10 @@ def test_build_gateway_manager_wires_gateway_config_defaults(
     assert isinstance(captured["gateway_actor_config"].apply_chat_template_kwargs, dict)
     assert captured["gateway_actor_config"].apply_chat_template_kwargs == expected_chat_template_kwargs
     assert captured["gateway_actor_config"].mm_processor_kwargs == expected_mm_processor_kwargs
+    assert captured["gateway_actor_config"].bind_address == agent_framework_config.get("gateway_bind_address")
+    assert captured["gateway_actor_config"].bind_address_by_node == agent_framework_config.get(
+        "gateway_bind_address_by_node"
+    )
 
 
 @pytest.mark.cpu

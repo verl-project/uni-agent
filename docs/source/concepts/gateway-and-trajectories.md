@@ -50,6 +50,54 @@ POST /sessions/{session_id}/v1/messages
 
 Sessions are held in Gateway memory until they are finalized or aborted.
 
+## Gateway Network Address
+
+By default, each Gateway listens on its own Ray node IP and returns that address
+in session URLs. In a cluster with multiple network interfaces, an external
+Agent or Sandbox may be able to reach a different address on the same node.
+Configure `gateway_bind_address` to use that local IP for both HTTP listening
+and session URLs:
+
+```yaml
+actor_rollout_ref:
+  rollout:
+    custom:
+      agent_framework:
+        gateway_bind_address: "192.0.2.10"
+```
+
+For Gateways spread across multiple nodes, use `gateway_bind_address_by_node`
+instead. Keys are Ray node IPs; values are HTTP addresses assigned to the
+corresponding nodes. Each actor selects its own entry after Ray places it:
+
+```yaml
+actor_rollout_ref:
+  rollout:
+    custom:
+      agent_framework:
+        gateway_bind_address_by_node:
+          "192.0.2.10": "2001:db8:1::10"
+          "192.0.2.11": "2001:db8:1::11"
+```
+
+Replace these example addresses with your deployment's addresses. The two
+options are mutually exclusive. Both IPv4 and IPv6 are supported, including
+IPv6 Ray node keys. A mapping must cover every node on which a Gateway can be
+scheduled; a missing entry fails actor construction instead of falling back to
+an unintended address. Wildcard, multicast, link-local, and scoped addresses
+are rejected because the chosen address also appears in the returned URL.
+For Python callers, the corresponding `GatewayActorConfig` fields are
+`bind_address` and `bind_address_by_node`. Policies sharing a Gateway actor must
+resolve to the same HTTP address on that node.
+
+This configuration does not move the Gateway or change Ray, inference backend,
+or GPU communication addresses. The chosen IP must belong to the Gateway's
+node, and the Agent network must allow the resulting address and port. Existing
+Sandbox allowlist and reverse-tunnel mechanisms still apply. Deployments whose
+public endpoint differs from their local listening address still need their
+provider's forwarding or tunnel configuration; these options use one address
+for both listening and session URLs.
+
 ## Agent Identity
 
 Gateway can preserve the identity of agents sharing one rollout session. Claude
