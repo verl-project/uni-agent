@@ -213,6 +213,7 @@ async def test_from_config_warns_for_unsupported_colocated_hybrid_reward(
 
 @pytest.mark.cpu
 @pytest.mark.level0
+@pytest.mark.parametrize("hint_capability", [None, False, True])
 @pytest.mark.parametrize(
     (
         "data_config",
@@ -241,6 +242,7 @@ async def test_from_config_warns_for_unsupported_colocated_hybrid_reward(
 )
 def test_build_gateway_manager_wires_gateway_config_defaults(
     monkeypatch,
+    hint_capability,
     data_config,
     agent_framework_config,
     expected_rollback,
@@ -278,7 +280,9 @@ def test_build_gateway_manager_wires_gateway_config_defaults(
     )
     monkeypatch.setattr(entry_module, "GatewayManager", _FakeGatewayManager)
 
-    llm_client = object()
+    llm_client = types.SimpleNamespace()
+    if hint_capability is not None:
+        llm_client.supports_agent_runtime_hint = hint_capability
     config = OmegaConf.create(
         {
             "data": data_config,
@@ -289,6 +293,18 @@ def test_build_gateway_manager_wires_gateway_config_defaults(
                     "prompt_length": 128,
                     "response_length": 64,
                     "multi_turn": {"format": "hermes"},
+                    "engine_kwargs": {
+                        "vllm": {
+                            "kv_transfer_config": {
+                                "kv_connector": "OffloadingConnector",
+                                "kv_role": "kv_both",
+                                "kv_connector_extra_config": {
+                                    "spec_name": "PriorityGPUOffloadingSpec",
+                                    "spec_module_path": "uni_agent.gateway.kv_offload.priority_policy",
+                                },
+                            }
+                        }
+                    },
                     "custom": {
                         "agent_framework": {
                             "gateway_count": 2,
@@ -304,6 +320,7 @@ def test_build_gateway_manager_wires_gateway_config_defaults(
 
     assert isinstance(manager, _FakeGatewayManager)
     assert captured["llm_client"] is llm_client
+    assert getattr(llm_client, "supports_agent_runtime_hint", None) is hint_capability
     assert captured["gateway_count"] == 2
     assert captured["gateway_actor_config"].prompt_length == 128
     assert captured["gateway_actor_config"].response_length == 64
@@ -318,6 +335,27 @@ def test_build_gateway_manager_wires_gateway_config_defaults(
     assert isinstance(captured["gateway_actor_config"].apply_chat_template_kwargs, dict)
     assert captured["gateway_actor_config"].apply_chat_template_kwargs == expected_chat_template_kwargs
     assert captured["gateway_actor_config"].mm_processor_kwargs == expected_mm_processor_kwargs
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_build_gateway_manager_rejects_old_gateway_kv_config(monkeypatch):
+    from uni_agent.framework import entry as entry_module
+
+    model = types.SimpleNamespace(tokenizer=None, processor=None, hf_config=types.SimpleNamespace(model_type=None))
+    rollout = types.SimpleNamespace(
+        name="vllm",
+        prompt_length=128,
+        response_length=64,
+        multi_turn=types.SimpleNamespace(format="hermes"),
+        custom=types.SimpleNamespace(agent_framework={"gateway_count": 1, "kv_cache_offload": {"enable": True}}),
+    )
+    config = types.SimpleNamespace(data={}, actor_rollout_ref=types.SimpleNamespace(model=model, rollout=rollout))
+    monkeypatch.setattr(entry_module, "omega_conf_to_dataclass", lambda cfg: cfg)
+    monkeypatch.setattr(entry_module, "GatewayManager", lambda **kwargs: kwargs["gateway_actor_config"])
+
+    with pytest.raises(ValueError, match="connector's agent_hint_config"):
+        entry_module.build_gateway_manager(config=config, llm_client=None)
 
 
 @pytest.mark.cpu

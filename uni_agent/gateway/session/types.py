@@ -39,10 +39,12 @@ class InternalGenerationRequest(_InternalGenerationRequestRequired, total=False)
 
     Provider adapters lower OpenAI / Anthropic wire requests into this
     template-facing canonical before the session sees them. It is not a
-    provider-neutral block model.
+    provider-neutral block model. Optional received_tool_result preserves
+    the current provider turn's meaning across multimodal lowering.
     """
 
     agent_context: AgentContext
+    received_tool_result: bool
 
 
 @dataclass
