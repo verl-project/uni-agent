@@ -123,7 +123,7 @@ def test_e2b_defaults_to_root_user():
 @pytest.mark.cpu
 @pytest.mark.level0
 def test_e2b_sets_up_executable_paths_as_root_by_default(monkeypatch):
-    from uni_agent.sandbox.e2b import E2BSandbox
+    from uni_agent.sandbox.e2b import E2BSandbox, _session_command
 
     calls = []
 
@@ -164,9 +164,9 @@ def test_e2b_sets_up_executable_paths_as_root_by_default(monkeypatch):
     asyncio.run(sandbox.start())
 
     assert calls == [
-        ("exec bash -c 'command -v claude'", "root"),
-        ("exec ln -sfn /opt/claude-code/bin/claude /usr/bin/claude", "root"),
-        ("exec bash -c 'command -v claude'", "root"),
-        ("exec test /usr/bin/claude -ef /opt/claude-code/bin/claude", "root"),
+        (_session_command(["bash", "-c", "command -v claude"]), "root"),
+        (_session_command(["ln", "-sfn", "/opt/claude-code/bin/claude", "/usr/bin/claude"]), "root"),
+        (_session_command(["bash", "-c", "command -v claude"]), "root"),
+        (_session_command(["test", "/usr/bin/claude", "-ef", "/opt/claude-code/bin/claude"]), "root"),
     ]
     assert sandbox.user == "root"
