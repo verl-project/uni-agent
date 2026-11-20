@@ -188,7 +188,7 @@ def test_from_config_uses_shared_runner_config():
                             "agent_runners": {
                                 "multi_agent": {
                                     "runner_fqn": "example.runner",
-                                    "runner_kwargs": {"execution": {"backend": "local_process"}},
+                                    "runner_kwargs": {"question_key": "value"},
                                     "max_concurrent_sessions": 3,
                                     "dispatch_mode": "ray_task",
                                     "trajectory_selection": "all",

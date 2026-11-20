@@ -1,8 +1,13 @@
 """Generic command-driven external MAS runner.
 
 Each invocation receives a rollout-scoped Gateway URL, injects it into a copy
-of the MAS configuration, and launches the configured command in the Ray
-worker that owns this rollout task.
+of the MAS configuration, and launches the configured command inside the
+rollout's sandbox.
+
+The sandbox owns execution: the Task builds it from its ``sandbox`` block, so
+``provider: local`` runs the command on the host while ``docker``/``modal``/...
+run it in an isolated or remote environment. The rendered config is written
+into the sandbox filesystem.
 """
 
 from __future__ import annotations
@@ -12,20 +17,16 @@ import json
 import logging
 import re
 import shlex
-import tempfile
+import uuid
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
 
-from .process_backend import (
-    LocalProcessError,
-    LocalProcessResult,
-    LocalProcessTimeout,
-    run_local_process,
-)
+if TYPE_CHECKING:
+    from uni_agent.sandbox import Sandbox
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,31 @@ _UNSUPPORTED_PLACEHOLDER_RE = re.compile(
 )
 
 _MISSING = object()
+
+#: Directory inside the sandbox that receives the rendered per-rollout config.
+_DEFAULT_SANDBOX_CONFIG_DIR = "/tmp"
+
+#: Exit code the base sandbox contract returns when a command times out.
+_SANDBOX_TIMEOUT_EXIT_CODE = -1
+
+
+class ExternalMASError(RuntimeError):
+    """The external MAS command failed (non-zero exit)."""
+
+    def __init__(self, message: str, *, exit_code: int, stdout: str, stderr: str) -> None:
+        super().__init__(message)
+        self.exit_code = exit_code
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+class ExternalMASTimeout(TimeoutError):
+    """The external MAS command exceeded its configured timeout."""
+
+    def __init__(self, message: str, *, stdout: str = "", stderr: str = "") -> None:
+        super().__init__(message)
+        self.stdout = stdout
+        self.stderr = stderr
 
 
 @dataclass(frozen=True)
@@ -293,16 +319,17 @@ def _normalize_result(
     }
 
 
-def _parse_result(process_result: LocalProcessResult, result_config: Mapping[str, Any]) -> dict[str, Any]:
+def _parse_result(process_result: Any, result_config: Mapping[str, Any]) -> dict[str, Any]:
     mode = str(result_config.get("mode", "stdout_json"))
     if mode == "none":
         return {}
+    stdout = str(getattr(process_result, "stdout", "") or "")
     if mode == "stdout_text":
-        text = process_result.stdout.strip()
+        text = stdout.strip()
         raw_result = {"final_result": text, "reward_info": {"final_result": text}}
         return _normalize_result(raw_result, result_config)
     if mode == "stdout_json":
-        raw_result = _parse_stdout_json(process_result.stdout)
+        raw_result = _parse_stdout_json(stdout)
         return _normalize_result(raw_result, result_config)
     else:
         raise ValueError(f"Unsupported external MAS result mode: {mode!r}")
@@ -362,24 +389,100 @@ def _write_external_mas_logs_best_effort(
         )
 
 
+def _stdout_of(result: Any) -> str:
+    return str(getattr(result, "stdout", "") or "")
+
+
+def _stderr_of(result: Any) -> str:
+    return str(getattr(result, "stderr", "") or "")
+
+
+def _exit_code_of(result: Any) -> int:
+    return int(getattr(result, "exit_code", 0) or 0)
+
+
+async def _execute_mas_command(
+    *,
+    sandbox: Sandbox,
+    command: Mapping[str, Any],
+    config: Mapping[str, Any],
+    request: ExternalMASRequest,
+    injected: Mapping[str, Any],
+    work_dir: str | None,
+    timeout_seconds: Mapping[str, Any] | float | int | None,
+) -> Any:
+    """Write the rendered config into the sandbox and run the MAS command there.
+
+    The config path is generated inside the sandbox filesystem (not on the host)
+    because a remote provider owns the filesystem the MAS reads; ``{config_path}``
+    therefore resolves to a path the command can actually open.
+    ``config.config_dir`` overrides the directory, which is also where the config
+    is cleaned up after the run.
+    """
+    config_dir = str(config.get("config_dir") or _DEFAULT_SANDBOX_CONFIG_DIR).rstrip("/") or "/"
+    safe_id = _safe_filename_component(request.session_group_id, default="rollout")
+    config_path = f"{config_dir}/uni_mas_{safe_id}_{uuid.uuid4().hex[:12]}.yaml"
+
+    context = {
+        "config_path": config_path,
+        "prompt": request.prompt,
+        "session_group_id": request.session_group_id,
+    }
+    process_command, shell = _build_command(command, context)
+    process_env = _format_values(command.get("env", {}), context)
+    timeout = float(timeout_seconds) if timeout_seconds is not None else None
+
+    await sandbox.write_file(
+        config_path,
+        yaml.safe_dump(dict(injected), sort_keys=False, allow_unicode=True),
+    )
+    try:
+        if shell:
+            exec_result = await sandbox.exec_shell(
+                str(process_command),
+                timeout=timeout,
+                workdir=work_dir,
+                env=process_env or None,
+            )
+        else:
+            exec_result = await sandbox.exec(
+                list(process_command),
+                timeout=timeout,
+                workdir=work_dir,
+                env=process_env or None,
+            )
+    finally:
+        # The rollout config is written per execution, so remove it even when the
+        # command fails. Cleanup failures must not mask the original outcome.
+        try:
+            await sandbox.exec(["rm", "-f", config_path])
+        except Exception:
+            logger.debug("failed to remove sandbox config %s", config_path, exc_info=True)
+
+    return exec_result
+
+
 async def run_external_mas(
     *,
     request: ExternalMASRequest,
-    execution: Mapping[str, Any],
+    sandbox: Sandbox,
     command: Mapping[str, Any],
     config: Mapping[str, Any],
     timeout: Mapping[str, Any] | float | int | None = None,
     result: Mapping[str, Any] | None = None,
     logs: Mapping[str, Any] | None = None,
-    **_: Any,
 ) -> dict[str, Any]:
-    """Launch one external MAS command against the rollout Gateway."""
+    """Launch one external MAS command in the rollout's sandbox.
+
+    The sandbox is required: ``ExternalMASTask`` builds it through
+    ``build_sandbox()``, so the provider comes from the Task Config exactly like
+    the other recipes. ``LocalSandbox`` runs the command on the host; container
+    and remote providers run it in their own environment.
+    """
     if not request.role_urls:
         raise ValueError("external MAS request requires at least one role URL")
-
-    backend = str(execution.get("backend", "local_process"))
-    if backend != "local_process":
-        raise NotImplementedError(f"External MAS execution backend {backend!r} is not implemented")
+    if sandbox is None:
+        raise ValueError("external MAS execution requires a started sandbox")
 
     template_path = config.get("template_path")
     if not template_path:
@@ -390,59 +493,46 @@ async def run_external_mas(
         raise ValueError("External MAS config template must contain a mapping")
 
     template = _apply_overrides(template, config.get("overrides"))
-
     injected = inject_gateway_config(
         template,
         role_urls=request.role_urls,
         injection=config.get("injection"),
     )
-    temp_dir = config.get("temp_dir")
-    temporary = tempfile.NamedTemporaryFile(
-        mode="w",
-        suffix=".yaml",
-        prefix="uni_mas_",
-        dir=str(temp_dir) if temp_dir else None,
-        delete=False,
-        encoding="utf-8",
+    timeout_seconds = timeout.get("seconds") if isinstance(timeout, Mapping) else timeout
+    work_dir = str(command["work_dir"]) if command.get("work_dir") else None
+
+    exec_result = await _execute_mas_command(
+        sandbox=sandbox,
+        command=command,
+        config=config,
+        request=request,
+        injected=injected,
+        work_dir=work_dir,
+        timeout_seconds=timeout_seconds,
     )
-    config_path = Path(temporary.name)
-    try:
-        yaml.safe_dump(injected, temporary, sort_keys=False, allow_unicode=True)
-        temporary.close()
 
-        context = {
-            "config_path": str(config_path),
-            "prompt": request.prompt,
-            "session_group_id": request.session_group_id,
-        }
-        process_command, shell = _build_command(command, context)
-        process_env = _format_values(command.get("env", {}), context)
-        timeout_seconds = timeout.get("seconds") if isinstance(timeout, Mapping) else timeout
-
-        try:
-            process_result = await run_local_process(
-                process_command,
-                work_dir=str(command["work_dir"]) if command.get("work_dir") else None,
-                env=process_env,
-                timeout_seconds=(float(timeout_seconds) if timeout_seconds is not None else None),
-                shell=shell,
-            )
-        except (LocalProcessError, LocalProcessTimeout) as exc:
-            _write_external_mas_logs_best_effort(
-                logs=logs,
-                session_group_id=request.session_group_id,
-                stdout=exc.stdout,
-                stderr=exc.stderr,
-            )
-            raise
-
-        _write_external_mas_logs_best_effort(
-            logs=logs,
-            session_group_id=request.session_group_id,
-            stdout=process_result.stdout,
-            stderr=process_result.stderr,
+    exit_code = _exit_code_of(exec_result)
+    stdout = _stdout_of(exec_result)
+    stderr = _stderr_of(exec_result)
+    _write_external_mas_logs_best_effort(
+        logs=logs,
+        session_group_id=request.session_group_id,
+        stdout=stdout,
+        stderr=stderr,
+    )
+    # The sandbox contract reports a timeout as exit code -1, so the timeout path
+    # is a result rather than an exception.
+    if exit_code == _SANDBOX_TIMEOUT_EXIT_CODE:
+        raise ExternalMASTimeout(
+            f"External MAS command timed out after {timeout_seconds}s",
+            stdout=stdout,
+            stderr=stderr,
         )
-        return _parse_result(process_result, result or {})
-    finally:
-        temporary.close()
-        config_path.unlink(missing_ok=True)
+    if exit_code != 0:
+        raise ExternalMASError(
+            f"External MAS command exited with code {exit_code}: {stderr.strip()}",
+            exit_code=exit_code,
+            stdout=stdout,
+            stderr=stderr,
+        )
+    return _parse_result(exec_result, result or {})
