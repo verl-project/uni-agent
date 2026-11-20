@@ -221,6 +221,66 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
         egress allowlist; a private worker address or `127.0.0.1` is not
         reachable from the E2B cloud.
 
+=== "OpenSandbox"
+
+    **Remote or self-hosted service.** [OpenSandbox](https://github.com/alibaba/opensandbox)
+    provides OS-level isolated sandboxes with a managed control plane.
+
+    Install the SDK and configure the endpoint and API key through environment
+    variables (or pass an `opensandbox.config.ConnectionConfig` via `sandbox_kwargs.connection_config`):
+
+    ```bash
+    pip install "opensandbox>=1.2"
+    export OPEN_SANDBOX_DOMAIN="https://<management-endpoint>"
+    export OPEN_SANDBOX_API_KEY="<api-key>"
+    ```
+
+    Use an `https://` endpoint: scheme-less or `http://` endpoints send the
+    API key in cleartext, which is only appropriate for trusted local
+    connections. The URL scheme covers the management API only -- command and
+    filesystem traffic follows `ConnectionConfig.protocol` (default `http`).
+    The full configuration below passes `ConnectionConfig(protocol="https")`
+    to encrypt sandbox traffic as well.
+
+    Start from an OCI image, or resume a previously created snapshot:
+
+    ```python
+    from opensandbox.config import ConnectionConfig
+
+    from uni_agent.sandbox import SandboxConfig
+
+    config = SandboxConfig(
+        provider="opensandbox",
+        image="python:3.12",
+        runtime_timeout=3600,
+        sandbox_kwargs={
+            "ready_timeout": 120,
+            "cpu": 2,
+            "memory_gb": 4,
+            # Encrypt command and filesystem traffic, not just the management API.
+            "connection_config": ConnectionConfig(protocol="https"),
+            # Optional: cap outbound traffic without setting a process-wide
+            # proxy in the training worker. Domain targets match every port;
+            # a port restriction needs an IP/CIDR target (and opensandbox>=1.2).
+            "network_policy": {
+                "default_action": "deny",
+                "egress": [{"action": "allow", "target": "pypi.org"}],
+            },
+        },
+    )
+    ```
+
+    The instance lifetime is enforced server-side: `stop()` destroys the
+    sandbox, and a worker that dies before `stop()` still gets the instance
+    reclaimed at `runtime_timeout`. Commands run as native argv on the sandbox
+    (no shell wrapping); a caller-set `timeout` is enforced by the server, and
+    the deadline kill is reported as a command timeout. File operations use the
+    SDK's filesystem API and create parent directories on write. Ports are
+    exposed through the SDK's endpoint service; when an endpoint requires
+    request headers, read them via `sandbox.get_port_endpoint(port)`. Image
+    mounts are not supported -- bake tool images into the sandbox image or use
+    SDK volumes instead.
+
 === "OpenYuanrong"
 
     **Remote or self-hosted service.** [OpenYuanrong](https://docs.openyuanrong.org/zh-cn/latest/index.html) provides elastic sandbox management for distributed agent workloads.

@@ -163,7 +163,7 @@ def test_is_timeout_error_override_is_honored_by_exec():
 
 # --------------------------- provider wiring ---------------------------
 
-_PROVIDERS = ["local", "docker", "e2b", "modal", "vefaas", "openyuanrong"]
+_PROVIDERS = ["local", "docker", "e2b", "modal", "opensandbox", "vefaas", "openyuanrong"]
 
 
 @pytest.mark.cpu

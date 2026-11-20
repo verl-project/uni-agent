@@ -47,4 +47,20 @@ export E2B_API_KEY="<e2b-api-key>"
 DEBUG_MODE=1 SANDBOX_PROVIDER=e2b IMAGE=python:3.12 python examples/quickstart/sandbox/demo.py
 ```
 
+## Run with OpenSandbox
+
+Install the SDK and point it at an OpenSandbox service:
+
+```bash
+pip install "opensandbox>=1.2"
+export OPEN_SANDBOX_DOMAIN="https://<management-endpoint>"
+export OPEN_SANDBOX_API_KEY="<api-key>"
+DEBUG_MODE=1 SANDBOX_PROVIDER=opensandbox IMAGE=python:3.12 python examples/quickstart/sandbox/demo.py
+```
+
+The demo runs sandbox traffic over the SDK default `http` data plane. The
+URL scheme above covers the management API only; to encrypt command and
+filesystem traffic too, set `sandbox_kwargs.connection_config` with
+`protocol="https"` in your own `SandboxConfig` (see the [Launch a Sandbox](../../../docs/source/quickstart/launch-sandbox.md) guide).
+
 See the [Launch a Sandbox](../../../docs/source/quickstart/launch-sandbox.md) guide for a step-by-step explanation.
