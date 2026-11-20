@@ -69,9 +69,20 @@ async def compute_reward(metadata, sandbox, eval_timeout: float = 300.0) -> dict
     """Run the image-provided R2E tests and compare them with the expected map."""
     instance_id = metadata.get("instance_id", "?")
     logger.info(f"running R2E-Gym eval for {instance_id} (timeout={eval_timeout:.0f}s)")
+    restore_and_test = (
+        "export PATH=/testbed/.venv/bin:/root/.venv/bin:/root/.local/bin:$PATH\n"
+        "if [ -d /root/.r2e_eval/r2e_tests ]; then "
+        "rm -rf /root/r2e_tests /testbed/r2e_tests && "
+        "cp -a /root/.r2e_eval/r2e_tests /root/r2e_tests && "
+        "ln -s /root/r2e_tests /testbed/r2e_tests; fi\n"
+        "if [ -f /root/.r2e_eval/run_tests.sh ]; then bash /root/.r2e_eval/run_tests.sh; "
+        "elif [ -f /root/run_tests.sh ]; then bash /root/run_tests.sh; "
+        "elif [ -f /run_tests.sh ]; then bash /run_tests.sh; "
+        "else echo 'run_tests.sh not found' >&2; exit 1; fi"
+    )
     execution_t0 = time.perf_counter()
     response = await sandbox.exec_shell(
-        "bash /root/run_tests.sh 2>&1",
+        f"{restore_and_test} 2>&1",
         workdir="/testbed",
         timeout=eval_timeout,
     )

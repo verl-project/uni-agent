@@ -16,46 +16,49 @@ logger = logging.getLogger(__name__)
 _SETUP_SCRIPT = r"""
 set -euo pipefail
 
-mkdir -p /root/.local/bin
+mkdir -p /root/.local/bin /root/.r2e_eval
 if [ -d /testbed/.venv ]; then
     ln -sfn /testbed/.venv /root/.venv
     if [ -x /testbed/.venv/bin/python ]; then
         ln -sfn /testbed/.venv/bin/python /root/.local/bin/python
         ln -sfn /testbed/.venv/bin/python /root/.local/bin/python3
     fi
-    find /testbed/.venv/bin -maxdepth 1 -type f -executable -exec ln -sf {} /root/.local/bin/ \;
+    find /testbed/.venv/bin -maxdepth 1 -type f -executable -exec ln -sf {} /root/.local/bin/ \; 2>/dev/null || true
 fi
 
-if [ ! -f /root/run_tests.sh ]; then
+if [ ! -f /root/.r2e_eval/run_tests.sh ]; then
     if [ -f /testbed/run_tests.sh ]; then
-        mv /testbed/run_tests.sh /root/run_tests.sh
+        cp -a /testbed/run_tests.sh /root/.r2e_eval/run_tests.sh
+    elif [ -f /root/run_tests.sh ]; then
+        cp -a /root/run_tests.sh /root/.r2e_eval/run_tests.sh
     elif [ -f /run_tests.sh ]; then
-        mv /run_tests.sh /root/run_tests.sh
+        cp -a /run_tests.sh /root/.r2e_eval/run_tests.sh
     else
         echo "R2E-Gym image is missing run_tests.sh" >&2
         exit 1
     fi
 fi
-chmod +x /root/run_tests.sh
+chmod +x /root/.r2e_eval/run_tests.sh
 
-if [ ! -d /root/r2e_tests ]; then
-    if [ -d /testbed/r2e_tests ]; then
-        mv /testbed/r2e_tests /root/r2e_tests
-    elif [ -d /r2e_tests ]; then
-        mv /r2e_tests /root/r2e_tests
+if [ ! -d /root/.r2e_eval/r2e_tests ]; then
+    if [ -d /testbed/r2e_tests ] && [ ! -L /testbed/r2e_tests ]; then
+        cp -a /testbed/r2e_tests /root/.r2e_eval/r2e_tests
+    elif [ -d /root/r2e_tests ] && [ ! -L /root/r2e_tests ]; then
+        cp -a /root/r2e_tests /root/.r2e_eval/r2e_tests
+    elif [ -d /r2e_tests ] && [ ! -L /r2e_tests ]; then
+        cp -a /r2e_tests /root/.r2e_eval/r2e_tests
     else
         echo "R2E-Gym image is missing r2e_tests" >&2
         exit 1
     fi
 fi
-if [ -L /testbed/r2e_tests ]; then
-    ln -sfn /root/r2e_tests /testbed/r2e_tests
-elif [ ! -e /testbed/r2e_tests ]; then
-    ln -s /root/r2e_tests /testbed/r2e_tests
-fi
 
-find /testbed /root/r2e_tests -name '*.pyc' -delete
-find /testbed /root/r2e_tests -name '__pycache__' -type d -prune -exec rm -rf {} +
+# Keep held-out evaluation scripts and tests hidden from the agent workspace.
+rm -rf /r2e_tests /root/r2e_tests /testbed/r2e_tests /run_tests.sh /root/run_tests.sh /testbed/run_tests.sh
+find /testbed /root/.r2e_eval/r2e_tests -name '*.pyc' -delete
+find /testbed /root/.r2e_eval/r2e_tests -name '__pycache__' -type d -prune -exec rm -rf {} +
+git config --global --add safe.directory /testbed 2>/dev/null || true
+git -C /testbed reset --hard 2>/dev/null || true
 """.strip()
 
 
@@ -77,6 +80,8 @@ class R2EGymTask(Task):
     async def run(self) -> TaskResult:
         cfg: R2EGymTaskConfig = self.config  # type: ignore[assignment]
         sample = cfg.metadata
+        if cfg.sandbox.image is None and isinstance(sample, dict) and sample.get("docker_image"):
+            cfg.sandbox.image = str(sample["docker_image"])
         instance_id = sample.get("instance_id", "?") if isinstance(sample, dict) else "?"
         task_config_dump = cfg.model_dump(mode="json", exclude={"metadata", "prompt"})
         logger.info(
