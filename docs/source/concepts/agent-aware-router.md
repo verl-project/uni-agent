@@ -45,6 +45,12 @@ agent_aware_router/
    └── insight/emitter.py            ← push to rl-insight → Prometheus → Grafana
 ```
 
+### Optional vLLM cache metadata
+
+Before creating the verl server manager, a custom inference entry point can call `register_vllm_metadata_replica()` from `uni_agent.agent_aware_router.server`. The registered replica exposes `get_kv_cache_metadata()` on its server actor. Entry points using the default replica continue to use verl's original server.
+
+Install uni-agent in the engine environment so vLLM can discover the `uni_agent_native_hash` general plugin. Include that name in any explicit `VLLM_PLUGINS` allowlist. Before engine startup, the metadata server adds its opt-in flag (`UNI_AGENT_ENABLE_NATIVE_HASH_METADATA`) to `VLLM_RAY_EXTRA_ENV_VARS_TO_COPY` so Ray EngineCore actors receive it alongside any user-specified variables. The server exposes group metadata and reports optional native hash or allocation profiles separately when the engine supports them.
+
 ## Routing decision flow
 
 On each `acquire_server(request_id, prompt_ids)`, the balancer scores the candidate replicas and dispatches the request to the top-ranked one. The default path goes straight to capacity-token-aware scoring — the sticky short-circuit is disabled by default (`do_shortcut=False`):
