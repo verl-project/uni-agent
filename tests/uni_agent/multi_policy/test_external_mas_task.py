@@ -20,7 +20,22 @@ def _handle(roles=("a",), session_group_id="r1"):
 
 
 def _task(metadata=None, **extra):
-    task = {"name": TASK_NAME}
+    # The Task Config requires a command and a template; callers that override a
+    # launcher section keep the remaining valid defaults.
+    launcher = {
+        "command": {"argv": ["python"]},
+        "config": {"template_path": "template.yaml"},
+    }
+    for section, values in (extra.pop("launcher_kwargs", None) or {}).items():
+        if isinstance(values, dict) and isinstance(launcher.get(section), dict):
+            launcher[section] = {**launcher[section], **values}
+        else:
+            launcher[section] = values
+    task = {
+        "name": TASK_NAME,
+        "sandbox": {"provider": "local"},
+        "launcher_kwargs": launcher,
+    }
     if metadata is not None:
         task["metadata"] = metadata
     task.update(extra)
@@ -50,7 +65,6 @@ async def test_runner_uses_native_task_resolution(monkeypatch):
         raw_prompt=messages,
         sample_index=3,
         tools_kwargs=tools,
-        execution={"backend": "local_process"},
         command={"argv": ["python"]},
         config={"template_path": "template.yaml"},
     )
@@ -84,9 +98,6 @@ async def test_runner_scores_exact_match(monkeypatch):
         raw_prompt="q",
         sample_index=0,
         tools_kwargs=tools,
-        execution={},
-        command={},
-        config={},
     )
     assert result.reward == 1.0
     assert result.accuracy == 1.0
@@ -104,9 +115,6 @@ async def test_runner_uses_top_level_ground_truth(monkeypatch):
         raw_prompt="q",
         sample_index=0,
         tools_kwargs=_task(ground_truth=["Paris"]),
-        execution={},
-        command={},
-        config={},
     )
     assert result.reward == 1.0
     assert result.extra_info["expected_answers"] == ["Paris"]
@@ -129,9 +137,6 @@ async def test_runner_ignores_external_reward_field(monkeypatch):
         raw_prompt="q",
         sample_index=0,
         tools_kwargs=tools,
-        execution={},
-        command={},
-        config={},
     )
     assert result.reward == 1.0
     assert result.accuracy == 1.0
@@ -158,9 +163,6 @@ async def test_runner_prefers_final_answer_over_response_and_result(monkeypatch)
         raw_prompt="q",
         sample_index=0,
         tools_kwargs=tools,
-        execution={},
-        command={},
-        config={},
     )
     assert result.reward == 1.0
     assert result.extra_info["final_answer"] == "Paris"
@@ -186,9 +188,6 @@ async def test_runner_extracts_answer_from_final_response(monkeypatch):
         raw_prompt="q",
         sample_index=0,
         tools_kwargs=tools,
-        execution={},
-        command={},
-        config={},
     )
     assert result.reward == 1.0
     assert result.extra_info["final_answer"] == "Paris"
@@ -211,9 +210,6 @@ async def test_runner_ignores_approved_and_does_not_substring_match(monkeypatch)
         raw_prompt="q",
         sample_index=0,
         tools_kwargs=tools,
-        execution={},
-        command={},
-        config={},
     )
     assert result.reward == 0.0
 
@@ -240,9 +236,6 @@ async def test_runner_scores_clean_answers_from_ground_truth_raw(monkeypatch):
         raw_prompt="q",
         sample_index=0,
         tools_kwargs=tools,
-        execution={},
-        command={},
-        config={},
     )
     assert result.reward == 1.0
     assert result.accuracy == 1.0
@@ -259,9 +252,6 @@ async def test_runner_normalizes_string_prompt(monkeypatch):
         raw_prompt="question",
         sample_index=0,
         tools_kwargs=_task(),
-        execution={},
-        command={},
-        config={},
     )
     assert launcher.call_args.kwargs["request"].prompt == "question"
     assert result.finished is None
@@ -292,9 +282,6 @@ async def test_invalid_task_result_is_rejected(monkeypatch, reward_info):
             raw_prompt="q",
             sample_index=0,
             tools_kwargs=_task(),
-            execution={},
-            command={},
-            config={},
         )
 
 
@@ -336,7 +323,6 @@ async def test_runner_preserves_task_config_and_binds_session(monkeypatch):
         raw_prompt="question",
         sample_index=0,
         tools_kwargs=tools,
-        execution={"backend": "local_process"},
     )
 
     forwarded = run_task.call_args.kwargs["tools_kwargs"]
@@ -345,7 +331,9 @@ async def test_runner_preserves_task_config_and_binds_session(monkeypatch):
     assert task["metadata"] == {"dataset": "test"}
     assert task["session_group_id"] == "g1"
     assert task["role_urls"] == _handle(roles=("a", "b"), session_group_id="g1").role_base_urls
-    assert task["launcher_kwargs"]["execution"]["backend"] == "local_process"
+    assert task["sandbox"] == {"provider": "local"}
+    # No runner kwargs were supplied, so the sample's launcher block is untouched.
+    assert task["launcher_kwargs"]["command"] == {"argv": ["python"]}
     assert tools == original
     bound = run_task.call_args.kwargs["session"]
     assert isinstance(bound, SessionHandle)
@@ -363,7 +351,6 @@ async def test_task_defaults_are_composed_once_by_native_runner(monkeypatch, tmp
     defaults_path.write_text(
         "name: multi_policy_external_mas\n"
         "launcher_kwargs:\n"
-        "  execution: {backend: local_process}\n"
         "  command: {argv: [python], env: {DEFAULT: yes}}\n"
         "  config: {template_path: template.yaml}\n",
         encoding="utf-8",
@@ -406,8 +393,6 @@ async def test_legacy_launcher_defaults_merge_without_mutating_samples(monkeypat
         sample_index=0,
         tools_kwargs=tools,
         command={"argv": ["python"], "env": {"DEFAULT": "yes"}},
-        execution={},
-        config={},
     )
     assert launcher.call_args.kwargs["command"] == {
         "argv": ["python"],
