@@ -359,9 +359,27 @@ def test_build_wait_stops_at_the_startup_timeout_not_at_the_next_poll(e2b_module
     monkeypatch.setenv("SANDBOX_STARTUP_TIMEOUT", "0.05")
 
     started = time.monotonic()
-    with pytest.raises(TimeoutError, match="still building"):
-        asyncio.run(module._wait_for_build(name, {}))
+    with pytest.raises(TimeoutError, match="SANDBOX_STARTUP_TIMEOUT"):
+        asyncio.run(asyncio.wait_for(module._ensure_template("python:3.12", 2, 4096), 2))
     assert time.monotonic() - started < 1.0
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_stalled_build_ends_the_shared_attempt_at_the_startup_timeout(e2b_module, monkeypatch):
+    templates = _Templates()
+    module = e2b_module(templates)
+    monkeypatch.setenv("SANDBOX_STARTUP_TIMEOUT", "0.05")
+
+    async def main():
+        templates.release_build = asyncio.Event()  # never set: the build request hangs
+        with pytest.raises(TimeoutError, match="SANDBOX_STARTUP_TIMEOUT"):
+            await asyncio.wait_for(module._ensure_template("python:3.12", 2, 4096), 2)
+        await asyncio.sleep(0)  # let the done callback run
+        assert module._attempts_for_running_loop() == {}  # nothing keeps running locally
+
+    asyncio.run(main())
+    assert len(templates.builds) == 1
 
 
 @pytest.mark.cpu

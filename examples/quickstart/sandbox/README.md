@@ -42,7 +42,7 @@ Install E2B and provide an API key. The provider builds the image-backed
 template on first use when it is missing:
 
 ```bash
-pip install "e2b>=2.26,<3"
+pip install "e2b>=2.28.1,<3"
 export E2B_API_KEY="<e2b-api-key>"
 DEBUG_MODE=1 SANDBOX_PROVIDER=e2b IMAGE=python:3.12 python examples/quickstart/sandbox/demo.py
 ```

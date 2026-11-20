@@ -164,7 +164,7 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
     Install the SDK and configure its API key:
 
     ```bash
-    pip install "e2b>=2.26,<3"
+    pip install "e2b>=2.28.1,<3"
     export E2B_API_KEY="<e2b-api-key>"
     ```
 

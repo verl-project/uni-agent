@@ -6,7 +6,6 @@ import inspect
 import logging
 import re
 import shlex
-import time
 import weakref
 from pathlib import Path
 from types import SimpleNamespace
@@ -33,7 +32,9 @@ async def _ensure_template(
     template name and connection. The attempt runs on the event loop through the
     async E2B SDK, so waiting for a build holds no executor thread. A cancelled
     caller does not cancel the shared attempt; callers that joined an attempt that
-    fails receive its error, and the next caller starts a new attempt.
+    fails receive its error, and the next caller starts a new attempt. The whole
+    attempt is bounded by ``SANDBOX_STARTUP_TIMEOUT`` (``<= 0`` disables the bound,
+    as for ``start()``).
     """
     image = image.strip()
     if not image:
@@ -44,14 +45,19 @@ async def _ensure_template(
     name = f"uni-agent-{slug}-{cpu_count}c-{memory_mb}mb-{digest}"
     connection_kwargs = {"proxy": proxy} if proxy is not None else {}
 
+    timeout = _env_number("SANDBOX_STARTUP_TIMEOUT", _DEFAULT_STARTUP_TIMEOUT)
     attempts = _attempts_for_running_loop()
     key = (name, proxy)
     attempt = attempts.get(key)
     if attempt is None:
-        attempt = asyncio.ensure_future(_build_if_not_ready(image, name, cpu_count, memory_mb, connection_kwargs))
+        build = _build_if_not_ready(image, name, cpu_count, memory_mb, connection_kwargs)
+        attempt = asyncio.ensure_future(asyncio.wait_for(build, timeout if timeout > 0 else None))
         attempts[key] = attempt
         attempt.add_done_callback(lambda done: _forget_attempt(attempts, key, done))
-    return await asyncio.shield(attempt)
+    try:
+        return await asyncio.shield(attempt)
+    except asyncio.TimeoutError as exc:
+        raise TimeoutError(f"E2B template {name!r} is not ready within SANDBOX_STARTUP_TIMEOUT={timeout:g}s") from exc
 
 
 async def ensure_template(image: str, cpu_count: int = 2, memory_mb: int = 4096, proxy: str | None = None) -> str:
@@ -68,8 +74,8 @@ async def ensure_template(image: str, cpu_count: int = 2, memory_mb: int = 4096,
 # ponytail: attempts are shared per event loop only. Workers in other processes
 # may build the same name concurrently; E2B then rejects all but one alias
 # insert, and the loser waits for the winning build. An attempt keeps running
-# after its last caller is cancelled, until the build or the startup-timeout
-# wait ends; prebuild templates before large fan-out (see the E2B sandbox docs).
+# after its last caller is cancelled, at most until SANDBOX_STARTUP_TIMEOUT, so
+# a retried start() joins it; the remote build is not stopped either way.
 _attempts_by_loop: weakref.WeakKeyDictionary[
     asyncio.AbstractEventLoop, dict[tuple[str, str | None], asyncio.Future]
 ] = weakref.WeakKeyDictionary()
@@ -173,23 +179,10 @@ async def _template_id(name: str, connection_kwargs: dict[str, Any]) -> str | No
 
 
 async def _wait_for_build(name: str, connection_kwargs: dict[str, Any]) -> str | None:
-    """Wait while the template's build is running; return its final status (``None`` if no build).
-
-    Bounded by ``SANDBOX_STARTUP_TIMEOUT``; a value ``<= 0`` disables the bound, as for ``start()``.
-    """
-    timeout = _env_number("SANDBOX_STARTUP_TIMEOUT", _DEFAULT_STARTUP_TIMEOUT)
-    deadline = time.monotonic() + timeout if timeout > 0 else None
-    while True:
-        status = await _build_status(name, connection_kwargs)
-        if status not in ("building", "waiting"):
-            return status
-        delay = _BUILD_POLL_INTERVAL
-        if deadline is not None:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise TimeoutError(f"E2B template {name!r} is still building")
-            delay = min(delay, remaining)
-        await asyncio.sleep(delay)
+    """Wait while the template's build is running; return its final status (``None`` if no build)."""
+    while (status := await _build_status(name, connection_kwargs)) in ("building", "waiting"):
+        await asyncio.sleep(_BUILD_POLL_INTERVAL)
+    return status
 
 
 @register_sandbox("e2b")
