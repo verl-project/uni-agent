@@ -117,6 +117,8 @@ class _FleetSettings:
 
 _FLEETS: dict[_FleetSettings, Any] = {}
 _FLEETS_LOCK = threading.Lock()
+# Images this process started a sandbox for without prewarming them, per fleet.
+_COLD_STARTED: dict[_FleetSettings, set[str]] = {}
 
 
 def _get_fleet(settings: _FleetSettings) -> Any:
@@ -199,11 +201,36 @@ def _require_egress_policy(sdk: SimpleNamespace, cluster: Any) -> None:
 
 def _teardown_fleets() -> None:
     """At interpreter exit, release this process's sandboxes and delete the warm pools it created."""
-    for fleet in list(_FLEETS.values()):
+    for settings, fleet in list(_FLEETS.items()):
         try:
             fleet.teardown()
+            if settings.run_id:
+                _delete_cold_start_pools(fleet, _COLD_STARTED.get(settings, ()))
         except Exception:
             logger.warning("GKE sandbox teardown failed; leftovers carry the run ID label", exc_info=True)
+
+
+def _delete_cold_start_pools(fleet: Any, images: Iterable[str]) -> None:
+    """Delete the pools that cold starts of ``images`` created under a shared run ID.
+
+    With a shared run ID the fleet's own teardown only deletes pools this process prewarmed, since any other pool
+    may belong to another process of the run. A pool still marked on-demand was never prewarmed by anyone, so it is
+    safe to delete; one that a ``prewarm`` has taken over since is left to its owner.
+    """
+    constants = _load_sdk().rl.constants
+    cluster = fleet.registry.get("default")
+    for image in images:
+        pool = cluster.resources.get_warmpool(fleet.config.pool_name(image)) or {}
+        meta = pool.get("metadata") or {}
+        if (meta.get("labels") or {}).get(constants.RUN_ID_LABEL) != fleet.run_id:
+            continue
+        if (meta.get("annotations") or {}).get(constants.ON_DEMAND_ANNOTATION) != "true":
+            continue
+        # Conditional on the uid just read, so an object re-created under the same name is left alone.
+        cluster.resources.delete_warmpool(meta["name"], uid=meta["uid"])
+        template = (cluster.resources.get_template(fleet.config.template_name(image)) or {}).get("metadata") or {}
+        if (template.get("labels") or {}).get(constants.RUN_ID_LABEL) == fleet.run_id:
+            cluster.resources.delete_template(template["name"], uid=template["uid"])
 
 
 def _plan(fleet: Any, images: Iterable[str]) -> None:
@@ -226,6 +253,9 @@ def _claim(settings: _FleetSettings, image: str, runtime_timeout: float) -> tupl
         # been unwarmed since; a no-op while it exists. An unplanned image gets an on-demand pool from acquire().
         with _FLEETS_LOCK:
             fleet.warm_images([image], replicas_override=1, wait=False)
+    else:
+        with _FLEETS_LOCK:
+            _COLD_STARTED.setdefault(settings, set()).add(image)
     handle = fleet.acquire(sdk.rl.Task(id=image, image=image))
     try:
         # Best effort: have the controller delete the claim at the deadline even if this process has died.
