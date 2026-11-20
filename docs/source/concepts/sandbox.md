@@ -185,7 +185,7 @@ The three environment fallbacks exist because those values change per run, which
 A sandbox starts without any preparation: the first one for an image creates the pod on demand and waits for the image pull. To avoid that wait, keep sandboxes started ahead of time:
 
 ```python
-from uni_agent.sandbox.gke_agent_sandbox import GKEAgentSandbox
+from uni_agent.sandbox.gke import GKEAgentSandbox
 
 # image -> number of ready sandboxes to keep; returns image -> ready
 ready = GKEAgentSandbox.prewarm({"python:3.12": 16}, run_id="my-run", timeout=900)
