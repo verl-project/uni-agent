@@ -22,9 +22,17 @@ def _ensure_template(
     image: str,
     cpu_count: int,
     memory_mb: int,
-    proxy: str | None = None,
+    *,
+    connection_kwargs: dict[str, Any],
 ) -> str:
-    """Build the image-backed template once and return its deterministic name."""
+    """Build the image-backed template once and return its deterministic name.
+
+    ``connection_kwargs`` carries the E2B SDK connection parameters actually
+    configured on the provider (``api_key`` / ``api_url`` / ``sandbox_url`` /
+    ``domain`` / ``http_version`` / ``proxy``) so template building talks to the
+    same endpoint as sandbox creation. An empty dict keeps the historical
+    behaviour: no extra keyword arguments reach the SDK.
+    """
     import e2b
 
     image = image.strip()
@@ -34,7 +42,7 @@ def _ensure_template(
     slug = re.sub(r"[^a-z0-9_-]+", "-", image.lower()).strip("-_")[:64] or "image"
     digest = hashlib.sha256(image.encode()).hexdigest()[:12]
     name = f"uni-agent-{slug}-{cpu_count}c-{memory_mb}mb-{digest}"
-    connection_kwargs = {"proxy": proxy} if proxy is not None else {}
+    connection_kwargs = dict(connection_kwargs)
     if not e2b.Template.exists(name, **connection_kwargs):
         e2b.Template.build(
             e2b.Template().from_image(image),
@@ -49,7 +57,19 @@ def _ensure_template(
 
 @register_sandbox("e2b")
 class E2BSandbox(Sandbox):
-    """Create an E2B sandbox from an image-backed template."""
+    """Create an E2B sandbox from an image-backed template.
+
+    Connection parameters (``api_key`` / ``api_url`` / ``sandbox_url`` /
+    ``domain`` / ``http_version``) are optional and stay ``None`` by default, so
+    the SDK keeps its usual environment-variable defaults. When set, each one is
+    forwarded to every control-plane call (``Template.exists`` /
+    ``Template.build`` and ``AsyncSandbox.create``) together with ``proxy``.
+
+    In e2b 2.62.0 ``api_url`` and ``sandbox_url`` are deprecated (they are
+    removed in the next major version); point a self-hosted service at
+    ``domain`` when it supports that. Both are kept here because the AgentEnv
+    provider targets a deployment that only exposes E2B-compatible URLs.
+    """
 
     def __init__(
         self,
@@ -63,6 +83,11 @@ class E2BSandbox(Sandbox):
         metadata: dict[str, str] | None = None,
         envs: dict[str, str] | None = None,
         proxy: str | None = None,
+        api_key: str | None = None,
+        api_url: str | None = None,
+        sandbox_url: str | None = None,
+        domain: str | None = None,
+        http_version: str | None = None,
         secure: bool = True,
         allow_internet_access: bool = True,
         network: dict[str, Any] | None = None,
@@ -87,6 +112,15 @@ class E2BSandbox(Sandbox):
             raise ValueError("either image or template must be provided")
         if proxy is not None and not proxy.strip():
             raise ValueError("proxy must be non-empty when provided")
+        for connection_name, connection_value in (
+            ("api_key", api_key),
+            ("api_url", api_url),
+            ("sandbox_url", sandbox_url),
+            ("domain", domain),
+            ("http_version", http_version),
+        ):
+            if connection_value is not None and not connection_value.strip():
+                raise ValueError(f"{connection_name} must be non-empty when provided")
         if image_mounts:
             raise NotImplementedError(
                 "E2BSandbox does not support image mounts; build a composite E2B template instead"
@@ -101,6 +135,20 @@ class E2BSandbox(Sandbox):
         self.metadata = dict(metadata or {})
         self.envs = dict(envs or {})
         self.proxy = proxy.strip() if proxy is not None else None
+        # Only configured connection parameters are kept: an unconfigured
+        # E2BSandbox must make exactly the same SDK calls as before this
+        # refactor (no stray keyword arguments on the wire).
+        connection_values: dict[str, str | None] = {
+            "api_key": api_key,
+            "api_url": api_url,
+            "sandbox_url": sandbox_url,
+            "domain": domain,
+            "http_version": http_version,
+            "proxy": self.proxy,
+        }
+        self._connection_kwargs: dict[str, Any] = {
+            key: value.strip() for key, value in connection_values.items() if value is not None
+        }
         self.secure = secure
         self.allow_internet_access = allow_internet_access
         self.network = network
@@ -136,7 +184,7 @@ class E2BSandbox(Sandbox):
                 self.image,
                 self.cpu_count,
                 self.memory_mb,
-                self.proxy,
+                connection_kwargs=self._connection_kwargs,
             )
 
         create_kwargs: dict[str, Any] = {
@@ -151,10 +199,8 @@ class E2BSandbox(Sandbox):
             create_kwargs["network"] = self.network
         if self.lifecycle is not None:
             create_kwargs["lifecycle"] = self.lifecycle
-        if self.proxy is not None:
-            create_kwargs["proxy"] = self.proxy
 
-        sandbox = await AsyncSandbox.create(**create_kwargs)
+        sandbox = await AsyncSandbox.create(**create_kwargs, **self._connection_kwargs)
         self._sandbox = sandbox
         self.sandbox_id = str(sandbox.sandbox_id)
         await self._setup_executable_paths(self.executable_paths)

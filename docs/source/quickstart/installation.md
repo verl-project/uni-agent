@@ -61,6 +61,29 @@ Install the client package for the sandbox backend you plan to use, for example:
     pip install e2b
     ```
 
+=== "AgentEnv"
+
+    AgentEnv serves an E2B-compatible API, so it reuses the `e2b` client package;
+    there is no separate extra:
+
+    ```bash
+    pip install 'uni-agent[e2b]'
+    ```
+
+    Point the provider at the deployment with the three required settings:
+
+    ```bash
+    export AGENTENV_API_URL="<agentenv-api-url>"
+    export AGENTENV_SANDBOX_URL="<agentenv-sandbox-url>"
+    export AGENTENV_API_KEY="<agentenv-api-key>"
+    ```
+
+    Each one falls back to `E2B_API_URL` / `E2B_SANDBOX_URL` / `E2B_API_KEY`
+    when the `AGENTENV_*` variable is unset or blank, and explicit
+    `sandbox_kwargs.api_url` / `sandbox_url` / `api_key` values take priority
+    over the environment. See [Launch a Sandbox](launch-sandbox.md#choose-a-sandbox-backend)
+    for a complete configuration.
+
 === "veFaaS"
 
     ```bash

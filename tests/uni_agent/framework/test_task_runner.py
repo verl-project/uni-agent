@@ -4,6 +4,7 @@ from uni_agent.framework import task_runner as task_runner_module
 from uni_agent.framework.task_runner import (
     _extract_upstream,
     _inject_gateway_tunnel,
+    _inject_sandbox_route_key,
     _rewrite_gateway_url,
     compute_score,
     run_task,
@@ -206,6 +207,95 @@ async def test_run_task_returns_task_result_while_ignoring_framework_tool_config
     )
 
     assert result is task_result
+
+
+# --------------------------- routes traffic-split key injection ---------------------------
+
+
+def _routes_task(**sandbox_kwargs):
+    return {"sandbox": {"provider": "routes", "sandbox_kwargs": dict(sandbox_kwargs)}}
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_inject_sandbox_route_key_uses_gateway_session_id():
+    task = _routes_task(routes=[{"name": "a"}])
+    injected = _inject_sandbox_route_key(task, "session-123")
+
+    assert injected["sandbox"]["sandbox_kwargs"]["route_key"] == "session-123"
+    # The other routes sandbox kwargs survive and the input is untouched.
+    assert injected["sandbox"]["sandbox_kwargs"]["routes"] == [{"name": "a"}]
+    assert "route_key" not in task["sandbox"]["sandbox_kwargs"]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_inject_sandbox_route_key_keeps_explicit_route_key():
+    task = _routes_task(route_key="pinned-by-config")
+    assert _inject_sandbox_route_key(task, "session-123") is task
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize("provider", ["local", "e2b", "agentenv"])
+def test_inject_sandbox_route_key_skips_non_routes_providers(provider):
+    task = {"sandbox": {"provider": provider, "sandbox_kwargs": {}}}
+    assert _inject_sandbox_route_key(task, "session-123") is task
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_inject_sandbox_route_key_skips_empty_session_id():
+    task = _routes_task()
+    for session_id in (None, ""):
+        assert _inject_sandbox_route_key(task, session_id) is task
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_inject_sandbox_route_key_does_not_mutate_input():
+    task = _routes_task(routes=[{"name": "a"}], salt="rollout")
+    snapshot = {"sandbox": {"provider": "routes", "sandbox_kwargs": {"routes": [{"name": "a"}], "salt": "rollout"}}}
+
+    injected = _inject_sandbox_route_key(task, "session-123")
+
+    assert task == snapshot
+    assert injected is not task
+    assert injected["sandbox"] is not task["sandbox"]
+    assert injected["sandbox"]["sandbox_kwargs"] is not task["sandbox"]["sandbox_kwargs"]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_run_task_injects_session_id_as_routes_route_key(monkeypatch):
+    captured = {}
+
+    class _Resolver:
+        def resolve(self, sample_config, runtime_model):
+            return {
+                "name": "stub",
+                "sandbox": {"provider": "routes", "sandbox_kwargs": {"routes": []}},
+                "prompt": [],
+            }
+
+    class _Task:
+        async def run(self):
+            return TaskResult(reward=0.0, accuracy=1.0, finished=True)
+
+    def _get_task(task):
+        captured["task"] = task
+        return _Task()
+
+    monkeypatch.setattr(task_runner_module, "TaskConfigResolver", _Resolver)
+    monkeypatch.setattr(task_runner_module, "get_task", _get_task)
+
+    await run_task(
+        session=SessionHandle(session_id="sess-42", base_url="http://gateway/sessions/sess-42/v1"),
+        tools_kwargs={"task": {"name": "stub"}},
+    )
+
+    assert captured["task"]["sandbox"]["sandbox_kwargs"]["route_key"] == "sess-42"
 
 
 @pytest.mark.cpu

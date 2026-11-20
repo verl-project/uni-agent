@@ -51,6 +51,11 @@ does not configure credentials or create the sandbox service. For example, the
 GPU ReAct training quickstarts use `vefaas` by default. For RL-Insight setup,
 see the [integration guide](../concepts/rl-insight-integration.md).
 
+The `agentenv` provider (E2B-protocol deployment) reuses the `e2b` extra, and the
+composite `routes` provider has no client of its own: select the extras required
+by the providers listed under `routes[].config`. No new extra is declared for
+either provider, so neither changes `uv.lock`; use `--extra e2b` for AgentEnv.
+
 ```bash
 # vLLM + Megatron training, veFaaS sandbox, SWE-bench and RL-Insight client.
 uv sync --locked --all-packages --extra vllm --extra megatron \
@@ -118,8 +123,9 @@ Start Ray using the same locked backend/sandbox extras and Python 3.12, for exam
 workers must use matching Ray/Python versions. A custom `RUNTIME_ENV` may supply
 sandbox credentials and tuning variables, but must not define `pip`, `conda`,
 `uv` or `py_executable`: dependencies come from `uv.lock`. Select another sandbox
-with `UV_SANDBOX_EXTRA=modal` or `e2b` alongside its corresponding task config.
-Other recipes retain their existing launch environments.
+with `UV_SANDBOX_EXTRA=modal` or `e2b` alongside its corresponding task config
+(`e2b` also covers the `agentenv` provider). Other recipes retain their existing
+launch environments.
 
 ## Updating the verl dependency
 

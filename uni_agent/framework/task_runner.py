@@ -74,6 +74,27 @@ def _inject_gateway_tunnel(task: dict[str, Any], base_url: str) -> dict[str, Any
     )
 
 
+def _inject_sandbox_route_key(task: dict[str, Any], session_id: str | None) -> dict[str, Any]:
+    """Fill a ``routes`` sandbox's traffic-split key from the gateway session id.
+
+    The routing key is runtime data -- it identifies the session whose traffic
+    should stay pinned to one route -- so it cannot live in the static task
+    config. Only ``provider="routes"`` consumes it, an explicitly configured
+    ``sandbox_kwargs.route_key`` always wins, and without a session id the
+    sandbox falls back to its own per-instance generated key. Returns a copy so
+    the caller's task mapping is never mutated.
+    """
+    sandbox = task.get("sandbox")
+    if not isinstance(sandbox, dict) or sandbox.get("provider") != "routes":
+        return task
+    sandbox_kwargs = sandbox.get("sandbox_kwargs")
+    if isinstance(sandbox_kwargs, dict) and sandbox_kwargs.get("route_key"):
+        return task
+    if not session_id:
+        return task
+    return _deep_merge(task, {"sandbox": {"sandbox_kwargs": {"route_key": str(session_id)}}})
+
+
 def score_from_runner_result(
     *,
     data_source: str,
@@ -144,6 +165,11 @@ async def run_task(
     tunnel_port = (task.get("sandbox") or {}).get("sandbox_kwargs", {}).get("proxy_port")
     if tunnel_port and base_url:
         task = _inject_gateway_tunnel(task, base_url)
+
+    # A routes sandbox pins its traffic split on the session id, which is
+    # runtime data like the tunnel pieces above; fill it before the Task (and
+    # its sandbox) is built from the config.
+    task = _inject_sandbox_route_key(task, getattr(session, "session_id", None))
 
     task_name = task.get("name")
     logger.info("run_task start: task=%s sample_index=%s", task_name, sample_index)

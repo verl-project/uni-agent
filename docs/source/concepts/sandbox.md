@@ -33,6 +33,30 @@ The standard fields are:
 
 Unknown fields are rejected. Put provider-specific options inside `sandbox_kwargs`.
 
+### Provider composition
+
+Two providers adapt or compose other backends instead of owning an environment
+of their own:
+
+- `agentenv` is an E2B-compatible deployment. It inherits the E2B data plane
+  (commands, file transfer, port exposure, template handling) and only resolves
+  connection settings differently: `AGENTENV_API_URL` / `AGENTENV_SANDBOX_URL` /
+  `AGENTENV_API_KEY` take priority over `E2B_API_URL` / `E2B_SANDBOX_URL` /
+  `E2B_API_KEY`, and explicit `sandbox_kwargs.api_url` / `sandbox_url` /
+  `api_key` override both. It requires the `e2b` extra. Prefer
+  `sandbox_kwargs.template` over `image`, because a deployment is not required
+  to implement E2B's template-build API; `expose_port` additionally needs a
+  reachable `domain`.
+- `routes` is a composite provider: it starts exactly one child
+  `SandboxConfig` from a weighted list and then delegates the whole data plane
+  to it. `strategy: weighted` (the default) splits sessions deterministically by
+  a SHA-256 bucket over `salt` and a routing key; `strategy: primary` pins
+  traffic to the first route and keeps the remaining routes as startup
+  fallbacks. The routing key is the Gateway session id injected by the task
+  runner unless one is configured explicitly. Failover happens only at startup,
+  only for transient errors (configuration, SDK, and permission errors are
+  raised), and an active route never migrates after startup.
+
 ### `image_map`
 
 SWE-Bench samples ship with public image names such as `swebench/sweb.eval.x86_64.astropy_1776_astropy-13033`. If your cluster cannot pull those names (private registry, mirror, or a local tag), add `image_map` under `sandbox` in Task Config. Do not edit the parquet.
@@ -131,7 +155,7 @@ This policy prevents one bad agent command from crashing an otherwise healthy ep
 
 ## Gateway Reverse Tunnel
 
-Some sandbox providers support a Gateway reverse tunnel and declare this with `supports_reverse_tunnel = True`. With `sandbox_kwargs.proxy_port`, the task runner supplies the Gateway Session's upstream and rewrites the model URL to the in-sandbox HTTP proxy, preserving the Session path. Providers without this capability reject the configuration. A provider class can be inspected without installing its SDK or creating a remote environment.
+Some sandbox providers support a Gateway reverse tunnel and declare this with `supports_reverse_tunnel = True`. With `sandbox_kwargs.proxy_port`, the task runner supplies the Gateway Session's upstream and rewrites the model URL to the in-sandbox HTTP proxy, preserving the Session path. Providers without this capability reject the configuration. A provider class can be inspected without installing its SDK or creating a remote environment. The composite `routes` provider advertises the capability itself, but refuses to start when any configured route provider does not support it, so a split never sends some sessions to a backend that cannot reach the Gateway.
 
 Each supporting provider owns its upstream format through the `Sandbox.tunnel_upstream(base_url)` classmethod. The default requires an explicit `host:port`; a provider can override it to preserve its required URL scheme, supply default ports, or handle IPv6 addresses. The task runner delegates this formatting to the selected provider.
 
