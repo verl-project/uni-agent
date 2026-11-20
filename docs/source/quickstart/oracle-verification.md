@@ -85,7 +85,7 @@ python examples/inference/parallel_run_oracle.py \
     --limit 3
 ```
 
-On first use, the three SWE-Bench Verified templates (images of about 1 GiB each) build in parallel; in our two runs a single template took between 28 seconds and about 4 minutes. Re-running the prebuild step finds them ready in about a second each. One oracle run then reported (timings vary between runs):
+On first use, the three SWE-Bench Verified templates (images of about 1 GiB each) build in parallel; in our two runs a single template took between 28 seconds and about 4 minutes. Each template is bounded by `SANDBOX_STARTUP_TIMEOUT` (600 seconds by default); for images that take longer to build, raise it for the prebuild step, or set it to `0` to wait without a bound. Re-running the prebuild step finds them ready in about a second each. One oracle run then reported (timings vary between runs):
 
 ```text
 ----------------- oracle summary -----------------
