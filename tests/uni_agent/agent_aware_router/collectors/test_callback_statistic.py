@@ -39,6 +39,12 @@ from uni_agent.agent_aware_router.collectors.transport.callback import (
 from uni_agent.agent_aware_router.store.data_store import DataStore
 from uni_agent.agent_aware_router.strategies import route
 from uni_agent.agent_aware_router.types import MetricKey
+from uni_agent.agent_aware_router.types.kv_cache import (
+    DispatchSchema,
+    GroupReservation,
+    GroupReservationSpec,
+    KVCacheEvent,
+)
 
 pytestmark = [pytest.mark.level0, pytest.mark.cpu]
 
@@ -86,15 +92,17 @@ class TestInflightParser:
     def _parser(self) -> InflightParser:
         return InflightParser()
 
-    def test_on_acquire_unresolvable_chain_emits_netted_delta_only(self):
-        """No learned block size → nothing resolvable → netted deltas without a block command."""
+    def test_on_acquire_without_schema_keeps_an_unknown_reservation(self):
+        """An unknown budget remains held until this request releases."""
         updates = self._parser().parse(
             StatisticEvent("on_acquire", request_id="r1", replica_id="s0", prompt_ids=tuple(range(42))),
             "",
             turn=1,
         )
-        assert [type(u).__name__ for u in updates] == ["MetricsUpdate"]  # nothing resolvable → no block command
-        upd = updates[0]
+        assert [type(u).__name__ for u in updates] == ["InflightBlockUpdate", "MetricsUpdate"]
+        assert updates[0].schema is None
+        assert updates[0].block_hashes == []
+        upd = updates[1]
         assert upd.replica_id == "s0"
         assert upd.metrics == {
             MetricKey.INFLIGHT_COUNT: 1,
@@ -115,7 +123,7 @@ class TestInflightParser:
             StatisticEvent("on_acquire", request_id="r1", replica_id="s0", prompt_ids=tuple(prompt)),
             "",
             turn=1,
-            block_size=BLOCK_SIZE,
+            schema=DispatchSchema(0, BLOCK_SIZE, (GroupReservationSpec(0, BLOCK_SIZE),)),
         )
         assert [type(u).__name__ for u in updates] == ["InflightBlockUpdate", "MetricsUpdate"]
         pin = updates[0]
@@ -152,10 +160,9 @@ class TestInflightParser:
             turn=2,  # the stale dispatch was turn 1
             stale={"replica": "s0", "hashes": ["h1", "h2"]},
             booked_len=64,  # its booked tokens
-            # block size not learned (default 0) → empty chain → no new pin command
         )
         actions = [u.action for u in updates if isinstance(u, InflightBlockUpdate)]
-        assert actions == ["stale_unpin"]
+        assert actions == ["stale_unpin", "pin"]
         metrics = updates[-1].metrics
         assert metrics[MetricKey.INFLIGHT_COUNT] == 0  # +1 netted by the dropped release's -1
         assert metrics[MetricKey.INFLIGHT_TOKENS] == 32 - 64  # stale booking folded out
@@ -203,7 +210,7 @@ class TestCallbackTransport:
         balancer = _FakeBalancer()
         transport = CallbackTransport(balancer)
         received: list = []
-        _run(transport.subscribe(lambda raw, replica_id: received.append((raw, replica_id))))
+        _run(transport.subscribe(lambda raw, nid: received.append(raw)))
 
         assert set(balancer.callbacks) == {"on_acquire", "on_release", "on_servers_removed"}
         # one callback per hook
@@ -214,28 +221,28 @@ class TestCallbackTransport:
         balancer.callbacks["on_servers_removed"][0](["s1", "s2"])
 
         assert received == [
-            (StatisticEvent("on_acquire", request_id="r1", replica_id="s0"), ""),
-            (StatisticEvent("on_release", replica_id="s0"), ""),
-            (StatisticEvent("on_servers_removed", server_ids=("s1", "s2")), ""),
+            StatisticEvent("on_acquire", request_id="r1", replica_id="s0"),
+            StatisticEvent("on_release", replica_id="s0"),
+            StatisticEvent("on_servers_removed", server_ids=("s1", "s2")),
         ]
 
     def test_on_release_callback_forwards_request_id(self):
         balancer = _FakeBalancer()
         transport = CallbackTransport(balancer)
         received: list = []
-        _run(transport.subscribe(lambda raw, replica_id: received.append((raw, replica_id))))
+        _run(transport.subscribe(lambda raw, nid: received.append(raw)))
 
         # (server_id, request_id) — the 2nd arg threads the routing request id
         # so the collector can attribute the release (turn / token subtraction).
         balancer.callbacks["on_release"][0]("s0", "r1")
         assert received == [
-            (StatisticEvent("on_release", replica_id="s0", request_id="r1"), ""),
+            StatisticEvent("on_release", replica_id="s0", request_id="r1"),
         ]
 
     def test_stop_unregisters_all(self):
         balancer = _FakeBalancer()
         transport = CallbackTransport(balancer)
-        _run(transport.subscribe(lambda raw, replica_id: None))
+        _run(transport.subscribe(lambda raw, nid: None))
         transport.stop()
         assert all(not lst for lst in balancer.callbacks.values())
 
@@ -467,12 +474,17 @@ class TestInflightBlockPin:
         PerRequestStore._instance = None
         KVCacheStore._instance = None
 
-    @staticmethod
-    def _start(block_size: int = BLOCK_SIZE):
+    @pytest.fixture(autouse=True)
+    def _layout(self, layout, install_metadata):
+        self.layout = layout
+        self.install_metadata = install_metadata
+
+    def _start(self, block_size: int = BLOCK_SIZE, groups=None):
         from uni_agent.agent_aware_router.collectors.collector import Collector
 
         ds = DataStore()
-        ds.set_block_size(block_size)
+        self.install_metadata(ds, "s0", self.layout(groups or (("full_attention", block_size),), unit=block_size))
+        self.install_metadata(ds, "s1", self.layout(groups or (("full_attention", block_size),), unit=block_size))
         balancer = _FakeBalancer()
         collector = Collector(CallbackTransport(balancer), InflightParser())
         collector.start()
@@ -537,18 +549,17 @@ class TestInflightBlockPin:
         try:
             balancer.callbacks["on_acquire"][0]("r1", "s0", prompt)
             assert ds.inflight_block_count("s0") == 4
-            marker = ds.get_marker("r1")
-            assert marker is not None
 
-            collector._write_kv_update(KVCacheUpdate(replica_id="s0", clear_all=True))
+            collector._write_kv_update(
+                KVCacheUpdate(replica_id="s0", events=[KVCacheEvent("clear", "s0", [], None, None, None)])
+            )
             assert ds.inflight_block_count("s0") == 4
-            assert ds.get_marker("r1") == marker
+            assert ds.get_marker("r1") is not None
 
             balancer.callbacks["on_release"][0]("s0", "r1")
             assert ds.inflight_block_count("s0") == 0
-            assert ds.get_marker("r1") is None
 
-            balancer.callbacks["on_acquire"][0]("r2", "s0", prompt)
+            balancer.callbacks["on_acquire"][0]("r2", "s0", prompt)  # post-restart dispatch re-pins
             assert ds.inflight_block_count("s0") == 4
             balancer.callbacks["on_release"][0]("s0", "r2")
             assert ds.inflight_block_count("s0") == 0
@@ -621,14 +632,20 @@ class TestInflightBlockPin:
         collector, balancer, ds = self._start()
         ds.refresh_metrics(
             {
-                "s0": {MetricKey.NUM_GPU_BLOCKS: 10},
-                "s1": {MetricKey.NUM_GPU_BLOCKS: 10},
+                "s0": {MetricKey.NUM_GPU_BLOCKS: 10, MetricKey.KV_CACHE_CAPACITY_BLOCKS: 9},
+                "s1": {MetricKey.NUM_GPU_BLOCKS: 10, MetricKey.KV_CACHE_CAPACITY_BLOCKS: 9},
             }
         )
-        ds.incr_block_refs("s1", [f"p{i}" for i in range(10)])  # s1 pinned full
+        ds.pin_request(
+            "busy",
+            "s1",
+            [],
+            ds.dispatch_schema("s1"),
+            reservations=(GroupReservation(0, tuple(f"p{i}" for i in range(10))),),
+            predict=False,
+        )  # s1 pinned full
         strat = KVCacheAwareStrategy(
             load_threshold=0.9,
-            layer_weights={"gpu": 0.7, "cpu": 0.2, "ssd": 0.1},
             slow_cut=SlowCut.CAPACITY_TOKEN_AWARE,
             do_shortcut=False,
             tie_tolerance=0.0,
@@ -654,27 +671,32 @@ class TestInflightBlockPin:
         finally:
             collector.stop()
 
-    def test_acquire_records_the_prefix_as_resident_and_release_keeps_it(self):
-        """Acquire alone makes the prefix a gpu_hit; the resident record outlives release."""
+    @pytest.mark.parametrize("hybrid", [False, True])
+    def test_acquire_predicts_group_prefix_without_native_residency(self, hybrid):
+        """All layouts retain dispatch predictions across release, without native residency."""
         from uni_agent.agent_aware_router.utils.prefix_cache import resolve_prefix_hashes
 
         prompt = list(range(4 * BLOCK_SIZE))
-        collector, balancer, ds = self._start()
+        groups = (("full_attention", BLOCK_SIZE), ("mamba", 2 * BLOCK_SIZE)) if hybrid else None
+        collector, balancer, ds = self._start(groups=groups)
+        predicted = 6 if hybrid else 4
         try:
             chain = resolve_prefix_hashes(prompt, None, ds)
-            assert ds.get_layer_prefix_hit_rate("s0", chain) == 0.0
+            assert ds.estimate_prefixes(["s0"], chain, len(prompt))["s0"].hit_rate == 0.0
 
             balancer.callbacks["on_acquire"][0]("r1", "s0", prompt)
-            assert ds.get_layer_prefix_hit_rate("s0", chain) == 1.0
-            assert ds.per_replica_block_counts() == {"s0": 4}
-            assert collector._dispatch_recorded_blocks == 4
+            estimate = ds.estimate_prefixes(["s0"], chain, len(prompt))["s0"]
+            assert estimate.provisional
+            assert estimate.estimated_hit_tokens == (2 if hybrid else 3) * BLOCK_SIZE
+            assert ds.per_replica_block_counts() == {"s0": 0}
+            assert collector._dispatch_recorded_blocks == predicted
 
             balancer.callbacks["on_release"][0]("s0", "r1")
             assert ds.inflight_block_count("s0") == 0  # held drops...
-            assert ds.per_replica_block_counts() == {"s0": 4}  # ...resident survives release
+            assert ds.per_replica_block_counts() == {"s0": 0}  # ...hints survive; no native residency counted
 
             balancer.callbacks["on_acquire"][0]("r2", "s0", prompt)
-            assert collector._dispatch_recorded_blocks == 4  # r2's record is a no-op
+            assert collector._dispatch_recorded_blocks == predicted  # r2's record is a no-op
         finally:
             collector.stop()
 
@@ -806,10 +828,17 @@ class TestCollectorEmitsToInsight:
 
     def test_kv_removed_forwards_evictions(self):
         from uni_agent.agent_aware_router.collectors.collector import Collector
-        from uni_agent.agent_aware_router.collectors.parse import KVCacheUpdate
-        from uni_agent.agent_aware_router.types import Layer
+        from uni_agent.agent_aware_router.types.kv_cache import KVCacheEvent, KVCacheUpdate
 
         collector = Collector(CallbackTransport(_FakeBalancer()), InflightParser())
-        collector._write_kv_update(KVCacheUpdate(replica_id="s0", remove_blocks={Layer.GPU: ["h1", "h2", "h3"]}))
+        event = KVCacheEvent(
+            event_type="removed",
+            replica_id="s0",
+            block_hashes=["h1", "h2", "h3"],
+            parent_block_hash=None,
+            block_size=None,
+            medium="GPU",
+        )
+        collector._write_kv_update(KVCacheUpdate(replica_id="s0", events=[event]))
 
         assert self._rl.calls == [("counter", "kv_evictions", 3, {"replica": "s0"})]

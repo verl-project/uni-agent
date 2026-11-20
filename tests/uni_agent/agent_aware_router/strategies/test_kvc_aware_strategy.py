@@ -16,13 +16,24 @@
 
 Overload (used only by the sticky short-circuit): ``kv_cache_usage_perc >
 load_threshold`` (default 0.5). Fallback scoring never consults overload.
-Default cache weights: {gpu:0.7, cpu:0.2, ssd:0.1}.
 """
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+import msgpack
 import pytest
 
+from uni_agent.agent_aware_router.collectors.collector import Collector
+from uni_agent.agent_aware_router.collectors.parse.basic.inflight import InflightParser
+from uni_agent.agent_aware_router.collectors.parse.vllm.kv import VLLMKVParser
+from uni_agent.agent_aware_router.collectors.transport.callback import StatisticEvent
+from uni_agent.agent_aware_router.store.data_store import DataStore
+from uni_agent.agent_aware_router.store.group_cache import PrefixEstimate
+from uni_agent.agent_aware_router.store.kv_cache_store import KVCacheStore
+from uni_agent.agent_aware_router.store.per_replica_store import PerReplicaStore
+from uni_agent.agent_aware_router.store.per_request_store import PerRequestStore
 from uni_agent.agent_aware_router.strategies import route
 from uni_agent.agent_aware_router.strategies.base import ReplicaInfo
 from uni_agent.agent_aware_router.strategies.kvc_aware import (
@@ -31,7 +42,9 @@ from uni_agent.agent_aware_router.strategies.kvc_aware import (
     StrategyError,
 )
 from uni_agent.agent_aware_router.strategies.routing import RoutingStrategy
-from uni_agent.agent_aware_router.types import Layer, MetricKey, OverloadMode, SlowCut
+from uni_agent.agent_aware_router.types import MetricKey, OverloadMode, SlowCut
+from uni_agent.agent_aware_router.types.kv_cache import KVCacheUpdate
+from uni_agent.agent_aware_router.utils.prefix_cache import resolve_prefix_hashes
 
 # --------------------------------------------------------------------------- #
 # Helpers
@@ -44,10 +57,7 @@ def _strat(**kwargs) -> KVCacheAwareStrategy:
     Calls ``set_capacity(64, 1024)`` — mimics what the Balancer does after
     construction.
     """
-    defaults = dict(
-        load_threshold=0.9,
-        layer_weights={"gpu": 0.7, "cpu": 0.2, "ssd": 0.1},
-    )
+    defaults = dict(load_threshold=0.9)
     defaults.update(kwargs)
     strat = KVCacheAwareStrategy(**defaults)
     strat.set_capacity(64, 1024)
@@ -79,6 +89,9 @@ class FakeRouteDataProvider:
       inflight_tokens      – raw in-flight prompt tokens, observation-only (default 0)
       inflight_blocks      – held KV blocks read via inflight_block_count(),
                              dedup + ref counted (default 0)
+      num_gpu_blocks      – raw engine pool size, including one null block
+      reservation_known   – whether the held-block budget is valid (default True)
+      private_budget_known – whether the new-request budget is valid (default True)
       gpu_hit_pct          – GPU prefix cache hit percent 0-100 (default 0)
       tiers                – dict mapping tier name to hit rate (default {})
     """
@@ -115,26 +128,38 @@ class FakeRouteDataProvider:
             MetricKey.INFLIGHT_COUNT: entry.get("inflight_count", 0),
         }
 
-    def get_layer_prefix_hit_rate(self, replica_id: str, hash_strs: list[str], layer: str = Layer.GPU) -> float:
-        entry = self._data.get(replica_id, {})
-        if layer == Layer.GPU:
-            return entry.get("gpu_hit_pct", 0) / 100.0
-        return entry.get("tiers", {}).get(layer, 0.0)
+    def estimate_prefixes(self, nodes, hashes, prompt_len):
+        return {
+            node: PrefixEstimate(
+                status="ready",
+                query_tokens=prompt_len,
+                lookup_limit_tokens=prompt_len,
+                local_hash_unit=16,
+                estimated_hit_tokens=int(prompt_len * self._data.get(node, {}).get("gpu_hit_pct", 0) / 100),
+            )
+            for node in nodes
+        }
 
-    def kv_cache_load(self, replica_id: str) -> float | None:
-        # Unit tests key the load signal on kv_cache_usage_perc (no kv-events /
-        # retained blocks simulated); mirror it so the load formula sees it.
-        return self._data.get(replica_id, {}).get("kv_cache_usage_perc", 1.0)
+    def hash_schema(self):
+        return (0, 16)
+
+    def inflight_reserved_blocks(self, node):
+        return self.inflight_block_count(node) if self._data.get(node, {}).get("reservation_known", True) else None
+
+    def capacity_blocks(self, node):
+        raw = self._data.get(node, {}).get("num_gpu_blocks")
+        return max(0, raw - 1) if raw is not None else None
+
+    def request_block_need(self, prompt_tokens, saved_tokens=0, *, replica_id=None):
+        if not self._data.get(replica_id, {}).get("private_budget_known", True):
+            return None
+        return max(0, prompt_tokens - saved_tokens) / 16
 
     def inflight_block_count(self, replica_id: str) -> int:
         return int(self._data.get(replica_id, {}).get("inflight_blocks", 0))
 
     def get_metric_replica_ids(self) -> list[str]:
         return list(self._data.keys())
-
-    def get_block_size(self) -> int | None:
-        # Block size is learned from KV events; tests default to vLLM's 16.
-        return 16
 
     def get_per_request(self, request_id: str, key: str, default=None):
         return self._per_request.get(request_id, {}).get(key, default)
@@ -168,52 +193,6 @@ class RaisingStrategy:
 
 
 # --------------------------------------------------------------------------- #
-# _cache_score: three-layer weighted hit (gpu + cpu + ssd)
-# --------------------------------------------------------------------------- #
-@pytest.mark.cpu
-@pytest.mark.level0
-class TestKVCAwareCacheScore:
-    def test_custom_weights_respected(self):
-        """
-        Feature: _cache_score honors custom layer_weights
-        Description: weights {gpu:0.5,cpu:0.3,ssd:0.2}; all hits = 1.0 (gpu_hit_pct=100)
-        Expectation: 0.5 + 0.3 + 0.2 = 1.0
-        """
-        strat = _strat(layer_weights={"gpu": 0.5, "cpu": 0.3, "ssd": 0.2})
-        provider = FakeRouteDataProvider({"rep": {"gpu_hit_pct": 100, "tiers": {"cpu": 1.0, "ssd": 1.0}}})
-        s_cache, _ = strat._cache_score(provider, ReplicaInfo("rep"), PROMPT_IDS)
-        assert s_cache == pytest.approx(1.0)
-
-
-# --------------------------------------------------------------------------- #
-# Tier weights in the cache term
-# --------------------------------------------------------------------------- #
-@pytest.mark.cpu
-@pytest.mark.level1
-class TestKVCAwareTierWeights:
-    def test_cpu_weight_higher_than_ssd(self):
-        """
-        Feature: cpu tier weight (0.2) > ssd tier weight (0.1) in the cache score
-        Description: two replicas with gpu_hit=0; one has cpu hit, other ssd hit
-        Expectation: cpu-hit replica scores higher
-          cpu_hit: s_cache = 0.2·0.6 = 0.12
-          ssd_hit: s_cache = 0.1·0.8 = 0.08
-        """
-        strat = _strat()
-        provider = FakeRouteDataProvider(
-            {
-                "cpu_hit": {"gpu_hit_pct": 0, "tiers": {"cpu": 0.6, "ssd": 0.0}},
-                "ssd_hit": {"gpu_hit_pct": 0, "tiers": {"cpu": 0.0, "ssd": 0.8}},
-            }
-        )
-        s_cache_cpu, _ = strat._cache_score(provider, ReplicaInfo("cpu_hit"), PROMPT_IDS)
-        s_cache_ssd, _ = strat._cache_score(provider, ReplicaInfo("ssd_hit"), PROMPT_IDS)
-        assert s_cache_cpu == pytest.approx(0.12)
-        assert s_cache_ssd == pytest.approx(0.08)
-        assert s_cache_cpu > s_cache_ssd
-
-
-# --------------------------------------------------------------------------- #
 # Construction validation
 # --------------------------------------------------------------------------- #
 @pytest.mark.cpu
@@ -224,10 +203,6 @@ class TestKVCAwareConstruction:
         [
             {"load_threshold": 0},
             {"load_threshold": 1.0},
-            {"layer_weights": {"gpu": 0.7, "cpu": 0.2, "ssd": -0.1}},
-            {"layer_weights": {"nvme": 1.0}},
-            {"layer_weights": {"gpu": 1.0, "cpu": 0.2, "ssd": 0.1}},
-            {"layer_weights": {"gpu": 0.7, "cpu": 0.3}},
         ],
     )
     def test_invalid_construction_raises(self, kwargs):
@@ -239,10 +214,6 @@ class TestKVCAwareConstruction:
         with pytest.raises(StrategyError):
             _strat(**kwargs)
 
-    def test_valid_three_key_weights_accepted(self):
-        strat = _strat(layer_weights={"gpu": 0.5, "cpu": 0.3, "ssd": 0.2})
-        assert strat.layer_weights == {"gpu": 0.5, "cpu": 0.3, "ssd": 0.2}
-
 
 # --------------------------------------------------------------------------- #
 # set_capacity
@@ -253,10 +224,7 @@ class TestSetCapacity:
     @staticmethod
     def _new_strat() -> KVCacheAwareStrategy:
         """A fresh strategy with set_capacity not yet called."""
-        return KVCacheAwareStrategy(
-            load_threshold=0.9,
-            layer_weights={"gpu": 0.7, "cpu": 0.2, "ssd": 0.1},
-        )
+        return KVCacheAwareStrategy(load_threshold=0.9)
 
     def test_set_capacity_updates_max_num_seqs(self):
         """
@@ -298,18 +266,18 @@ class TestStrategyContract:
         provider = FakeRouteDataProvider(
             {
                 "rep_a": {
-                    "num_gpu_blocks": 100,
+                    "num_gpu_blocks": 101,
                     "kv_cache_usage_perc": 0.3,
                     "num_requests_running": 1,
                     "num_requests_waiting": 0,
-                    # cap=1600 → avail 1600 (rep_a) vs 32 (rep_b): strict argmax, not a tie.
+                    # Allocatable cap=100 → avail 100 (rep_a) vs 3 (rep_b): strict argmax.
                     "inflight_tokens": 0,
                     "inflight_blocks": 0,
                     "gpu_hit_pct": 80,
                     "tiers": {"cpu": 0.0, "ssd": 0.0},
                 },
                 "rep_b": {
-                    "num_gpu_blocks": 100,
+                    "num_gpu_blocks": 101,
                     "kv_cache_usage_perc": 0.5,
                     "num_requests_running": 2,
                     "num_requests_waiting": 0,
@@ -343,27 +311,24 @@ class TestFromConfig:
         cfg = KVCAwareStrategyConfig(load_threshold=0.85)
         # The config persists the user-tunable knob (load_threshold); the
         # remaining knobs fall back to DEFAULT_STRATEGY_KNOBS — mirror that
-        # here (with one override).
-        cfg.layer_weights = {"gpu": 0.6, "cpu": 0.3, "ssd": 0.1}
+        # here.
         cfg.seed = SOFT_PICK_SEED  # same tie-break stream as the direct build below
         strat_from_cfg = KVCacheAwareStrategy.from_config(cfg)
 
         # ── field mapping ──
         assert strat_from_cfg.load_threshold == pytest.approx(0.85)
-        assert strat_from_cfg.layer_weights == {"gpu": 0.6, "cpu": 0.3, "ssd": 0.1}
         assert strat_from_cfg._max_num_seqs is None  # not set until set_capacity()
 
         # ── behavioral equivalence: from_config vs direct construction ──
         strat_from_cfg.set_capacity(64, 1024)
         strat_direct = _strat(
             load_threshold=0.85,
-            layer_weights={"gpu": 0.6, "cpu": 0.3, "ssd": 0.1},
             seed=SOFT_PICK_SEED,
         )
         provider = FakeRouteDataProvider(
             {
                 "rep_a": {
-                    "num_gpu_blocks": 100,
+                    "num_gpu_blocks": 101,
                     "kv_cache_usage_perc": 0.3,
                     "num_requests_running": 1,
                     "num_requests_waiting": 0,
@@ -372,11 +337,11 @@ class TestFromConfig:
                     "tiers": {"cpu": 0.0, "ssd": 0.0},
                 },
                 "rep_b": {
-                    "num_gpu_blocks": 100,
+                    "num_gpu_blocks": 101,
                     "kv_cache_usage_perc": 0.92,
                     "num_requests_running": 0,
                     "num_requests_waiting": 0,
-                    # cap=1600 → avail 48 < gate 160 → rep_a wins deterministically.
+                    # Allocatable cap=100 → avail 3 < gate 10 → rep_a wins deterministically.
                     "inflight_tokens": 100,
                     "inflight_blocks": 97,
                     "gpu_hit_pct": 0,
@@ -453,23 +418,17 @@ class TestFromConfigDebugEnv:
         assert strat.do_shortcut is True
 
     def test_coercion_types(self, monkeypatch):
-        """bool / enum / float / dict-json all coerce to their knob types."""
+        """Boolean and float overrides coerce to their knob types."""
         from uni_agent.agent_aware_router.config.strategy import KVCAwareStrategyConfig
 
         monkeypatch.setattr(
             "uni_agent.agent_aware_router.debug.os.environ",
-            self._env_with(
-                "1",
-                TIE_TOLERANCE="0.2",
-                DO_SHORTCUT="false",
-                LAYER_WEIGHTS='{"gpu": 0.6, "cpu": 0.3, "ssd": 0.1}',
-            ),
+            self._env_with("1", TIE_TOLERANCE="0.2", DO_SHORTCUT="false"),
         )
         cfg = KVCAwareStrategyConfig(load_threshold=0.85)
         strat = KVCacheAwareStrategy.from_config(cfg)
         assert strat.tie_tolerance == pytest.approx(0.2)
         assert strat.do_shortcut is False
-        assert strat.layer_weights == {Layer.GPU: 0.6, Layer.CPU: 0.3, Layer.SSD: 0.1}
 
     def test_tie_tolerance_env_override_and_error_layering(self, monkeypatch):
         """TIE_TOLERANCE: coercion first (ConfigError), then range (StrategyError)."""
@@ -523,9 +482,6 @@ class TestFromConfigDebugEnv:
             ("OVERLOAD_MODE", "sometimes", "overload_mode"),
             ("DO_SHORTCUT", "maybe", "do_shortcut"),
             ("TIE_TOLERANCE", "high", "tie_tolerance"),
-            ("LAYER_WEIGHTS", "not json", "layer_weights"),
-            ("LAYER_WEIGHTS", "[1, 2]", "layer_weights"),
-            ("LAYER_WEIGHTS", '{"npu": 0.5}', "layer_weights"),
         ],
     )
     def test_bad_values_raise_configerror(self, monkeypatch, knob, value, match):
@@ -620,9 +576,9 @@ class TestStickyShortCircuit:
         assert ranking[0] == "rep_a"
 
     # ── REMAINING_CAP under-water gate ─────────────────────────────────────
-    # cap = num_gpu_blocks(100) × block_size(16) = 1600; thresh = 1600 × (1-0.5) = 800
+    # cap = raw num_gpu_blocks(101) - null block = 100; threshold = 100 × (1-0.5) = 50
     # (load_threshold pinned to 0.5 for this fixture). Under water: 60 held blocks →
-    # avail 640. Headroom: 10 held → avail 1440. The verdict is local to the bound
+    # avail 40. Headroom: 10 held → avail 90. The verdict is local to the bound
     # replica: under water → overloaded, and the routing pool is not consulted.
 
     def test_under_water_is_overloaded_even_with_nowhere_to_go(self):
@@ -634,9 +590,9 @@ class TestStickyShortCircuit:
         """
         strat = _strat(overload_mode=OverloadMode.REMAINING_CAP, load_threshold=0.5)
         provider = self._provider(
-            rep_a={"num_gpu_blocks": 100, "inflight_blocks": 60},
-            rep_b={"num_gpu_blocks": 100, "inflight_blocks": 60},
-            ghost={"num_gpu_blocks": 100, "inflight_blocks": 0},
+            rep_a={"num_gpu_blocks": 101, "inflight_blocks": 60},
+            rep_b={"num_gpu_blocks": 101, "inflight_blocks": 60},
+            ghost={"num_gpu_blocks": 101, "inflight_blocks": 0},
         )
         assert strat.is_overloaded(provider, ReplicaInfo("rep_a")) is True
 
@@ -648,25 +604,47 @@ class TestStickyShortCircuit:
         """
         strat = _strat(overload_mode=OverloadMode.REMAINING_CAP, load_threshold=0.5)
         provider = self._provider(
-            rep_a={"num_gpu_blocks": 100, "inflight_blocks": 60},
-            rep_b={"num_gpu_blocks": 100, "inflight_blocks": 10},
+            rep_a={"num_gpu_blocks": 101, "inflight_blocks": 60},
+            rep_b={"num_gpu_blocks": 101, "inflight_blocks": 10},
         )
         assert strat.is_overloaded(provider, ReplicaInfo("rep_a")) is True
 
     def test_sticky_falls_through_when_bound_under_water(self):
         """Feature: sticky short-circuit consults the under-water gate
-        Description: binding binds r1→rep_a; rep_a under water (avail=640<800), rep_b
-        has headroom (avail=1440) so the fallback scoring has a strict winner
+        Description: binding binds r1→rep_a; rep_a under water (avail=40<50), rep_b
+        has headroom (avail=90) so the fallback scoring has a strict winner
         Expectation: scores = [0.0, STICKY_TOP_SCORE] — combined scoring re-routes to rep_b
         """
         strat = _strat(overload_mode=OverloadMode.REMAINING_CAP, load_threshold=0.5)
         provider = self._provider(
             sticky={"r1": "rep_a"},
-            rep_a={"num_gpu_blocks": 100, "inflight_blocks": 60},
-            rep_b={"num_gpu_blocks": 100, "inflight_blocks": 10},
+            rep_a={"num_gpu_blocks": 101, "inflight_blocks": 60},
+            rep_b={"num_gpu_blocks": 101, "inflight_blocks": 10},
         )
         scores = strat.score(PROMPT_IDS, provider, _replicas("rep_a", "rep_b"), "r1")
         assert scores == [0.0, STICKY_TOP_SCORE]
+
+    def test_remaining_cap_sticky_uses_bound_replica_capacity(self):
+        """A smaller bound pool cannot borrow a sibling's capacity to preserve sticky."""
+        strat = _strat(overload_mode=OverloadMode.REMAINING_CAP, load_threshold=0.5)
+        provider = self._provider(
+            sticky={"r1": "small"},
+            large={"num_gpu_blocks": 101},
+            small={"num_gpu_blocks": 11, "inflight_blocks": 6},
+        )
+        assert strat.is_overloaded(provider, ReplicaInfo("small")) is True
+        assert strat.score(PROMPT_IDS, provider, _replicas("large", "small"), "r1") == [STICKY_TOP_SCORE, 0.0]
+
+    def test_remaining_cap_sticky_keeps_binding_without_its_capacity(self):
+        """A sibling's known capacity does not make an unknown bound pool overloaded."""
+        strat = _strat(overload_mode=OverloadMode.REMAINING_CAP)
+        provider = self._provider(
+            sticky={"r1": "unknown"},
+            known={"num_gpu_blocks": 101},
+            unknown={"inflight_blocks": 1000},
+        )
+        assert strat.is_overloaded(provider, ReplicaInfo("unknown")) is False
+        assert strat.score(PROMPT_IDS, provider, _replicas("known", "unknown"), "r1") == [0.0, STICKY_TOP_SCORE]
 
 
 # --------------------------------------------------------------------------- #
@@ -682,7 +660,7 @@ class TestFallbackModes:
     def test_overloaded_sticky_defers_to_the_capacity_book(self):
         """Bound replica over the sticky gate → the capacity book decides, not the binding.
 
-        rep_a holds 97 blocks (avail = 1600-1552 = 48 < thresh=800 → filtered), rep_b wins.
+        rep_a holds 97 blocks (avail = 100-97 = 3 < threshold=10 → filtered), rep_b wins.
         """
         strat = _strat(load_threshold=0.9)
         provider = FakeRouteDataProvider(
@@ -690,14 +668,14 @@ class TestFallbackModes:
                 # cap must be > 0 (num_gpu_blocks) so the post-fallback ranking has a
                 # strict winner: with cap=0 both replicas tie and soft-pick randomizes.
                 "rep_a": {
-                    "num_gpu_blocks": 100,
+                    "num_gpu_blocks": 101,
                     "kv_cache_usage_perc": 0.95,
                     "num_requests_running": 64,
                     "num_requests_waiting": 1000,
                     "inflight_tokens": 1550,
                     "inflight_blocks": 97,
                 },
-                "rep_b": {"num_gpu_blocks": 100, "kv_cache_usage_perc": 1.0},
+                "rep_b": {"num_gpu_blocks": 101, "kv_cache_usage_perc": 1.0},
             },
             sticky={"r1": "rep_a"},
         )
@@ -729,7 +707,7 @@ class TestFallbackModes:
 @pytest.mark.cpu
 @pytest.mark.level0
 class TestCapacityTokenAware:
-    """``slow_cut=capacity-token-aware``: ``avail = cap - held_blocks × block_size`` gates
+    """``slow_cut=capacity-token-aware``: ``avail = cap - held_blocks`` gates
     and ranks (the router's own ref-count book via ``inflight_block_count`` — neither
     ``kv_perc`` nor ``INFLIGHT_TOKENS`` decides).
 
@@ -740,17 +718,185 @@ class TestCapacityTokenAware:
     def _cap_strat(self, **kwargs) -> KVCacheAwareStrategy:
         kwargs.setdefault("slow_cut", SlowCut.CAPACITY_TOKEN_AWARE)
         # Gate baseline pinned at 0.9: the fixtures below do arithmetic
-        # against thresh = cap·(1−0.9) = 160 at cap=1600; threshold
+        # against threshold = cap·(1−0.9) = 10 at cap=100; threshold
         # sensitivity is covered by test_capacity_gate_threshold_via_load_threshold.
         kwargs.setdefault("load_threshold", 0.9)
         kwargs.setdefault("seed", SOFT_PICK_SEED)
         return _strat(**kwargs)
 
+    @pytest.fixture
+    def cache_store(self, monkeypatch):
+        for cls in (KVCacheStore, PerReplicaStore, PerRequestStore):
+            monkeypatch.setattr(cls, "_instance", None)
+        return DataStore()
+
+    @staticmethod
+    def _dispatch(store, prompt):
+        pin = InflightParser().parse(
+            StatisticEvent("on_acquire", request_id="request", replica_id="a", prompt_ids=tuple(prompt)),
+            "a",
+            schema=store.dispatch_schema("a"),
+        )[0]
+        store.pin_request("request", "a", pin.block_hashes, pin.schema, reservations=pin.reservations)
+
+    @pytest.mark.parametrize("mixed", [False, True], ids=["full", "mixed"])
+    def test_collected_cache_events_change_the_winner(
+        self, cache_store, layout, install_metadata, stored, removed, mixed
+    ):
+        groups = (("full_attention", 4), ("mamba", 8)) if mixed else (("full_attention", 4),)
+        raw = layout(groups)
+        raw["cache_reservation_profile"]["capacity_blocks"] = 99
+        collector = Collector(SimpleNamespace(stop=lambda: None), VLLMKVParser())
+        strat = self._cap_strat(do_shortcut=False, tie_tolerance=0)
+        prompt, replicas = list(range(17)), _replicas("a", "b")
+        try:
+            for node, endpoint in (("a", 8), ("b", 16)):
+                install_metadata(cache_store, node, raw)
+                events = (
+                    [stored(1, "mamba", 8, hashes=[f"r{endpoint}"]), stored()]
+                    if mixed
+                    else [stored(tokens=list(range(endpoint)))]
+                )
+                collector._handle_raw_data(msgpack.packb([0, events, 0]), node)
+            assert strat.score(prompt, cache_store, replicas) == [0, STICKY_TOP_SCORE]
+            removal = removed(1, ["r16"]) if mixed else removed(0, ["r4"])
+            collector._handle_raw_data(msgpack.packb([0, [removal], 0]), "b")
+            assert strat.score(prompt, cache_store, replicas) == [STICKY_TOP_SCORE, 0]
+            cache_store.clear_kv_resident_blocks("b")
+            cache_store.refresh_metrics({"a": {MetricKey.INFLIGHT_COUNT: 3}})
+            assert strat.score(prompt, cache_store, replicas) == [STICKY_TOP_SCORE, 0]
+        finally:
+            collector.stop()
+
+    @pytest.mark.parametrize("mixed", [False, True], ids=["full", "mixed"])
+    def test_dispatch_reservations_change_the_capacity_winner(self, cache_store, layout, install_metadata, mixed):
+        groups = (("full_attention", 4), ("sliding_window", 8)) if mixed else (("full_attention", 4),)
+        raw = layout(groups)
+        raw["cache_reservation_profile"]["capacity_blocks"] = 9
+        for node in ("a", "b"):
+            install_metadata(cache_store, node, raw)
+        cache_store.refresh_metrics({"b": {MetricKey.KV_CACHE_USAGE_PERC: 1.0}})
+        strat = self._cap_strat(do_shortcut=False, load_threshold=0.4, tie_tolerance=0)
+        prompt, replicas = list(range(17)), _replicas("a", "b")
+        self._dispatch(cache_store, prompt)
+        assert strat.score(prompt, cache_store, replicas) == [0, STICKY_TOP_SCORE]
+        cache_store.unpin_request("request")
+        assert strat.score(prompt, cache_store, replicas) == [STICKY_TOP_SCORE, 0]
+
+    def test_capacity_ranking_uses_saved_tokens_after_prefix_replay(
+        self, cache_store, layout, parse, stored, install_metadata, monkeypatch
+    ):
+        raw = layout((("full_attention", 4), ("sliding_window_mla", 4)), window=8)
+        raw["groups"][1].update(prefix_cacheable=False, prefix_replay_tokens=8)
+        raw["cache_reservation_profile"]["capacity_blocks"] = 100
+        for node, extent in (("a", 16), ("b", 8)):
+            install_metadata(cache_store, node, raw)
+            events = parse([stored(tokens=list(range(extent)))], node)
+            cache_store.apply_kv_update(KVCacheUpdate(node, events))
+        emitted = {}
+        monkeypatch.setattr(
+            "uni_agent.agent_aware_router.strategies.kvc_aware.emitter.on_score",
+            lambda node, values: emitted.update({node: values}),
+        )
+        strat = self._cap_strat(do_shortcut=False, tie_tolerance=0)
+        assert strat.score(list(range(17)), cache_store, _replicas("a", "b")) == [STICKY_TOP_SCORE, 0]
+        assert emitted["a"]["need_ratio"] == pytest.approx(cache_store.request_block_need(17, 8, replica_id="a") / 100)
+        assert emitted["b"]["need_ratio"] == pytest.approx(cache_store.request_block_need(17, 0, replica_id="b") / 100)
+
+    @pytest.mark.parametrize("mode", ["align", "all"])
+    def test_unknown_private_budget_uses_least_inflight_even_with_a_prediction(
+        self, cache_store, layout, install_metadata, mode
+    ):
+        raw = layout(mode=mode)
+        del raw["cache_reservation_profile"]
+        for node in ("a", "b"):
+            install_metadata(cache_store, node, raw)
+        cache_store.refresh_metrics(
+            {
+                "a": {MetricKey.KV_CACHE_CAPACITY_BLOCKS: 99, MetricKey.INFLIGHT_COUNT: 3},
+                "b": {MetricKey.KV_CACHE_CAPACITY_BLOCKS: 99, MetricKey.INFLIGHT_COUNT: 0},
+            }
+        )
+        prompt = list(range(17))
+        self._dispatch(cache_store, prompt)
+        hashes = resolve_prefix_hashes(prompt, None, cache_store)
+        estimate = cache_store.estimate_prefixes(["a"], hashes, len(prompt))["a"]
+        assert estimate.provisional and estimate.estimated_hit_tokens == 16
+        strat = self._cap_strat(do_shortcut=False, tie_tolerance=0)
+        assert strat.score(prompt, cache_store, _replicas("a", "b")) == [0, STICKY_TOP_SCORE]
+
+    def test_gate_uses_each_replica_capacity(self):
+        """The small pool fails its own gate even though its cache lowers need to zero."""
+        strat = self._cap_strat(load_threshold=0.5, do_shortcut=False, tie_tolerance=0)
+        provider = FakeRouteDataProvider(
+            {
+                "large": {"num_gpu_blocks": 101, "inflight_blocks": 50},
+                "small": {"num_gpu_blocks": 11, "inflight_blocks": 6, "gpu_hit_pct": 100},
+            }
+        )
+        assert strat.score([1] * 800, provider, _replicas("large", "small")) == [STICKY_TOP_SCORE, 0.0]
+
+    def test_capacity_ratios_use_normalized_local_capacity(self, monkeypatch):
+        provider = FakeRouteDataProvider(
+            {
+                "large": {"num_gpu_blocks": 101, "inflight_blocks": 50},
+                "small": {"num_gpu_blocks": 11, "inflight_blocks": 4},
+            }
+        )
+        emitted = {}
+        monkeypatch.setattr(
+            "uni_agent.agent_aware_router.strategies.kvc_aware.emitter.on_score",
+            lambda node, values: emitted.update({node: values}),
+        )
+        self._cap_strat().score([1] * 160, provider, _replicas("large", "small"))
+        assert emitted["large"] == pytest.approx({"avail_ratio": 0.5, "need_ratio": 0.1, "remaining_ratio": 0.4})
+        assert emitted["small"] == pytest.approx({"avail_ratio": 0.6, "need_ratio": 1, "remaining_ratio": -0.4})
+
+    @pytest.mark.parametrize(
+        "incomplete",
+        [
+            {},
+            {"num_gpu_blocks": 101, "private_budget_known": False},
+            {"num_gpu_blocks": 101, "reservation_known": False},
+        ],
+    )
+    @pytest.mark.parametrize("known_held", [0, 100])
+    def test_incomplete_budget_cannot_win_against_known_budget(self, incomplete, known_held):
+        """Missing capacity or layout budgets never become a zero-need saturation winner."""
+        provider = FakeRouteDataProvider(
+            {
+                "unknown": {**incomplete, "gpu_hit_pct": 100},
+                "known": {"num_gpu_blocks": 101, "inflight_blocks": known_held, "inflight_count": 10},
+            }
+        )
+        assert self._cap_strat().score(PROMPT_IDS, provider, _replicas("unknown", "known")) == [0.0, STICKY_TOP_SCORE]
+
+    def test_all_unknown_uses_least_inflight_with_empty_prompt(self):
+        provider = FakeRouteDataProvider(
+            {
+                "unknown": {"inflight_count": 1},
+                "invalid_budget": {"num_gpu_blocks": 101, "private_budget_known": False, "inflight_count": 3},
+            }
+        )
+        assert self._cap_strat().score([], provider, _replicas("unknown", "invalid_budget")) == [STICKY_TOP_SCORE, 0.0]
+
+    def test_known_zero_capacity_handles_empty_prompt_without_emitting_ratios(self, monkeypatch):
+        provider = FakeRouteDataProvider({"zero": {"num_gpu_blocks": 1}})
+        emitted = []
+        monkeypatch.setattr(
+            "uni_agent.agent_aware_router.strategies.kvc_aware.emitter.on_score",
+            lambda *args: emitted.append(args),
+        )
+        strat = self._cap_strat(overload_mode=OverloadMode.REMAINING_CAP)
+        assert strat.is_overloaded(provider, ReplicaInfo("zero")) is True
+        assert strat.score([], provider, _replicas("zero")) == [STICKY_TOP_SCORE]
+        assert emitted == []
+
     def test_gate_filters_booked_replicas_and_picks_max_remaining(self):
         """Eligible = ``avail >= cap·(1-load_threshold)``; the largest ``remaining = avail - need`` wins.
 
-        rep_a cache-rich but full (avail=16 < 160) → filtered; rep_b (remaining=797)
-        beats eligible rep_c (477) → argmax picks rep_b.
+        rep_a cache-rich but full (avail=1 < 10) → filtered; rep_b (remaining≈49.8)
+        beats eligible rep_c (≈29.8) → argmax picks rep_b.
         """
         strat = self._cap_strat()
         replicas = _replicas("rep_a", "rep_b", "rep_c")
@@ -758,15 +904,15 @@ class TestCapacityTokenAware:
             {
                 # rep_a: perfect cache but its held blocks nearly fill the pool → filtered.
                 "rep_a": {
-                    "num_gpu_blocks": 100,
+                    "num_gpu_blocks": 101,
                     "inflight_tokens": 1584,
                     "inflight_blocks": 99,
                     "gpu_hit_pct": 100,
                 },
-                # rep_b: no cache but plenty of room → avail=800.
-                "rep_b": {"num_gpu_blocks": 100, "inflight_tokens": 800, "inflight_blocks": 50, "gpu_hit_pct": 0},
+                # rep_b: no cache but plenty of room → avail=50.
+                "rep_b": {"num_gpu_blocks": 101, "inflight_tokens": 800, "inflight_blocks": 50, "gpu_hit_pct": 0},
                 # rep_c: eligible but less remaining than rep_b → argmax is non-trivial.
-                "rep_c": {"num_gpu_blocks": 100, "inflight_tokens": 1120, "inflight_blocks": 70, "gpu_hit_pct": 0},
+                "rep_c": {"num_gpu_blocks": 101, "inflight_tokens": 1120, "inflight_blocks": 70, "gpu_hit_pct": 0},
             },
         )
         # The capacity path is the ONLY path (no sticky binding), so this is also the unbound-request case.
@@ -776,17 +922,17 @@ class TestCapacityTokenAware:
         assert route(strat, PROMPT_IDS, provider, replicas, "r1")[0] == "rep_b"
 
     def test_avail_tracks_inflight_blocks_not_tokens_or_kv_perc(self):
-        """Free capacity = ``cap − held_blocks × block_size``; kv_perc and INFLIGHT_TOKENS are observation-only.
+        """Free capacity = ``cap − held_blocks``; kv_perc and INFLIGHT_TOKENS are observation-only.
 
         rep_b's token ledger reads 0 (its prompts all hit prefix cache) yet its 94 held
-        blocks are real occupancy: avail=96 < 160 → filtered; kv-rich rep_a wins.
+        blocks reserve capacity: avail=6 < 10 → filtered; kv-rich rep_a wins.
         """
         strat = self._cap_strat()
         provider = FakeRouteDataProvider(
             {
-                "rep_a": {"num_gpu_blocks": 100, "kv_cache_usage_perc": 0.99, "inflight_tokens": 0},
+                "rep_a": {"num_gpu_blocks": 101, "kv_cache_usage_perc": 0.99, "inflight_tokens": 0},
                 "rep_b": {
-                    "num_gpu_blocks": 100,
+                    "num_gpu_blocks": 101,
                     "kv_cache_usage_perc": 0.0,
                     "inflight_tokens": 1500,
                     "inflight_blocks": 94,
@@ -799,20 +945,20 @@ class TestCapacityTokenAware:
     def test_capacity_gate_threshold_via_load_threshold(self):
         """Gate threshold = ``cap·(1-load_threshold)``; load_threshold tunes it.
 
-        cap=1600, do_shortcut=False so the binding can't short-circuit into the sticky
-        branch: 0.99 (thresh=16) keeps both eligible; 0.85 (thresh=240) filters rep_a (avail=160).
+        cap=100, do_shortcut=False so the binding can't short-circuit into the sticky
+        branch: 0.99 (threshold≈1) keeps both eligible; 0.85 (threshold=15) filters rep_a (avail=9).
         """
         data = {
-            "rep_a": {"num_gpu_blocks": 100, "inflight_tokens": 1450, "inflight_blocks": 91, "gpu_hit_pct": 100},
-            "rep_b": {"num_gpu_blocks": 100, "inflight_tokens": 800, "inflight_blocks": 50, "gpu_hit_pct": 0},
+            "rep_a": {"num_gpu_blocks": 101, "inflight_tokens": 1450, "inflight_blocks": 91, "gpu_hit_pct": 100},
+            "rep_b": {"num_gpu_blocks": 101, "inflight_tokens": 800, "inflight_blocks": 50, "gpu_hit_pct": 0},
         }
-        # Low threshold (thresh=1600·(1-0.99)=16): both eligible → rep_b wins on remaining.
+        # Low threshold (100·(1-0.99)≈1): both eligible → rep_b wins on remaining.
         low = self._cap_strat(do_shortcut=False, load_threshold=0.99)
         p_low = FakeRouteDataProvider(dict(data))
         p_low.put_sticky_binding("r1", "rep_b")
         s_low = low.score(PROMPT_IDS, p_low, _replicas("rep_a", "rep_b"), request_id="r1")
         assert s_low[1] == STICKY_TOP_SCORE
-        # High threshold (thresh=1600·(1-0.85)=240): rep_a (avail=160) filtered, rep_b wins.
+        # High threshold (100·(1-0.85)=15): rep_a (avail=9) filtered, rep_b wins.
         high = self._cap_strat(do_shortcut=False, load_threshold=0.85)
         p_high = FakeRouteDataProvider(dict(data))
         p_high.put_sticky_binding("r1", "rep_b")
@@ -823,16 +969,16 @@ class TestCapacityTokenAware:
     def test_all_under_water_falls_back_to_min_need(self):
         """No replica passes the gate → pick min need (cheapest assignment), not max remaining.
 
-        rep_a has the shallowest deficit (avail=80) but is cache-cold (need=plen);
+        rep_a has the most headroom (avail=5) but is cache-cold (need=plen/16);
         rep_b sits deeper (avail=0) yet fully warm (need=0). A remaining-based ranking
-        picks rep_a (48 > 0) — deficit magnitudes drown the cache signal; the min-need
+        picks rep_a (4.8125 > 0) — deficit magnitudes drown the cache signal; the min-need
         fallback keeps cache steering alive under saturation and wins on rep_b.
         """
-        strat = self._cap_strat(do_shortcut=False)  # thresh = 1600·0.1 = 160
+        strat = self._cap_strat(do_shortcut=False)  # threshold = 100·0.1 ≈ 10
         provider = FakeRouteDataProvider(
             {
-                "rep_a": {"num_gpu_blocks": 100, "inflight_blocks": 95, "gpu_hit_pct": 0},  # avail=80 < 160
-                "rep_b": {"num_gpu_blocks": 100, "inflight_blocks": 100, "gpu_hit_pct": 100},  # avail=0 < 160
+                "rep_a": {"num_gpu_blocks": 101, "inflight_blocks": 95, "gpu_hit_pct": 0},  # avail=5 < 10
+                "rep_b": {"num_gpu_blocks": 101, "inflight_blocks": 100, "gpu_hit_pct": 100},  # avail=0 < 10
             }
         )
         scores = strat.score(PROMPT_IDS, provider, _replicas("rep_a", "rep_b"), request_id="r1")
@@ -841,17 +987,17 @@ class TestCapacityTokenAware:
     def test_soft_pick_randomizes_within_tolerance_band(self):
         """tie_tolerance soft-pick: near-equal remaining values share the win.
 
-        |best| band = 0.05×797 ≈ 40: rep_c (gap 16) is in, rep_d (gap 624) and
+        |best| band = 0.05×49.8125 ≈ 2.5: rep_c (gap 1) is in, rep_d (gap 39) and
         filtered rep_a are out; repeated calls return both winners.
         """
         strat = self._cap_strat(do_shortcut=False, tie_tolerance=0.05)
         provider = FakeRouteDataProvider(
             {
-                "rep_a": {"num_gpu_blocks": 100, "inflight_blocks": 99},
-                "rep_b": {"num_gpu_blocks": 100, "inflight_blocks": 50},
-                "rep_c": {"num_gpu_blocks": 100, "inflight_blocks": 51},
-                # Distant third stays outside the band (gap 624 ≫ 40) — excluded from the pick.
-                "rep_d": {"num_gpu_blocks": 100, "inflight_blocks": 89},
+                "rep_a": {"num_gpu_blocks": 101, "inflight_blocks": 99},
+                "rep_b": {"num_gpu_blocks": 101, "inflight_blocks": 50},
+                "rep_c": {"num_gpu_blocks": 101, "inflight_blocks": 51},
+                # Distant third stays outside the band (gap 39 ≫ 2.5) — excluded from the pick.
+                "rep_d": {"num_gpu_blocks": 101, "inflight_blocks": 89},
             }
         )
         winners = {
@@ -865,14 +1011,14 @@ class TestCapacityTokenAware:
     def test_soft_pick_strict_outside_tolerance_band(self):
         """Soft-pick only randomizes inside the band — a clear win stays deterministic.
 
-        rep_b remaining=1597 vs rep_c 781: band = 0.05×1597 ≈ 80 ≪ 816 → strict argmax every call.
+        rep_b remaining≈99.8 vs rep_c 48.8: band ≈5 ≪ 51 → strict argmax every call.
         """
         strat = self._cap_strat(do_shortcut=False, tie_tolerance=0.05)
         provider = FakeRouteDataProvider(
             {
-                "rep_a": {"num_gpu_blocks": 100, "inflight_blocks": 99},
-                "rep_b": {"num_gpu_blocks": 100, "inflight_blocks": 0},
-                "rep_c": {"num_gpu_blocks": 100, "inflight_blocks": 51},
+                "rep_a": {"num_gpu_blocks": 101, "inflight_blocks": 99},
+                "rep_b": {"num_gpu_blocks": 101, "inflight_blocks": 0},
+                "rep_c": {"num_gpu_blocks": 101, "inflight_blocks": 51},
             }
         )
         winners = {

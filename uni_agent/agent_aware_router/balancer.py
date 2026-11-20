@@ -18,10 +18,8 @@ from __future__ import annotations
 
 import logging
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable
 
-import httpx
 import ray
 from omegaconf import DictConfig, OmegaConf
 
@@ -41,8 +39,6 @@ class KVCAwareBalancer:
     """Route requests and manage collector-backed state."""
 
     _ROUTE_LOG_EVERY = 64
-    _MAX_DISCOVERY_WORKERS = 8
-    _DISCOVERY_TIMEOUT_SECONDS = 5.0
 
     def __init__(
         self,
@@ -57,6 +53,7 @@ class KVCAwareBalancer:
         self._provider_factory = provider_factory
 
         self._servers: dict[str, Any] = dict(servers)
+        self._initial_servers = dict(servers)
         rollout_config = self._fetch_rollout_config()
         self._config = self._init_config(config, rollout_config)
         logger.info("KVCAwareBalancer, config=%s", self._config)
@@ -141,110 +138,14 @@ class KVCAwareBalancer:
         return _config
 
     def _init_provider(self) -> None:
-        """Resolve per-server endpoints from vLLM HTTP servers, then start collectors.
-
-        Non-actor handles (plain strings in unit tests) have no
-        ``get_server_address``; discovery is skipped and collectors fall back
-        to configured/default endpoints.
-        """
-        collection_names = sorted(self._strategy.collection_names)
-        address_futures = []
-        replica_ids = []
-        for replica_id, handle in self._servers.items():
-            if not hasattr(handle, "get_server_address"):
-                logger.warning(
-                    "server '%s' handle has no get_server_address remote (type=%s); "
-                    "skipping dynamic endpoint discovery",
-                    replica_id,
-                    type(handle).__name__,
-                )
-                continue
-            replica_ids.append(replica_id)
-            address_futures.append(handle.get_server_address.remote())
-
-        server_addresses: dict[str, str] = {}
-        if replica_ids:
-            addresses = ray.get(address_futures)
-            server_addresses = {
-                replica_id: f"{ip}:{port}" for replica_id, (ip, port) in zip(replica_ids, addresses, strict=True)
-            }
-        kv_event_endpoints = self._discover_kv_event_endpoints(server_addresses)
+        """Start collectors for the initial source set."""
         self._provider = self._provider_factory(
             self._config.collector,
-            collection_names,
-            server_addresses=server_addresses,
-            kv_event_endpoints=kv_event_endpoints,
+            sorted(self._strategy.collection_names),
             balancer_handler=self,
+            metadata_servers=self._servers,
         )
         self._provider.start()
-
-    def _discover_kv_event_endpoints(self, server_addresses: dict[str, str]) -> dict[str, list[str]]:
-        if not server_addresses:
-            return {}
-
-        endpoints: dict[str, list[str]] = {}
-        max_workers = min(len(server_addresses), self._MAX_DISCOVERY_WORKERS)
-        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="kv-event-discovery") as executor:
-            futures = {
-                executor.submit(self._fetch_kv_event_endpoints, address): replica_id
-                for replica_id, address in server_addresses.items()
-            }
-            for future in as_completed(futures):
-                replica_id = futures[future]
-                try:
-                    source = future.result()
-                except httpx.HTTPError as e:
-                    logger.warning("failed to discover KV-event endpoint from server '%s': %s", replica_id, e)
-                    continue
-                if source is not None:
-                    endpoints[replica_id] = source
-        return endpoints
-
-    @staticmethod
-    def _collector_address(endpoint: Any) -> str:
-        """Convert a vLLM TCP URI into the address expected by ZMQTransport."""
-        if endpoint is None:
-            return ""
-        if not isinstance(endpoint, str) or not endpoint.startswith("tcp://"):
-            raise RuntimeError(f"unsupported KV-event endpoint: {endpoint!r}")
-        return endpoint.removeprefix("tcp://")
-
-    @classmethod
-    def _parse_kv_event_sources(cls, sources: Any) -> list[str] | None:
-        """Convert vLLM's rank-keyed response into the current single-DP shape."""
-        if not isinstance(sources, dict):
-            raise RuntimeError(f"vLLM returned invalid KV-event sources: {sources!r}")
-        if not sources:
-            return None
-        if len(sources) > 1:
-            raise RuntimeError(
-                "agent-aware-router does not support multiple DP ranks per rollout server yet: "
-                f"reported ranks={sorted(sources)}"
-            )
-
-        rank, config = next(iter(sources.items()))
-        if not isinstance(config, dict):
-            raise RuntimeError(f"vLLM returned invalid KV-event config for DP rank {rank}: {config!r}")
-        publisher = config.get("publisher")
-        if publisher != "zmq":
-            raise RuntimeError(f"unsupported KV-event publisher for DP rank {rank}: {publisher!r}")
-        topic = config.get("topic")
-        if not isinstance(topic, str):
-            raise RuntimeError(f"invalid KV-event topic for DP rank {rank}: {topic!r}")
-        return [
-            cls._collector_address(config.get("endpoint")),
-            cls._collector_address(config.get("replay_endpoint")),
-            publisher,
-            topic,
-        ]
-
-    @classmethod
-    def _fetch_kv_event_endpoints(cls, server_address: str) -> list[str] | None:
-        """Query the endpoint-discovery API provided by vLLM #55844."""
-        with httpx.Client(timeout=cls._DISCOVERY_TIMEOUT_SECONDS, trust_env=False) as client:
-            response = client.get(f"http://{server_address}/kv_event_sources")
-            response.raise_for_status()
-            return cls._parse_kv_event_sources(response.json())
 
     def register_call_back(self, event: str, fn: Callable[..., None]) -> None:
         """Register an event callback."""
@@ -279,6 +180,7 @@ class KVCAwareBalancer:
             "sticky_size": self._store.sticky_status()["size"],
             "total_inflight": self.get_total_inflight(),
             "collectors": collector_status() if callable(collector_status) else [],
+            "cache": self._store.get_cache_status(),
         }
 
     def release_server(self, server_id: str, request_id: str | None = None) -> None:
@@ -347,7 +249,10 @@ class KVCAwareBalancer:
         return sum(self._inflight.values())
 
     def add_servers(self, servers: dict[str, Any]) -> None:
-        """Bulk-add servers to the pool (provider is keyed by init-time addresses, untouched here)."""
+        """Add routing targets without changing the collector source set."""
+        for sid, handle in servers.items():
+            if sid in self._initial_servers and handle != self._initial_servers[sid]:
+                raise ValueError(f"Replacing the event source for replica {sid!r} requires a new balancer")
         for sid, handle in servers.items():
             self._servers[sid] = handle
             self._inflight.setdefault(sid, 0)
