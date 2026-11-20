@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Mapping
+from ipaddress import ip_address
 from typing import Any
 
 import ray
@@ -131,6 +132,16 @@ class _GatewayActor:
         The normalized mappings are retained as actor configuration.
         """
         self._policy_configs, self._policy_clients = _normalize_gateway_inputs(config, backend)
+        ray_node_address = ray.util.get_node_ip_address()
+        server_addresses = [
+            policy_config.resolve_bind_address(ray_node_address) for policy_config in self._policy_configs.values()
+        ]
+        self._server_address = server_addresses[0]
+        if any(
+            address != self._server_address and ip_address(address) != ip_address(self._server_address)
+            for address in server_addresses[1:]
+        ):
+            raise ValueError("All policies sharing a Gateway actor must resolve to the same bind address")
         self._policy_codecs: dict[str, MessageCodec] = {
             policy_name: _build_codec(policy_config) for policy_name, policy_config in self._policy_configs.items()
         }
@@ -144,7 +155,6 @@ class _GatewayActor:
         self._sessions: dict[str, GatewaySession] = {}
         self._session_policies: dict[str, str] = {}
 
-        self._server_address = ray.util.get_node_ip_address().strip("[]")
         self._server_port: int | None = None
         self._server_task: asyncio.Task[Any] | None = None
         self._server_base_url: str | None = None
