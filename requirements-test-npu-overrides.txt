@@ -1,0 +1,23 @@
+# Override pass-through requirements that break the gate install:
+# - arctic-inference (vllm-ascend): sdist-only (no aarch64 wheel) and its
+#   CUDA/nanobind build fails in the gate container, while vllm_ascend never
+#   imports it at runtime.
+# - torchcodec (vllm): CUDA-only wheels link libc10_cuda / libnvrtc.so.13, which
+#   a CPU torch cannot provide; vllm's multimodal audio import catches ImportError
+#   and falls back to AudioDecoder=None, so the package is not needed.
+# - triton: triton-ascend ships its own triton package (with the Ascend
+#   libtriton build); the PyPI triton wheel shadows it and makes triton.jit
+#   fall back to plain functions, breaking slot-mapping kernels at runtime.
+# - fastapi: vllm-ascend's <0.124 cap contradicts vllm 0.30's >=0.133 range;
+#   relax to a compatible floor (vllm-ascend does not use newer fastapi APIs).
+# - torch family: vllm 0.30 declares torch 2.13 / torchaudio 2.11 / torchvision
+#   0.28, but vllm-ascend 0.30 is built for torch 2.10 / torch-npu 2.10.0.post7.
+#   The aarch64 torch 2.10 wheel is CPU-only, which torch-npu requires.
+arctic-inference==0.1.1 ; sys_platform == "never"
+torchcodec==0.17.0 ; sys_platform == "never"
+triton==3.6.0 ; sys_platform == "never"
+fastapi>=0.133.0,<0.137.0
+torch==2.10.0
+torch-npu==2.10.0.post7
+torchvision==0.25.0
+torchaudio==2.10.0
