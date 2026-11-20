@@ -137,15 +137,13 @@ Each supporting provider owns its upstream format through the `Sandbox.tunnel_up
 
 ## GKE Agent Sandbox (`gke_agent_sandbox`)
 
-`gke_agent_sandbox` runs isolated container episodes on Google Kubernetes Engine (or any Kubernetes cluster with the [`kubernetes-sigs/agent-sandbox`](https://github.com/kubernetes-sigs/agent-sandbox) CRDs installed) using `agent_sandbox_rl` warm pools and the Kubernetes `pods/exec` API.
+`gke_agent_sandbox` runs each sandbox as a pod on Google Kubernetes Engine, or on any Kubernetes cluster with the [`kubernetes-sigs/agent-sandbox`](https://github.com/kubernetes-sigs/agent-sandbox) controller and CRDs installed. Commands run through the Kubernetes `pods/exec` API, so the image needs `sh` and `timeout`.
 
 ```yaml
 sandbox:
   provider: gke_agent_sandbox
+  image: python:3.12
   runtime_timeout: 7200
-  image_map:
-    - from: "swebench/**:latest"
-      to: "<region>-docker.pkg.dev/<project>/<repo>/**:latest"
   sandbox_kwargs:
     namespace: default
     node_selector:
@@ -162,35 +160,48 @@ pip install 'git+https://github.com/kubernetes-sigs/agent-sandbox.git@9afee70393
 pip install 'git+https://github.com/kubernetes-sigs/agent-sandbox.git@9afee7039342f18fa9ad402929cabf8b66eebaa7#subdirectory=examples/agent-sandbox-rl'
 ```
 
-Key behaviors and options:
+The process needs Kubernetes credentials (in-cluster service account or kubeconfig) that may create `SandboxTemplate`, `SandboxWarmPool` and `SandboxClaim` objects and use `pods/exec` in the namespace.
 
-- **Network isolation (loopback-only by default)**: Templates default to `networkPolicyManagement: Managed` with `networkPolicy: {ingress: [], egress: []}` (deny-all ingress and egress; only pod loopback and Kubernetes API `pods/exec` remain usable). To use a single operator-managed namespace-wide `NetworkPolicy` instead (for large GKE Dataplane V2 / Cilium clusters), set `sandbox_kwargs.network_policy_management: "Unmanaged"` (or `SANDBOX_NETWORK_POLICY_MANAGEMENT=Unmanaged`); startup fails closed unless an egress-restricting `NetworkPolicy` selecting `app=agent-sandbox-rl` exists in the namespace.
-- **Overall lifetime limit (`runtime_timeout`)**: Enforced both in-process (expiring the sandbox, clamping per-command timeouts, and releasing the `SandboxClaim`) and on-cluster via a best-effort `SandboxClaim.spec.lifecycle.shutdownTime` (`shutdownPolicy: Delete`).
-- **Image rewriting**: Configure `sandbox.image_map` in Task Config (or set `SANDBOX_IMAGE_MAP`, e.g. `org/**=mirror.example.com/repo/**`).
-- **Optional pod annotations**: Pass cluster-specific pod annotations via `sandbox_kwargs.pod_annotations` or `SANDBOX_POD_ANNOTATIONS` (JSON object). No cluster-specific annotations are added by default.
+Options under `sandbox_kwargs`:
 
-See `examples/quickstart/training/task_config_react_gke.yaml` for a full ReAct training config.
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `namespace` | `SANDBOX_NAMESPACE`, then the process's own namespace, then `default` | Namespace the sandbox pods run in. |
+| `run_id` | `SANDBOX_RUN_ID`, else a random ID per process | Sandboxes with the same run ID share warm pools across processes. |
+| `node_selector` | `NODE_SELECTOR_KEY` / `NODE_SELECTOR_VAL` | Node labels the pods require. A matching `NoSchedule` toleration is added for each label, so a node pool tainted with its own label is usable. |
+| `network_policy_management` | `Managed` | `Managed`: the controller creates a NetworkPolicy per image. `Unmanaged`: it creates none. |
+| `network_policy` | deny all ingress and egress | The NetworkPolicy rules for `Managed` mode. |
 
-To [verify oracle solutions](../quickstart/oracle-verification.md) on this provider, select it with `SANDBOX_PROVIDER` and give the run its own ID:
+The three environment fallbacks exist because those values change per run, which a Task Config file cannot express.
 
-```bash
-export SANDBOX_PROVIDER=gke_agent_sandbox
-export SANDBOX_RUN_ID="oracle-$(date +%m%d-%H%M%S)"
-export SANDBOX_MAX_WARMPOOL_SIZE=1  # each oracle sample claims one sandbox for its image
-python examples/inference/parallel_run_oracle.py \
-    --data-path ~/data/uni_agent/r2e_gym_subset.parquet \
-    --task-config examples/quickstart/oracle/task_config_oracle.yaml \
-    --num-workers 8 \
-    --concurrency 64
+**Network isolation.** Sandboxes have no network access by default; only the pod's loopback and `pods/exec` work. To allow traffic, pass `network_policy` rules. `Unmanaged` mode is for clusters where one namespace-wide policy is preferable to one per image (large GKE Dataplane V2 clusters): the provider then refuses to start unless a NetworkPolicy in the namespace restricts egress for the sandbox pods (label `app=agent-sandbox-rl`).
+
+**Lifetime.** A sandbox is stopped when `runtime_timeout` elapses, and the controller is asked to delete its claim at the same deadline in case the process has died.
+
+**Shell.** The `stateful_shell` tool uses a built-in shell session that needs only `bash`, because an isolated sandbox cannot download tmux.
+
+### Warm pools
+
+A sandbox starts without any preparation: the first one for an image creates the pod on demand and waits for the image pull. To avoid that wait, keep sandboxes started ahead of time:
+
+```python
+from uni_agent.sandbox.gke import GKEAgentSandbox
+
+# image -> number of ready sandboxes to keep; returns image -> ready
+ready = GKEAgentSandbox.prewarm({"python:3.12": 16}, run_id="my-run", timeout=900)
+...
+GKEAgentSandbox.unwarm(["python:3.12"], run_id="my-run")
 ```
 
-The oracle runner does not tear the warm pools down when it exits. Remove them afterwards with the reaper from `agent-sandbox-rl`:
+Both calls take the same `sandbox_kwargs` as the sandboxes that will use the pools, and both block. Sandboxes in other processes use the pools when they share the `run_id`.
+
+### Cleanup
+
+When a process exits it releases its sandboxes and deletes the pools it created. A process that is killed cannot do that; remove what it left with the reaper from `agent-sandbox-rl`, using `--in-cluster` when running inside the cluster:
 
 ```bash
-python -m agent_sandbox_rl.reaper --namespace "${SANDBOX_NAMESPACE:-default}" --run-id "${SANDBOX_RUN_ID}"
+python -m agent_sandbox_rl.reaper --namespace <namespace> --run-id <run_id>
 ```
-
-Sandboxes have no network access by default, so oracle samples whose tests need DNS or outside hosts report as unsolved.
 
 ## Custom Backend
 

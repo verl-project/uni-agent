@@ -313,6 +313,30 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
     For in-sandbox model calls, set `sandbox_kwargs.proxy_port: 38197` in a Task
     Config; `run_task` configures the reverse tunnel from the live Gateway Session.
 
+=== "GKE Agent Sandbox"
+
+    **Self-hosted on Kubernetes.** Each sandbox is a pod on a GKE cluster with the
+    [Agent Sandbox](https://github.com/kubernetes-sigs/agent-sandbox) controller installed.
+    Install the client packages listed in [Sandbox](../concepts/sandbox.md#gke-agent-sandbox-gke_agent_sandbox)
+    and run with Kubernetes credentials for the namespace.
+
+    ```python
+    from uni_agent.sandbox import SandboxConfig
+
+    config = SandboxConfig(
+        provider="gke_agent_sandbox",
+        image="python:3.12",
+        runtime_timeout=3600,
+        sandbox_kwargs={
+            "namespace": "default",
+            # Optional: node labels the sandbox pods require.
+            "node_selector": {"cloud.google.com/gke-nodepool": "sandbox-cpu-pool"},
+            # Optional: sandboxes have no network access unless rules are given here.
+            "network_policy": {"egress": [{}]},
+        },
+    )
+    ```
+
 `image_mounts` allows Uni-Agent to attach self-contained runtime images for black-box
 agent harnesses to task sandboxes while keeping harness dependencies isolated
 from task images; `executable_paths` exposes selected runtime commands.
@@ -460,6 +484,16 @@ After configuring a supported backend above, run the complete connectivity and p
     DEBUG_MODE=1 SANDBOX_PROVIDER=agent_dx IMAGE=python:3.12 \
       python examples/quickstart/sandbox/demo.py
     ```
+
+=== "GKE Agent Sandbox"
+
+    ```bash
+    DEBUG_MODE=1 SANDBOX_PROVIDER=gke_agent_sandbox SANDBOX_NAMESPACE=<namespace> \
+      python examples/quickstart/sandbox/demo.py
+    ```
+
+    Sandboxes have no network access by default, so the demo's `pip install numpy` step
+    fails unless `IMAGE` already contains numpy.
 
 Next, [verify task oracle solutions](oracle-verification.md) against the configured sandbox before running agent inference or training.
 
