@@ -22,6 +22,7 @@ vLLM or ZMQ dependency.
 from __future__ import annotations
 
 import asyncio
+from threading import Event
 
 import msgpack
 import pytest
@@ -88,12 +89,15 @@ class FakeZMQTransport(Transport):
     def __init__(self, payloads: list[bytes], interval: float = 1.0) -> None:
         self._payloads = list(payloads)
         self._interval = interval
+        self.payloads_handled = Event()
 
     async def subscribe(self, handler):
         try:
-            for p in self._payloads:
-                handler(p, REPLICA_ID)
-                await asyncio.sleep(self._interval)
+            for index, payload in enumerate(self._payloads):
+                if index:
+                    await asyncio.sleep(self._interval)
+                handler(payload, REPLICA_ID)
+            self.payloads_handled.set()
             while True:
                 await asyncio.sleep(self._interval)
         except (asyncio.CancelledError, GeneratorExit):

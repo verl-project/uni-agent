@@ -24,11 +24,9 @@ from __future__ import annotations
 import pytest
 
 from uni_agent.agent_aware_router.config.strategy import KVCAwareStrategyConfig
+from uni_agent.agent_aware_router.store.group_cache import PrefixEstimate
 from uni_agent.agent_aware_router.strategies import ReplicaInfo, StrategyRegistry, route
 from uni_agent.agent_aware_router.strategies.kvc_aware import KVCacheAwareStrategy
-
-pytestmark = [pytest.mark.level0, pytest.mark.cpu]
-
 
 # ============================================================
 # ReplicaInfo
@@ -38,6 +36,8 @@ pytestmark = [pytest.mark.level0, pytest.mark.cpu]
 class TestReplicaInfo:
     """R03: ReplicaInfo value type."""
 
+    @pytest.mark.cpu
+    @pytest.mark.level0
     def test_r03_carries_only_replica_id(self):
         """
         Feature: ReplicaInfo carries a replica_id and no actor handle
@@ -58,6 +58,8 @@ class TestReplicaInfo:
 
 
 class TestStrategyRegistry:
+    @pytest.mark.cpu
+    @pytest.mark.level0
     def test_builtin_registered(self):
         """
         Feature: built-in KVCacheAwareStrategy is pre-registered for KVCAwareStrategyConfig
@@ -67,6 +69,8 @@ class TestStrategyRegistry:
 
         assert StrategyRegistry.get(KVCAwareStrategyConfig) is KVCacheAwareStrategy
 
+    @pytest.mark.cpu
+    @pytest.mark.level0
     def test_register_and_get(self):
         """
         Feature: custom strategy can be registered and retrieved by config type
@@ -87,6 +91,8 @@ class TestStrategyRegistry:
         finally:
             StrategyRegistry._registry.pop(_DummyConfig, None)
 
+    @pytest.mark.cpu
+    @pytest.mark.level0
     def test_get_unknown_raises(self):
         """
         Feature: looking up an unregistered config type raises KeyError
@@ -107,32 +113,29 @@ class TestStrategyRegistry:
 
 
 class FakeRouteDataProvider:
-    def __init__(self, data=None):
-        self._data = data or {}
-
-    def get_metrics(self, replica_id):
-        return self._data.get(replica_id, {})
+    def __init__(self, reserved_blocks=None):
+        self._reserved_blocks = reserved_blocks or {}
 
     def get_metric(self, replica_id, key):
-        return self.get_metrics(replica_id).get(key, 0.0)
+        return 0.0
 
-    def get_metric_replica_ids(self):
-        return list(self._data)
+    def capacity_blocks(self, replica_id):
+        return 10
 
-    def get_block_size(self):
-        return 16
-
-    def hash_schema(self):
-        return 0, 16, 0
+    def inflight_reserved_blocks(self, replica_id):
+        return self._reserved_blocks[replica_id]
 
     def inflight_block_count(self, replica_id):
-        return self.get_metrics(replica_id).get("held", 0)
+        return self._reserved_blocks[replica_id]
 
-    def get_layer_prefix_hit_rate(self, replica_id, prompt_ids, layer, *, query_tokens=None):
-        return 0.0
+    def request_block_need(self, prompt_tokens, saved_tokens, *, replica_id):
+        return 1
 
-    def kv_cache_load(self, replica_id):
-        return 0.0
+    def hash_schema(self):
+        return 0, None, 0
+
+    def estimate_prefixes(self, replica_ids, hashes, query_tokens):
+        return {node: PrefixEstimate("unavailable", 0, query_tokens, 0, None) for node in replica_ids}
 
 
 class ConstantStrategy:
@@ -163,7 +166,6 @@ PROMPT_IDS = [1, 2, 3]
 def _strat(**kwargs):
     defaults = dict(
         load_threshold=0.9,
-        layer_weights={"gpu": 0.7, "cpu": 0.2, "ssd": 0.1},
     )
     defaults.update(kwargs)
     strat = KVCacheAwareStrategy(**defaults)
@@ -177,6 +179,8 @@ def _strat(**kwargs):
 
 
 class TestRoute:
+    @pytest.mark.cpu
+    @pytest.mark.level0
     def test_single_strategy_descending(self):
         """
         Feature: route() returns replica ids sorted by score descending
@@ -193,22 +197,19 @@ class TestRoute:
     @pytest.mark.cpu
     @pytest.mark.level0
     def test_overloaded_present_in_ranking(self, monkeypatch):
-        def unexpected_shuffle(*args):
-            pytest.fail("capacity scoring entered the exception fallback")
-
-        monkeypatch.setattr("random.shuffle", unexpected_shuffle)
-        strat = _strat(tie_tolerance=0)
-        provider = FakeRouteDataProvider(
-            {
-                "rep_a": {"num_gpu_blocks": 10, "held": 0},
-                "rep_b": {"num_gpu_blocks": 10, "held": 4},
-                "overloaded": {"num_gpu_blocks": 10, "held": 10},
-            }
+        """Capacity scoring keeps an overloaded replica in the ranking."""
+        provider = FakeRouteDataProvider(reserved_blocks={"rep_a": 2, "rep_b": 6, "overloaded": 10})
+        monkeypatch.setattr(
+            "uni_agent.agent_aware_router.strategies.routing.random.shuffle",
+            lambda _: pytest.fail("unexpected fallback to random routing"),
         )
-        ranking = route(strat, PROMPT_IDS, provider, _replicas("rep_a", "rep_b", "overloaded"), None)
+
+        ranking = route(_strat(), PROMPT_IDS, provider, _replicas("overloaded", "rep_b", "rep_a"))
         assert ranking[0] == "rep_a"
         assert set(ranking) == {"rep_a", "rep_b", "overloaded"}
 
+    @pytest.mark.cpu
+    @pytest.mark.level0
     def test_empty_pool_raises(self):
         """
         Feature: route() raises RuntimeError when the replica list is empty
@@ -216,6 +217,8 @@ class TestRoute:
         with pytest.raises(RuntimeError):
             route(ConstantStrategy([]), PROMPT_IDS, FakeRouteDataProvider({}), [])
 
+    @pytest.mark.cpu
+    @pytest.mark.level0
     def test_length_mismatch_falls_back_to_random(self):
         """
         Feature: route() falls back to random order when score() returns wrong-length list
@@ -228,6 +231,8 @@ class TestRoute:
         )
         assert set(ranking) == {"rep_a", "rep_b"}
 
+    @pytest.mark.cpu
+    @pytest.mark.level0
     def test_strategy_exception_falls_back_to_random(self):
         """
         Feature: exceptions from score() cause route() to fall back to random order
@@ -235,6 +240,8 @@ class TestRoute:
         ranking = route(RaisingStrategy(), PROMPT_IDS, FakeRouteDataProvider({}), _replicas("rep_a", "rep_b"))
         assert set(ranking) == {"rep_a", "rep_b"}
 
+    @pytest.mark.cpu
+    @pytest.mark.level0
     def test_nan_score_ranked_last(self):
         """
         Feature: non-finite (NaN) scores are ranked last

@@ -122,27 +122,3 @@ def test_old_untagged_and_modern_group_events_share_full_estimates(query_tokens,
         assert estimates[0] == estimates[1]
         assert estimates[0].estimated_hit_tokens == hit
         assert stores[0].per_replica_block_counts() == stores[1].per_replica_block_counts()
-
-
-@pytest.mark.cpu
-@pytest.mark.level0
-@pytest.mark.parametrize("length", [1, 2])
-def test_lookahead_predictions_match_event_identity_and_require_the_complete_suffix(
-    layout, install_metadata, parse, stored, length
-):
-    raw = layout((("full_attention", 4),), unit=2, alignment=4)
-    raw["native_hash_config"]["lookahead_tokens"] = length
-    cache = KVCacheStore()
-    for node in ("reported", "predicted"):
-        install_metadata(cache, node, raw)
-    tokens = list(range(4 + length))
-    event = stored(block=4, tokens=tokens[:4], hashes=["block"], lookahead_token_ids=[tokens[4:]])
-    cache.apply_update(KVCacheUpdate("reported", parse([event], "reported")))
-
-    def hashes(prompt):
-        return list(map(str, get_prefix_hashes_incremental(prompt, 2, 0, 0, lookahead=length)[0]))
-
-    cache.record_dispatch_blocks("predicted", hashes(tokens))
-    for prompt, hit in ((tokens, 4), (tokens[:-1] + [99], 0), (tokens[:-1], 0)):
-        estimates = cache.estimate_prefixes(["reported", "predicted"], hashes(prompt), len(prompt))
-        assert [estimate.estimated_hit_tokens for estimate in estimates.values()] == [hit, hit]

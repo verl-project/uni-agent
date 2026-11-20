@@ -18,7 +18,7 @@ import pytest
 
 from uni_agent.agent_aware_router.store.data_store import DataStore
 from uni_agent.agent_aware_router.store.kv_cache_store import KVCacheStore
-from uni_agent.agent_aware_router.types.kv_cache import KVCacheUpdate
+from uni_agent.agent_aware_router.types.kv_cache import GroupReservation, KVCacheUpdate
 from uni_agent.agent_aware_router.utils.hash import get_prefix_hashes_incremental
 
 
@@ -41,13 +41,14 @@ def estimate(cache, replica="a"):
 
 
 def pin(cache, request, replica="a"):
-    cache.incr_block_refs(replica, ["held"])
-    cache.put_marker(request, replica, ["held"])
-
-
-def release(cache, request):
-    marker = cache.pop_marker(request)
-    cache.decr_block_refs(marker["replica"], marker["hashes"])
+    cache.pin_request(
+        request,
+        replica,
+        [],
+        cache.dispatch_schema(replica),
+        reservations=(GroupReservation(0, ("held",)), GroupReservation(1, private_blocks=2)),
+        predict=False,
+    )
 
 
 @pytest.mark.cpu
@@ -59,18 +60,19 @@ def test_invalidate_gates_rebuilt_hits_and_dispatch_without_losing_request_state
     cache.invalidate_replica("a")
     assert estimate(cache).estimated_hit_tokens == 0
     assert estimate(cache, "b").estimated_hit_tokens == 16
-    assert cache.inflight_block_count("a") == 1
+    assert cache.inflight_reserved_blocks("a") == 3
     assert cache.get_marker("request-a") is not None
     populate(cache, parse, stored)
     assert estimate(cache).estimated_hit_tokens == 0
     hashes = list(map(str, get_prefix_hashes_incremental(list(range(17)), 2, 0, 0)[0]))
-    assert cache.record_dispatch_blocks("a", hashes) == 0
+    assert cache.pin_request("during-replay", "a", hashes, cache.dispatch_schema("a"), reservations=()) == 0
+    cache.unpin_request("during-replay")
     cache.mark_replica_ready("a")
     assert estimate(cache).estimated_hit_tokens == 16
-    assert cache.inflight_block_count("a") == 1
-    release(cache, "request-a")
-    assert cache.inflight_block_count("a") == 0
-    assert cache.inflight_block_count("b") == 1
+    assert cache.inflight_reserved_blocks("a") == 3
+    cache.unpin_request("request-a")
+    assert cache.inflight_reserved_blocks("a") == 0
+    assert cache.inflight_reserved_blocks("b") == 3
 
 
 @pytest.mark.cpu
@@ -88,7 +90,7 @@ def test_clear_resident_blocks_preserves_request_state_and_rebuilding(cache, par
     assert cache._gated_replicas == ({"a"} if gated else set())
     assert estimate(cache).estimated_hit_tokens == 0
     assert estimate(cache, "b").estimated_hit_tokens == 16
-    assert cache.inflight_block_count("a") == 1
+    assert cache.inflight_reserved_blocks("a") == 3
     assert cache.get_marker("request-a") == marker
     populate(cache, parse, stored)
     assert estimate(cache).estimated_hit_tokens == (0 if gated else 16)
@@ -106,8 +108,8 @@ def test_clear_replica_cleans_request_state_but_does_not_end_rebuilding(cache, p
     cache.invalidate_replica("a")
     cache.clear_replica("a")
     assert cache.get_marker("request-a") is None
-    assert cache.inflight_block_count("a") == 0
-    assert cache.inflight_block_count("b") == 1
+    assert cache.inflight_reserved_blocks("a") == 0
+    assert cache.inflight_reserved_blocks("b") == 3
     populate(cache, parse, stored)
     assert estimate(cache).estimated_hit_tokens == 0
     cache.mark_replica_ready("a")
@@ -128,9 +130,9 @@ def test_data_store_repeated_invalidation_discards_partial_replay_until_ready(ca
     assert estimate(cache).estimated_hit_tokens == 0
     store.mark_kv_replica_ready("a")
     assert estimate(cache).estimated_hit_tokens == 16
-    assert store.inflight_block_count("a") == 1
-    release(store, "request")
-    assert store.inflight_block_count("a") == 0
+    assert store.inflight_reserved_blocks("a") == 3
+    store.unpin_request("request")
+    assert store.inflight_reserved_blocks("a") == 0
 
 
 @pytest.mark.cpu
@@ -145,10 +147,11 @@ def test_dispatch_estimates_discard_old_residency_and_preserve_request_accountin
     assert cache.per_replica_block_counts() == {"b": 5}
     assert estimate(cache).estimated_hit_tokens == 0
     hashes = list(map(str, get_prefix_hashes_incremental(list(range(17)), 2, 0, 0)[0]))
-    assert cache.record_dispatch_blocks("a", hashes) == 6
+    assert cache.pin_request("prediction", "a", hashes, cache.dispatch_schema("a"), reservations=()) == 6
+    cache.unpin_request("prediction")
     assert estimate(cache).estimated_hit_tokens == 16
-    assert cache.inflight_block_count("a") == 1
+    assert cache.inflight_reserved_blocks("a") == 3
     cache.invalidate_replica("a")
     assert estimate(cache).estimated_hit_tokens == 0
-    assert cache.inflight_block_count("a") == 1
+    assert cache.inflight_reserved_blocks("a") == 3
     assert estimate(cache, "b").estimated_hit_tokens == 16

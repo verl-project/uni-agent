@@ -14,8 +14,6 @@
 
 """Canonical token estimates after unsequenced Stored, Removed, and Clear."""
 
-import time
-
 import pytest
 from conftest import BLOCK_SIZE, REPLICA_ID, FakeZMQTransport, kv_payload, make_stored_event, mapping_event
 
@@ -37,19 +35,17 @@ def estimate(store, tokens):
 def test_prefix_estimate_keeps_final_token_computation_boundary(layout, install_metadata):
     store = DataStore()
     install_metadata(store, REPLICA_ID, layout((("full_attention", BLOCK_SIZE),), unit=BLOCK_SIZE))
-    collector = Collector(
-        FakeZMQTransport(
-            [
-                kv_payload(make_stored_event("rh0", LONG_IDS[:BLOCK_SIZE])),
-                kv_payload(make_stored_event("rh1", LONG_IDS[BLOCK_SIZE:], parent="rh0")),
-            ],
-            interval=0.05,
-        ),
-        VLLMKVParser(),
+    transport = FakeZMQTransport(
+        [
+            kv_payload(make_stored_event("rh0", LONG_IDS[:BLOCK_SIZE])),
+            kv_payload(make_stored_event("rh1", LONG_IDS[BLOCK_SIZE:], parent="rh0")),
+        ],
+        interval=0.05,
     )
+    collector = Collector(transport, VLLMKVParser())
     collector.start()
     try:
-        time.sleep(0.3)
+        assert transport.payloads_handled.wait(timeout=5), "Collector did not finish handling both Stored events"
         for query_tokens, hit_tokens in [
             (BLOCK_SIZE, 0),
             (2 * BLOCK_SIZE, BLOCK_SIZE),

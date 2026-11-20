@@ -24,7 +24,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
 
-from ...types.kv_cache import KVCacheUpdate
+from ...types.kv_cache import DispatchSchema, GroupReservation, InflightBooking, KVCacheUpdate
 
 
 @dataclass
@@ -59,7 +59,7 @@ class InflightBlockUpdate:
     decisions (when to pin, when a re-acquire must first unwind a stale pin);
     the collector applies each command mechanically — pin/unpin sets for
     ``unpin`` / ``stale_unpin`` come from the per-request marker row
-    (``KVCacheStore.pop_marker``), which is the ground truth of what the
+    (``KVCacheStore.unpin_request``), which is the ground truth of what the
     dispatch pinned.
 
     Attributes:
@@ -68,13 +68,21 @@ class InflightBlockUpdate:
             from the marker row and may be a previous one).
         request_id: The routing request id the command is scoped to.
         action: ``"pin"`` / ``"unpin"`` / ``"stale_unpin"``.
-        block_hashes: Resolved full-block prefix hash chain — ``pin`` only.
+        block_hashes: Local prefix hashes at the captured hash unit for dispatch predictions.
+        reservations: Per-group block hashes and private budgets held until release.
+        mark_resident: ``pin`` only — request provisional group-prefix estimates. Group residency remains
+            established by native events; unsupported layouts ignore this hint.
+        schema: Acquire-time identity generation and reservation units.
     """
 
     replica_id: str
     request_id: str
     action: str
     block_hashes: list[str] = field(default_factory=list)
+    mark_resident: bool = False
+    schema: DispatchSchema | None = None
+    reservations: tuple[GroupReservation, ...] = ()
+    booking: InflightBooking | None = None
 
 
 @dataclass

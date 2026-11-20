@@ -1,5 +1,7 @@
 """Shared cache metadata and event fixtures for router tests."""
 
+import math
+
 import msgpack
 import pytest
 
@@ -57,6 +59,18 @@ def layout(metadata):
         raw["cache_config"].update(prefix_match_unit=unit, mamba_cache_mode=mode)
         raw["native_hash_config"].update(unit=unit, hit_alignment=unit if alignment is None else alignment)
         raw["model_config"]["attention_chunk_size"] = chunk
+        # Static native budgets, separate from matching policy and token capacity.
+        raw["cache_reservation_profile"] = {
+            "schema_version": 1,
+            "max_model_len": 64,
+            "groups": [
+                {
+                    "group_idx": i,
+                    "max_blocks_per_request": (2 if kind == "mamba" and mode != "all" else math.ceil(64 / size)),
+                }
+                for i, (kind, size) in enumerate(groups)
+            ],
+        }
         return raw
 
     return make_layout

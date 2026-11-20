@@ -79,12 +79,13 @@ def test_disabled_prefix_caching_does_not_choose_a_hash_unit(metadata):
     "alignment,reason",
     [(None, "missing_hit_alignment"), (0, "invalid_hit_alignment"), (48, "incompatible_hit_alignment")],
 )
-def test_unusable_hit_alignment_disables_matching(alignment, reason, layout):
+def test_unusable_hit_alignment_disables_matching_but_keeps_reservations(alignment, reason, layout):
     raw = layout((("full_attention", 32), ("sliding_window", 64)), unit=32)
     raw["native_hash_config"]["hit_alignment"] = alignment
     state = build_cache_registry(raw)
     assert state.registry is None
     assert state.reason == reason
+    assert state.reservation_groups
 
 
 @pytest.mark.cpu
@@ -93,8 +94,11 @@ def test_unusable_hit_alignment_disables_matching(alignment, reason, layout):
 def test_mamba_all_requires_representable_sliding_block_ends(layout, prefix_cacheable):
     raw = layout((("full_attention", 8), ("sliding_window", 4), ("mamba", 8)), unit=8, window=9, mode="all")
     raw["groups"][1].update(prefix_cacheable=prefix_cacheable, prefix_replay_tokens=0)
+    raw["cache_reservation_profile"].update(num_blocks=65, capacity_blocks=64)
     state = build_cache_registry(raw)
 
+    assert state.capacity_blocks == 64
+    assert [spec.group_idx for spec in state.reservation_groups] == [0, 1, 2]
     if prefix_cacheable:
         assert state.registry is None
         assert state.reason == "incompatible_native_hash_unit"
@@ -108,11 +112,12 @@ def test_mamba_all_requires_representable_sliding_block_ends(layout, prefix_cach
 @pytest.mark.parametrize(
     "policy", [{"drop_eagle_group_ids": [1]}, {"codec_unavailable_reason": "unsupported_lookahead"}]
 )
-def test_unknown_or_hybrid_eagle_drop_disables_matching(layout, policy):
+def test_unknown_or_hybrid_eagle_drop_preserves_capacity(layout, policy):
     raw = layout()
     raw["native_hash_config"].update(lookahead_tokens=0, **policy)
+    raw["cache_reservation_profile"]["capacity_blocks"] = 64
     state = build_cache_registry(raw)
-    assert state.registry is None
+    assert state.registry is None and state.reservation_groups and state.capacity_blocks == 64
 
 
 # Representative contract failures: non-positive and incompatible units.
@@ -283,6 +288,20 @@ def test_store_owns_registry_separately_from_event_granularity_and_residency(met
 
 @pytest.mark.cpu
 @pytest.mark.level0
+def test_malformed_optional_budget_cannot_suppress_private_group_cost(layout):
+    raw = layout()
+    profile = raw["cache_reservation_profile"]
+    profile["capacity_blocks"] = 99
+    assert build_cache_registry(raw).capacity_blocks == 99
+    profile["groups"].append(dict(profile["groups"][1]))  # duplicate group must not overwrite a budget
+    state = build_cache_registry(raw)
+    assert state.registry is not None  # cache matching remains usable
+    assert state.capacity_blocks is None
+    assert state.reservation_groups[1].private_blocks is None
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_native_unit_includes_non_matching_group_without_deriving_from_groups(layout):
     raw = layout((("full_attention", 32), ("sliding_window", 16), ("encoder_only_attention", 8)), unit=8, alignment=32)
     raw["vllm_version"] = "0.23.0"
@@ -295,38 +314,28 @@ def test_native_unit_includes_non_matching_group_without_deriving_from_groups(la
 @pytest.mark.cpu
 @pytest.mark.level0
 @pytest.mark.parametrize("profile", [None, {}, {"schema_version": 1, "unit": 0}])
-def test_missing_native_unit_disables_matching(layout, profile):
+def test_missing_native_unit_keeps_capacity_and_request_budget_without_matching(layout, profile):
     raw = layout((("full_attention", 4),), unit=2)
     raw["native_hash_config"] = profile
+    raw["cache_reservation_profile"]["capacity_blocks"] = 9
     state = build_cache_registry(raw)
     assert state.registry is None
     assert state.reason in {"missing_native_hash_unit", "invalid_native_hash_unit"}
+    assert state.capacity_blocks == 9
+    assert state.reservation_groups[0].block_size == 4
 
 
 @pytest.mark.cpu
 @pytest.mark.level0
 @pytest.mark.parametrize("length", [None, -1, True, "missing"])
-def test_ambiguous_new_hash_lookahead_disables_matching(layout, length):
+def test_ambiguous_new_hash_lookahead_keeps_capacity_without_matching(layout, length):
     raw = layout((("full_attention", 4),), unit=2)
     profile = raw["native_hash_config"]
     profile["vllm_version"] = "0.33.0"
+    raw["cache_reservation_profile"]["capacity_blocks"] = 24
     if length != "missing":
         profile["lookahead_tokens"] = length
     state = build_cache_registry(raw)
     assert state.registry is None
     assert state.reason in {"missing_hash_lookahead", "invalid_hash_lookahead"}
-
-
-@pytest.mark.cpu
-@pytest.mark.level0
-def test_malformed_metadata_errors_preserve_layout_until_a_valid_refresh(layout, install_metadata):
-    store = KVCacheStore()
-    state = install_metadata(store, "a", layout())
-    changed = layout(unit=4)
-    changed["metadata_errors"] = ["timeout"]
-    assert not store.refresh_replica_metadata("a", changed)
-    assert store.registry_state("a") is state
-    assert store.metadata_status("a")["reason"] == "invalid_metadata_errors"
-    changed["metadata_errors"] = {}
-    assert store.refresh_replica_metadata("a", changed)
-    assert store.metadata_status("a")["gated"]
+    assert state.capacity_blocks == 24

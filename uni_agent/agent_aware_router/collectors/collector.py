@@ -27,11 +27,10 @@ from ..debug import get_debug_var, is_debug_enabled
 from ..insight import WriteEvent, WriteKind, emitter
 from ..store.data_store import DataStore
 from ..types import EmitKey, MetricKey
-from ..types.kv_cache import LOCAL_GPU_DOMAIN
+from ..types.kv_cache import LOCAL_GPU_DOMAIN, KVCacheUpdate
 from ..utils.knob import coerce_knob_value
-from ..utils.prefix_cache import resolve_prefix_hashes
 from ._loop_runner import _LoopRunner
-from .parse import InflightBlockUpdate, KVCacheUpdate, MetricsUpdate, Parser, StickyUpdate
+from .parse import InflightBlockUpdate, MetricsUpdate, Parser, StickyUpdate
 from .parse.basic.inflight import InflightParser
 from .transport.base import Transport
 from .transport.callback import StatisticEvent
@@ -69,11 +68,6 @@ _CUMULATIVE_KEYS: tuple[str, ...] = (
     MetricKey.EXTERNAL_PREFIX_CACHE_HITS,
     MetricKey.ESTIMATED_FLOPS_PER_GPU,
 )
-
-# Per-request bookkeeping key: prompt length recorded at dispatch (acquire) and
-# folded back out at release — releases carry no token list (verl #7115). All
-# inflight store access lives on the collector; the parser decides and emits.
-_PROMPT_LEN_KEY = "prompt_len"
 
 
 def _avg(delta_sum: float, delta_cnt: float) -> float:
@@ -246,8 +240,9 @@ class Collector:
         if update.is_delta:
             is_acquire = MetricKey.DISPATCHED_COUNT in update.metrics
             is_release = MetricKey.COMPLETED_COUNT in update.metrics
+            is_unwind = update.metrics.get(MetricKey.INFLIGHT_COUNT) == -1
             new_values = self._data_store.incr_metrics(update.replica_id, update.metrics)
-            if is_acquire or is_release:
+            if is_acquire or is_release or is_unwind:
                 emitter.on_write(
                     WriteEvent(
                         kind=WriteKind.ACQUIRE if is_acquire else WriteKind.RELEASE,
@@ -309,23 +304,14 @@ class Collector:
         """Gather the acquire state in the protocol's store order, then decide."""
         rid = event.request_id
         turn = self._data_store.incr_per_request(rid, "turn") if rid else 0
-        stale = self._data_store.get_marker(rid) if rid else None
-        booked_len = self._data_store.get_per_request(rid, _PROMPT_LEN_KEY, 0) if rid else 0
-        if rid:
-            self._data_store.set_per_request(rid, _PROMPT_LEN_KEY, len(event.prompt_ids))
-            # Prediction follows the native prefix schema. The held-block book below
-            # still accounts in the physical blocks used by the capacity strategy.
-            hashes = resolve_prefix_hashes(list(event.prompt_ids), None, self._data_store)
-            self._dispatch_recorded_blocks += self._data_store.record_dispatch_blocks(event.replica_id, hashes)
-        block_size = self._data_store.get_block_size() or 0
-        return parser.parse(event, replica_id, turn=turn, stale=stale, block_size=block_size, booked_len=booked_len)
+        booking = self._data_store.get_booking(rid)
+        schema = self._data_store.dispatch_schema(event.replica_id)
+        return parser.parse(event, replica_id, turn=turn, booking=booking, schema=schema)
 
     def _inflight_release(self, parser: InflightParser, event: StatisticEvent, replica_id: str) -> list:
-        """Gather the release folds from the acquire-time rows, then decide."""
-        rid = event.request_id
-        turn = self._data_store.get_per_request(rid, "turn", 0) if rid else 0
-        booked_len = self._data_store.get_per_request(rid, _PROMPT_LEN_KEY, 0) if rid else 0
-        return parser.parse(event, replica_id, turn=turn, booked_len=booked_len)
+        """Use the original booking even if the request's LRU row was evicted."""
+        booking = self._data_store.get_booking(event.request_id)
+        return parser.parse(event, replica_id, booking=booking)
 
     def _apply_inflight_block_update(self, update: InflightBlockUpdate) -> None:
         """Apply an ``InflightBlockUpdate`` command to the held-block book — mechanically.
@@ -333,26 +319,22 @@ class Collector:
         The acquire/release protocol decisions (when to pin, when a re-acquire
         must first unwind a stale pin) live in ``InflightParser``; this applier
         only maps each command to store operations. Unpin sets always come from
-        the request's marker row (``KVCacheStore.pop_marker``) — the ground
+        the acquire-time marker (``KVCacheStore.unpin_request``) — the ground
         truth of what that dispatch pinned — so a release whose memo was later
         replaced still unwinds exactly the original set.
         """
         if update.action == "pin":
-            self._data_store.incr_block_refs(update.replica_id, update.block_hashes)
-            self._data_store.put_marker(update.request_id, update.replica_id, update.block_hashes)
-        elif update.action == "unpin":
-            marker = self._data_store.pop_marker(update.request_id)
-            if marker is None:
-                # Nothing was pinned at acquire — the held set never knew about this request.
-                logger.debug(f"release with no pinned blocks request={update.request_id} on {update.replica_id}")
-                return
-            self._data_store.decr_block_refs(marker["replica"], marker["hashes"])
-        elif update.action == "stale_unpin":
-            marker = self._data_store.pop_marker(update.request_id)
-            if marker is None:
-                logger.debug(f"stale-unpin found no marker request={update.request_id}")
-                return
-            self._data_store.decr_block_refs(marker["replica"], marker["hashes"])
+            self._dispatch_recorded_blocks += self._data_store.pin_request(
+                update.request_id,
+                update.replica_id,
+                update.block_hashes,
+                update.schema,
+                predict=update.mark_resident,
+                reservations=update.reservations,
+                booking=update.booking,
+            )
+        elif update.action in {"unpin", "stale_unpin"}:
+            self._data_store.unpin_request(update.request_id)
         else:
             logger.warning(f"unknown InflightBlockUpdate action: {update.action}")
 

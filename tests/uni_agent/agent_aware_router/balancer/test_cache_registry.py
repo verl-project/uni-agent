@@ -28,9 +28,9 @@ def test_initial_metadata_wait_is_bounded_and_applies_only_ready_replicas(monkey
     balancer = KVCAwareBalancer(servers, _router_config(), provider_factory=_FakeCollectorManager)
     wait.assert_called_once_with([slow, failed, healthy], num_returns=3, timeout=5.0)
     assert [call.args[0] for call in get.call_args_list] == [failed, healthy]
-    assert balancer._store.cache_registry_state("c").registry.local_hash_unit == 4
-    assert balancer._store.cache_registry_state("a").registry is None
-    assert balancer._store.cache_registry_state("b").registry is None
+    assert balancer._store.dispatch_schema("c").hash_unit == 4
+    assert balancer._store.dispatch_schema("a") is None
+    assert balancer._store.dispatch_schema("b") is None
     balancer.acquire_server("request", [1, 2, 3])
     for server in servers.values():
         server.get_kv_cache_metadata.remote.assert_called_once_with()

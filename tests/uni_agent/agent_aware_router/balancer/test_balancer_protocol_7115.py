@@ -22,9 +22,9 @@ from uni_agent.agent_aware_router.types import MetricKey
 
 from ._helpers import _make_balancer
 
-pytestmark = [pytest.mark.cpu, pytest.mark.level0]
 
-
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_declares_forwarded_fields():
     balancer = _make_balancer()
 
@@ -32,6 +32,8 @@ def test_declares_forwarded_fields():
     assert balancer.require_release_fields() == ["request_id"]
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_release_balances_latest_prompt_tokens():
     balancer = _make_balancer({"s0": "h0"})
 
@@ -42,6 +44,8 @@ def test_release_balances_latest_prompt_tokens():
         assert balancer._store.get_metric("s0", MetricKey.INFLIGHT_TOKENS) == 0
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_release_without_request_id_cannot_balance_prompt_tokens():
     balancer = _make_balancer({"s0": "h0"})
     server_id, _ = balancer.acquire_server("request-1", [1, 2, 3])
@@ -52,6 +56,8 @@ def test_release_without_request_id_cannot_balance_prompt_tokens():
     assert balancer._store.get_metric("s0", MetricKey.INFLIGHT_TOKENS) == 3
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_clear_sticky_cache_preserves_prefix_checkpoint_and_reports_load(layout, install_metadata):
     balancer = _make_balancer({"s0": "h0"})
     install_metadata(balancer._store, "s0", layout((("full_attention", 16),), unit=16))
@@ -64,6 +70,8 @@ def test_clear_sticky_cache_preserves_prefix_checkpoint_and_reports_load(layout,
     assert balancer._store.get_per_request("request-1", "prefix_hashes") is not None
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_inflight_counter_tolerates_unknown_and_late_releases():
     balancer = _make_balancer({"s0": "h0"})
     balancer.acquire_server("request-1", [1])

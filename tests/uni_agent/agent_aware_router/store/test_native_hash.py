@@ -414,12 +414,13 @@ def test_failed_metadata_refresh_preserves_cache_until_successful_retry(store, e
 
     # A caller may reuse and mutate the very object it supplied to both replicas.
     metadata["native_hash_config"]["root_hash_hex"] = new_root
+    metadata["cache_reservation_profile"]["capacity_blocks"] = 7
     with pytest.raises(RuntimeError, match="new codec"):
         value.refresh_replica_metadata("a", metadata)
-    assert value.registry_state("a") is old_state
+    assert value.registry_state("a") is old_state and value.capacity_blocks("a") is None
     assert value.group_caches["a"] is a and not value.metadata_status("a")["gated"]
     assert value.refresh_replica_metadata("a", metadata)
-    assert value.metadata_status("a")["gated"]
+    assert value.capacity_blocks("a") == 7 and value.metadata_status("a")["gated"]
     assert "a" not in value.group_caches
     value.apply_update(KVCacheUpdate("a", events=[]))
     assert value.group_caches["a"].native_hashes.root.hex() == new_root

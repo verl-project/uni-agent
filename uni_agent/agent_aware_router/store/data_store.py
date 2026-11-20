@@ -18,7 +18,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..types import Layer, MetricKey
+from ..types import MetricKey
 from ..types.kv_cache import KVCacheUpdate, NativeHashCodecFactory
 from .cache_registry import CacheRegistryState
 from .kv_cache_store import KVCacheStore
@@ -106,30 +106,27 @@ class DataStore:
         return self._kv.refresh_replica_metadata(replica_id, metadata)
 
     def metadata_status(self, replica_id):
-        return self._kv.metadata_status(replica_id)
+        status = self._kv.metadata_status(replica_id)
+        status["capacity_known"] = self.capacity_blocks(replica_id) is not None
+        return status
 
     def get_cache_status(self):
-        return self._kv.get_cache_status()
+        statuses = self._kv.get_cache_status()
+        for node, status in statuses.items():
+            status["capacity_known"] = self.capacity_blocks(node) is not None
+        return statuses
 
     def set_native_hash_codec_factory(self, factory: NativeHashCodecFactory) -> None:
         self._kv.set_native_hash_codec_factory(factory)
 
-    def get_block_size(self) -> int | None:
-        """Get learned block size.
-
-        Returns:
-            Block size in tokens, or None if not yet learned.
-        """
-        return self._kv.block_size
-
-    def set_block_size(self, size: int) -> None:
-        """Set block size (learned from first BlockStored event).
-
-        Args:
-            size: Block size in tokens.
-        """
-        if self._kv.block_size is None:
-            self._kv.block_size = size
+    def capacity_blocks(self, replica_id) -> int | None:
+        """Current node's usable pool budget, preferring validated native metadata."""
+        if self._kv.dispatch_schema(replica_id) is None:
+            return None
+        capacity = self._kv.capacity_blocks(replica_id)
+        if capacity is None:
+            capacity = self.get_metrics(replica_id).get(MetricKey.KV_CACHE_CAPACITY_BLOCKS)
+        return capacity if type(capacity) is int and capacity >= 0 else None
 
     def hash_schema(self) -> tuple[int, int | None, int]:
         return self._kv.hash_schema()
@@ -181,51 +178,31 @@ class DataStore:
         """
         return self._kv.per_replica_block_counts()
 
-    def record_dispatch_blocks(self, replica_id: str, hashes: list[str]) -> int:
-        return self._kv.record_dispatch_blocks(replica_id, hashes)
+    def dispatch_schema(self, replica_id):
+        return self._kv.dispatch_schema(replica_id)
 
-    def get_layer_prefix_hit_rate(
-        self, replica_id: str, hash_strs: list[str], layer: Layer = Layer.GPU, *, query_tokens: int | None = None
-    ) -> float:
-        if layer != Layer.GPU or not hash_strs:
-            return 0.0
-        if query_tokens is None:
-            _, unit, lookahead = self.hash_schema()
-            if not unit:
-                return 0.0
-            extent = len(hash_strs) * unit
-            # Legacy hash-only callers supplied complete blocks and expected
-            # their matched fraction. Supply the tail required by the engine.
-            estimate = self.estimate_prefixes([replica_id], hash_strs, extent + max(1, lookahead))[replica_id]
-            return estimate.estimated_saved_tokens / extent
-        return self.estimate_prefixes([replica_id], hash_strs, query_tokens)[replica_id].saved_token_rate
-
-    def incr_block_refs(self, replica_id: str, hash_strs: list[str]) -> None:
-        """Add one reference to every hash on a replica (multiset insert).
-
-        Thin pass-through to ``KVCacheStore`` (see :meth:`KVCacheStore.incr_block_refs`).
-        """
-        self._kv.incr_block_refs(replica_id, hash_strs)
-
-    def decr_block_refs(self, replica_id: str, hash_strs: list[str]) -> None:
-        """Drop one reference to every hash on a replica (multiset remove)."""
-        self._kv.decr_block_refs(replica_id, hash_strs)
-
-    def inflight_block_count(self, replica_id: str) -> int:
-        """Number of distinct hashes currently referenced on ``replica_id``."""
+    def inflight_block_count(self, replica_id):
         return self._kv.inflight_block_count(replica_id)
 
-    def put_marker(self, request_id: str, replica_id: str, hash_strs: list[str]) -> None:
-        """Store a per-request snapshot row (see :meth:`KVCacheStore.put_marker`)."""
-        self._kv.put_marker(request_id, replica_id, hash_strs)
+    def inflight_reserved_blocks(self, replica_id):
+        return self._kv.inflight_reserved_blocks(replica_id)
 
-    def get_marker(self, request_id: str) -> dict[str, Any] | None:
-        """Return a copy of a request's marker row without clearing it (``None`` if absent)."""
+    def request_block_need(self, prompt_tokens, saved_tokens=0, *, replica_id):
+        return self._kv.request_block_need(prompt_tokens, saved_tokens, replica_id=replica_id)
+
+    def get_booking(self, request_id):
+        return self._kv.get_booking(request_id)
+
+    def get_marker(self, request_id):
         return self._kv.get_marker(request_id)
 
-    def pop_marker(self, request_id: str) -> dict[str, Any] | None:
-        """Remove and return a request's marker row (``None`` if absent)."""
-        return self._kv.pop_marker(request_id)
+    def pin_request(self, request_id, replica_id, hashes, schema, *, reservations, predict=True, booking=None):
+        return self._kv.pin_request(
+            request_id, replica_id, hashes, schema, reservations=reservations, predict=predict, booking=booking
+        )
+
+    def unpin_request(self, request_id):
+        self._kv.unpin_request(request_id)
 
     # ── PerReplicaStore incremental write ──────────────────────────────────
 

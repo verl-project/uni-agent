@@ -54,6 +54,61 @@ NativeHashCodecFactory = Callable[[Mapping[str, Any], int], NativeHashCodecResul
 
 
 @dataclass(frozen=True)
+class GroupReservationSpec:
+    """One group's prompt-prefix budget plus request-private pool blocks.
+
+    ``private_blocks=None`` means the engine has not supplied a usable budget.
+    Prefix budgets retain #257's complete-prompt-block estimate; bounded
+    attention groups conservatively retain that chain until request release.
+    """
+
+    group_idx: int
+    block_size: int
+    share_prefix: bool = True
+    private_blocks: int | None = 0
+
+
+@dataclass(frozen=True)
+class GroupReservation:
+    group_idx: int
+    block_hashes: tuple[str, ...] = ()
+    private_blocks: int | None = 0
+
+
+@dataclass(frozen=True)
+class InflightBooking:
+    """Gauges charged to a replica until this dispatch releases."""
+
+    replica_id: str
+    prompt_len: int
+    turn: int
+
+
+@dataclass(frozen=True)
+class DispatchSchema:
+    """Acquire-time layout; no hash unit means reservations cannot share prefixes."""
+
+    generation: int
+    hash_unit: int | None
+    groups: tuple[GroupReservationSpec, ...]
+    lookahead_tokens: int = 0
+
+    def request_blocks(self, prompt_tokens: int, saved_tokens: int = 0) -> float | None:
+        """Prefill-work cost in shared-pool block units, including private budgets."""
+        if any(group.private_blocks is None for group in self.groups):
+            return None
+        remaining = max(0, prompt_tokens - (saved_tokens if self.hash_unit is not None else 0))
+        return (
+            sum(
+                (remaining / group.block_size if group.share_prefix else 0) + (group.private_blocks or 0)
+                for group in self.groups
+            )
+            if prompt_tokens
+            else 0.0
+        )
+
+
+@dataclass(frozen=True)
 class KVCacheEvent:
     """Normalized cache identity and residency event shared across layers.
 

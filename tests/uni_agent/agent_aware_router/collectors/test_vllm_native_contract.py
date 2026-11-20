@@ -160,6 +160,11 @@ def native(monkeypatch, request, hash_lookahead, single_full_drop):
     assert profile["hit_alignment"] == scheduler_block_size
     assert profile["int_hashes"] is request.param
     assert utility_calls == ["get_kv_cache_group_metadata", profile_method, "uni_agent_get_cache_reservation_profile"]
+    budget = metadata["cache_reservation_profile"]
+    assert budget is not None and budget["num_blocks"] == config.num_blocks
+    # The real pool reserves a null block once for the shared pool, not per group.
+    assert budget["capacity_blocks"] == config.num_blocks - 1 == manager.block_pool.get_num_free_blocks()
+    assert [g["group_idx"] for g in budget["groups"]] == list(range(len(specs)))
 
     def make_request(token_ids):
         return Request(

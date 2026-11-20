@@ -26,6 +26,7 @@ from uni_agent.agent_aware_router.collectors.collector import get_collector
 from uni_agent.agent_aware_router.collectors.parse.vllm.kv import VLLMKVParser
 from uni_agent.agent_aware_router.config.collector import CollectorConfig
 from uni_agent.agent_aware_router.store.data_store import DataStore
+from uni_agent.agent_aware_router.types.kv_cache import GroupReservation
 from uni_agent.agent_aware_router.utils.hash import get_prefix_hashes_incremental
 
 
@@ -45,12 +46,18 @@ def seed(store, replica_id, tokens):
 
 
 def pin(store, request_id, replica_id, hashes):
-    store.incr_block_refs(replica_id, hashes)
-    store.put_marker(request_id, replica_id, hashes)
+    schema = store.dispatch_schema(replica_id)
+    return store.pin_request(
+        request_id, replica_id, hashes, schema, reservations=(GroupReservation(0, tuple(hashes)),), predict=False
+    )
 
 
 def predict(store, replica_id, hashes):
-    return store.record_dispatch_blocks(replica_id, hashes)
+    schema = store.dispatch_schema(replica_id)
+    request = "completed-prediction"
+    added = store.pin_request(request, replica_id, hashes, schema, reservations=(GroupReservation(0, tuple(hashes)),))
+    store.unpin_request(request)
+    return added
 
 
 def hit_rate(store, replica_id, hashes):

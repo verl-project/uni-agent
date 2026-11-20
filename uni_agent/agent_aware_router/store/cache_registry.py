@@ -5,6 +5,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from typing import Literal
 
+from ..types.kv_cache import GroupReservationSpec
+
 MatchKind = Literal["full", "sliding", "chunked", "mamba"]
 _MATCH_KINDS: dict[str, MatchKind] = {
     "full_attention": "full",
@@ -127,7 +129,8 @@ class CacheRegistryState:
     status: str = "unavailable"
     registry: CacheRegistry | None = None
     reason: str | None = None
-    has_layout: bool = False  # Group metadata passed validation, independently of matching support.
+    reservation_groups: tuple[GroupReservationSpec, ...] = ()
+    capacity_blocks: int | None = None
 
 
 class _RegistryError(ValueError):
@@ -297,6 +300,46 @@ def _resolve_prefix_layout(groups: list[CacheGroupSpec], profile, mode: str | No
     return unit, next(iter(replay_windows), 0), alignment, lookahead, drop
 
 
+def _reservation_profile(profile, group_ids):
+    """Optional budget failure leaves the layout usable with unknown private costs."""
+    if not isinstance(profile, Mapping) or type(profile.get("schema_version")) is not int:
+        return {}, None, 0
+    raw_groups = profile.get("groups")
+    max_len = profile.get("max_model_len")
+    if profile["schema_version"] != 1 or not isinstance(raw_groups, list) or type(max_len) is not int or max_len <= 0:
+        return {}, None, 0
+    budgets = {}
+    for item in raw_groups:
+        if not isinstance(item, Mapping):
+            return {}, None, 0
+        idx, count = item.get("group_idx"), item.get("max_blocks_per_request")
+        if type(idx) is not int or idx in budgets or type(count) is not int or count < 0:
+            return {}, None, 0
+        budgets[idx] = count
+    if budgets.keys() != group_ids:
+        return {}, None, 0
+    pool = profile.get("capacity_blocks")
+    return budgets, pool if type(pool) is int and pool >= 0 else None, max_len
+
+
+def _reservation_specs(groups, mode, profile):
+    """Keep complete-prefix reservations; obtain private-state budgets natively."""
+    budgets, pool, max_len = _reservation_profile(profile, {group.group_idx for group in groups})
+    specs = []
+    for group in groups:
+        shared = group.participates and (group.match_kind != "mamba" or mode == "all")
+        if shared:
+            peak = budgets.get(group.group_idx)
+            if peak is not None and max_len:
+                extra = max(0, peak - (max_len + group.block_size - 1) // group.block_size)
+            else:
+                extra = None if group.match_kind == "mamba" else 0
+        else:
+            extra = budgets.get(group.group_idx, 0 if group.kind == "encoder_only_attention" else None)
+        specs.append(GroupReservationSpec(group.group_idx, group.block_size, shared, extra))
+    return tuple(specs), pool
+
+
 def build_cache_registry(metadata) -> CacheRegistryState:
     """Build a cache registry from vLLM metadata."""
     try:
@@ -321,13 +364,15 @@ def build_cache_registry(metadata) -> CacheRegistryState:
         model, model_name, mode = _parse_model_layout(raw.get("model_config"), cache)
         groups, inferred_auxiliary_groups = _parse_group_specs(raw.get("groups"), model)
         groups.sort(key=lambda group: group.group_idx)
+        reservation_specs, pool_blocks = _reservation_specs(groups, mode, raw.get("cache_reservation_profile"))
         if cache["enable_prefix_caching"] is False:
             if not any(group.kind in _MATCH_KINDS for group in groups):
                 raise _RegistryError("no_prefix_cache_groups", "unsupported")
             return CacheRegistryState(
                 status="disabled",
                 reason="prefix_caching_disabled",
-                has_layout=True,
+                reservation_groups=reservation_specs,
+                capacity_blocks=pool_blocks,
             )
         try:
             unit, replay, alignment, lookahead, drop_eagle_block = _resolve_prefix_layout(
@@ -337,7 +382,8 @@ def build_cache_registry(metadata) -> CacheRegistryState:
             return CacheRegistryState(
                 status=exc.status,
                 reason=str(exc),
-                has_layout=True,
+                reservation_groups=reservation_specs,
+                capacity_blocks=pool_blocks,
             )
         registry = CacheRegistry(
             tuple(groups),
@@ -356,6 +402,8 @@ def build_cache_registry(metadata) -> CacheRegistryState:
                 "KV metadata has no prefix policy for unknown groups %s; treating them as non-cacheable",
                 inferred_auxiliary_groups,
             )
-        return CacheRegistryState(status="registered", registry=registry, has_layout=True)
+        return CacheRegistryState(
+            status="registered", registry=registry, reservation_groups=reservation_specs, capacity_blocks=pool_blocks
+        )
     except _RegistryError as exc:
         return CacheRegistryState(status=exc.status, reason=str(exc))
