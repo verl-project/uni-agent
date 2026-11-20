@@ -122,6 +122,7 @@ ENV/
 
 # data
 *.parquet
+!tests/uni_agent/agent_aware_router/e2e/testdata/*.parquet
 
 
 # local logs

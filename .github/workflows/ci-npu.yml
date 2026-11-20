@@ -22,18 +22,19 @@ jobs:
     if: needs.changes.outputs.npu == 'true'
     runs-on: linux-aarch64-a2-8
     container:
-      image: ascendai/cann:latest
+      image: ascendai/cann:9.2.1-910b-ubuntu22.04-py3.11
 
     strategy:
+      # 3.11, not 3.12: vllm-ascend's triton-ascend dependency has no cp312 wheels.
       matrix:
-        python-version: [ "3.12" ]
+        python-version: [ "3.11" ]
 
     env:
       # use GitHub proxy to download
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       # set pypi source
       UV_INDEX_URL: http://cache-service.nginx-pypi-cache.svc.cluster.local/pypi/simple
-      UV_EXTRA_INDEX_URL: "https://repo.huaweicloud.com/ascend/repos/pypi https://pypi.tuna.tsinghua.edu.cn/simple"
+      UV_EXTRA_INDEX_URL: "https://mirrors.huaweicloud.com/ascend/repos/pypi https://mirrors.huaweicloud.com/ascend/repos/pypi/nightly https://pypi.tuna.tsinghua.edu.cn/simple"
       UV_INDEX_STRATEGY: unsafe-best-match
       UV_NO_CACHE: 1
       UV_SYSTEM_PYTHON: 1
@@ -50,7 +51,7 @@ jobs:
       - name: Install lsb-release
         run: |
           apt-get update
-          apt-get install -y lsb-release
+          apt-get install -y lsb-release gcc
 
       - name: Set up Python ${{ matrix.python-version }}
         uses: actions/setup-python@v5
@@ -63,13 +64,39 @@ jobs:
         run: |
           python -m pip install --upgrade uv datasets
           uv pip install -r requirements-test.txt
+          uv pip install -r requirements-test-npu.txt --override requirements-test-npu-overrides.txt
 
           git clone --branch v4.1.0 https://github.com/princeton-nlp/SWE-bench.git
           cd SWE-bench
           pip install -e .
 
+      # The CANN 9.2 gate image lacks rtFunctionGetMetaInfoSize and
+      # MsprofUnRegisterCallback, which vllm-ascend's kernel library imports;
+      # the stub lets it load (the rt symbol is only used by the MLA path,
+      # which these Qwen3 models never reach).
+      - name: Build CANN symbol shim
+        run: |
+          gcc -shared -fPIC -O2 -o /tmp/librt_metainfo_shim.so \
+            tests/uni_agent/agent_aware_router/e2e/utils/rt_metainfo_shim.c
+
       # 4. Test with pytest
+      - name: NPU env sanity
+        env:
+          LD_PRELOAD: /tmp/librt_metainfo_shim.so
+        run: |
+          ls /dev/davinci* 2>/dev/null || echo "NO davinci devices visible"
+          python -c "import torch, torch_npu; print('npu device_count:', torch.npu.device_count())" || true
+          ASCEND_RT_VISIBLE_DEVICES=0 VLLM_MODEL=/root/.cache/huggingface/hub/models--Qwen--Qwen3-0.6B/snapshots/c1899de289a04d12100db370d81485cdf75e47ca python - <<'EOF' || echo "SMOKE FAILED"
+          import os
+          from vllm import LLM
+          llm = LLM(model=os.environ["VLLM_MODEL"], max_model_len=512, enforce_eager=True)
+          out = llm.generate(["Hello"])
+          print("SMOKE OK:", out[0].outputs[0].text[:20])
+          EOF
+
       - name: Test with pytest
+        env:
+          LD_PRELOAD: /tmp/librt_metainfo_shim.so
         run: |
           uv pip install pytest pytest-cov pytest-custom_exit_code
           export PYTHONPATH="${PYTHONPATH}:${GITHUB_WORKSPACE}"
