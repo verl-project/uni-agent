@@ -20,14 +20,14 @@ import asyncio
 import logging
 import time
 from collections import defaultdict
-from typing import Any
+from typing import Any, Callable
 
 from ..config.collector import CollectorConfig
 from ..debug import get_debug_var, is_debug_enabled
 from ..insight import WriteEvent, WriteKind, emitter
 from ..store.data_store import DataStore
 from ..types import EmitKey, MetricKey
-from ..types.kv_cache import LOCAL_GPU_DOMAIN, KVCacheUpdate
+from ..types.kv_cache import LOCAL_GPU_DOMAIN, CacheMetadataUpdate, KVCacheUpdate
 from ..utils.knob import coerce_knob_value
 from ._loop_runner import _LoopRunner
 from .parse import InflightBlockUpdate, MetricsUpdate, Parser, StickyUpdate
@@ -92,6 +92,7 @@ class Collector:
         self._transport = transport
         self._parser = parser
         self._data_store = DataStore()
+        self._on_metadata_replay: Callable[[str, int], None] | None = None
         self._loop_runner = _LoopRunner(transport) if getattr(transport, "is_async", True) else None
         self._sync_started = False
         self._sync_subscription_error: str | None = None
@@ -176,7 +177,9 @@ class Collector:
             return
         updates = result if isinstance(result, list) else [result]
         for update in updates:
-            if isinstance(update, KVCacheUpdate):
+            if isinstance(update, CacheMetadataUpdate):
+                self._write_metadata_update(update)
+            elif isinstance(update, KVCacheUpdate):
                 self._write_kv_update(update)
             elif isinstance(update, MetricsUpdate):
                 self._write_metrics_update(update)
@@ -187,9 +190,17 @@ class Collector:
             else:
                 logger.debug(f"parser.parse returned an unknown update: {update}")
 
+    def _write_metadata_update(self, update: CacheMetadataUpdate) -> None:
+        replay = self._data_store.refresh_replica_metadata(update.replica_id, update.metadata, revision=update.revision)
+        self._emit_cache_diagnostics()
+        if replay:
+            if self._on_metadata_replay is not None:
+                self._on_metadata_replay(update.replica_id, self._data_store.replay_revision(update.replica_id))
+
     def _write_kv_update(self, update: KVCacheUpdate) -> None:
         """Write KVCacheUpdate via DataStore, then emit a periodic kv-events tally."""
         self._data_store.apply_kv_update(update)
+        self._emit_cache_diagnostics()
         gpu_evictions = 0
         for event in update.events:
             if event.is_store:
@@ -223,6 +234,19 @@ class Collector:
                 f"blocks={dict(self._kv_block_counts)} (total_events={total}) | "
                 f"{detail}"
             )
+
+    def _emit_cache_diagnostics(self) -> None:
+        for replica, stage, reason, count in self._data_store.drain_cache_diagnostics():
+            emitter.on_cache_diagnostic(replica, stage, reason, count)
+        for replica, status in self._data_store.get_cache_status().items():
+            capabilities = {
+                "matching": status["matching"] == "registered" and not status["gated"],
+                "native_identity": status["native"] == "ready",
+                "capacity": status["capacity_known"],
+                "budget": status["budget_known"],
+            }
+            for capability, ready in capabilities.items():
+                emitter.on_cache_capability(replica, capability, ready)
 
     def _write_metrics_update(self, update: MetricsUpdate) -> None:
         """Write MetricsUpdate via DataStore, then forward to the insight emitter.
@@ -277,6 +301,7 @@ class Collector:
             # ``_metrics_prev`` baseline, so windowed deltas stay correct.
             for nid in self._data_store.get_metric_replica_ids():
                 self._log_evidence_window(nid)
+        self._emit_cache_diagnostics()
 
     # ── Inflight flow: the collector owns all inflight store access ─────
 
@@ -460,6 +485,7 @@ def get_collector(
     server_addresses: dict[str, str] | None = None,
     kv_event_endpoints: dict[str, list[str]] | None = None,
     balancer_handler=None,
+    metadata_servers: dict[str, Any] | None = None,
 ) -> Collector:
     """Create a Collector by name — one place does both composition and config binding.
 
@@ -482,6 +508,16 @@ def get_collector(
     Raises:
         ValueError: If ``name`` is unknown.
     """
+    if name == "vllm_metadata":
+        from .metadata import MetadataParser, MetadataTransport
+
+        transport = MetadataTransport(
+            metadata_servers or {}, server_addresses=server_addresses, kv_event_endpoints=kv_event_endpoints
+        )
+        collector = Collector(transport, MetadataParser())
+        transport._on_diagnostics = collector._emit_cache_diagnostics
+        return collector
+
     if name == "vllm_metrics":
         from .parse.vllm.metrics import VLLMMetricsParser
         from .transport.http import HTTPTransport
@@ -502,17 +538,33 @@ def get_collector(
         data_store = DataStore()
         data_store.set_native_hash_codec_factory(VLLMHashCodec.from_metadata)
 
+        def reset_stream(replica_id: str) -> None:
+            # Gate routing reads before discarding the parser's old hash chain.
+            data_store.invalidate_kv_replica(replica_id)
+            collector._emit_cache_diagnostics()
+
+        def unavailable_stream(replica_id: str) -> None:
+            reset_stream(replica_id)
+            data_store.enable_kv_dispatch_estimates(replica_id)
+
+        def ready_stream(replica_id: str, revision: int) -> None:
+            data_store.mark_kv_replica_ready(replica_id, revision=revision)
+            collector._emit_cache_diagnostics()
+
         transport = ZMQTransport(
             endpoints=kv_event_endpoints or {},
-            on_stream_reset=data_store.invalidate_kv_replica,
-            on_stream_ready=data_store.mark_kv_replica_ready,
-            on_stream_unavailable=data_store.enable_kv_dispatch_estimates,
+            on_stream_reset=reset_stream,
+            get_replay_revision=data_store.replay_revision,
+            on_stream_ready_revision=ready_stream,
+            on_stream_unavailable=unavailable_stream,
+            on_stream_refresh=lambda replica: data_store.request_metadata_refresh(replica, "stream_reset"),
             base_retry_delay=_debug_knob("base_retry_delay"),
             max_retry_delay=_debug_knob("max_retry_delay"),
             max_retry_attempts=_debug_knob("max_retry_attempts"),
             retry_backoff_factor=_debug_knob("retry_backoff_factor"),
         )
-        return Collector(transport, kv_parser)
+        collector = Collector(transport, kv_parser)
+        return collector
 
     if name == "sticky_stat":
         from .parse.basic.sticky import StickyParser

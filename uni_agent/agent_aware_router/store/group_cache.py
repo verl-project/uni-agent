@@ -119,6 +119,12 @@ class ReplicaCacheIndex:
         self._retried_revision = self.native_hashes.identity_revision if self.native_hashes else 0
         self.status, self.reason = "ready", None
 
+    def resume_native_reconstruction(self) -> None:
+        if self.native_reconstruction_paused:
+            self.native_reconstruction_paused = False
+            # Pending children can now use parent identities already known from peers.
+            self._retried_revision = None
+
     def record_dispatch(self, hashes: list[str]) -> int:
         """Predict expressible block endpoints from the canonical local hash chain.
 

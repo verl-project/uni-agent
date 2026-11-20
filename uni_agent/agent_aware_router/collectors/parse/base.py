@@ -24,7 +24,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
 
-from ...types.kv_cache import DispatchSchema, GroupReservation, InflightBooking, KVCacheUpdate
+from ...types.kv_cache import CacheMetadataUpdate, DispatchSchema, GroupReservation, InflightBooking, KVCacheUpdate
 
 
 @dataclass
@@ -122,7 +122,7 @@ class Parser(ABC):
     @abstractmethod
     def parse(
         self, raw_data: bytes | str | Any, replica_id: str
-    ) -> KVCacheUpdate | MetricsUpdate | StickyUpdate | InflightBlockUpdate | list | None:
+    ) -> CacheMetadataUpdate | KVCacheUpdate | MetricsUpdate | StickyUpdate | InflightBlockUpdate | list | None:
         """Parse raw data and return a structured update (or list of them).
 
         Args:

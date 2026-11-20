@@ -54,6 +54,13 @@ NativeHashCodecFactory = Callable[[Mapping[str, Any], int], NativeHashCodecResul
 
 
 @dataclass(frozen=True)
+class CacheMetadataUpdate:
+    replica_id: str
+    metadata: Mapping[str, Any]
+    revision: int = 0
+
+
+@dataclass(frozen=True)
 class GroupReservationSpec:
     """One group's prompt-prefix budget plus request-private pool blocks.
 

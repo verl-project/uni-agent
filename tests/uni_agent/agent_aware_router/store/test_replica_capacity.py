@@ -387,6 +387,23 @@ def test_partial_refresh_does_not_reuse_private_budget_after_layout_changes(stor
 
 @pytest.mark.cpu
 @pytest.mark.level0
+def test_old_stream_ready_cannot_expose_a_new_metadata_replay(store, layout):
+    raw = profile(layout, 9)
+    assert store.refresh_replica_metadata("a", raw)
+    before = store.replay_revision("a")
+    store.mark_kv_replica_ready("a", revision=before)
+    changed = deepcopy(raw)
+    changed["native_hash_config"]["root_hash_hex"] = "11" * 32
+    assert store.refresh_replica_metadata("a", changed)
+    assert store.replay_revision("a") > before
+    store.mark_kv_replica_ready("a", revision=before)
+    assert store.metadata_status("a")["gated"]
+    store.mark_kv_replica_ready("a", revision=store.replay_revision("a"))
+    assert not store.metadata_status("a")["gated"]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_request_hashes_recompute_after_layout_changes(store, layout, install_metadata):
     install_metadata(store, "a", layout(unit=4))
     prompt = list(range(17))
@@ -479,3 +496,35 @@ def test_reported_predicted_and_reserved_blocks_use_the_same_lookahead(
     assert store.inflight_reserved_blocks("predicted") == 4
     store.apply_kv_update(KVCacheUpdate("reported", parse([removed(0, ["block"])], "reported")))
     assert hits(tokens) == [0, 4]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_cache_cleanup_releases_diagnostic_index_references(store, layout, install_metadata):
+    import gc
+    import weakref
+
+    raw = profile(layout, 9)
+    install_metadata(store, "a", raw)
+    dispatch(store, "a", "busy", range(17))
+    store.estimate_prefixes(["a"], store.get_marker("busy")["hashes"], 17)
+    index = weakref.ref(store._kv.group_caches["a"])
+    store.invalidate_kv_replica("a")
+    gc.collect()
+    assert index() is None
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_transient_query_failure_does_not_discard_verified_profile_on_partial_retry(store, layout, install_metadata):
+    raw = profile(layout, 9)
+    install_metadata(store, "a", raw)
+    dispatch(store, "a", "busy", range(17))
+    store.refresh_replica_metadata("a", {"status": "error", "reason": "rpc_timeout"})
+    retry = deepcopy(raw)
+    retry["native_hash_config"] = None
+    retry["metadata_errors"] = {"native_hash_config": {"reason": "rpc_timeout"}}
+    assert not store.refresh_replica_metadata("a", retry)
+    assert store.dispatch_schema("a").hash_unit == 4
+    assert store.inflight_reserved_blocks("a") == 4
+    assert store.estimate_prefixes(["a"], store.get_marker("busy")["hashes"], 17)["a"].estimated_hit_tokens == 16

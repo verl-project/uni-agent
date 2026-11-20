@@ -16,7 +16,9 @@
 
 from __future__ import annotations
 
+import logging
 import threading
+import time
 from collections import Counter, defaultdict
 from collections.abc import Mapping
 from copy import deepcopy
@@ -26,6 +28,8 @@ from ..types.kv_cache import DispatchSchema, KVCacheUpdate, NativeHashCodecFacto
 from .cache_registry import CacheRegistryState, build_cache_registry
 from .group_cache import PrefixEstimate, ReplicaCacheIndex
 from .prefix_identity import PrefixIdentityIndex
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -78,7 +82,14 @@ class KVCacheStore:
         self._native_by_node: dict[str, PrefixIdentityIndex] = {}
         self._native_results: dict[str, NativeHashCodecResult] = {}
         self._schema_generations: dict[str, int] = {}
+        self._metadata_revisions: Counter[str] = Counter()
+        self._replay_revisions: Counter[str] = Counter()
+        self._metadata_requests: dict[str, int] = {}
         self._metadata_errors: dict[str, str] = {}
+        self._diagnostics: dict[str, Counter] = {}
+        self._diagnostic_deltas: Counter = Counter()
+        self._diagnostic_logged: dict[tuple, float] = {}
+        self._index_diagnostics: dict[str, tuple[ReplicaCacheIndex, Counter]] = {}
         self._gated_replicas: set[str] = set()
         self._inflight_holds: dict[str, _ReplicaHolds] = defaultdict(_ReplicaHolds)
         self._inflight_pins: dict[str, dict] = {}
@@ -139,6 +150,9 @@ class KVCacheStore:
             self._native_by_node = by_node
             self._native_results = results
             self.group_caches.clear()
+            self._index_diagnostics.clear()
+            for node, result in results.items():
+                self._record_codec_failure_locked(node, result)
 
     @staticmethod
     def _native_required(registry) -> bool:
@@ -162,6 +176,47 @@ class KVCacheStore:
         if index is None:
             index = indexes[key] = PrefixIdentityIndex(result.codec)
         return result, index
+
+    def _record_codec_failure_locked(self, node, result):
+        if result.codec is None:
+            self._record_diagnostic_locked(node, "codec", result.reason or "native_codec_unavailable", result.details)
+
+    def _record_diagnostic_locked(self, node, stage, reason, details=None, *, count=1, warning=True):
+        reason = reason.split(":", 1)[0]
+        self._diagnostics.setdefault(node, Counter())[(stage, reason)] += count
+        key = node, stage, reason
+        self._diagnostic_deltas[key] += count
+        now = time.monotonic()
+        if warning and (key not in self._diagnostic_logged or now - self._diagnostic_logged[key] >= 300):
+            self._diagnostic_logged[key] = now
+            logger.warning(
+                "KV cache capability unavailable: replica=%s stage=%s reason=%s details=%s",
+                node,
+                stage,
+                reason,
+                dict(details or {}),
+            )
+
+    def _collect_index_diagnostics_locked(self, node, index):
+        old_index, previous = self._index_diagnostics.get(node, (None, Counter()))
+        if old_index is not index:
+            previous = Counter()
+        for reason, count in (index.diagnostics - previous).items():
+            stage = (
+                "pending" if reason.startswith("pending_") else "identity" if reason.startswith("native_") else "event"
+            )
+            self._record_diagnostic_locked(node, stage, reason, count=count, warning=reason != "native_events_resolved")
+        self._index_diagnostics[node] = index, index.diagnostics.copy()
+
+    def drain_cache_diagnostics(self):
+        with self._lock:
+            result = [(*key, count) for key, count in self._diagnostic_deltas.items()]
+            self._diagnostic_deltas.clear()
+            return result
+
+    def record_cache_diagnostic(self, node, stage, reason, details=None, *, count=1):
+        with self._lock:
+            self._record_diagnostic_locked(node, stage, reason, details, count=count)
 
     def _metadata_status_locked(self, node):
         state = self._node_layout_state_locked(node)
@@ -200,6 +255,9 @@ class KVCacheStore:
             "capacity_known": state.capacity_blocks is not None,
             "budget_known": budget_known,
             "gated": node in self._gated_replicas,
+            "revision": self._metadata_revisions[node],
+            "refresh_pending": node in self._metadata_requests,
+            "counts": {f"{stage}:{why}": count for (stage, why), count in self._diagnostics.get(node, {}).items()},
         }
 
     def metadata_status(self, node):
@@ -208,17 +266,41 @@ class KVCacheStore:
 
     def get_cache_status(self):
         with self._lock:
-            nodes = self._replica_metadata.keys() | self._metadata_errors.keys()
+            nodes = set(self._replica_metadata) | set(self._diagnostics) | set(self._metadata_requests)
             return {node: self._metadata_status_locked(node) for node in sorted(nodes)}
+
+    def metadata_revision(self, node):
+        with self._lock:
+            return self._metadata_revisions[node]
+
+    def replay_revision(self, node):
+        with self._lock:
+            return self._replay_revisions[node]
+
+    def _request_metadata_refresh_locked(self, node, reason):
+        if node not in self._metadata_requests or reason == "stream_reset":
+            self._metadata_revisions[node] += 1
+        self._metadata_requests[node] = self._metadata_revisions[node]
+        return self._metadata_revisions[node]
+
+    def request_metadata_refresh(self, node, reason):
+        with self._lock:
+            return self._request_metadata_refresh_locked(node, reason)
+
+    def metadata_refresh_requests(self):
+        with self._lock:
+            return dict(self._metadata_requests)
 
     @staticmethod
     def _reservation_key(state):
         registry = state.registry
         return (registry.local_hash_unit, registry.lookahead_tokens) if registry else None, state.reservation_groups
 
-    def refresh_replica_metadata(self, node, metadata):
+    def refresh_replica_metadata(self, node, metadata, *, revision=None):
         """Apply one validated source snapshot without resetting unrelated caches or holds."""
         with self._lock:
+            if revision is not None and revision != self._metadata_revisions[node]:
+                return False
             if not isinstance(metadata, Mapping) or metadata.get("status") != "ok":
                 reason = (
                     metadata.get("reason", "metadata_unavailable")
@@ -226,22 +308,51 @@ class KVCacheStore:
                     else "invalid_metadata"
                 )
                 self._metadata_errors[node] = str(reason)
+                self._record_diagnostic_locked(node, "metadata", str(reason))
                 return False
             old = self._replica_registries.get(node, CacheRegistryState())
             previous_raw = self._replica_metadata.get(node)
+            previous_status = self._metadata_status_locked(node)
             incoming = deepcopy(dict(metadata))
             errors = incoming.get("metadata_errors")
             if errors is not None and not isinstance(errors, Mapping):
                 self._metadata_errors[node] = "invalid_metadata_errors"
+                self._record_diagnostic_locked(node, "metadata", "invalid_metadata_errors")
                 return False
             error_reason = None
             if errors:
                 error = next(iter(errors.values()))
                 error_reason = str(error.get("reason", "metadata_unavailable") if isinstance(error, Mapping) else error)
+            errors = errors or {}
+            same_layout = previous_raw is not None and all(
+                previous_raw.get(key) == incoming.get(key)
+                for key in (
+                    "schema_version",
+                    "vllm_version",
+                    "groups",
+                    "cache_config",
+                    "parallel_config",
+                    "model_config",
+                )
+            )
+            same_identity = previous_raw is not None and (
+                previous_raw.get("native_hash_config") == incoming.get("native_hash_config")
+                or incoming.get("native_hash_config") is None
+                and "native_hash_config" in errors
+            )
+            if same_layout and errors and node not in self._metadata_requests:
+                for field in ("native_hash_config", "cache_reservation_profile"):
+                    if (
+                        incoming.get(field) is None
+                        and previous_raw.get(field) is not None
+                        and (field == "native_hash_config" or same_identity)
+                    ):
+                        incoming[field] = previous_raw[field]
             state = build_cache_registry(incoming)
             if not state.reservation_groups:
                 reason = state.reason or "invalid_metadata"
                 self._metadata_errors[node] = reason
+                self._record_diagnostic_locked(node, "metadata", reason)
                 return False
             registry = state.registry
             if registry is not None:
@@ -285,20 +396,43 @@ class KVCacheStore:
                 self._native_results.pop(node, None)
             else:
                 self._native_results[node] = result
+                self._record_codec_failure_locked(node, result)
             if index is None:
                 self._native_by_node.pop(node, None)
             else:
                 self._native_by_node[node] = index
             if error_reason is not None:
                 self._metadata_errors[node] = error_reason
+                for part, why in errors.items():
+                    reason = why.get("reason", "metadata_unavailable") if isinstance(why, Mapping) else str(why)
+                    self._record_diagnostic_locked(node, "metadata", str(reason), {"part": part, "error": why})
             else:
                 self._metadata_errors.pop(node, None)
+                self._metadata_requests.pop(node, None)
+            cache = self.group_caches.get(node)
+            if cache is not None and not changed:
+                cache.native_hashes = self._native_by_node.get(node)
+                if not errors:
+                    cache.resume_native_reconstruction()
+                    self._apply_index_events_locked(cache, [])
             if changed:
                 self._drop_cache_locked(node)
                 self._gated_replicas.add(node)
+                self._replay_revisions[node] += 1
+            if state.reason and state.status != "disabled":
+                self._record_diagnostic_locked(node, "unit" if "unit" in state.reason else "metadata", state.reason)
+            if not previous_status["ready"] and self._metadata_status_locked(node)["ready"]:
+                logger.info("KV cache metadata recovered: replica=%s", node)
+                self._record_diagnostic_locked(node, "metadata", "recovered", warning=False)
             active = {index.codec.profile_key for index in self._native_by_node.values()}
             self._native_indexes = {key: value for key, value in indexes.items() if key in active}
             return bool(changed and state.registry is not None)
+
+    def _apply_index_events_locked(self, index, events):
+        index.apply(events)
+        self._collect_index_diagnostics_locked(index.replica_id, index)
+        if index.native_reconstruction_paused:
+            self._request_metadata_refresh_locked(index.replica_id, "native_hash_mismatch")
 
     def apply_update(self, update: KVCacheUpdate) -> None:
         """Apply ordered cache events under one lock."""
@@ -312,12 +446,12 @@ class KVCacheStore:
             native = self._native_by_node.get(node)
             revision = native.identity_revision if native else 0
             index = self._replica_index_locked(node)
-            index.apply([registry.normalize_event(event) for event in update.events])
+            self._apply_index_events_locked(index, [registry.normalize_event(event) for event in update.events])
             while native is not None and revision != native.identity_revision:
                 revision = native.identity_revision
                 for cache in self.group_caches.values():
                     if cache.native_hashes is native:
-                        cache.apply([])
+                        self._apply_index_events_locked(cache, [])
 
     def estimate_prefixes(self, replica_ids, hashes, query_tokens) -> dict[str, PrefixEstimate]:
         with self._lock:
@@ -336,6 +470,7 @@ class KVCacheStore:
                     )
                 else:
                     result[node] = index.estimate(hashes, query_tokens)
+                    self._collect_index_diagnostics_locked(node, index)
             return result
 
     def invalidate_replica(self, replica_id: str) -> None:
@@ -344,9 +479,11 @@ class KVCacheStore:
             self._gated_replicas.add(replica_id)
             self._drop_cache_locked(replica_id)
 
-    def mark_replica_ready(self, replica_id: str) -> None:
+    def mark_replica_ready(self, replica_id: str, *, revision: int | None = None) -> None:
         """Expose the known resident subset after transport rebuilding."""
         with self._lock:
+            if revision is not None and revision != self._replay_revisions[replica_id]:
+                return
             self._gated_replicas.discard(replica_id)
 
     def enable_dispatch_estimates(self, replica_id: str) -> None:
@@ -373,6 +510,7 @@ class KVCacheStore:
 
     def _drop_cache_locked(self, node):
         self.group_caches.pop(node, None)
+        self._index_diagnostics.pop(node, None)
 
     def _replica_index_locked(self, node):
         index = self.group_caches.get(node)

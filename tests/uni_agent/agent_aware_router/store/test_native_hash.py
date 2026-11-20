@@ -117,6 +117,21 @@ def test_full_event_identity_is_shared_across_replica_caches(full_node, store, e
 
 @pytest.mark.cpu
 @pytest.mark.level0
+def test_peer_retry_requests_metadata_for_the_paused_replica(store, events, stored, parse):
+    value, _ = store
+    full, _ = events
+    parent = full[0].block_hashes[0]
+    child = stored(1, "full_attention", 8, tokens=list(range(8, 16)), hashes=["invalid-child"], parent=parent)
+    value.apply_update(KVCacheUpdate("a", events=parse([child])))
+    assert value.group_caches["a"].pending and not value.metadata_refresh_requests()
+
+    value.apply_update(KVCacheUpdate("b", events=full))
+    assert value.metadata_status("a")["native"] == "paused"
+    assert set(value.metadata_refresh_requests()) == {"a"}
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.parametrize("elapsed", [59, 61], ids=["before-ttl", "after-ttl"])
 def test_peer_can_only_restore_unexpired_pending_identity(elapsed, store, events, monkeypatch):
     value, _ = store
@@ -250,6 +265,7 @@ def test_incompatible_native_profile_keeps_conservative_estimates(
     field, value, reason, store, events, install_metadata
 ):
     cache_store, metadata = store
+    cache_store.drain_cache_diagnostics()
     local = metadata["native_hash_config"][field]
     if value is None:
         metadata["native_hash_config"].pop(field)
@@ -261,6 +277,9 @@ def test_incompatible_native_profile_keeps_conservative_estimates(
     assert status["native"] == "unavailable"
     assert status["reason"] == reason
     assert status["native_details"] == ({"remote": value, "local": local} if value is not None else {})
+    assert status["counts"][f"codec:{reason}"] == 1
+    assert cache_store.drain_cache_diagnostics() == [("a", "codec", reason, 1)]
+    assert cache_store.drain_cache_diagnostics() == []
     full, sparse = events
     cache_store.apply_update(KVCacheUpdate(replica_id="a", events=full + sparse))
     cache = cache_store.group_caches["a"]
@@ -314,23 +333,30 @@ def test_codec_rejection_exposes_remote_and_local_values(native_metadata, field,
 
 @pytest.mark.cpu
 @pytest.mark.level0
-def test_bad_native_event_isolated_to_replica(store, events, native, stored, parse):
-    value, _ = store
+def test_bad_native_event_isolated_to_replica_and_same_profile_refresh_restores_it(
+    store, events, native, stored, parse
+):
+    value, metadata = store
     full, sparse = events
     for node in ("a", "b"):
         value.apply_update(KVCacheUpdate(node, events=full + sparse))
     a, b = value.group_caches["a"], value.group_caches["b"]
     assert a.native_hashes is b.native_hashes
     before = value.per_replica_block_counts()
+    value.drain_cache_diagnostics()
     bad = parse([stored(1, "full_attention", 8, hashes=["corrupt-native-hash"], tokens=list(range(8)))])
     value.apply_update(KVCacheUpdate("a", events=bad))
     assert a.native_reconstruction_paused and not b.native_reconstruction_paused
     status = value.metadata_status("a")
     assert status["native"] == "paused"
     assert status["reason"] == "native_hash_mismatch"
+    assert status["counts"]["identity:native_hash_mismatch"] == 1
     assert value.metadata_status("b")["native"] == "ready"
+    assert value.drain_cache_diagnostics() == [("a", "identity", "native_hash_mismatch", 1)]
+    assert value.drain_cache_diagnostics() == []
     assert hit(a) == hit(b) == 16
     assert not a.pending and value.per_replica_block_counts() == before
+    assert "a" in value.metadata_refresh_requests()
 
     parent = native.root
     digests = []
@@ -358,6 +384,19 @@ def test_bad_native_event_isolated_to_replica(store, events, native, stored, par
     value.apply_update(KVCacheUpdate("b", events=fresh))
     hashes, _ = get_prefix_hashes_incremental(list(range(100, 117)), 4, 0, 0)
     assert b.estimate(list(map(str, hashes)), 17).estimated_hit_tokens == 16
+
+    # A can resolve this child from B's parent only after native reconstruction resumes.
+    child_hash = native.chain(digests[-1]).full_hashes[0]
+    child = stored(1, "full_attention", 8, tokens=list(range(8)), hashes=[child_hash], parent=full_hashes[-1])
+    value.apply_update(KVCacheUpdate("a", events=parse([child])))
+    assert len(a.pending) == 1
+
+    assert value.refresh_replica_metadata("a", metadata) is False
+    assert not a.pending and a.entries[1, str(child_hash)].tokens == 24
+    assert value.group_caches["a"] is a and a.native_hashes is b.native_hashes
+    assert not a.native_reconstruction_paused and hit(a) == 16
+    assert value.metadata_status("a")["native"] == "ready"
+    assert "a" not in value.metadata_refresh_requests()
 
 
 @pytest.mark.cpu

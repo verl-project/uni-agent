@@ -21,7 +21,7 @@ import pytest
 import zmq
 from conftest import BLOCK_SIZE, kv_payload, make_stored_event
 
-from tests.uni_agent.agent_aware_router.collectors.zmq_helpers import Publisher
+from tests.uni_agent.agent_aware_router.collectors.zmq_helpers import Publisher, until
 from uni_agent.agent_aware_router.collectors.collector import get_collector
 from uni_agent.agent_aware_router.collectors.parse.vllm.kv import VLLMKVParser
 from uni_agent.agent_aware_router.config.collector import CollectorConfig
@@ -75,14 +75,6 @@ def has_blocks(store, replica_id):
 def remote_hashes(store, replica_id):
     index = store._kv.group_caches.get(replica_id)
     return set(index.anchors) if index is not None else set()
-
-
-async def until(predicate):
-    async def wait():
-        while not predicate():
-            await asyncio.sleep(0.01)
-
-    await asyncio.wait_for(wait(), 5)
 
 
 @pytest.mark.cpu
@@ -300,11 +292,11 @@ def test_consumer_failure_discards_partial_cache_and_keeps_dispatch_gated(layout
             collector.start()
             identity, _ = await publisher.requested_start()
             await publisher.batch(identity, 0, kv_payload(make_stored_event("partial", tokens)))
-            await until(lambda: collector._loop_runner.subscription_future.done())
-            assert collector._loop_runner.subscription_future.result() is None
+            await until(lambda: collector._transport.get_stream_status().get("a", {}).get("state") == "fatal")
+            assert not collector._loop_runner.subscription_future.done()
             assert collector.get_status() == {
                 "transport": "ZMQTransport",
-                "subscription": {"active": False, "error": None},
+                "subscription": {"active": True, "error": None},
                 "streams": {"a": {"state": "fatal", "reason": "ValueError: consumer failed after writing"}},
             }
             assert not has_blocks(store, "a")
@@ -462,8 +454,8 @@ def test_repeated_unapplied_removal_exhausts_replay_budget(layout, install_metad
                 await until(lambda: transport._replay_cursors.get("a") == 10)
                 await publisher.batch(identity, 11, invalid_removal)
 
-            await until(lambda: collector._loop_runner.subscription_future.done())
-            assert collector.get_status()["streams"]["a"]["state"] == "fatal"
+            await until(lambda: transport.get_stream_status()["a"]["state"] == "fatal")
+            assert not collector._loop_runner.subscription_future.done()
             assert "invalid-payload retries exhausted" in collector.get_status()["streams"]["a"]["reason"]
             await publisher.publish(12, valid_live)
             assert "a" not in transport._replay_cursors

@@ -36,13 +36,20 @@ from tests.uni_agent.agent_aware_router.collectors.zmq_helpers import (
 from tests.uni_agent.agent_aware_router.collectors.zmq_helpers import (
     subscription as _subscription,
 )
-from uni_agent.agent_aware_router.collectors.transport.zmq import ZMQTransport, _MalformedFrame
-
-pytestmark = [pytest.mark.cpu, pytest.mark.level0]
+from uni_agent.agent_aware_router.collectors.transport.zmq import ZMQTransport, _MalformedFrame, _StreamReset
 
 
 async def _next(queue):
     return await asyncio.wait_for(queue.get(), 3)
+
+
+async def _endpoint_finished(transport, replica="a"):
+    async def wait():
+        while replica not in transport._sub_tasks:
+            await asyncio.sleep(0)
+        return await asyncio.gather(transport._sub_tasks[replica], return_exceptions=True)
+
+    await asyncio.wait_for(wait(), 3)
 
 
 async def _subscribed(pub):
@@ -73,6 +80,217 @@ def _transport(endpoints, **kwargs):
     return ZMQTransport(endpoints, base_retry_delay=0, **kwargs)
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_session_ready_carries_its_start_revision_and_controlled_replay_regates():
+    async def run():
+        with _source() as source:
+            current = [1]
+            gated = [True]
+            ready = asyncio.Queue()
+            resets = []
+
+            def reset(replica):
+                resets.append(replica)
+                gated[0] = True
+
+            def mark_ready(replica, revision):
+                if revision == current[0]:
+                    gated[0] = False
+                ready.put_nowait(revision)
+
+            def receive(payload, replica):
+                assert gated[0], "replay cannot expose an incomplete cache"
+
+            transport = _transport(
+                source.endpoints,
+                on_stream_reset=reset,
+                get_replay_revision=lambda replica: current[0],
+                on_stream_ready_revision=mark_ready,
+            )
+            async with _subscription(transport, receive) as (_, task):
+                await _subscribed(source.pub)
+                identity = await _request(source.router)
+                current[0] = 2
+                await _reply(source.router, identity, [])
+                assert await _next(ready) == 1 and gated[0]
+                gated[0] = False
+                transport.request_replay("a", 2)
+                await _subscribed(source.pub)
+                await _respond(source.router, [(0, b"rebuilt")])
+                assert await _next(ready) == 2 and not gated[0]
+                assert resets == ["a", "a"]
+
+    asyncio.run(run())
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_metadata_replay_is_coalesced_and_keeps_other_replica_connected():
+    async def run():
+        with _source() as source, _source(False) as other:
+            ready = asyncio.Queue()
+            resets, refreshes = [], []
+            endpoints = source.endpoints | {"b": other.endpoints["a"]}
+            transport = _transport(
+                endpoints,
+                on_stream_reset=resets.append,
+                on_stream_ready=ready.put_nowait,
+                on_stream_refresh=refreshes.append,
+            )
+            async with _subscription(transport) as (received, task):
+                await _subscribed(source.pub)
+                await _subscribed(other.pub)
+                await _respond(source.router, [(40, b"old")])
+                assert {await _next(ready), await _next(ready)} == {"a", "b"}
+                assert await _next(received) == ("a", b"old")
+                owner = transport._sub_tasks["a"]
+                old = transport._endpoint_sockets["a"]
+                other_sockets = transport._endpoint_sockets["b"]
+                initial_resets = list(resets)
+
+                for revision in (1, 1, 0, 2):
+                    transport.request_replay("a", revision)
+                await _subscribed(source.pub)
+                await _respond(source.router, [(0, b"recovered")])
+                assert await _next(ready) == "a"
+                assert await _next(received) == ("a", b"recovered")
+                assert old.closed and transport._sub_tasks["a"] is owner
+                assert transport._endpoint_sockets["b"] is other_sockets
+                assert resets == initial_resets + ["a"] and not refreshes
+                assert not transport._retry_counts and not transport._malformed_counts
+                transport.request_replay("a", 2)
+                assert not transport._replay_events["a"].is_set()
+                await other.publish(0, b"still connected")
+                assert await _next(received) == ("b", b"still connected")
+                assert not owner.done() and not task.done()
+
+    asyncio.run(run())
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_metadata_replay_stop_drains_session_and_control_waiter(monkeypatch):
+    async def run():
+        with _source(False) as source:
+            started = asyncio.Queue()
+            cancelled = []
+            transport = _transport(source.endpoints)
+
+            async def consume(sockets, handler):
+                started.put_nowait(sockets)
+                try:
+                    await asyncio.Event().wait()
+                finally:
+                    cancelled.append(sockets)
+
+            monkeypatch.setattr(transport, "_consume_session", consume)
+            received, task = _observe(transport)
+            first = await _next(started)
+            transport.request_replay("a", 1)
+            second = await _next(started)
+            await _stop(transport, task)
+            assert cancelled == [first, second]
+            assert first.closed and second.closed
+            assert not transport._endpoint_sockets and not transport._sub_tasks
+            assert not [pending for pending in asyncio.all_tasks() if pending is not asyncio.current_task()]
+
+    asyncio.run(run())
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_only_real_stream_reset_requests_metadata_refresh():
+    async def run():
+        with _source(False) as source:
+            ready, refresh = asyncio.Queue(), asyncio.Queue()
+            transport = _transport(
+                source.endpoints, on_stream_ready=ready.put_nowait, on_stream_refresh=refresh.put_nowait
+            )
+            async with _subscription(transport) as (_, task):
+                await _subscribed(source.pub)
+                await _next(ready)
+                assert refresh.empty()
+                source.close_socket("pub")
+                assert await _next(refresh) == "a"
+                source.reopen("pub")
+                await _next(ready)
+                assert refresh.empty()
+                source.close_socket("pub")
+                assert await _next(refresh) == "a"
+
+    asyncio.run(run())
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize("when", ["session-failure", "backoff"])
+def test_metadata_replay_interrupts_reconnect_backoff(monkeypatch, when):
+    async def run():
+        with _source() as source:
+            backoff = asyncio.Event()
+            deliveries = asyncio.Queue()
+            view, callbacks = _stream_observer()
+            transport = _transport(source.endpoints, **callbacks)
+
+            def request_replay():
+                view["gated"] = True  # Metadata installation gates the cache before scheduling the replay.
+                transport.request_replay("a", 1)
+
+            async def disconnect(sockets, poller, handler):
+                if when == "session-failure":
+                    request_replay()
+                raise _StreamReset("old stream disconnected")
+
+            async def retry(replica, malformed):
+                backoff.set()
+                await asyncio.Event().wait()
+
+            def receive(payload, replica):
+                deliveries.put_nowait((payload, view["gated"]))
+
+            monkeypatch.setattr(transport, "_consume_live", disconnect)
+            monkeypatch.setattr(transport, "_wait_to_retry", retry)
+            async with _subscription(transport, receive):
+                await _respond(source.router, [])
+                if when == "backoff":
+                    await asyncio.wait_for(backoff.wait(), 3)
+                    request_replay()
+                identity = await _request(source.router)
+                await _reply(source.router, identity, [(0, b"rebuilt")], end=False)
+                assert await _next(deliveries) == (b"rebuilt", True)
+
+    asyncio.run(run())
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_replay_controls_can_restart_on_a_new_event_loop(monkeypatch):
+    transport = _transport({"a": ["127.0.0.1:1", "", "zmq", "topic"]})
+    started = None
+
+    async def consume(sockets, handler):
+        started.put_nowait(sockets)
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(transport, "_consume_session", consume)
+
+    async def run():
+        nonlocal started
+        started = asyncio.Queue()
+        async with _subscription(transport) as (_, task):
+            first = await _next(started)
+            transport.request_replay("a", 1)
+            second = await _next(started)
+            assert first.closed and second is not first
+            assert started.empty()
+
+    asyncio.run(run())
+    asyncio.run(run())
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_replay_suffix_accepts_nonzero_baseline_and_deduplicates_older_frames():
     async def run():
         with _source() as source:
@@ -94,6 +312,8 @@ def test_replay_suffix_accepts_nonzero_baseline_and_deduplicates_older_frames():
     asyncio.run(run())
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.parametrize("restart_sequence", [0, 80], ids=["sequence-reset", "already-above-old-cursor"])
 def test_same_address_publisher_restart_invalidates_before_replay(restart_sequence):
     async def run():
@@ -147,6 +367,8 @@ def test_same_address_publisher_restart_invalidates_before_replay(restart_sequen
     asyncio.run(run())
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.parametrize(
     "disconnected_socket", ["pub", "router"], ids=["only-sub-disconnects", "only-replay-disconnects"]
 )
@@ -211,6 +433,8 @@ def test_stop_then_publisher_restart_does_not_reuse_the_previous_cursor():
     asyncio.run(run())
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_old_subscription_cleanup_cannot_close_a_new_subscription():
     async def run():
         with _source(False) as source:
@@ -239,6 +463,8 @@ def test_old_subscription_cleanup_cannot_close_a_new_subscription():
     asyncio.run(run())
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_empty_replay_allows_an_arbitrary_first_live_baseline():
     async def run():
         with _source() as source:
@@ -256,6 +482,8 @@ def test_empty_replay_allows_an_arbitrary_first_live_baseline():
     asyncio.run(run())
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.parametrize("phase", ["replay", "live"])
 def test_sequence_gaps_invalidate_partial_state_and_replay_from_zero(phase):
     async def run():
@@ -288,6 +516,8 @@ def test_sequence_gaps_invalidate_partial_state_and_replay_from_zero(phase):
     asyncio.run(run())
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.parametrize(
     "bad_reply",
     [[b"short", b"payload"], [(0).to_bytes(8, "big"), b""], [END_SEQ, b"unexpected"], [b""]],
@@ -316,6 +546,8 @@ def test_malformed_replay_never_marks_ready_and_retries_with_a_fresh_identity(ba
     asyncio.run(run())
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_replay_timeout_retires_identity_and_excludes_late_replies():
     async def run():
         with _source() as source:
@@ -343,6 +575,8 @@ def test_replay_timeout_retires_identity_and_excludes_late_replies():
     asyncio.run(run())
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_initially_unreachable_connection_recovers_after_the_retry_budget_cools_down():
     async def run():
         with _source(False) as source:
@@ -370,6 +604,8 @@ def test_initially_unreachable_connection_recovers_after_the_retry_budget_cools_
     asyncio.run(run())
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.parametrize("replay", [False, True], ids=["subscription-only", "successful-replay-each-time"])
 def test_bad_live_frames_exhaust_retries_even_after_successful_handshake_or_replay(replay):
     async def run():
@@ -391,12 +627,14 @@ def test_bad_live_frames_exhaust_retries_even_after_successful_handshake_or_repl
                     await _next(ready)
                     await source.pub.send_multipart([b"topic", b"bad", b"payload"])
                     assert await _next(resets) == "a"
-                await asyncio.wait_for(task, 3)
+                await _endpoint_finished(transport)
                 assert not transport._replay_cursors and not transport._endpoint_sockets
 
     asyncio.run(run())
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_valid_live_data_restores_retry_budget_and_sub_only_restart_recovers():
     async def run():
         with _source(False) as source:
@@ -423,6 +661,8 @@ def test_valid_live_data_restores_retry_budget_and_sub_only_restart_recovers():
     asyncio.run(run())
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_consumer_error_invalidates_partial_writes_and_does_not_reconnect(caplog, monkeypatch):
     async def run():
         with _source(False) as bad, _source(False) as good:
@@ -484,6 +724,8 @@ def test_consumer_error_invalidates_partial_writes_and_does_not_reconnect(caplog
     assert records[0].exc_info[0] is ValueError
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_setup_failure_closes_the_partially_created_socket_and_context(monkeypatch):
     async def run():
         context = zmq.asyncio.Context()
@@ -509,6 +751,8 @@ def test_setup_failure_closes_the_partially_created_socket_and_context(monkeypat
     asyncio.run(run())
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_monitor_shutdown_error_still_closes_both_socket_pairs(monkeypatch):
     async def run():
         with _source() as source:
@@ -546,6 +790,8 @@ def test_monitor_shutdown_error_still_closes_both_socket_pairs(monkeypatch):
     asyncio.run(run())
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_retired_endpoint_cannot_reset_the_current_replica_state():
     async def run():
         resets = []
@@ -565,6 +811,8 @@ def test_retired_endpoint_cannot_reset_the_current_replica_state():
     asyncio.run(run())
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_replay_consumer_error_invalidates_and_stops_instead_of_retrying():
     async def run():
         with _source() as source:
@@ -586,7 +834,7 @@ def test_replay_consumer_error_invalidates_and_stops_instead_of_retrying():
                 await _respond(source.router, [(0, b"partial write")])
                 with pytest.raises(ValueError, match="replay consumer failed"):
                     await asyncio.wait_for(endpoint, 3)
-                await asyncio.wait_for(task, 3)
+                await _endpoint_finished(transport)
                 assert not ready and not cache and resets == ["a", "a"]
                 assert not transport._replay_cursors and not transport._retry_counts
                 assert not transport._endpoint_sockets
@@ -611,6 +859,8 @@ def sub_frames_read(monkeypatch):
     return frames
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.parametrize("phase", ["connecting", "replay"])
 def test_sub_is_read_before_replay_finishes_and_merged_before_ready(phase, sub_frames_read):
     async def run():
@@ -636,6 +886,8 @@ def test_sub_is_read_before_replay_finishes_and_merged_before_ready(phase, sub_f
     asyncio.run(run())
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.parametrize("bound", ["messages", "bytes"])
 def test_pending_live_buffer_overflow_invalidates_and_rebuilds(bound, sub_frames_read):
     async def run():
@@ -668,6 +920,8 @@ def test_pending_live_buffer_overflow_invalidates_and_rebuilds(bound, sub_frames
     asyncio.run(run())
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_replay_fills_pending_gaps_and_reclaims_overlap_buffer_space(sub_frames_read):
     async def run():
         with _source() as source:
@@ -697,6 +951,8 @@ def test_replay_fills_pending_gaps_and_reclaims_overlap_buffer_space(sub_frames_
     asyncio.run(run())
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_completed_replay_retires_dealer_before_ready_and_keeps_healthy_sub():
     async def run():
         with _source() as source:
@@ -724,6 +980,8 @@ def test_completed_replay_retires_dealer_before_ready_and_keeps_healthy_sub():
     asyncio.run(run())
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_recoverable_gaps_cool_down_and_resume_without_a_new_subscription():
     async def run():
         with _source() as source:
@@ -756,6 +1014,8 @@ def test_recoverable_gaps_cool_down_and_resume_without_a_new_subscription():
     asyncio.run(run())
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_recoverable_cooldown_does_not_refill_the_malformed_frame_budget():
     async def run():
         with _source() as source:
@@ -781,12 +1041,14 @@ def test_recoverable_cooldown_does_not_refill_the_malformed_frame_budget():
                     await _next(resets)
                     if not malformed:
                         assert not task.done()
-                await asyncio.wait_for(task, 3)
+                await _endpoint_finished(transport)
                 assert not transport._endpoint_sockets and not transport._replay_cursors
 
     asyncio.run(run())
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_continuous_live_traffic_does_not_hold_replay_readiness_open(sub_frames_read):
     async def run():
         with _source() as source:
@@ -826,6 +1088,8 @@ def test_continuous_live_traffic_does_not_hold_replay_readiness_open(sub_frames_
     asyncio.run(run())
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_valid_live_progress_resets_the_malformed_frame_streak():
     async def run():
         with _source(False) as source:
@@ -851,6 +1115,8 @@ def test_valid_live_progress_resets_the_malformed_frame_streak():
     asyncio.run(run())
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_buffered_live_progress_resets_retries_before_a_later_merge_error():
     async def run():
         with _source(False) as source:
@@ -883,6 +1149,8 @@ def test_buffered_live_progress_resets_retries_before_a_later_merge_error():
     asyncio.run(run())
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_replay_retirement_zmq_error_rebuilds_instead_of_stopping(monkeypatch):
     async def run():
         with _source() as source:
@@ -945,11 +1213,15 @@ def _stream_observer():
     return view, {"on_stream_unavailable": unavailable, "on_stream_reset": reset, "on_stream_ready": ready}
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_connect_failures_preserve_dispatch_estimates_until_handshake_rebuilds(monkeypatch):
     async def run():
         with _source(False) as source:
             source.close_socket("pub")
             view, callbacks = _stream_observer()
+            refreshes = []
+            callbacks["on_stream_refresh"] = refreshes.append
             transport = _transport(source.endpoints, max_retry_attempts=0, max_retry_delay=0, **callbacks)
             transport._CONNECTION_TIMEOUT = 0.02
             attempts = asyncio.Queue()
@@ -969,6 +1241,10 @@ def test_connect_failures_preserve_dispatch_estimates_until_handshake_rebuilds(m
                     await _next(attempts)
                 assert view["events"] == ["unavailable"]
                 assert view["resident"] == {b"new dispatch"} and not view["gated"]
+                transport.request_replay("a", 1)
+                assert await _next(view["changes"]) == "reset"
+                assert await _next(view["changes"]) == "unavailable"
+                assert not view["gated"] and not refreshes
                 source.reopen("pub")
                 await _subscribed(source.pub)
                 assert await _next(view["changes"]) == "reset"
@@ -980,6 +1256,8 @@ def test_connect_failures_preserve_dispatch_estimates_until_handshake_rebuilds(m
     asyncio.run(run())
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_handshake_gates_and_clears_fallback_before_any_replay_handler():
     async def run():
         with _source() as source:
@@ -1009,6 +1287,8 @@ def test_handshake_gates_and_clears_fallback_before_any_replay_handler():
     asyncio.run(run())
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_recoverable_failure_closes_owned_session_before_opening_fallback(monkeypatch):
     async def run():
         with _source() as source:
@@ -1026,6 +1306,8 @@ def test_recoverable_failure_closes_owned_session_before_opening_fallback(monkey
                 unavailable(replica)
 
             callbacks["on_stream_unavailable"] = assert_closed_then_unavailable
+            refreshes = []
+            callbacks["on_stream_refresh"] = refreshes.append
             transport = _transport(source.endpoints, max_retry_delay=0, max_retry_attempts=0, **callbacks)
             transport._CONNECTION_TIMEOUT = 0.03
             attempts = asyncio.Queue()
@@ -1053,6 +1335,7 @@ def test_recoverable_failure_closes_owned_session_before_opening_fallback(monkey
                 await _next(attempts)
                 await _next(attempts)
                 assert view["events"] == ["unavailable", "reset", "ready", "unavailable"]
+                assert refreshes == ["a"]
                 assert view["resident"] == {b"dispatch during outage"} and not view["gated"]
                 source.reopen("router")
                 assert await _next(view["changes"]) == "reset"
@@ -1065,6 +1348,8 @@ def test_recoverable_failure_closes_owned_session_before_opening_fallback(monkey
     asyncio.run(run())
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_terminal_malformed_failure_gates_without_an_unavailable_window():
     async def run():
         with _source(False) as source:
@@ -1079,7 +1364,7 @@ def test_terminal_malformed_failure_gates_without_an_unavailable_window():
                     view["resident"].add(b"partial")
                     await source.pub.send_multipart([b"topic", b"bad", b"payload"])
                     assert await _next(view["changes"]) == ("unavailable" if attempt == 0 else "reset")
-                await asyncio.wait_for(task, 3)
+                await _endpoint_finished(transport)
                 assert view["gated"] and not view["resident"]
                 assert view["events"] == ["unavailable", "reset", "ready", "unavailable", "reset", "ready", "reset"]
                 status = transport.get_stream_status()["a"]
@@ -1099,6 +1384,8 @@ def test_terminal_malformed_failure_gates_without_an_unavailable_window():
     asyncio.run(run())
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.parametrize(
     "fault, legacy",
     [
@@ -1141,7 +1428,7 @@ def test_fatal_callbacks_gate_without_reopening_fallback(fault, legacy):
                     for event in ("unavailable", "reset", "ready"):
                         assert await _next(view["changes"]) == event
                     await source.publish(0, b"partial")
-                await asyncio.wait_for(task, 3)
+                await _endpoint_finished(transport)
                 assert view["gated"] and not view["resident"]
                 assert view["events"].count("unavailable") == (0 if legacy else 1)
                 assert view["events"][-1] == "reset"
@@ -1152,6 +1439,8 @@ def test_fatal_callbacks_gate_without_reopening_fallback(fault, legacy):
     asyncio.run(run())
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.parametrize("replacement", [False, True], ids=["own-task", "replacement-task"])
 def test_cancelled_cleanup_gather_removes_only_its_own_task_records(monkeypatch, replacement):
     """Inject cancellation at cleanup gather; ordinary 3.12 cancellation may miss this path."""
@@ -1169,7 +1458,7 @@ def test_cancelled_cleanup_gather_removes_only_its_own_task_records(monkeypatch,
                 nonlocal gather_calls, successor
                 if asyncio.current_task() is subscription:
                     gather_calls += 1
-                    if gather_calls == 2:
+                    if gather_calls == 1:
                         if replacement:
                             successor = asyncio.create_task(asyncio.Event().wait())
                             transport._sub_tasks["a"] = successor
@@ -1188,7 +1477,7 @@ def test_cancelled_cleanup_gather_removes_only_its_own_task_records(monkeypatch,
                 subscription.cancel()
                 with pytest.raises(asyncio.CancelledError):
                     await asyncio.wait_for(subscription, 3)
-                assert gather_calls == 2 and endpoint.done()
+                assert gather_calls == 1 and endpoint.done()
                 assert sockets.closed and sockets.sub_socket.closed and sockets.sub_monitor.closed
                 assert sockets.context.closed and not transport._endpoint_sockets
                 assert transport._sub_tasks == ({"a": successor} if replacement else {})

@@ -102,8 +102,20 @@ class DataStore:
         """This replica's layout used by group-aware indexing and matching."""
         return self._kv.registry_state(replica_id)
 
-    def refresh_replica_metadata(self, replica_id, metadata):
-        return self._kv.refresh_replica_metadata(replica_id, metadata)
+    def refresh_replica_metadata(self, replica_id, metadata, *, revision=None):
+        return self._kv.refresh_replica_metadata(replica_id, metadata, revision=revision)
+
+    def metadata_revision(self, replica_id):
+        return self._kv.metadata_revision(replica_id)
+
+    def replay_revision(self, replica_id):
+        return self._kv.replay_revision(replica_id)
+
+    def request_metadata_refresh(self, replica_id, reason):
+        return self._kv.request_metadata_refresh(replica_id, reason)
+
+    def metadata_refresh_requests(self):
+        return self._kv.metadata_refresh_requests()
 
     def metadata_status(self, replica_id):
         status = self._kv.metadata_status(replica_id)
@@ -115,6 +127,12 @@ class DataStore:
         for node, status in statuses.items():
             status["capacity_known"] = self.capacity_blocks(node) is not None
         return statuses
+
+    def drain_cache_diagnostics(self):
+        return self._kv.drain_cache_diagnostics()
+
+    def record_cache_diagnostic(self, replica_id, stage, reason, details=None, *, count=1):
+        self._kv.record_cache_diagnostic(replica_id, stage, reason, details, count=count)
 
     def set_native_hash_codec_factory(self, factory: NativeHashCodecFactory) -> None:
         self._kv.set_native_hash_codec_factory(factory)
@@ -141,9 +159,9 @@ class DataStore:
         """Clear the replica index and gate hits and dispatch predictions."""
         self._kv.invalidate_replica(replica_id)
 
-    def mark_kv_replica_ready(self, replica_id: str) -> None:
+    def mark_kv_replica_ready(self, replica_id: str, *, revision: int | None = None) -> None:
         """Expose residency restored by the completed event replay."""
-        self._kv.mark_replica_ready(replica_id)
+        self._kv.mark_replica_ready(replica_id, revision=revision)
 
     def enable_kv_dispatch_estimates(self, replica_id: str) -> None:
         """Discard incomplete replay state and permit new dispatch estimates."""

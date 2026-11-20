@@ -14,7 +14,7 @@ def install_metadata():
     def install(store, replica_id, metadata):
         cache = store._kv if isinstance(store, DataStore) else store
         cache.refresh_replica_metadata(replica_id, metadata)
-        cache.mark_replica_ready(replica_id)
+        cache.mark_replica_ready(replica_id, revision=cache.replay_revision(replica_id))
         return cache.registry_state(replica_id)
 
     return install

@@ -25,8 +25,7 @@ from uni_agent.agent_aware_router.collectors import _loop_runner as loop_runner_
 from uni_agent.agent_aware_router.collectors.collector import Collector
 from uni_agent.agent_aware_router.collectors.parse.base import Parser
 from uni_agent.agent_aware_router.collectors.transport.base import Transport
-
-pytestmark = [pytest.mark.cpu, pytest.mark.level0]
+from uni_agent.agent_aware_router.types.kv_cache import KVCacheUpdate
 
 
 class IdleTransport(Transport):
@@ -45,6 +44,62 @@ class NoopParser(Parser):
         return None
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_kv_write_drains_diagnostics_and_emits_current_capabilities(monkeypatch):
+    from uni_agent.agent_aware_router.collectors import collector as collector_module
+
+    collector = Collector(IdleTransport(), NoopParser())
+    diagnostics, capabilities, writes = [], [], []
+    status = {
+        "a": {
+            "matching": "registered",
+            "gated": True,
+            "native": "paused",
+            "capacity_known": True,
+            "budget_known": False,
+        }
+    }
+    pending = [("a", "native_identity", "digest_mismatch", 2)]
+
+    def drain():
+        rows = list(pending)
+        pending.clear()
+        return rows
+
+    collector._data_store = SimpleNamespace(
+        apply_kv_update=writes.append, drain_cache_diagnostics=drain, get_cache_status=lambda: status
+    )
+    monkeypatch.setattr(
+        collector_module,
+        "emitter",
+        SimpleNamespace(
+            on_cache_diagnostic=lambda *args: diagnostics.append(args),
+            on_cache_capability=lambda *args: capabilities.append(args),
+        ),
+    )
+    update = KVCacheUpdate("a")
+    collector._write_kv_update(update)
+    assert writes == [update] and diagnostics == [("a", "native_identity", "digest_mismatch", 2)]
+    assert capabilities == [
+        ("a", "matching", False),
+        ("a", "native_identity", False),
+        ("a", "capacity", True),
+        ("a", "budget", False),
+    ]
+    collector._write_kv_update(update)
+    assert len(diagnostics) == 1
+    other = Collector(IdleTransport(), NoopParser())
+    other._data_store = collector._data_store
+    status["a"]["gated"] = False
+    other._emit_cache_diagnostics()
+    status["a"]["gated"] = True
+    collector._emit_cache_diagnostics()
+    assert [ready for _, capability, ready in capabilities if capability == "matching"][-1] is False
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.parametrize("loop_running", [False, True], ids=["delayed-loop", "running-loop"])
 def test_startup_timeout_cleans_loop_and_thread_before_restart(monkeypatch, loop_running):
     transport = IdleTransport()
@@ -96,6 +151,8 @@ def test_startup_timeout_cleans_loop_and_thread_before_restart(monkeypatch, loop
         collector.stop(timeout=1)
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.parametrize("cleanup_error", [TimeoutError("thread did not stop"), RuntimeError("cleanup failed")])
 def test_startup_timeout_keeps_cleanup_failure_as_its_cause(monkeypatch, cleanup_error):
     collector = Collector(IdleTransport(), NoopParser())
@@ -122,6 +179,8 @@ def test_startup_timeout_keeps_cleanup_failure_as_its_cause(monkeypatch, cleanup
         collector.stop(timeout=1)
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_stop_timeout_retains_pending_cleanup_until_retry():
     transport = IdleTransport()
     collector = Collector(transport, NoopParser())
@@ -155,6 +214,8 @@ def test_stop_timeout_retains_pending_cleanup_until_retry():
     assert collector._loop_runner.thread is None and collector._loop_runner.cleanup_future is None
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.parametrize("closed_loop", [False, True], ids=["stopped-loop", "closed-loop"])
 def test_stop_reports_dead_loop_cleanup_failure_without_waiting(monkeypatch, closed_loop):
     started, cleaning = Event(), Event()
@@ -222,6 +283,8 @@ def test_stop_reports_dead_loop_cleanup_failure_without_waiting(monkeypatch, clo
             assert all(message == "Task was destroyed but it is pending!" for message in diagnostics)
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_stop_joins_thread_before_its_loop_has_started(monkeypatch):
     transport = IdleTransport()
     collector = Collector(transport, NoopParser())
@@ -246,6 +309,8 @@ def test_stop_joins_thread_before_its_loop_has_started(monkeypatch):
         collector.stop(timeout=1)
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_start_rejects_duplicate_and_restarts_after_complete_cleanup():
     collector = Collector(IdleTransport(), NoopParser())
     try:
@@ -264,6 +329,8 @@ def test_start_rejects_duplicate_and_restarts_after_complete_cleanup():
         collector.stop(timeout=1)
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_stop_timeout_finishes_in_background_without_another_stop():
     started, cleaning, cleaned = Event(), Event(), Event()
     release = asyncio.Event()
@@ -307,6 +374,8 @@ def test_stop_timeout_finishes_in_background_without_another_stop():
         collector.stop(timeout=1)
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.parametrize("cleanup_error", [ValueError("transport cleanup failed"), TimeoutError("transport timed out")])
 def test_stop_error_closes_the_loop_and_preserves_the_cause(cleanup_error):
     started, cleaned = Event(), Event()
@@ -350,6 +419,8 @@ def test_stop_error_closes_the_loop_and_preserves_the_cause(cleanup_error):
             collector.stop(timeout=1)
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_cleanup_error_after_timeout_is_reported_by_late_stop():
     started, cleaning = Event(), Event()
     release = asyncio.Event()
