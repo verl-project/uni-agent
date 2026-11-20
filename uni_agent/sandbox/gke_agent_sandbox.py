@@ -326,24 +326,39 @@ def _exec_in_pod(
                 raise
             time.sleep(attempt + 1)
     started = time.monotonic()
+    deadline = started + seconds + _EXEC_STREAM_GRACE
     stdout: list[str] = []
     stderr: list[str] = []
+    # The deadline cannot be left to the loop below alone: update() may not return while the stream keeps reporting
+    # data (a command that never stops printing, or a connection that was dropped without a close frame), and a
+    # thread spinning there slows every other sandbox of the process down. Closing the stream from a timer makes
+    # update() fail, which ends the loop.
+    watchdog = threading.Timer(deadline - started, resp.close)
+    watchdog.daemon = True
+    watchdog.start()
     try:
         while resp.is_open():
-            if time.monotonic() - started > seconds + _EXEC_STREAM_GRACE:
-                raise TimeoutError(f"exec exceeded {seconds}s in pod {handle.pod_name}")
+            if time.monotonic() > deadline:
+                raise TimeoutError
             resp.update(timeout=1.0)
             if resp.peek_stdout():
                 stdout.append(resp.read_stdout())
             if resp.peek_stderr():
                 stderr.append(resp.read_stderr())
+        if time.monotonic() > deadline:
+            raise TimeoutError
         # Output that arrives together with the close frame stays buffered and never surfaces through the loop
         # above. Drain it, or large outputs (such as read_file's base64) come back truncated.
         channels = getattr(resp, "_channels", {})
         stdout.append(channels.pop(1, ""))
         stderr.append(channels.pop(2, ""))
         exit_code = int(resp.returncode or 0)
+    except Exception as exc:
+        if time.monotonic() > deadline:
+            raise TimeoutError(f"exec exceeded {seconds}s in pod {handle.pod_name}") from exc
+        raise
     finally:
+        watchdog.cancel()
         with contextlib.suppress(Exception):
             resp.close()
     out, err = "".join(stdout), "".join(stderr)
