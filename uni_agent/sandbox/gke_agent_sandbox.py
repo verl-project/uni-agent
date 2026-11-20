@@ -1,1196 +1,362 @@
-"""GKE / Kubernetes Agent Sandbox provider backed by ``agent_sandbox_rl`` ``SandboxFleet``."""
+"""GKE sandbox provider: one sandbox is one pod claimed through the Kubernetes Agent Sandbox controller.
+
+The cluster needs the ``kubernetes-sigs/agent-sandbox`` controller and CRDs. Pods come from per-image warm pools
+managed by ``agent_sandbox_rl``: :meth:`GKEAgentSandbox.prewarm` fills a pool ahead of time, and a sandbox whose
+image has no pool is cold-started on demand.
+"""
 
 from __future__ import annotations
 
 import asyncio
-import collections
+import contextlib
+import functools
 import json
 import logging
 import math
 import os
-import re
 import shlex
 import threading
 import time
 import uuid
-from collections.abc import Callable, Mapping, Sequence
-from concurrent.futures import Future, ThreadPoolExecutor
+from collections.abc import Iterable, Mapping
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ClassVar
 
-import yaml
-
-from .base import ExecResult, ImageMap, Sandbox
+from .base import ExecResult, Sandbox
 from .registry import register_sandbox
 
 if TYPE_CHECKING:
     from .base import SandboxConfig
 
-try:
-    from kubernetes import client as k8s_client
-    from kubernetes import config as k8s_config
-    from kubernetes.stream import stream as k8s_stream
-except ImportError:
-    k8s_client = None  # type: ignore[assignment]
-    k8s_config = None  # type: ignore[assignment]
-    k8s_stream = None  # type: ignore[assignment]
-
-try:
-    import agent_sandbox_rl.resources as asrl_resources
-    from agent_sandbox_rl import ClusterConfig, FleetConfig, SandboxFleet, Task
-    from agent_sandbox_rl.config import TemplateSpec
-    from agent_sandbox_rl.lookahead import LookaheadWarmer
-except ImportError:
-    ClusterConfig = None  # type: ignore[assignment]
-    FleetConfig = None  # type: ignore[assignment]
-    SandboxFleet = None  # type: ignore[assignment]
-    Task = None  # type: ignore[assignment]
-    TemplateSpec = None  # type: ignore[assignment]
-    LookaheadWarmer = None  # type: ignore[assignment]
-    asrl_resources = None  # type: ignore[assignment]
-
 logger = logging.getLogger(__name__)
 
-RUNTIME_CONTAINER_NAME = "agent-runtime"
-_PWD_SENTINEL = "__UNI_AGENT_PWD__"
-
-_DEFAULT_NETWORK_POLICY_MANAGEMENT = "Managed"
-_VALID_NETWORK_POLICY_MODES = ("Managed", "Unmanaged")
+_NETWORK_POLICY_MODES = ("Managed", "Unmanaged")
 _DENY_ALL_NETWORK_POLICY: dict[str, list[Any]] = {"ingress": [], "egress": []}
-_AGENT_SANDBOX_RL_INSTALL_HINT = (
-    "GKEAgentSandbox requires 'agent_sandbox_rl', which is not installed. "
-    "Install the 'gke' extra from a uni-agent checkout (pip install -e '.[gke]') and 'agent-sandbox-rl' "
-    "(see docs/source/concepts/sandbox.md)."
-)
-
-_AGENT_SANDBOX_EXT_GROUP = "extensions.agents.x-k8s.io"
-_AGENT_SANDBOX_EXT_VERSION = "v1beta1"
-_SANDBOX_CLAIMS_PLURAL = "sandboxclaims"
-
-_FLEET_LOCK = threading.Lock()
-_GLOBAL_FLEET: Any = None
-_GLOBAL_LOOKAHEAD_WARMER: Any = None
-_LOOKAHEAD_FUTURES: dict[int | str, Future[Any]] = {}
-_TEMPLATES_PATCHED = False
-_FLEET_POD_ANNOTATIONS: dict[str, str] = {}
-_ACTIVE_CLAIMS: dict[str, int] = {}
-_RECENT_BATCH_IMAGES: collections.deque[set[str]] = collections.deque(maxlen=4)
-_IDLE_LRU: collections.OrderedDict[str, None] = collections.OrderedDict()
-
-# Separate executors so cold sandbox claim waits never starve active pod exec calls.
-# Initialized lazily so importing this module or pickling Ray actors never touches a ThreadPoolExecutor.
-_EXECUTOR_LOCK = threading.Lock()
-_LIFECYCLE_EXECUTOR: ThreadPoolExecutor | None = None
-_EXEC_EXECUTOR: ThreadPoolExecutor | None = None
+_DEFAULT_EXEC_TIMEOUT = 120.0
+# How long after a command's own timeout the exec stream may stay open before the client gives up on it.
+_EXEC_STREAM_GRACE = 10.0
+# A claim can wait minutes for a pod, so claims get their own threads and never starve command execution.
+_CLAIM_WORKERS = 128
+_EXEC_WORKERS = 256
+# Threads the fleet uses to create or delete several warm pools at once.
+_FLEET_WORKERS = 64
 
 
-class SandboxRuntimeTimeoutError(RuntimeError):
-    """Raised when a ``GKEAgentSandbox`` exceeds its overall ``runtime_timeout``."""
+@functools.cache
+def _load_sdk() -> SimpleNamespace:
+    """Import the Kubernetes clients lazily so this provider stays importable without them."""
+    try:
+        import agent_sandbox_rl
+        from agent_sandbox_rl.preflight import pod_selector_covers
+        from kubernetes import client
+        from kubernetes.stream import stream
+    except ImportError as exc:
+        raise ImportError(
+            "the gke_agent_sandbox provider requires kubernetes, k8s-agent-sandbox and agent-sandbox-rl; "
+            "see the GKE section of docs/source/concepts/sandbox.md for the install commands"
+        ) from exc
+    return SimpleNamespace(rl=agent_sandbox_rl, client=client, stream=stream, pod_selector_covers=pod_selector_covers)
 
 
-def get_lifecycle_executor() -> ThreadPoolExecutor:
-    global _LIFECYCLE_EXECUTOR
-    if _LIFECYCLE_EXECUTOR is None:
-        with _EXECUTOR_LOCK:
-            if _LIFECYCLE_EXECUTOR is None:
-                _LIFECYCLE_EXECUTOR = ThreadPoolExecutor(max_workers=128, thread_name_prefix="gke-sb-lifecycle")
-    return _LIFECYCLE_EXECUTOR
+@functools.cache
+def _executor(name: str, workers: int) -> ThreadPoolExecutor:
+    return ThreadPoolExecutor(max_workers=workers, thread_name_prefix=f"gke-sandbox-{name}")
 
 
-def get_exec_executor() -> ThreadPoolExecutor:
-    global _EXEC_EXECUTOR
-    if _EXEC_EXECUTOR is None:
-        with _EXECUTOR_LOCK:
-            if _EXEC_EXECUTOR is None:
-                _EXEC_EXECUTOR = ThreadPoolExecutor(max_workers=256, thread_name_prefix="gke-sb-exec")
-    return _EXEC_EXECUTOR
-
-
-def parse_image_map(raw: Any) -> list[ImageMap]:
-    """Parse ``ImageMap`` rules from a list/dict, JSON string, or comma-separated ``from=to`` string."""
-    if raw is None:
-        return []
-    if isinstance(raw, str):
-        text = raw.strip()
-        if not text:
-            return []
-        if text[0] in "[{":
-            try:
-                parsed = json.loads(text)
-            except json.JSONDecodeError as exc:
-                raise ValueError(f"Invalid JSON in SANDBOX_IMAGE_MAP: {exc}") from exc
-            return parse_image_map(parsed)
-        rules: list[ImageMap] = []
-        for entry in text.split(","):
-            item = entry.strip()
-            if not item:
-                continue
-            if "=" not in item:
-                raise ValueError(
-                    f"Invalid SANDBOX_IMAGE_MAP entry {item!r}; expected 'from=to' or JSON list of {{from, to}} rules"
-                )
-            src, dst = item.split("=", 1)
-            rules.append(ImageMap(from_=src.strip(), to=dst.strip()))
-        return rules
-    if isinstance(raw, ImageMap):
-        return [raw]
-    if isinstance(raw, Mapping):
-        return [ImageMap.model_validate(dict(raw))]
-    if isinstance(raw, Sequence):
-        result: list[ImageMap] = []
-        for elem in raw:
-            if isinstance(elem, ImageMap):
-                result.append(elem)
-            elif isinstance(elem, Mapping):
-                result.append(ImageMap.model_validate(dict(elem)))
-            else:
-                raise ValueError(f"Unsupported image_map rule entry: {elem!r}")
-        return result
-    raise ValueError(f"Unsupported image_map value: {raw!r}")
-
-
-def load_image_map_from_task_config(task_config_path: str | None) -> list[ImageMap]:
-    """Collect ``sandbox.image_map`` rules from a Task Config YAML file, followed by ``SANDBOX_IMAGE_MAP`` env rules."""
-    rules: list[ImageMap] = []
-    seen: set[tuple[str, str]] = set()
-    if task_config_path:
-        path = Path(task_config_path).expanduser()
-        if path.is_file():
-            raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-            entries = raw if isinstance(raw, list) else ([raw] if isinstance(raw, dict) else [])
-            for entry in entries:
-                if not isinstance(entry, Mapping):
-                    continue
-                sandbox_cfg = entry.get("sandbox")
-                if isinstance(sandbox_cfg, Mapping) and sandbox_cfg.get("image_map"):
-                    for rule in parse_image_map(sandbox_cfg["image_map"]):
-                        key = (rule.from_, rule.to)
-                        if key not in seen:
-                            seen.add(key)
-                            rules.append(rule)
-    for rule in parse_image_map(os.getenv("SANDBOX_IMAGE_MAP", "")):
-        key = (rule.from_, rule.to)
-        if key not in seen:
-            seen.add(key)
-            rules.append(rule)
-    return rules
-
-
-def apply_image_map(
-    image: str,
-    image_map: Sequence[ImageMap | Mapping[str, Any]] | Mapping[str, Any] | str | None = None,
-) -> str:
-    """Apply ``ImageMap`` rewrite rules (explicit or from ``SANDBOX_IMAGE_MAP``) to ``image``. First match wins."""
-    if not image:
-        return image
-    rules = parse_image_map(os.getenv("SANDBOX_IMAGE_MAP", "")) if image_map is None else parse_image_map(image_map)
-    for rule in rules:
-        mapped = rule.try_map(image)
-        if mapped is not None:
-            return mapped
-    return image
-
-
-def _read_in_cluster_namespace() -> str | None:
+def _in_cluster_namespace() -> str | None:
     try:
         with open("/var/run/secrets/kubernetes.io/serviceaccount/namespace", encoding="utf-8") as f:
-            ns = f.read().strip()
-            if ns:
-                return ns
+            return f.read().strip() or None
     except OSError:
-        pass
-    return None
+        return None
 
 
-def _resolve_default_namespace(namespace: str | None = None) -> str:
-    if namespace and namespace.strip():
-        return namespace.strip()
-    for env_key in ("SANDBOX_NAMESPACE", "K8S_NAMESPACE", "POD_NAMESPACE"):
-        val = os.environ.get(env_key, "").strip()
-        if val:
-            return val
-    return _read_in_cluster_namespace() or "default"
+@dataclass(frozen=True)
+class _FleetSettings:
+    """Everything sandboxes must agree on to share warm pools; also the cache key of their fleet."""
 
+    namespace: str
+    run_id: str | None
+    node_selector: tuple[tuple[str, str], ...]
+    network_policy_management: str
+    network_policy: str  # JSON, so the settings stay hashable
 
-def _resolve_default_node_selector(node_selector: Mapping[str, str] | None = None) -> dict[str, str] | None:
-    if node_selector is not None:
-        return {str(k): str(v) for k, v in node_selector.items()}
-    k, v = os.getenv("NODE_SELECTOR_KEY"), os.getenv("NODE_SELECTOR_VAL")
-    return {k: v} if (k and v) else None
-
-
-def _resolve_default_pod_annotations(pod_annotations: Mapping[str, str] | None = None) -> dict[str, str]:
-    """Parse optional pod annotations from ``SANDBOX_POD_ANNOTATIONS`` (JSON object) and explicit kwargs."""
-    merged: dict[str, str] = {}
-    raw_env = os.getenv("SANDBOX_POD_ANNOTATIONS", "").strip()
-    if raw_env:
-        try:
-            parsed = json.loads(raw_env)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"Invalid JSON in SANDBOX_POD_ANNOTATIONS: {exc}") from exc
-        if not isinstance(parsed, dict) or not all(
-            isinstance(k, str) and isinstance(v, str) for k, v in parsed.items()
-        ):
-            raise ValueError("SANDBOX_POD_ANNOTATIONS must be a JSON object mapping string keys to string values")
-        merged.update(parsed)
-    if pod_annotations is not None:
-        if not isinstance(pod_annotations, Mapping):
-            raise ValueError(f"pod_annotations must be a mapping, got {type(pod_annotations).__name__}")
-        for k, v in pod_annotations.items():
-            if not isinstance(k, str) or not isinstance(v, str):
-                raise ValueError("pod_annotations keys and values must be strings")
-            merged[k] = v
-    return merged
-
-
-def _getenv_int(name: str, default: int) -> int:
-    raw = (os.getenv(name) or "").strip()
-    if not raw:
-        return default
-    try:
-        return int(raw)
-    except ValueError:
-        raise ValueError(f"{name} must be an integer, got {raw!r}") from None
-
-
-def _require_agent_sandbox_rl() -> None:
-    if ClusterConfig is None or FleetConfig is None or SandboxFleet is None or Task is None:
-        raise ImportError(_AGENT_SANDBOX_RL_INSTALL_HINT)
-
-
-def _resolve_network_policy_management(mode: str | None = None) -> str:
-    if isinstance(mode, str) and mode.strip():
-        resolved = mode.strip()
-    else:
-        env_val = (os.getenv("SANDBOX_NETWORK_POLICY_MANAGEMENT") or "").strip()
-        resolved = env_val or _DEFAULT_NETWORK_POLICY_MANAGEMENT
-    if resolved not in _VALID_NETWORK_POLICY_MODES:
-        raise ValueError(f"network_policy_management must be one of {_VALID_NETWORK_POLICY_MODES}, got {resolved!r}")
-    return resolved
-
-
-def _resolve_network_policy(network_policy: Mapping[str, Any] | None = None) -> dict[str, Any]:
-    if network_policy is None:
-        return {
-            "ingress": list(_DENY_ALL_NETWORK_POLICY["ingress"]),
-            "egress": list(_DENY_ALL_NETWORK_POLICY["egress"]),
-        }
-    if not isinstance(network_policy, Mapping):
-        raise ValueError(f"network_policy must be a mapping, got {type(network_policy).__name__}")
-    return dict(network_policy)
-
-
-def _load_kube_config_once() -> None:
-    if k8s_config is None:
-        raise ImportError("The 'kubernetes' package is required for GKEAgentSandbox.")
-    try:
-        k8s_config.load_incluster_config()
-    except Exception:
-        k8s_config.load_kube_config()
-
-
-def _pod_selector_covers(selector: Any, labels: Mapping[str, str]) -> bool:
-    """Return True if a Kubernetes label selector matches a pod carrying ``labels``."""
-    if selector is None:
-        return True
-    if isinstance(selector, Mapping):
-        match_labels = selector.get("matchLabels") or selector.get("match_labels") or {}
-        match_exprs = selector.get("matchExpressions") or selector.get("match_expressions") or []
-    else:
-        match_labels = getattr(selector, "match_labels", None) or {}
-        match_exprs = getattr(selector, "match_expressions", None) or []
-
-    for key, expected in match_labels.items():
-        if labels.get(key) != expected:
-            return False
-
-    for expr in match_exprs:
-        if isinstance(expr, Mapping):
-            key = expr.get("key")
-            op = expr.get("operator")
-            values = set(expr.get("values") or ())
-        else:
-            key = getattr(expr, "key", None)
-            op = getattr(expr, "operator", None)
-            values = set(getattr(expr, "values", None) or ())
-        present = key in labels
-        val = labels.get(key)
-        if op == "In" and (not present or val not in values):
-            return False
-        if op == "NotIn" and present and val in values:
-            return False
-        if op == "Exists" and not present:
-            return False
-        if op == "DoesNotExist" and present:
-            return False
-    return True
-
-
-def _is_allow_all_egress_rule(rule: Any) -> bool:
-    if isinstance(rule, Mapping):
-        to = rule.get("to")
-        ports = rule.get("ports")
-    else:
-        to = getattr(rule, "to", None)
-        ports = getattr(rule, "ports", None)
-    return not to and not ports
-
-
-def _egress_isolation(policy: Any) -> tuple[bool, bool]:
-    """Return ``(isolates_egress, allows_all_egress)`` for one NetworkPolicy."""
-    spec = policy.get("spec") if isinstance(policy, Mapping) else getattr(policy, "spec", None)
-    if spec is None:
-        return False, False
-    if isinstance(spec, Mapping):
-        policy_types = spec.get("policyTypes") or spec.get("policy_types") or []
-        egress = spec.get("egress")
-    else:
-        policy_types = getattr(spec, "policy_types", None) or []
-        egress = getattr(spec, "egress", None)
-
-    # policyTypes decides the direction. The API server defaults it (Egress only when egress rules exist), so the
-    # same default is applied here to manifests that leave it out.
-    isolates = "Egress" in policy_types if policy_types else bool(egress)
-    if not isolates:
-        return False, False
-    return True, any(_is_allow_all_egress_rule(rule) for rule in egress or [])
-
-
-def _verify_unmanaged_network_policy(namespace: str, pod_labels: Mapping[str, str]) -> None:
-    """Fail closed when ``networkPolicyManagement='Unmanaged'`` has no namespace-wide egress NetworkPolicy."""
-    if k8s_client is None:
-        raise RuntimeError(
-            "network_policy_management='Unmanaged' requires the 'kubernetes' package to verify that a "
-            f"namespace-wide NetworkPolicy restricts egress for pods {dict(pod_labels)} in namespace {namespace!r}. "
-            "Use the default 'Managed' mode instead."
-        )
-    try:
-        _load_kube_config_once()
-        policies = k8s_client.NetworkingV1Api().list_namespaced_network_policy(namespace).items or []
-    except Exception as exc:
-        raise RuntimeError(
-            f"Refusing to run with network_policy_management='Unmanaged' in namespace {namespace!r}: "
-            f"could not verify a namespace-wide NetworkPolicy ({exc}). Use the default 'Managed' mode, "
-            "or grant list access on networking.k8s.io/networkpolicies."
-        ) from exc
-
-    # NetworkPolicies are additive: a pod may send whatever any policy selecting it allows. So egress is restricted
-    # only if some policy isolates egress for the sandbox pods and none of those policies allows all of it.
-    isolated = allows_all = False
-    for policy in policies:
-        spec = policy.get("spec") if isinstance(policy, Mapping) else getattr(policy, "spec", None)
-        selector = (
-            (spec.get("podSelector") if isinstance(spec, Mapping) else getattr(spec, "pod_selector", None))
-            if spec is not None
-            else None
-        )
-        if not _pod_selector_covers(selector, pod_labels):
-            continue
-        policy_isolates, policy_allows_all = _egress_isolation(policy)
-        isolated = isolated or policy_isolates
-        allows_all = allows_all or policy_allows_all
-    if isolated and not allows_all:
-        return
-
-    wanted = ",".join(f"{k}={v}" for k, v in sorted(pod_labels.items()))
-    if allows_all:
-        raise RuntimeError(
-            f"Refusing to run with network_policy_management='Unmanaged': a NetworkPolicy in namespace {namespace!r} "
-            f"allows all egress for sandbox pods ({wanted}), which overrides any deny-all policy. Remove that rule "
-            "or use the default network_policy_management='Managed' mode."
-        )
-    raise RuntimeError(
-        f"Refusing to run with network_policy_management='Unmanaged': no egress-restricting NetworkPolicy in "
-        f"namespace {namespace!r} selects sandbox pods ({wanted}). Apply a namespace-wide deny-all NetworkPolicy "
-        "or use the default network_policy_management='Managed' mode."
-    )
-
-
-def patch_agent_sandbox_rl_templates() -> None:
-    """Hook ``agent_sandbox_rl.Resources._template_manifest`` to attach opt-in ``pod_annotations`` when configured."""
-    global _TEMPLATES_PATCHED
-    if asrl_resources is None or _TEMPLATES_PATCHED:
-        return
-    if not hasattr(asrl_resources.Resources, "_orig_template_manifest") and hasattr(
-        asrl_resources.Resources, "_template_manifest"
-    ):
-        asrl_resources.Resources._orig_template_manifest = asrl_resources.Resources._template_manifest
-
-        def _patched_template_manifest(self: Any, image: str, template_name: str, template: Any) -> dict[str, Any]:
-            manifest = self._orig_template_manifest(image, template_name, template)
-            spec = manifest["spec"]
-            pod_template = spec["podTemplate"]
-            if _FLEET_POD_ANNOTATIONS:
-                pod_meta = pod_template.setdefault("metadata", {})
-                pod_annotations = pod_meta.setdefault("annotations", {})
-                for key, value in _FLEET_POD_ANNOTATIONS.items():
-                    pod_annotations.setdefault(key, value)
-            pod_spec = pod_template["spec"]
-            pod_spec.setdefault("automountServiceAccountToken", False)
-            pod_spec.setdefault("shareProcessNamespace", False)
-            containers = pod_spec.get("containers") or []
-            if containers:
-                containers[0]["name"] = RUNTIME_CONTAINER_NAME
-            return manifest
-
-        asrl_resources.Resources._template_manifest = _patched_template_manifest
-        _TEMPLATES_PATCHED = True
-
-
-def _get_or_init_fleet_locked(
-    *,
-    namespace: str,
-    node_selector: dict[str, str] | None,
-    pod_annotations: Mapping[str, str] | None = None,
-    network_policy_management: str | None = None,
-    network_policy: Mapping[str, Any] | None = None,
-) -> Any:
-    global _GLOBAL_FLEET, _RECENT_BATCH_IMAGES, _FLEET_POD_ANNOTATIONS
-    if _GLOBAL_FLEET is not None:
-        return _GLOBAL_FLEET
-    _require_agent_sandbox_rl()
-
-    resolved_annotations = _resolve_default_pod_annotations(pod_annotations)
-    resolved_np_mgmt = _resolve_network_policy_management(network_policy_management)
-    resolved_np = _resolve_network_policy(network_policy)
-
-    if resolved_np_mgmt == "Unmanaged":
-        _verify_unmanaged_network_policy(namespace, {"app": "agent-sandbox-rl"})
-
-    _FLEET_POD_ANNOTATIONS = dict(resolved_annotations)
-    patch_agent_sandbox_rl_templates()
-
-    adopt_existing = os.getenv("SANDBOX_ADOPT_EXISTING", "0").strip().lower() in ("1", "true", "yes")
-    run_id = os.getenv("SANDBOX_RUN_ID", "uni-agent-shared").strip() or None
-    default_isolation = "none" if (adopt_existing or run_id in (None, "uni-agent-shared")) else "names"
-    run_isolation = os.getenv("SANDBOX_RUN_ISOLATION", default_isolation).strip() or default_isolation
-    max_concurrent = max(1, _getenv_int("SANDBOX_MAX_CONCURRENT", 512))
-    max_warmpool_size = max(1, _getenv_int("SANDBOX_MAX_WARMPOOL_SIZE", 8))
-    colocate_replicas = os.getenv("SANDBOX_COLOCATE_REPLICAS", "1").strip().lower() in ("1", "true", "yes")
-    pinned_batches = max(1, _getenv_int("SANDBOX_PINNED_BATCHES", 4))
-    _RECENT_BATCH_IMAGES = collections.deque(_RECENT_BATCH_IMAGES, maxlen=pinned_batches)
-
-    fleet_kwargs: dict[str, Any] = {
-        "clusters": [
-            ClusterConfig(
-                name="default",
-                namespace=namespace,
-                node_selector=node_selector,
-                in_cluster=os.getenv("KUBERNETES_SERVICE_HOST") is not None,
+    @classmethod
+    def resolve(
+        cls,
+        *,
+        namespace: str | None = None,
+        run_id: str | None = None,
+        node_selector: Mapping[str, str] | None = None,
+        network_policy_management: str = "Managed",
+        network_policy: Mapping[str, Any] | None = None,
+    ) -> _FleetSettings:
+        """Fill unset values from the environment: these three change per run, which a Task Config file cannot."""
+        if network_policy_management not in _NETWORK_POLICY_MODES:
+            raise ValueError(
+                f"network_policy_management must be one of {_NETWORK_POLICY_MODES}, got {network_policy_management!r}"
             )
-        ],
-        "max_concurrent": max_concurrent,
-        "window_size": 16,
-        "max_warmpool_size": max_warmpool_size,
-        "warm_per_task": True,
-        "adopt_existing": adopt_existing,
-        "run_isolation": run_isolation,
-        "run_id": run_id,
-        "install_teardown_hooks": True,
+        if network_policy is not None and network_policy_management != "Managed":
+            raise ValueError("network_policy only applies when network_policy_management is 'Managed'")
+        if node_selector is None:
+            key, value = os.getenv("NODE_SELECTOR_KEY"), os.getenv("NODE_SELECTOR_VAL")
+            node_selector = {key: value} if key and value else {}
+        return cls(
+            namespace=namespace or os.getenv("SANDBOX_NAMESPACE") or _in_cluster_namespace() or "default",
+            run_id=run_id or os.getenv("SANDBOX_RUN_ID") or None,
+            node_selector=tuple(sorted((str(k), str(v)) for k, v in node_selector.items())),
+            network_policy_management=network_policy_management,
+            network_policy=json.dumps(
+                _DENY_ALL_NETWORK_POLICY if network_policy is None else dict(network_policy), sort_keys=True
+            ),
+        )
+
+
+_FLEETS: dict[_FleetSettings, Any] = {}
+_FLEETS_LOCK = threading.Lock()
+
+
+def _get_fleet(settings: _FleetSettings) -> Any:
+    """Return the process-wide ``SandboxFleet`` for ``settings``, building it on first use."""
+    with _FLEETS_LOCK:
+        if settings not in _FLEETS:
+            fleet = _build_fleet(settings)
+            if not _FLEETS:
+                # Not atexit: teardown() uses worker threads, which can no longer be started by the time atexit
+                # handlers run. This hook runs earlier, alongside concurrent.futures' own.
+                threading._register_atexit(_teardown_fleets)
+            _FLEETS[settings] = fleet
+        return _FLEETS[settings]
+
+
+def _build_fleet(settings: _FleetSettings) -> Any:
+    sdk = _load_sdk()
+    node_selector = dict(settings.node_selector)
+    # Start a pool's replicas on the same node where possible, so the image is pulled once.
+    template: dict[str, Any] = {
+        "network_policy_management": settings.network_policy_management,
+        "colocate_replicas": True,
     }
-    template_kwargs: dict[str, Any] = {
-        "colocate_replicas": colocate_replicas,
-        "network_policy_management": resolved_np_mgmt,
-        "automount_service_account_token": False,
-        "share_process_namespace": False,
-    }
+    if settings.network_policy_management == "Managed":
+        template["extra_template_spec"] = {"networkPolicy": json.loads(settings.network_policy)}
     if node_selector:
-        template_kwargs["extra_pod_spec"] = {
+        # A dedicated sandbox node pool is usually tainted with its own label; tolerate that taint.
+        template["extra_pod_spec"] = {
             "tolerations": [
-                {"key": k, "operator": "Equal", "value": str(v), "effect": "NoSchedule"}
-                for k, v in node_selector.items()
+                {"key": key, "operator": "Equal", "value": value, "effect": "NoSchedule"}
+                for key, value in node_selector.items()
             ]
         }
-    if resolved_np_mgmt == "Managed":
-        template_kwargs["extra_template_spec"] = {"networkPolicy": resolved_np}
-    fleet_kwargs["template"] = TemplateSpec(**template_kwargs)
-
-    cfg = FleetConfig(**fleet_kwargs)
-    _GLOBAL_FLEET = SandboxFleet(cfg)
-    _GLOBAL_FLEET._install_teardown_hooks()
-    logger.info(
-        "Initialized GKE SandboxFleet (namespace=%s, run_id=%s, run_isolation=%s, max_warmpool_size=%d, "
-        "colocate=%s, network_policy_management=%s)",
-        namespace,
-        run_id,
-        run_isolation,
-        max_warmpool_size,
-        colocate_replicas,
-        resolved_np_mgmt,
+    fleet = sdk.rl.SandboxFleet(
+        sdk.rl.FleetConfig(
+            clusters=[
+                sdk.rl.ClusterConfig(
+                    name="default",
+                    namespace=settings.namespace,
+                    node_selector=node_selector or None,
+                    in_cluster="KUBERNETES_SERVICE_HOST" in os.environ,
+                )
+            ],
+            max_concurrent=_FLEET_WORKERS,
+            run_id=settings.run_id,
+            # Put the run ID in pool and template names, so runs sharing a namespace never share or delete
+            # each other's pools.
+            run_isolation="names",
+            template_name_prefix="uni-agent-",
+            template=sdk.rl.TemplateSpec(**template),
+        )
     )
-    return _GLOBAL_FLEET
+    if settings.network_policy_management == "Unmanaged":
+        _require_egress_policy(sdk, fleet.registry.get("default"))
+    return fleet
 
 
-def _register_and_warm_locked(
-    fleet: Any,
-    tasks: list[Any],
-    *,
-    warm: bool = True,
-    replicas_override: int | None = None,
-) -> None:
-    unique_tasks: list[Any] = []
-    seen_images: set[str] = set()
-    for t in tasks:
-        img = getattr(t, "image", None)
-        if img and img not in seen_images:
-            seen_images.add(img)
-            unique_tasks.append(t)
-    if not unique_tasks:
-        return
+def _require_egress_policy(sdk: SimpleNamespace, cluster: Any) -> None:
+    """Refuse Unmanaged mode unless the namespace restricts egress for every sandbox pod.
 
-    unplanned = [t for t in unique_tasks if fleet.plan_ is None or fleet.plan_.for_image(t.image) is None]
-    if unplanned:
+    In this mode the controller creates no NetworkPolicy, so without one of the operator's the sandboxes would have
+    full network access.
+    """
+    labels = cluster.resources.fleet_pod_labels()
+    policies = sdk.client.NetworkingV1Api(cluster.api_client).list_namespaced_network_policy(cluster.namespace).items
+    restricting = [
+        policy.spec
+        for policy in policies
+        if sdk.pod_selector_covers(policy.spec.pod_selector, labels) and "Egress" in (policy.spec.policy_types or [])
+    ]
+    # Policies are additive: a single rule with neither ``to`` nor ``ports`` re-opens all egress.
+    allows_all = any(not (rule.to or rule.ports) for spec in restricting for rule in spec.egress or [])
+    if not restricting or allows_all:
+        raise RuntimeError(
+            f"network_policy_management='Unmanaged' needs a NetworkPolicy in namespace {cluster.namespace!r} that "
+            f"restricts egress for pods labelled {labels}, and none that allows all egress for them. Apply one, or "
+            "use the default 'Managed' mode."
+        )
+
+
+def _teardown_fleets() -> None:
+    """At interpreter exit, release this process's sandboxes and delete the warm pools it created."""
+    for fleet in list(_FLEETS.values()):
+        try:
+            fleet.teardown()
+        except Exception:
+            logger.warning("GKE sandbox teardown failed; leftovers carry the run ID label", exc_info=True)
+
+
+def _plan(fleet: Any, images: Iterable[str]) -> None:
+    """Register images with the fleet, which only warms images it has planned a pool for."""
+    tasks = [_load_sdk().rl.Task(id=image, image=image) for image in images]
+    with _FLEETS_LOCK:
         if fleet.plan_ is None:
-            fleet.load_tasks(unplanned)
+            fleet.load_tasks(tasks)
             fleet.plan()
         else:
-            fleet.add_tasks(unplanned)
-
-    for t in unique_tasks:
-        _IDLE_LRU[t.image] = None
-        _IDLE_LRU.move_to_end(t.image)
-
-    if warm:
-        warmed_map = getattr(fleet, "_warmed", None)
-        # Re-warm images that were evicted across epochs even when still present in fleet.plan_.
-        to_warm = (
-            [t.image for t in unique_tasks if t.image not in warmed_map]
-            if isinstance(warmed_map, dict)
-            else [t.image for t in unplanned]
-        )
-        if to_warm:
-            default_reps = getattr(getattr(fleet, "config", None), "max_warmpool_size", None) or 8
-            reps = max(1, min(int(replicas_override), default_reps)) if replicas_override is not None else default_reps
-            fleet.warm_images(to_warm, replicas_override=reps, wait=False)
+            fleet.add_tasks(tasks)
 
 
-def _is_lookahead_mode_enabled() -> bool:
-    """Return True when warm-pool lifecycle is managed by a ``LookaheadWarmer`` (local or trainer actor)."""
-    return _GLOBAL_LOOKAHEAD_WARMER is not None or os.getenv("VERL_SANDBOX_LOOKAHEAD", "0").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-    )
-
-
-def _evict_excess_warmpools_locked(fleet: Any) -> list[str]:
-    """Unwarm oldest zero-claim, unpinned warm pools once active pool count exceeds SANDBOX_MAX_WARM_IMAGES."""
-    if _is_lookahead_mode_enabled():
-        return []
-    if getattr(getattr(fleet, "config", None), "adopt_existing", False):
-        return []
-    max_warm_images = _getenv_int("SANDBOX_MAX_WARM_IMAGES", 128)
-    if max_warm_images <= 0:
-        return []
-    warmed_map = getattr(fleet, "_warmed", None)
-    if not isinstance(warmed_map, dict) or len(warmed_map) <= max_warm_images:
-        return []
-
-    for img in warmed_map:
-        if img not in _IDLE_LRU:
-            _IDLE_LRU[img] = None
-    pinned: set[str] = set().union(*_RECENT_BATCH_IMAGES) if _RECENT_BATCH_IMAGES else set()
-    excess = len(warmed_map) - max_warm_images
-    to_evict: list[str] = []
-    for img in list(_IDLE_LRU.keys()):
-        if len(to_evict) >= excess:
-            break
-        if img not in warmed_map:
-            _IDLE_LRU.pop(img, None)
-            continue
-        if _ACTIVE_CLAIMS.get(img, 0) > 0 or img in pinned:
-            continue
-        to_evict.append(img)
-
-    if to_evict:
-        try:
-            fleet.unwarm_images(to_evict)
-            for img in to_evict:
-                if img not in warmed_map:
-                    _IDLE_LRU.pop(img, None)
-            logger.info(
-                "Evicted %d idle sandbox warm pool(s) (active_warm=%d, limit=%d)",
-                len(to_evict),
-                len(warmed_map),
-                max_warm_images,
-            )
-        except Exception:
-            logger.warning("Failed to evict idle sandbox warm pools: %s", to_evict[:3], exc_info=True)
-    return to_evict
-
-
-def _extract_image_from_mapping(item: Any) -> str | None:
-    if isinstance(item, str):
-        return item.strip() or None
-    if not isinstance(item, dict):
-        return None
-    tools_kwargs = item.get("tools_kwargs")
-    if not isinstance(tools_kwargs, dict):
-        extra_info = item.get("extra_info")
-        if isinstance(extra_info, dict):
-            tools_kwargs = extra_info.get("tools_kwargs")
-    if isinstance(tools_kwargs, dict):
-        task_dict = tools_kwargs.get("task") if isinstance(tools_kwargs.get("task"), dict) else tools_kwargs
-    elif isinstance(item.get("task"), dict):
-        task_dict = item["task"]
-    else:
-        task_dict = item
-    sandbox_cfg = task_dict.get("sandbox")
-    if isinstance(sandbox_cfg, dict):
-        img = sandbox_cfg.get("image")
-        if isinstance(img, str) and img.strip():
-            return img.strip()
-    meta_cfg = task_dict.get("metadata")
-    if isinstance(meta_cfg, dict):
-        img = meta_cfg.get("docker_image")
-        if isinstance(img, str) and img.strip():
-            return img.strip()
-    img = task_dict.get("docker_image") or task_dict.get("image")
-    if isinstance(img, str) and img.strip():
-        return img.strip()
-    return None
-
-
-def _maybe_dedup_images(images: list[str], *, deduplicate: bool) -> list[str]:
-    if not deduplicate:
-        return images
-    return list(dict.fromkeys(images))
-
-
-def extract_sandbox_images(
-    batch_or_items: Any,
-    *,
-    deduplicate: bool = False,
-    image_map: Sequence[ImageMap | Mapping[str, Any]] | Mapping[str, Any] | str | None = None,
-) -> list[str]:
-    """Extract normalized sandbox container images from a batch (TensorDict/dict), dataset, or item list."""
-    if batch_or_items is None:
-        return []
-    dataframe = getattr(batch_or_items, "dataframe", None)
-    if dataframe is not None:
-        batch_or_items = dataframe
-    if hasattr(batch_or_items, "to_dict") and hasattr(batch_or_items, "columns"):
-        # pandas.DataFrame or HuggingFace Dataset with columns
-        try:
-            records = batch_or_items.to_dict(orient="records")
-        except TypeError:
-            records = list(batch_or_items)
-        images = [
-            apply_image_map(img, image_map=image_map) for item in records if (img := _extract_image_from_mapping(item))
-        ]
-        return _maybe_dedup_images(images, deduplicate=deduplicate)
-    if isinstance(batch_or_items, dict) or hasattr(batch_or_items, "keys"):
-        for key in ("tools_kwargs", "extra_info"):
-            try:
-                col = batch_or_items[key]
-            except Exception:
-                col = None
-            if col is not None:
-                if isinstance(col, dict):
-                    items = [col]
-                elif hasattr(col, "tolist"):
-                    items = col.tolist()
-                else:
-                    items = list(col)
-                extracted: list[str] = []
-                for elem in items:
-                    wrapped = {key: elem} if isinstance(elem, dict) and key not in elem else elem
-                    img = _extract_image_from_mapping(wrapped)
-                    if img:
-                        extracted.append(apply_image_map(img, image_map=image_map))
-                if extracted:
-                    return _maybe_dedup_images(extracted, deduplicate=deduplicate)
-        if isinstance(batch_or_items, dict):
-            single = _extract_image_from_mapping(batch_or_items)
-            return [apply_image_map(single, image_map=image_map)] if single else []
-    if isinstance(batch_or_items, str):
-        return [apply_image_map(batch_or_items, image_map=image_map)]
-    images = []
+def _claim(settings: _FleetSettings, image: str, runtime_timeout: float) -> tuple[Any, Any]:
+    """Claim one sandbox pod for ``image`` and return ``(fleet, handle)``. Blocks until the pod is ready."""
+    sdk = _load_sdk()
+    fleet = _get_fleet(settings)
+    if fleet.plan_ is not None and fleet.plan_.for_image(image) is not None:
+        # This process prewarmed the image, so the claim addresses its pool by name. Recreate the pool if it has
+        # been unwarmed since; a no-op while it exists. An unplanned image gets an on-demand pool from acquire().
+        with _FLEETS_LOCK:
+            fleet.warm_images([image], replicas_override=1, wait=False)
+    handle = fleet.acquire(sdk.rl.Task(id=image, image=image))
     try:
-        iterator = iter(batch_or_items)
-    except TypeError:
-        return images
-    for item in iterator:
-        img = _extract_image_from_mapping(item)
-        if img:
-            images.append(apply_image_map(img, image_map=image_map))
-    return _maybe_dedup_images(images, deduplicate=deduplicate)
-
-
-def _get_or_init_lookahead_warmer_locked(fleet: Any) -> Any:
-    global _GLOBAL_LOOKAHEAD_WARMER
-    if _GLOBAL_LOOKAHEAD_WARMER is not None and getattr(_GLOBAL_LOOKAHEAD_WARMER, "fleet", None) is fleet:
-        return _GLOBAL_LOOKAHEAD_WARMER
-    cap = getattr(getattr(fleet, "config", None), "max_warmpool_size", None) or 8
-    _GLOBAL_LOOKAHEAD_WARMER = LookaheadWarmer(
-        fleet,
-        cap=cap,
-        keep_finished=0,
-        max_workers=32,
-        fail_fast=False,
-        register_images=True,
-    )
-    return _GLOBAL_LOOKAHEAD_WARMER
-
-
-def _build_image_counts(
-    images: list[str],
-    *,
-    replicas_override: int | None = None,
-    max_replicas: int = 8,
-    image_map: Sequence[ImageMap | Mapping[str, Any]] | Mapping[str, Any] | str | None = None,
-) -> tuple[list[str], dict[str, int]]:
-    # Lookahead callers pass final image references (``extract_sandbox_images`` already applied the rules). Mapping
-    # them again would warm a pool the sandbox never claims when rules chain (a -> b, b -> c), so rules are applied
-    # here only when the caller passes them explicitly for raw references.
-    normalized = [apply_image_map(img, image_map=image_map) if image_map is not None else img for img in images if img]
-    unique_images = list(dict.fromkeys(normalized))
-    per_prompt = max(1, min(int(replicas_override), max_replicas)) if replicas_override is not None else max_replicas
-    counts: dict[str, int] = collections.OrderedDict()
-    for img in normalized:
-        counts[img] = min(max_replicas, counts.get(img, 0) + per_prompt)
-    return unique_images, counts
-
-
-def ensure_lookahead_batch_warm(
-    batch_id: int | str,
-    images: list[str],
-    *,
-    replicas_override: int | None = None,
-    wait: bool = True,
-    wait_timeout: float | None = None,
-    namespace: str | None = None,
-    node_selector: dict[str, str] | None = None,
-    pod_annotations: Mapping[str, str] | None = None,
-    network_policy_management: str | None = None,
-    network_policy: Mapping[str, Any] | None = None,
-    image_map: Sequence[ImageMap | Mapping[str, Any]] | Mapping[str, Any] | str | None = None,
-) -> None:
-    """Ensure ``batch_id`` is registered and warmed (awaiting any prior background prefetch for ``batch_id``).
-
-    ``images`` are final image references, as ``extract_sandbox_images`` returns them. Pass ``image_map`` only to
-    rewrite raw dataset references here; ``SANDBOX_IMAGE_MAP`` is not applied implicitly.
-    """
-    _require_agent_sandbox_rl()
-    resolved_ns = _resolve_default_namespace(namespace)
-    resolved_sel = _resolve_default_node_selector(node_selector)
-    with _FLEET_LOCK:
-        fleet = _get_or_init_fleet_locked(
-            namespace=resolved_ns,
-            node_selector=resolved_sel,
-            pod_annotations=pod_annotations,
-            network_policy_management=network_policy_management,
-            network_policy=network_policy,
-        )
-        max_reps = getattr(getattr(fleet, "config", None), "max_warmpool_size", None) or 8
-        unique_images, counts = _build_image_counts(
-            images,
-            replicas_override=replicas_override,
-            max_replicas=max_reps,
-            image_map=image_map,
-        )
-        if not unique_images:
-            return
-        task_objs = [Task(id=img, image=img, metadata={"ds": {"docker_image": img}}) for img in unique_images]
-        _register_and_warm_locked(fleet, task_objs, warm=False)
-        warmer = _get_or_init_lookahead_warmer_locked(fleet)
-        fut = _LOOKAHEAD_FUTURES.pop(batch_id, None)
-    if fut is not None:
-        fut.result()
-        if wait:
-            warmer.wait_ready(counts.keys(), timeout=wait_timeout, replicas=counts)
-    elif batch_id in getattr(warmer, "_live", {}):
-        if wait:
-            warmer.wait_ready(counts.keys(), timeout=wait_timeout, replicas=counts)
-    else:
-        warmer.add(batch_id, counts, wait=wait, wait_timeout=wait_timeout)
-
-
-def prefetch_lookahead_batch_async(
-    batch_id: int | str,
-    images: list[str],
-    *,
-    replicas_override: int | None = None,
-    namespace: str | None = None,
-    node_selector: dict[str, str] | None = None,
-    pod_annotations: Mapping[str, str] | None = None,
-    network_policy_management: str | None = None,
-    network_policy: Mapping[str, Any] | None = None,
-    image_map: Sequence[ImageMap | Mapping[str, Any]] | Mapping[str, Any] | str | None = None,
-) -> None:
-    """Start warming ``batch_id``'s sandbox pools asynchronously in the background via ``LookaheadWarmer``.
-
-    ``images`` and ``image_map`` follow the same contract as in ``ensure_lookahead_batch_warm``.
-    """
-    _require_agent_sandbox_rl()
-    resolved_ns = _resolve_default_namespace(namespace)
-    resolved_sel = _resolve_default_node_selector(node_selector)
-    with _FLEET_LOCK:
-        fleet = _get_or_init_fleet_locked(
-            namespace=resolved_ns,
-            node_selector=resolved_sel,
-            pod_annotations=pod_annotations,
-            network_policy_management=network_policy_management,
-            network_policy=network_policy,
-        )
-        max_reps = getattr(getattr(fleet, "config", None), "max_warmpool_size", None) or 8
-        unique_images, counts = _build_image_counts(
-            images,
-            replicas_override=replicas_override,
-            max_replicas=max_reps,
-            image_map=image_map,
-        )
-        if not unique_images:
-            return
-        task_objs = [Task(id=img, image=img, metadata={"ds": {"docker_image": img}}) for img in unique_images]
-        _register_and_warm_locked(fleet, task_objs, warm=False)
-        warmer = _get_or_init_lookahead_warmer_locked(fleet)
-    fut = warmer.add_async(batch_id, counts, wait=False)
-    with _FLEET_LOCK:
-        _LOOKAHEAD_FUTURES[batch_id] = fut
-
-
-def finish_lookahead_batch_async(batch_id: int | str, *, wait: bool = False) -> None:
-    """Retire ``batch_id`` from ``LookaheadWarmer`` and tear down its unneeded warm pools."""
-    with _FLEET_LOCK:
-        warmer = _GLOBAL_LOOKAHEAD_WARMER
-        _LOOKAHEAD_FUTURES.pop(batch_id, None)
-    if warmer is None:
-        return
-    if wait:
-        warmer.finish(batch_id)
-        return
-    with warmer._lock:
-        counts = warmer._live.pop(batch_id, None)
-        if counts is None:
-            return
-        if warmer.keep_finished:
-            warmer._finished.append(counts)
-        if warmer._executor is None:
-            warmer._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="lookahead-warm")
-        ex = warmer._executor
-    ex.submit(warmer._reconcile)
-
-
-def close_lookahead_warmer() -> None:
-    """Drain background lookahead futures and close the global ``LookaheadWarmer``."""
-    global _GLOBAL_LOOKAHEAD_WARMER
-    with _FLEET_LOCK:
-        warmer, _GLOBAL_LOOKAHEAD_WARMER = _GLOBAL_LOOKAHEAD_WARMER, None
-        _LOOKAHEAD_FUTURES.clear()
-    if warmer is not None:
-        warmer.close()
-
-
-class PrewarmBatchIterator:
-    """2-slot sliding lookahead iterator.
-
-    Warms Step 1 synchronously on ``prime()``, then on each ``next_batch()`` returns the
-    already-warmed batch for Step ``k`` while prefetching and warming Step ``k + 1`` in
-    the background. Calling ``finish_oldest_inflight_batch()`` when Step ``k`` completes
-    tears down Step ``k``'s pools while keeping Step ``k + 1`` (and any other live batch) warm.
-    """
-
-    def __init__(
-        self,
-        fetch_batch_fn: Callable[[], Any] | Any,
-        *,
-        extract_images_fn: Callable[[Any], list[str]] = extract_sandbox_images,
-        ensure_warm_fn: Callable[..., Any] = ensure_lookahead_batch_warm,
-        prefetch_async_fn: Callable[..., Any] | None = None,
-        prefetch_fn: Callable[..., Any] | None = None,
-        finish_batch_fn: Callable[..., Any] | None = None,
-        finish_fn: Callable[..., Any] | None = None,
-        replicas_override: int | None = None,
-    ) -> None:
-        if callable(fetch_batch_fn):
-            self._fetch_batch_fn = fetch_batch_fn
-        else:
-            source = fetch_batch_fn
-            it_state = [iter(source)]
-
-            def _next_from_iterable() -> Any:
-                try:
-                    return next(it_state[0])
-                except StopIteration:
-                    it_state[0] = iter(source)
-                    return next(it_state[0])
-
-            self._fetch_batch_fn = _next_from_iterable
-        self._extract_images_fn = extract_images_fn
-        self._ensure_warm_fn = ensure_warm_fn
-        self._prefetch_async_fn = prefetch_fn or prefetch_async_fn or prefetch_lookahead_batch_async
-        self._finish_batch_fn = finish_fn or finish_batch_fn or finish_lookahead_batch_async
-        self._replicas_override = replicas_override
-        self._next_batch_id = 1
-        self._lookahead: tuple[int | str, Any, list[str]] | None = None
-        self._inflight_batch_ids: collections.deque[int | str] = collections.deque()
-
-    @property
-    def inflight_batch_ids(self) -> list[int | str]:
-        return list(self._inflight_batch_ids)
-
-    @property
-    def lookahead_batch_id(self) -> int | str | None:
-        return self._lookahead[0] if self._lookahead is not None else None
-
-    def prime(self) -> int | str:
-        """Pull the first batch into the lookahead slot and warm its sandboxes synchronously."""
-        if self._lookahead is not None:
-            return self._lookahead[0]
-        batch_id = f"train_step_{self._next_batch_id}"
-        self._next_batch_id += 1
-        batch = self._fetch_batch_fn()
-        images = self._extract_images_fn(batch)
-        if images:
-            self._ensure_warm_fn(batch_id, images, replicas_override=self._replicas_override, wait=True)
-        self._lookahead = (batch_id, batch, images)
-        return batch_id
-
-    def next_batch(self) -> Any:
-        """Return the warmed current batch and start warming the next batch in the background."""
-        if self._lookahead is None:
-            self.prime()
-        assert self._lookahead is not None
-        batch_id, batch, images = self._lookahead
-        self._lookahead = None
-        if images:
-            self._ensure_warm_fn(batch_id, images, replicas_override=self._replicas_override, wait=True)
-
-        next_id = f"train_step_{self._next_batch_id}"
-        self._next_batch_id += 1
-        next_batch_obj = self._fetch_batch_fn()
-        next_images = self._extract_images_fn(next_batch_obj)
-        self._lookahead = (next_id, next_batch_obj, next_images)
-        if next_images:
-            self._prefetch_async_fn(next_id, next_images, replicas_override=self._replicas_override)
-
-        self._inflight_batch_ids.append(batch_id)
-        return batch
-
-    def finish_oldest_inflight_batch(self, *, wait: bool = False) -> int | str | None:
-        """Retire the oldest in-flight batch and unwarm its sandbox pools."""
-        if not self._inflight_batch_ids:
-            return None
-        batch_id = self._inflight_batch_ids.popleft()
-        self._finish_batch_fn(batch_id, wait=wait)
-        return batch_id
-
-
-def prewarm_sandbox_images(
-    images: list[str],
-    *,
-    replicas_override: int | None = None,
-    namespace: str | None = None,
-    node_selector: dict[str, str] | None = None,
-    pod_annotations: Mapping[str, str] | None = None,
-    network_policy_management: str | None = None,
-    network_policy: Mapping[str, Any] | None = None,
-    image_map: Sequence[ImageMap | Mapping[str, Any]] | Mapping[str, Any] | str | None = None,
-) -> None:
-    """Pre-warm a batch of sandbox images in parallel and pin them against LRU eviction."""
-    _require_agent_sandbox_rl()
-    if _is_lookahead_mode_enabled():
-        return
-    normalized = [apply_image_map(img, image_map=image_map) for img in images if img]
-    unique_images = list(dict.fromkeys(normalized))
-    if not unique_images:
-        return
-    resolved_ns = _resolve_default_namespace(namespace)
-    resolved_sel = _resolve_default_node_selector(node_selector)
-    task_objs = [Task(id=img, image=img, metadata={"ds": {"docker_image": img}}) for img in unique_images]
-    with _FLEET_LOCK:
-        fleet = _get_or_init_fleet_locked(
-            namespace=resolved_ns,
-            node_selector=resolved_sel,
-            pod_annotations=pod_annotations,
-            network_policy_management=network_policy_management,
-            network_policy=network_policy,
-        )
-        _RECENT_BATCH_IMAGES.append(set(unique_images))
-        _register_and_warm_locked(fleet, task_objs, warm=True, replicas_override=replicas_override)
-        _evict_excess_warmpools_locked(fleet)
-
-
-async def async_prewarm_sandbox_images(
-    images: list[str],
-    *,
-    replicas_override: int | None = None,
-    namespace: str | None = None,
-    node_selector: dict[str, str] | None = None,
-    pod_annotations: Mapping[str, str] | None = None,
-    network_policy_management: str | None = None,
-    network_policy: Mapping[str, Any] | None = None,
-    image_map: Sequence[ImageMap | Mapping[str, Any]] | Mapping[str, Any] | str | None = None,
-) -> None:
-    """Async wrapper running ``prewarm_sandbox_images`` on the dedicated lifecycle executor."""
-    if not images:
-        return
-    loop = asyncio.get_running_loop()
-    await loop.run_in_executor(
-        get_lifecycle_executor(),
-        lambda: prewarm_sandbox_images(
-            images,
-            replicas_override=replicas_override,
-            namespace=namespace,
-            node_selector=node_selector,
-            pod_annotations=pod_annotations,
-            network_policy_management=network_policy_management,
-            network_policy=network_policy,
-            image_map=image_map,
-        ),
-    )
-
-
-def _patch_claim_lifecycle(handle: Any, runtime_timeout: float) -> None:
-    """Best-effort server-side TTL patch on ``SandboxClaim.spec.lifecycle`` so expired claims are reaped on crash."""
-    claim_name = getattr(handle, "claim_name", None)
-    cluster = getattr(handle, "_cluster", None)
-    if not claim_name or cluster is None:
-        return
-    custom_api = getattr(getattr(cluster, "resources", None), "custom_api", None) or getattr(
-        cluster, "custom_api", None
-    )
-    if custom_api is None or not hasattr(custom_api, "patch_namespaced_custom_object"):
-        return
-    # Everything below is best effort, including building the timestamp (a very long runtime_timeout overflows it):
-    # an error here must not reach the acquire retry loop, which would claim a second sandbox and leak this one.
-    try:
-        shutdown_time = (datetime.now(timezone.utc) + timedelta(seconds=max(1, math.ceil(runtime_timeout)))).strftime(
-            "%Y-%m-%dT%H:%M:%SZ"
-        )
-        body = {
-            "spec": {
-                "lifecycle": {
-                    "shutdownTime": shutdown_time,
-                    "shutdownPolicy": "Delete",
+        # Best effort: have the controller delete the claim at the deadline even if this process has died.
+        cluster = fleet.registry.get(handle.cluster_name)
+        deadline = datetime.now(timezone.utc) + timedelta(seconds=math.ceil(runtime_timeout))
+        cluster.custom_api.patch_namespaced_custom_object(
+            group=sdk.rl.constants.GROUP,
+            version=sdk.rl.constants.VERSION,
+            namespace=cluster.namespace,
+            plural=sdk.rl.constants.CLAIMS_PLURAL,
+            name=handle.claim_name,
+            body={
+                "spec": {
+                    "lifecycle": {"shutdownTime": deadline.strftime("%Y-%m-%dT%H:%M:%SZ"), "shutdownPolicy": "Delete"}
                 }
-            }
-        }
-        custom_api.patch_namespaced_custom_object(
-            group=_AGENT_SANDBOX_EXT_GROUP,
-            version=_AGENT_SANDBOX_EXT_VERSION,
-            namespace=getattr(cluster, "namespace", "default"),
-            plural=_SANDBOX_CLAIMS_PLURAL,
-            name=claim_name,
-            body=body,
+            },
         )
     except Exception:
-        logger.debug("Best-effort SandboxClaim lifecycle patch skipped for %s", claim_name, exc_info=True)
+        logger.debug("could not set a shutdown time on claim %s", handle.claim_name, exc_info=True)
+    return fleet, handle
 
 
-def _acquire_from_fleet(
-    image: str,
-    *,
-    namespace: str,
-    node_selector: dict[str, str] | None,
-    runtime_timeout: float,
-    pod_annotations: dict[str, str],
-    network_policy_management: str,
-    network_policy: dict[str, Any],
-) -> Any:
-    _require_agent_sandbox_rl()
-    task_obj = Task(id=image, image=image, metadata={"ds": {"docker_image": image}})
-    with _FLEET_LOCK:
-        fleet = _get_or_init_fleet_locked(
-            namespace=namespace,
-            node_selector=node_selector,
-            pod_annotations=pod_annotations,
-            network_policy_management=network_policy_management,
-            network_policy=network_policy,
-        )
-        _ACTIVE_CLAIMS[image] = _ACTIVE_CLAIMS.get(image, 0) + 1
-        try:
-            _register_and_warm_locked(fleet, [task_obj], warm=not _is_lookahead_mode_enabled())
-            _evict_excess_warmpools_locked(fleet)
-        except Exception:
-            _ACTIVE_CLAIMS[image] = max(0, _ACTIVE_CLAIMS[image] - 1)
-            if _ACTIVE_CLAIMS[image] == 0:
-                _ACTIVE_CLAIMS.pop(image, None)
-            raise
+def _release_abandoned_claim(claim: asyncio.Future[tuple[Any, Any]]) -> None:
+    """Release a sandbox whose ``start()`` was cancelled while the claim was still in flight."""
+    if not claim.cancelled() and claim.exception() is None:
+        fleet, handle = claim.result()
+        _executor("claim", _CLAIM_WORKERS).submit(fleet.release, handle)
 
+
+def _exec_in_pod(
+    fleet: Any,
+    handle: Any,
+    argv: list[str],
+    timeout: float,
+    workdir: str | None,
+    env: dict[str, str] | None,
+) -> ExecResult:
+    """Run ``argv`` in the sandbox pod through the Kubernetes exec API. Needs ``sh`` and ``timeout`` in the image."""
+    sdk = _load_sdk()
+    cluster = fleet.registry.get(handle.cluster_name)
+    steps = [f"export {key}={shlex.quote(str(value))}" for key, value in (env or {}).items()]
+    if workdir:
+        steps.append(f"cd {shlex.quote(workdir)}")
+    steps.append("exec " + " ".join(shlex.quote(arg) for arg in argv))
+    seconds = max(1, math.ceil(timeout))
+    started = time.monotonic()
+    resp = sdk.stream(
+        cluster.exec_core_api().connect_get_namespaced_pod_exec,
+        handle.pod_name,
+        cluster.namespace,
+        command=["/bin/sh", "-c", f"timeout {seconds}s /bin/sh -c {shlex.quote(' && '.join(steps))}"],
+        container=handle.runtime_container,
+        stderr=True,
+        stdin=False,
+        stdout=True,
+        tty=False,
+        _preload_content=False,
+    )
+    stdout: list[str] = []
+    stderr: list[str] = []
     try:
-        for attempt in range(5):
-            try:
-                handle = fleet.acquire(task_obj, pod_annotations=pod_annotations or None)
-                _patch_claim_lifecycle(handle, runtime_timeout)
-                return handle
-            except Exception as exc:
-                if attempt < 4:
-                    time.sleep(5 * (attempt + 1))
-                else:
-                    raise exc
-    except Exception:
-        with _FLEET_LOCK:
-            _ACTIVE_CLAIMS[image] = max(0, _ACTIVE_CLAIMS[image] - 1)
-            if _ACTIVE_CLAIMS[image] == 0:
-                _ACTIVE_CLAIMS.pop(image, None)
-        raise
-
-
-def _release_to_fleet(image: str, handle: Any) -> None:
-    try:
-        if handle is not None and _GLOBAL_FLEET is not None:
-            _GLOBAL_FLEET.release(handle)
+        while resp.is_open():
+            if time.monotonic() - started > seconds + _EXEC_STREAM_GRACE:
+                raise TimeoutError(f"exec exceeded {seconds}s in pod {handle.pod_name}")
+            resp.update(timeout=1.0)
+            if resp.peek_stdout():
+                stdout.append(resp.read_stdout())
+            if resp.peek_stderr():
+                stderr.append(resp.read_stderr())
+        # Output that arrives together with the close frame stays buffered and never surfaces through the loop
+        # above. Drain it, or large outputs (such as read_file's base64) come back truncated.
+        channels = getattr(resp, "_channels", {})
+        stdout.append(channels.pop(1, ""))
+        stderr.append(channels.pop(2, ""))
+        exit_code = int(resp.returncode or 0)
     finally:
-        with _FLEET_LOCK:
-            if image in _ACTIVE_CLAIMS:
-                _ACTIVE_CLAIMS[image] = max(0, _ACTIVE_CLAIMS[image] - 1)
-                if _ACTIVE_CLAIMS[image] == 0:
-                    _ACTIVE_CLAIMS.pop(image, None)
-            if image in _IDLE_LRU:
-                _IDLE_LRU.move_to_end(image)
-            if _GLOBAL_FLEET is not None:
-                _evict_excess_warmpools_locked(_GLOBAL_FLEET)
+        with contextlib.suppress(Exception):
+            resp.close()
+    out, err = "".join(stdout), "".join(stderr)
+    # ``timeout`` exits 124 when it kills the command, but a command may also exit 124 by itself. Only report a
+    # timeout once the limit has actually passed, so an early 124 keeps its status and output.
+    if exit_code == 124 and time.monotonic() - started >= seconds:
+        raise TimeoutError(err or out or f"command timed out after {seconds}s")
+    return ExecResult(exit_code=exit_code, stdout=out, stderr=err)
 
 
-class _GKEStatefulShell:
-    """Lightweight shell wrapper that persists ``cwd`` and ``env`` without requiring ``tmux``."""
+class _Shell:
+    """A shell session that keeps its working directory and exported variables between commands.
 
-    def __init__(self, sandbox: GKEAgentSandbox, *, cwd: str | None = None, env: dict[str, str] | None = None) -> None:
+    Sandboxes have no network access by default, so the generic tmux shell cannot install tmux in an image that
+    lacks it. This one needs only ``bash``: each command restores the session from a state file and saves it back.
+    """
+
+    def __init__(self, sandbox: GKEAgentSandbox, *, cwd: str | None, env: dict[str, str] | None) -> None:
         self._sandbox = sandbox
-        self.cwd = cwd or "/testbed"
-        self.env = dict(env or {})
-        self._env_file = f"/tmp/.uni_agent_env_{uuid.uuid4().hex[:8]}"
-        self._initialized = False
+        self._state = f"/tmp/.uni-agent-shell-{uuid.uuid4().hex[:8]}"
+        lines = [f"export {key}={shlex.quote(str(value))}" for key, value in (env or {}).items()]
+        if cwd:
+            lines.append(f"cd -- {shlex.quote(cwd)}")
+        self._initial_state: str | None = "\n".join(lines) + "\n"
 
-    async def run(self, command: str, *, timeout: float | None = 120.0) -> ExecResult:
-        if not self._initialized:
-            exports = "\n".join(f"export {k}={shlex.quote(str(v))}" for k, v in self.env.items())
-            await self._sandbox.exec_shell(f"cat <<'__EOF__' > {self._env_file}\n{exports}\n__EOF__", timeout=30.0)
-            self._initialized = True
-        wrapped = (
-            "if [ -d /opt/miniconda3/envs/testbed/bin ]; then "
-            'export PATH="/opt/miniconda3/envs/testbed/bin:/opt/miniconda3/bin:${PATH}"; fi\n'
-            'if [ -d /testbed/.venv/bin ]; then export PATH="/testbed/.venv/bin:${PATH}"; fi\n'
-            f"[ -f {self._env_file} ] && . {self._env_file} >/dev/null 2>&1 || true\n"
-            f"cd {shlex.quote(self.cwd)} 2>/dev/null || cd /\n"
+    async def run(self, command: str, *, timeout: float | None = _DEFAULT_EXEC_TIMEOUT) -> ExecResult:
+        if self._initial_state is not None:
+            await self._sandbox.write_file(self._state, self._initial_state)
+            self._initial_state = None
+        script = (
+            f". {self._state} 2>/dev/null\n"
             f"{command}\n"
-            "__ec=$?\n"
-            f'printf "\\n{_PWD_SENTINEL}:%s\\n" "$(pwd)"\n'
-            f"export -p > {self._env_file} 2>/dev/null || true\n"
-            "exit $__ec"
+            "__uni_agent_exit=$?\n"
+            f"{{ export -p; printf 'cd -- %q\\n' \"$PWD\"; }} > {self._state} 2>/dev/null\n"
+            "exit $__uni_agent_exit"
         )
-        # No workdir/env here: the wrapper does its own ``cd`` (falling back to / when the directory is missing) and
-        # restores the environment from the saved file, so variables the agent unset stay unset.
-        res = await self._sandbox.exec(["bash", "-c", wrapped], timeout=timeout)
-        m = re.search(rf"\n?{re.escape(_PWD_SENTINEL)}:([^\r\n]+)\r?\n?$", res.stdout or "")
-        stdout = res.stdout or ""
-        if m:
-            self.cwd = m.group(1).strip() or self.cwd
-            stdout = stdout[: m.start()]
-        return ExecResult(exit_code=res.exit_code, stdout=stdout, stderr=res.stderr or "")
+        return await self._sandbox.exec(["bash", "-c", script], timeout=timeout)
 
     async def close(self) -> None:
-        if self._initialized:
-            await self._sandbox.exec(["rm", "-f", self._env_file], timeout=10.0)
-            self._initialized = False
+        if self._initial_state is None:
+            await self._sandbox.exec(["rm", "-f", self._state], timeout=10.0)
 
 
 @register_sandbox("gke_agent_sandbox")
 class GKEAgentSandbox(Sandbox):
-    """GKE / Kubernetes sandbox provider backed by ``agent_sandbox_rl`` warm pools."""
+    """Run each sandbox as a pod on GKE, or on any cluster with the Kubernetes Agent Sandbox controller.
+
+    ``namespace``, ``run_id`` and ``node_selector`` fall back to the ``SANDBOX_NAMESPACE``, ``SANDBOX_RUN_ID`` and
+    ``NODE_SELECTOR_KEY`` / ``NODE_SELECTOR_VAL`` environment variables. Sandboxes that share a ``run_id`` share
+    warm pools across processes; without one, each process uses and cleans up its own.
+
+    Pods have no network access by default: ``network_policy_management='Managed'`` gives every image a
+    NetworkPolicy with the rules in ``network_policy`` (deny all when unset). ``'Unmanaged'`` creates none and
+    requires a namespace policy that restricts the pods' egress.
+    """
 
     supports_shell: ClassVar[bool] = True
 
@@ -1198,189 +364,128 @@ class GKEAgentSandbox(Sandbox):
         self,
         *,
         image: str = "python:3.12",
-        runtime_timeout: float = 1800.0,
+        runtime_timeout: float = 3600.0,
         namespace: str | None = None,
+        run_id: str | None = None,
         node_selector: Mapping[str, str] | None = None,
-        pod_annotations: Mapping[str, str] | None = None,
-        network_policy_management: str | None = None,
+        network_policy_management: str = "Managed",
         network_policy: Mapping[str, Any] | None = None,
-        image_map: Sequence[ImageMap | Mapping[str, Any]] | Mapping[str, Any] | str | None = None,
+        executable_paths: dict[str, str] | None = None,
     ) -> None:
-        timeout_val = float(runtime_timeout)
-        if not math.isfinite(timeout_val) or timeout_val <= 0:
-            raise ValueError(f"runtime_timeout must be a finite positive number, got {runtime_timeout!r}")
-        self.image = apply_image_map(image, image_map=image_map)
-        self.runtime_timeout = timeout_val
-        self.namespace = _resolve_default_namespace(namespace)
-        self.node_selector = _resolve_default_node_selector(node_selector)
-        self.pod_annotations = _resolve_default_pod_annotations(pod_annotations)
-        self.network_policy_management = _resolve_network_policy_management(network_policy_management)
-        self.network_policy = _resolve_network_policy(network_policy)
+        if not math.isfinite(runtime_timeout) or runtime_timeout <= 0:
+            raise ValueError("runtime_timeout must be finite and positive")
+        self.image = image
+        self.runtime_timeout = float(runtime_timeout)
+        self.executable_paths = dict(executable_paths or {})
+        self._settings = _FleetSettings.resolve(
+            namespace=namespace,
+            run_id=run_id,
+            node_selector=node_selector,
+            network_policy_management=network_policy_management,
+            network_policy=network_policy,
+        )
+        self._fleet: Any = None
         self._handle: Any = None
-        self._pod_name: str | None = None
-        self._started = False
-        self._deadline: float | None = None
+        self._deadline = 0.0
         self._expired = False
-        self._expiry_task: asyncio.Task[None] | None = None
+        self._expiry: asyncio.Task[None] | None = None
 
     @classmethod
     def from_config(cls, config: SandboxConfig) -> GKEAgentSandbox:
+        if config.image_mounts:
+            raise ValueError("GKEAgentSandbox does not support image_mounts")
         return cls(
             image=config.image or "python:3.12",
             runtime_timeout=config.runtime_timeout,
+            executable_paths=config.executable_paths,
             **config.sandbox_kwargs,
         )
 
-    def _is_fatal_exec_error(self, exc: BaseException) -> bool:
-        return isinstance(exc, SandboxRuntimeTimeoutError)
+    # ----- warm pools: optional, a sandbox also starts without one -----
+    @classmethod
+    def prewarm(
+        cls,
+        images: Mapping[str, int],
+        *,
+        wait: bool = True,
+        timeout: float | None = None,
+        **fleet_kwargs: Any,
+    ) -> dict[str, bool]:
+        """Keep sandboxes started ahead of time, so :meth:`start` does not wait for a pod.
 
-    def _get_core_v1_api(self) -> Any:
-        if self._handle is not None and getattr(self._handle, "_cluster", None) is not None:
-            return self._handle._cluster.exec_core_api()
-        if k8s_client is None or k8s_config is None:
-            raise ImportError("The 'kubernetes' package is required for GKEAgentSandbox.")
-        _load_kube_config_once()
-        return k8s_client.CoreV1Api()
+        ``images`` maps each image to the number of ready sandboxes to keep; a pool that is already larger is left
+        as it is. ``fleet_kwargs`` are the constructor's ``namespace``, ``run_id``, ``node_selector``,
+        ``network_policy_management`` and ``network_policy``, and must match the sandboxes that will use the pools.
 
-    def _remaining_runtime_seconds(self) -> float | None:
-        if self._deadline is None:
-            return None
-        return self._deadline - time.monotonic()
+        With ``wait``, blocks for up to ``timeout`` seconds and returns ``image -> ready``. This call blocks: use a
+        worker thread from async code.
+        """
+        if not images:
+            return {}
+        fleet = _get_fleet(_FleetSettings.resolve(**fleet_kwargs))
+        _plan(fleet, images)
+        by_replicas: dict[int, list[str]] = {}
+        for image, replicas in images.items():
+            by_replicas.setdefault(int(replicas), []).append(image)
+        for replicas, group in by_replicas.items():
+            fleet.warm_images(group, replicas_override=replicas, wait=False)
+        return fleet.wait_pools_ready(list(images), timeout=timeout, replicas=dict(images)) if wait else {}
 
-    def _cancel_expiry_task(self) -> None:
-        task, self._expiry_task = self._expiry_task, None
-        if task is not None and task is not asyncio.current_task() and not task.done():
-            task.cancel()
+    @classmethod
+    def unwarm(cls, images: Iterable[str], **fleet_kwargs: Any) -> None:
+        """Delete the warm pools this process created with :meth:`prewarm` for ``images``.
 
-    async def _expire_after_runtime_timeout(self) -> None:
-        try:
-            await asyncio.sleep(self.runtime_timeout)
-        except asyncio.CancelledError:
-            return
-        self._expiry_task = None
-        self._expired = True
-        logger.warning(
-            "GKEAgentSandbox exceeded runtime_timeout=%.1fs (pod=%s); releasing sandbox",
-            self.runtime_timeout,
-            self._pod_name,
-        )
-        try:
-            await self.stop()
-        except Exception:
-            logger.warning("GKEAgentSandbox lifetime cleanup failed (pod=%s)", self._pod_name, exc_info=True)
+        Call it once the sandboxes using those pools have stopped. Pools still present at interpreter exit are
+        deleted then. This call blocks: use a worker thread from async code.
+        """
+        fleet = _get_fleet(_FleetSettings.resolve(**fleet_kwargs))
+        if fleet.plan_ is not None:
+            fleet.unwarm_images(list(images))
 
+    # ----- control plane -----
     async def start(self) -> None:
-        if self._started:
+        if self._handle is not None:
             return
         self._expired = False
         loop = asyncio.get_running_loop()
-        self._handle = await loop.run_in_executor(
-            get_lifecycle_executor(),
-            lambda: _acquire_from_fleet(
-                self.image,
-                namespace=self.namespace,
-                node_selector=self.node_selector,
-                runtime_timeout=self.runtime_timeout,
-                pod_annotations=self.pod_annotations,
-                network_policy_management=self.network_policy_management,
-                network_policy=self.network_policy,
-            ),
+        claim = loop.run_in_executor(
+            _executor("claim", _CLAIM_WORKERS), _claim, self._settings, self.image, self.runtime_timeout
         )
-        self._pod_name = getattr(self._handle, "pod_name", None)
-        if getattr(self._handle, "_cluster", None) is not None:
-            self.namespace = self._handle._cluster.namespace
+        try:
+            self._fleet, self._handle = await asyncio.shield(claim)
+        except asyncio.CancelledError:
+            # The claim keeps running in its thread and may still return a sandbox nobody is waiting for.
+            claim.add_done_callback(_release_abandoned_claim)
+            raise
         self._deadline = time.monotonic() + self.runtime_timeout
-        self._started = True
-        self._expiry_task = asyncio.create_task(self._expire_after_runtime_timeout())
+        self._expiry = asyncio.create_task(self._expire())
+        await self._setup_executable_paths(self.executable_paths)
 
     async def stop(self) -> None:
-        self._cancel_expiry_task()
-        self._started = False
-        self._deadline = None
+        expiry, self._expiry = self._expiry, None
+        if expiry is not None and expiry is not asyncio.current_task():
+            expiry.cancel()
         handle, self._handle = self._handle, None
-        self._pod_name = None
         if handle is not None:
             loop = asyncio.get_running_loop()
-            await loop.run_in_executor(get_lifecycle_executor(), _release_to_fleet, self.image, handle)
+            await loop.run_in_executor(_executor("claim", _CLAIM_WORKERS), self._fleet.release, handle)
+
+    async def _expire(self) -> None:
+        await asyncio.sleep(self.runtime_timeout)
+        self._expired = True
+        logger.warning("GKEAgentSandbox reached runtime_timeout=%gs; stopping it", self.runtime_timeout)
+        try:
+            await self.stop()
+        except Exception:
+            logger.warning("failed to stop an expired GKEAgentSandbox", exc_info=True)
 
     async def is_alive(self) -> bool:
-        if not self._started or self._expired or self._handle is None:
-            return False
-        remaining = self._remaining_runtime_seconds()
-        return remaining is None or remaining > 0
+        return self._handle is not None and not self._expired
 
-    async def open_shell(self, *, cwd: str | None = None, env: dict[str, str] | None = None) -> _GKEStatefulShell:
-        return _GKEStatefulShell(self, cwd=cwd, env=env)
+    async def open_shell(self, *, cwd: str | None = None, env: dict[str, str] | None = None) -> _Shell:
+        return _Shell(self, cwd=cwd, env=env)
 
-    def _exec_in_pod_sync(
-        self,
-        argv: list[str],
-        timeout: float,
-        workdir: str | None,
-        env: dict[str, str] | None,
-        *,
-        stream_grace: float = 10.0,
-    ) -> ExecResult:
-        if self._pod_name is None or k8s_stream is None:
-            raise RuntimeError("GKEAgentSandbox is not started or kubernetes.stream is unavailable.")
-        inner_cmd = " ".join(shlex.quote(a) for a in argv)
-        parts = [f"export {k}={shlex.quote(str(v))}" for k, v in (env or {}).items()]
-        if workdir:
-            parts.append(f"cd {shlex.quote(workdir)}")
-        full_cmd = (" && ".join(parts) + f" && exec {inner_cmd}") if parts else inner_cmd
-        timeout_int = max(1, math.ceil(timeout))
-        wrapped_argv = ["/bin/sh", "-c", f"timeout {timeout_int}s /bin/sh -c {shlex.quote(full_cmd)}"]
-
-        api = self._get_core_v1_api()
-        started = time.monotonic()
-        resp = k8s_stream(
-            api.connect_get_namespaced_pod_exec,
-            self._pod_name,
-            self.namespace,
-            command=wrapped_argv,
-            container=RUNTIME_CONTAINER_NAME,
-            stderr=True,
-            stdin=False,
-            stdout=True,
-            tty=False,
-            _preload_content=False,
-        )
-        stdout_chunks: list[str] = []
-        stderr_chunks: list[str] = []
-        deadline = time.monotonic() + timeout + stream_grace
-        try:
-            while resp.is_open():
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    resp.close()
-                    raise TimeoutError(f"Pod exec exceeded {timeout}s on {self._pod_name}/{RUNTIME_CONTAINER_NAME}")
-                resp.update(timeout=min(1.0, remaining))
-                if resp.peek_stdout():
-                    stdout_chunks.append(resp.read_stdout())
-                if resp.peek_stderr():
-                    stderr_chunks.append(resp.read_stderr())
-            # Frames that arrive together with the close frame are buffered but never surface through the
-            # is_open() loop; drain them, or large outputs (e.g. read_file's base64) come back truncated.
-            channels = getattr(resp, "_channels", None)
-            if isinstance(channels, dict):
-                stdout_chunks.append(channels.pop(1, "") or "")
-                stderr_chunks.append(channels.pop(2, "") or "")
-            rc = resp.returncode
-        finally:
-            try:
-                resp.close()
-            except Exception:
-                pass
-
-        exit_code = int(rc) if rc is not None else 0
-        stdout_str = "".join(stdout_chunks)
-        stderr_str = "".join(stderr_chunks)
-        # ``timeout`` exits 124 when it kills the command, but a command can also exit 124 by itself. Only treat it
-        # as a timeout once the limit has actually passed, so an early 124 keeps its status and output.
-        if exit_code == 124 and time.monotonic() - started >= timeout_int:
-            raise TimeoutError(stdout_str or stderr_str or f"Command timed out after {timeout}s")
-        return ExecResult(exit_code=exit_code, stdout=stdout_str, stderr=stderr_str)
-
+    # ----- data plane -----
     async def _exec(
         self,
         argv: list[str],
@@ -1390,36 +495,12 @@ class GKEAgentSandbox(Sandbox):
         env: dict[str, str] | None = None,
     ) -> ExecResult:
         if self._expired:
-            raise SandboxRuntimeTimeoutError(f"GKEAgentSandbox exceeded runtime_timeout of {self.runtime_timeout}s")
-        remaining = self._remaining_runtime_seconds()
-        if remaining is not None and remaining <= 0:
-            self._expired = True
-            await self.stop()
-            raise SandboxRuntimeTimeoutError(f"GKEAgentSandbox exceeded runtime_timeout of {self.runtime_timeout}s")
-        if not self._started or self._handle is None:
-            raise RuntimeError("GKEAgentSandbox is not started.")
-
-        requested_timeout = max(float(timeout or 120.0), 1.0)
-        clamped_by_runtime = remaining is not None and requested_timeout > remaining
-        eff_timeout = min(requested_timeout, remaining) if remaining is not None else requested_timeout
-        wait_timeout = (remaining + 0.5) if clamped_by_runtime and remaining is not None else (eff_timeout + 15.0)
-        stream_grace = 0.2 if clamped_by_runtime else 10.0
-
+            raise RuntimeError(f"GKEAgentSandbox was stopped after runtime_timeout={self.runtime_timeout:g}s")
+        if self._handle is None:
+            raise RuntimeError("GKEAgentSandbox not started; call start() first")
+        # A command may not outlive the sandbox.
+        limit = min(float(timeout or _DEFAULT_EXEC_TIMEOUT), max(self._deadline - time.monotonic(), 1.0))
         loop = asyncio.get_running_loop()
-        try:
-            return await asyncio.wait_for(
-                loop.run_in_executor(
-                    get_exec_executor(),
-                    lambda: self._exec_in_pod_sync(argv, eff_timeout, workdir, env, stream_grace=stream_grace),
-                ),
-                timeout=wait_timeout,
-            )
-        except (asyncio.TimeoutError, TimeoutError) as exc:
-            post_remaining = self._remaining_runtime_seconds()
-            if self._expired or (post_remaining is not None and post_remaining <= 0):
-                self._expired = True
-                await self.stop()
-                raise SandboxRuntimeTimeoutError(
-                    f"GKEAgentSandbox exceeded runtime_timeout of {self.runtime_timeout}s"
-                ) from exc
-            raise
+        return await loop.run_in_executor(
+            _executor("exec", _EXEC_WORKERS), _exec_in_pod, self._fleet, self._handle, argv, limit, workdir, env
+        )

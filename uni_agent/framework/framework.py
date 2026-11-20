@@ -22,9 +22,7 @@ from omegaconf import OmegaConf
 from tensordict import TensorDict
 from tensordict.tensorclass import NonTensorData, NonTensorStack
 
-# From the submodule, not the package: ``uni_agent.gateway.session`` may still be mid-import when verl's
-# VERL_USE_EXTERNAL_MODULES hook loads a module that imports ``uni_agent.framework``.
-from uni_agent.gateway.session.types import Trajectory
+from uni_agent.gateway.session import Trajectory
 from uni_agent.logging import LogContext, sample_logging
 from uni_agent.rl_insight.adapter import agent_loop_session
 from uni_agent.tasks import TaskResult
