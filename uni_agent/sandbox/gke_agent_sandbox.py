@@ -38,6 +38,8 @@ _DENY_ALL_NETWORK_POLICY: dict[str, list[Any]] = {"ingress": [], "egress": []}
 _DEFAULT_EXEC_TIMEOUT = 120.0
 # How long after a command's own timeout the exec stream may stay open before the client gives up on it.
 _EXEC_STREAM_GRACE = 10.0
+# Tries to open the exec connection; only a connection that was never established is retried.
+_EXEC_CONNECT_ATTEMPTS = 3
 # A claim can wait minutes for a pod, so claims get their own threads and never starve command execution.
 _CLAIM_WORKERS = 128
 _EXEC_WORKERS = 256
@@ -301,19 +303,29 @@ def _exec_in_pod(
         steps.append(f"cd {shlex.quote(workdir)}")
     steps.append("exec " + " ".join(shlex.quote(arg) for arg in argv))
     seconds = max(1, math.ceil(timeout))
+    command = ["/bin/sh", "-c", f"timeout {seconds}s /bin/sh -c {shlex.quote(' && '.join(steps))}"]
+    for attempt in range(_EXEC_CONNECT_ATTEMPTS):
+        try:
+            resp = sdk.stream(
+                cluster.exec_core_api().connect_get_namespaced_pod_exec,
+                handle.pod_name,
+                cluster.namespace,
+                command=command,
+                container=handle.runtime_container,
+                stderr=True,
+                stdin=False,
+                stdout=True,
+                tty=False,
+                _preload_content=False,
+            )
+            break
+        except sdk.client.ApiException as exc:
+            # Status 0 means the connection to the API server was never established (for example a connect
+            # timeout under load), so the command has not started and it is safe to try again.
+            if exc.status != 0 or attempt == _EXEC_CONNECT_ATTEMPTS - 1:
+                raise
+            time.sleep(attempt + 1)
     started = time.monotonic()
-    resp = sdk.stream(
-        cluster.exec_core_api().connect_get_namespaced_pod_exec,
-        handle.pod_name,
-        cluster.namespace,
-        command=["/bin/sh", "-c", f"timeout {seconds}s /bin/sh -c {shlex.quote(' && '.join(steps))}"],
-        container=handle.runtime_container,
-        stderr=True,
-        stdin=False,
-        stdout=True,
-        tty=False,
-        _preload_content=False,
-    )
     stdout: list[str] = []
     stderr: list[str] = []
     try:
