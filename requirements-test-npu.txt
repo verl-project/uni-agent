@@ -1,0 +1,14 @@
+# NPU stack for the tests-npu gate, installed on top of requirements-test.txt.
+# vllm-ascend 0.30 pairs with vllm 0.30 and with the torch 2.10 line it declares:
+# on aarch64 that torch wheel is CPU-only, which is exactly what torch-npu
+# requires (a CUDA-enabled torch registers an allocator hook that torch_npu
+# duplicates and aborts at dlopen). The torch family pins live in the overrides
+# file because vllm 0.30 itself declares torch 2.13 / torchaudio 2.11.
+# triton-ascend and the fla_npu kernels live on the Ascend mirror
+# (mirrors.huaweicloud.com/ascend/repos/pypi, see UV_EXTRA_INDEX_URL), not PyPI.
+# arctic-inference, torchcodec and the fastapi cap are dropped via the overrides
+# file: sdist-only, CUDA-only under a CPU torch, and a stale fastapi pin that
+# contradicts vllm 0.30's range (vllm guards a missing torchcodec itself).
+vllm==0.30.0
+vllm-ascend==0.30.0
+flash-linear-attention-npu-a2==26.10.0+feature
