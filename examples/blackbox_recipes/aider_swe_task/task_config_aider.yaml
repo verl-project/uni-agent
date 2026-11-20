@@ -1,0 +1,32 @@
+# Aider inference-only task defaults for the current-framework SWE-bench samples.
+# The sample row supplies the instance metadata and sandbox image; this file
+# selects the generic SWEBenchTask and binds the Aider agent. The user prompt
+# remains required at runtime: task_runner copies the dataset raw_prompt into
+# TaskConfig.prompt, and AiderAgent extracts it before --message-file launch.
+# Timeout values are seconds; provider defaults supply resources not listed here.
+- name: swe_bench
+  sandbox:
+    provider: docker
+    runtime_timeout: 7200
+    # Optional registry rewrite for remote providers; remove for local Docker.
+    # image_map:
+    #   - from: "swebench/**"
+    #     to: "registry.example.com/team/swe-bench-verified/**:v2"
+    image_mounts:
+      - image: aider-tool:0.86.2
+        mount_path: /opt/aider
+    executable_paths:
+      aider: /opt/aider/bin/aider
+      python: /opt/aider/bin/python
+  agent:
+    name: aider
+    run_timeout: 4800
+    # edit_format: udiff
+    # extra_args: ["--show-diffs"]
+  prompt_template:
+    - role: user
+      content: |-
+        {problem_statement}
+
+        After finishing and checking the task, stop without committing;
+        leave the working-tree diff for verification.
