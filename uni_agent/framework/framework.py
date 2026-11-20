@@ -536,6 +536,7 @@ class GatewayAgentFramework(AgentFramework):
         *,
         metadata: dict[str, object] | None = None,
         sampling_params: object = None,
+        pass_through_message_history: bool = False,
     ) -> object:
         """Create the session for one runner execution and return its handle.
 
@@ -543,11 +544,16 @@ class GatewayAgentFramework(AgentFramework):
         session group whose roles each own a Gateway session instead. Subclasses
         that return a different shape from ``_build_session_sampling_params``
         override this hook to consume it.
+
+        ``pass_through_message_history`` is set only for runners that configured a
+        select function; it asks the gateway to copy each chain's chat text onto
+        the materialized trajectory so the selector can read it.
         """
         return await self.gateway_manager.create_session(
             session_id,
             metadata=metadata,
             sampling_params=sampling_params,
+            pass_through_message_history=pass_through_message_history,
         )
 
     async def generate_sequences(self, prompts: TensorDict) -> None:

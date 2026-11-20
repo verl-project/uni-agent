@@ -11,9 +11,11 @@ class FakeTransferQueue:
     def __init__(self):
         self.puts = []
         self.batch_puts = []
+        self.events = []
 
     async def async_kv_put(self, *, key, partition_id, tag):
         self.puts.append({"key": key, "partition_id": partition_id, "tag": dict(tag)})
+        self.events.append(("put", key, tag.get("status")))
 
     async def async_kv_batch_put(self, *, keys, fields, tags, partition_id):
         self.batch_puts.append(
@@ -24,6 +26,7 @@ class FakeTransferQueue:
                 "partition_id": partition_id,
             }
         )
+        self.events.append(("batch_put", tuple(keys)))
 
 
 @pytest.fixture
