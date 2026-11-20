@@ -19,12 +19,12 @@ from __future__ import annotations
 import logging
 import time
 from collections import defaultdict
-from collections.abc import Callable
 from typing import Any, Protocol
 
 from ..collectors.parse import KVCacheUpdate, MetricsUpdate
 from ..store.contracts import KVReader, MetricsReader
 from ..types import EmitKey, MetricKey
+from ..types.kv_cache import LOCAL_GPU_DOMAIN
 from . import WriteEvent, WriteKind, emitter
 
 logger = logging.getLogger(__name__)
@@ -77,11 +77,9 @@ class CollectorObserver:
         self,
         metrics: MetricsReader,
         kv: KVReader,
-        parser_stats: Callable[[], Any] = lambda: None,
     ) -> None:
         self._metrics = metrics
         self._kv = kv
-        self._parser_stats = parser_stats
         self._metrics_poll_count = 0
         self._metrics_prev: dict[str, dict[str, float]] = {}
         self._kv_event_counts: dict[str, int] = defaultdict(int)
@@ -95,34 +93,33 @@ class CollectorObserver:
 
     def on_kv_applied(self, update: KVCacheUpdate) -> None:
         # Tally for periodic summary — observe BlockStored/BlockRemoved flow.
-        n_added = sum(len(v) for v in update.add_blocks.values())
-        n_removed = sum(len(v) for v in update.remove_blocks.values())
-        if update.clear_all:
-            self._kv_event_counts["clear"] += 1
-        if n_added:
-            self._kv_event_counts["stored"] += 1
-            self._kv_block_counts["stored"] += n_added
-        if n_removed:
-            self._kv_event_counts["removed"] += 1
-            self._kv_block_counts["removed"] += n_removed
+        gpu_evictions = 0
+        for event in update.events:
+            if event.is_store:
+                self._kv_event_counts["stored"] += 1
+                self._kv_block_counts["stored"] += len(event.block_hashes)
+            elif event.is_remove:
+                self._kv_event_counts["removed"] += 1
+                self._kv_block_counts["removed"] += len(event.block_hashes)
+                if event.storage_domain == LOCAL_GPU_DOMAIN:
+                    gpu_evictions += len(event.block_hashes)
+            elif event.is_clear:
+                self._kv_event_counts["clear"] += 1
+        if gpu_evictions:
             emitter.on_write(
                 WriteEvent(
                     kind=WriteKind.KV_REMOVED,
                     node=update.replica_id,
-                    deltas={EmitKey.KV_EVICTIONS: n_removed},
+                    deltas={EmitKey.KV_EVICTIONS: gpu_evictions},
                 )
             )
         total = sum(self._kv_event_counts.values())
         if total - self._kv_last_logged_total >= _KV_EVENT_LOG_INTERVAL_S:
             self._kv_last_logged_total = total
-            # Parser-side translation failures: non-zero means the event-side
-            # retained count is drifting above the engine's truth.
-            hash_map_stats = self._parser_stats()
             logger.debug(
                 f"kv-events tally: events={dict(self._kv_event_counts)} "
                 f"blocks={dict(self._kv_block_counts)} (total_events={total}) | "
-                f"retained_blocks/replica={self._kv.per_replica_block_counts()} | "
-                f"hash-map={dict(hash_map_stats or {})}"
+                f"retained_blocks/replica={self._kv.per_replica_block_counts()}"
             )
 
     def on_metrics_applied(self, update: MetricsUpdate, values: dict[str, Any]) -> None:

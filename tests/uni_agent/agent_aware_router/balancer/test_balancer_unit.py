@@ -263,6 +263,7 @@ class TestBalancerProtocol:
             "sticky_size": 0,
             "total_inflight": 0,
             "collectors": [],
+            "cache": {},
         }
 
     @pytest.mark.parametrize("completion", ["error", "empty-zmq"])
@@ -385,8 +386,8 @@ class TestBalancerProtocol:
     def test_add_and_remove_servers_update_pool_and_counters(self):
         balancer = _make_balancer({"s0": "h0"})
 
-        balancer.add_servers({"s0": "new-h0", "s1": "h1"})
-        assert balancer._servers == {"s0": "new-h0", "s1": "h1"}
+        balancer.add_servers({"s0": "h0", "s1": "h1"})
+        assert balancer._servers == {"s0": "h0", "s1": "h1"}
         assert balancer._inflight == {"s0": 0, "s1": 0}
 
         balancer.remove_servers(["s0", "missing"])

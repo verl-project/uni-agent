@@ -32,11 +32,15 @@ class MetricsReader(Protocol):
 class KVReader(Protocol):
     def get_block_size(self) -> int | None: ...
 
+    def hash_schema(self) -> tuple[int, int | None, int]: ...
+
     def get_layer_prefix_hit_rate(
         self,
         node_id: str,
         hash_strs: list[str],
         layer: Layer = Layer.GPU,
+        *,
+        query_tokens: int | None = None,
     ) -> float: ...
 
     def kv_cache_load(self, node_id: str) -> float: ...

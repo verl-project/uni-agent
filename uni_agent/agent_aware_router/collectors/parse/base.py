@@ -12,63 +12,20 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Parser abstract base and its update return types.
+"""Parser abstract base and collector-local update types.
 
-A ``Parser`` turns a raw transport payload (bytes/str) into a structured
-update that the application sink applies to the store.  The update types
-(``KVCacheUpdate``, ``MetricsUpdate``) live here, next to the base, because
-they are the parser's output contract — the layer that both produces and
-consumes them.
+``KVCacheUpdate`` is the shared domain contract, re-exported here for parser
+consumers. Metrics and sticky updates remain local to the collector pipeline.
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
-from ...types import InflightUpdate, Layer
-
-
-@dataclass
-class KVCacheUpdate:
-    """Mutable accumulator for KVCacheStore updates, built by the parser.
-
-    The parser dispatches each event to a handler that calls ``add``/``remove``
-    to fold blocks in; the updater then reads ``add_blocks``/``remove_blocks``
-    to write the store.
-
-    Attributes:
-        replica_id: Target endpoint identifier.
-        add_blocks: layer → block hashes accumulated to add.
-        remove_blocks: layer → block hashes accumulated to remove.
-        clear_all: If True, clear all blocks for this node.
-        block_size: Block size learned from the first BlockStored (None until then).
-    """
-
-    replica_id: str
-    add_blocks: dict[Layer, list[str]] = field(default_factory=dict)
-    remove_blocks: dict[Layer, list[str]] = field(default_factory=dict)
-    clear_all: bool = False
-    block_size: int | None = None
-
-    def add(self, layer: Layer, block_hashes: list[str]) -> None:
-        """Fold stored blocks into ``add_blocks`` under ``layer``."""
-        self.add_blocks.setdefault(layer, []).extend(block_hashes)
-
-    def remove(self, layer: Layer, block_hashes: list[str]) -> None:
-        """Fold removed blocks into ``remove_blocks`` under ``layer``."""
-        self.remove_blocks.setdefault(layer, []).extend(block_hashes)
-
-    def clear(self) -> None:
-        """Clear the replica, superseding block operations accumulated so far."""
-        self.clear_all = True
-        self.add_blocks.clear()
-        self.remove_blocks.clear()
-
-    def set_block_size(self, size: int) -> None:
-        """Set the learned block size (first BlockStored wins; set by the parser)."""
-        self.block_size = size
+from ...types import InflightUpdate
+from ...types.kv_cache import KVCacheUpdate
 
 
 @dataclass
@@ -141,5 +98,5 @@ class Parser(ABC):
 
         Returns:
             A single update, a list of updates (applied in order), or ``None``
-            if parsing fails or the payload type is not handled.
+            for skipped input.
         """

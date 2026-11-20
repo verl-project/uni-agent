@@ -29,15 +29,21 @@ def resolve_prefix_hashes(
 
     With a ``request_id``, the ``(parent_hash, len(hash_strs))`` checkpoint is
     memoized in the per-request store so only appended blocks are re-hashed on
-    later turns. Assumes multi-turn prompts are append-only; a shrunk prompt
-    triggers a full recompute. Returns ``[]`` when ``block_size`` is unknown.
+    later turns. As in the original router, prompts are assumed append-only;
+    fewer complete blocks or a changed hash schema trigger a full recompute.
+    Returns ``[]`` when ``block_size`` is unknown.
     """
-    block_size = store.kv.get_block_size()
+    schema = store.kv.hash_schema()
+    _, block_size, lookahead = schema
     if not block_size or block_size <= 0:
         return []
-
+    # A branched continuation may change a previously hashed block's suffix.
+    # The request checkpoint does not record the suffix it consumed.
+    if lookahead:
+        hashes, _ = get_prefix_hashes_incremental(prompt_ids, block_size, 0, 0, lookahead=lookahead)
+        return [str(h) for h in hashes]
     cached = store.requests.get_prefix_cache(request_id) if request_id is not None else None
-    if cached and len(prompt_ids) // block_size >= len(cached["hash_strs"]):
+    if cached and cached.get("schema") == schema and len(prompt_ids) // block_size >= len(cached["hash_strs"]):
         tail, new_parent = get_prefix_hashes_incremental(
             prompt_ids, block_size, cached["parent_hash"], len(cached["hash_strs"])
         )
@@ -46,9 +52,8 @@ def resolve_prefix_hashes(
         store.requests.set_prefix_cache(request_id, cached)
         return cached["hash_strs"]
 
-    # full recompute (miss / shrink)
     hashes, parent = get_prefix_hashes_incremental(prompt_ids, block_size, 0, 0)
     hash_strs = [str(h) for h in hashes]
     if request_id is not None:
-        store.requests.set_prefix_cache(request_id, {"hash_strs": hash_strs, "parent_hash": parent})
+        store.requests.set_prefix_cache(request_id, {"schema": schema, "hash_strs": hash_strs, "parent_hash": parent})
     return hash_strs

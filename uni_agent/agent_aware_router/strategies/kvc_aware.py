@@ -278,6 +278,8 @@ class KVCacheAwareStrategy:
         store: RoutingState,
         replica: ReplicaInfo,
         hash_strs: list[str],
+        *,
+        query_tokens: int | None = None,
     ) -> tuple[float, float]:
         """Three-layer weighted prefix-cache hit score ∈ [0, 1].
 
@@ -288,7 +290,9 @@ class KVCacheAwareStrategy:
         walk. CPU/SSD return 0.0 today (see ``KVCacheStore.get_layer_prefix_hit_rate``).
         Returns ``(s_cache, gpu_hit)`` so the caller logs gpu_hit without re-querying.
         """
-        gpu_hit = store.kv.get_layer_prefix_hit_rate(replica.replica_id, hash_strs, Layer.GPU)
+        gpu_hit = store.kv.get_layer_prefix_hit_rate(
+            replica.replica_id, hash_strs, Layer.GPU, query_tokens=query_tokens
+        )
         cpu_hit = store.kv.get_layer_prefix_hit_rate(replica.replica_id, hash_strs, Layer.CPU)
         ssd_hit = store.kv.get_layer_prefix_hit_rate(replica.replica_id, hash_strs, Layer.SSD)
         w = self.layer_weights
@@ -361,7 +365,7 @@ class KVCacheAwareStrategy:
             inflight = store.metrics.get_metric(replica.replica_id, MetricKey.INFLIGHT_COUNT) or 0
             inflight_tokens = store.metrics.get_metric(replica.replica_id, MetricKey.INFLIGHT_TOKENS) or 0
             inflight_blocks = store.kv.inflight_block_count(replica.replica_id)
-            s_cache, gpu_hit = self._cache_score(store, replica, gpu_hash_strs)
+            s_cache, gpu_hit = self._cache_score(store, replica, gpu_hash_strs, query_tokens=plen)
             avail = cap - inflight_blocks * block_size
             need = plen * (1.0 - gpu_hit)
             remaining = avail - need

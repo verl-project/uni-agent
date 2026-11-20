@@ -51,7 +51,7 @@ class Collector:
         if sink is None:
             from .updater import default_updater
 
-            sink = default_updater(lambda: getattr(parser, "stats", None))
+            sink = default_updater()
         self._transport = transport
         self._parser = parser
         self._sink = sink
@@ -196,25 +196,18 @@ def get_collector(
 
     if name == "vllm_zmq":
         from .parse.vllm.kv import VLLMKVParser
+        from .parse.vllm.native_hash import VLLMHashCodec
         from .transport.zmq import ZMQTransport
 
         kv_parser = VLLMKVParser()
-        data_store = DataStore()
-
-        def reset_stream(replica_id: str) -> None:
-            # Gate routing reads before discarding the parser's old hash chain.
-            data_store.invalidate_kv_replica(replica_id)
-            kv_parser.reset_replica(replica_id)
-
-        def unavailable_stream(replica_id: str) -> None:
-            reset_stream(replica_id)
-            data_store.enable_kv_dispatch_estimates(replica_id)
+        kv = DataStore().kv
+        kv.set_native_hash_codec_factory(VLLMHashCodec.from_metadata)
 
         transport = ZMQTransport(
             endpoints=kv_event_endpoints or {},
-            on_stream_reset=reset_stream,
-            on_stream_ready=data_store.mark_kv_replica_ready,
-            on_stream_unavailable=unavailable_stream,
+            on_stream_reset=kv.invalidate_kv_replica,
+            on_stream_ready=kv.mark_kv_replica_ready,
+            on_stream_unavailable=kv.enable_kv_dispatch_estimates,
             base_retry_delay=_debug_knob("base_retry_delay"),
             max_retry_delay=_debug_knob("max_retry_delay"),
             max_retry_attempts=_debug_knob("max_retry_attempts"),

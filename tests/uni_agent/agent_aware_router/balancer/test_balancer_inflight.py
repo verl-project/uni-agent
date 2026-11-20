@@ -158,7 +158,7 @@ def test_removed_replica_release_does_not_debit_readded_replica_work():
     balancer.acquire_server("removed", [1, 2])
     balancer.remove_servers(["s0"])
     assert balancer.get_total_inflight() == 0  # drain covers only the current pool
-    balancer.add_servers({"s0": "new-h0"})
+    balancer.add_servers({"s0": "h0"})
     balancer.acquire_server("new", [1])
     balancer.release_server("s0", "removed")
     _assert_active(balancer, {"s0": (1, 1, 1)})
@@ -167,7 +167,10 @@ def test_removed_replica_release_does_not_debit_readded_replica_work():
 
 
 def test_anonymous_release_of_removed_work_does_not_debit_readded_replica():
-    balancer = _make_balancer({"s0": "h0"})
+    # A target added after startup can be replaced under the same replica ID.
+    balancer = _make_balancer({"initial": "initial-handle"})
+    balancer.remove_servers(["initial"])
+    balancer.add_servers({"s0": "h0"})
     store = balancer._store
     balancer.acquire_server(None, [1, 2])
     balancer.acquire_server(None, [1, 2, 3])

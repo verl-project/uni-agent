@@ -27,7 +27,7 @@ from uni_agent.agent_aware_router.store.data_store import DataStore
 from uni_agent.agent_aware_router.store.kv_cache_store import KVCacheStore
 from uni_agent.agent_aware_router.store.per_replica_store import PerReplicaStore
 from uni_agent.agent_aware_router.store.per_request_store import PerRequestStore
-from uni_agent.agent_aware_router.types import InflightUpdate, Layer, MetricKey
+from uni_agent.agent_aware_router.types import InflightUpdate, MetricKey
 
 pytestmark = [pytest.mark.cpu, pytest.mark.level0]
 
@@ -80,7 +80,7 @@ def test_failed_store_write_is_not_observed(application, monkeypatch):
     assert observer.calls == []
 
 
-def test_pin_is_observed_only_after_its_marker_is_written(application, monkeypatch):
+def test_pin_is_observed_only_after_its_marker_is_written(application, monkeypatch, install_metadata, layout):
     store, observer, updater = application
 
     def record(count):
@@ -90,28 +90,35 @@ def test_pin_is_observed_only_after_its_marker_is_written(application, monkeypat
 
     monkeypatch.setattr(observer, "on_blocks_recorded", record)
     store.set_block_size(2)
+    install_metadata(store, "s0", layout((("full_attention", 2),), unit=2))
     updater.apply_inflight(InflightUpdate("acquire", "s0", "r", (1, 2)))
     assert observer.calls[0] == ("blocks", 1)
     assert observer.calls[1][0] == "metrics"
 
 
-def test_kv_clear_remove_add_order_and_first_block_size_wins(application):
+def test_kv_events_are_applied_in_wire_order_before_observation(
+    application, layout, install_metadata, stored, removed, parse
+):
     store, observer, updater = application
-    store.add_kv_blocks("s0", ["old", "shared"])
-    store.add_kv_blocks("s1", ["other"])
-    updater.apply_kv(
-        KVCacheUpdate(
-            "s0",
-            add_blocks={Layer.GPU: ["shared", "new"]},
-            remove_blocks={Layer.GPU: ["shared"]},
-            clear_all=True,
-            block_size=16,
-        )
-    )
-    assert observer.calls == [("kv", {"s1": 1, "s0": 2})]
-    assert not store.has_kv_block("old")
-    updater.apply_kv(KVCacheUpdate("s0", block_size=32))
-    assert store.get_block_size() == 16
+    for node in ("s0", "s1"):
+        install_metadata(store, node, layout((("full_attention", 2),), unit=2))
+        event = stored(block=2, tokens=[1, 2], hashes=["old"])
+        updater.apply_kv(KVCacheUpdate(node, parse([event], node)))
+    other = stored(block=4, tokens=[1, 2, 3, 4], hashes=["other"])
+    updater.apply_kv(KVCacheUpdate("unregistered", parse([other], "unregistered")))
+    assert store.get_block_size() == 2
+    observer.calls.clear()
+
+    events = [
+        {"type": "AllBlocksCleared"},
+        stored(block=2, tokens=[3, 4], hashes=["discard"]),
+        removed(0, ["discard"]),
+        stored(block=2, tokens=[5, 6], hashes=["keep"]),
+    ]
+    updater.apply_kv(KVCacheUpdate("s0", parse(events, "s0")))
+    assert observer.calls == [("kv", {"s0": 1, "s1": 1})]
+    updater.apply_kv(KVCacheUpdate("s0", parse([removed(0, ["keep"])], "s0")))
+    assert observer.calls[-1] == ("kv", {"s0": 0, "s1": 1})
 
 
 def test_inflight_updater_delegates_without_interpreting_callback_state(application, monkeypatch):

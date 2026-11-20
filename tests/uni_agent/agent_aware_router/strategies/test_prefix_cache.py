@@ -40,10 +40,11 @@ def test_incremental_checkpoint_is_written_back_to_copying_provider(rid):
             self.writes += 1
 
     requests = CopyingRequests()
-    store = SimpleNamespace(kv=SimpleNamespace(get_block_size=lambda: 2), requests=requests)
+    schema = (0, 2, 0)
+    store = SimpleNamespace(kv=SimpleNamespace(hash_schema=lambda: schema), requests=requests)
     for size in (2, 4, 6, 2):
         prompt = list(range(size))
         expected, parent = get_prefix_hashes_incremental(prompt, 2, 0, 0)
         assert resolve_prefix_hashes(prompt, rid, store) == [str(h) for h in expected]
-        assert requests.rows[rid] == {"hash_strs": [str(h) for h in expected], "parent_hash": parent}
+        assert requests.rows[rid] == {"schema": schema, "hash_strs": [str(h) for h in expected], "parent_hash": parent}
     assert requests.writes == 4

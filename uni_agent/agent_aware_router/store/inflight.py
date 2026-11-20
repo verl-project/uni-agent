@@ -109,8 +109,16 @@ class InflightState:
             # The routing memo assumes append-only prompts. Accounting accepts
             # replacements that rewrite the prefix, so intentionally recompute
             # all full blocks before touching a previous dispatch.
-            hashes, _ = get_prefix_hashes_incremental(list(update.prompt_ids), block_size, 0, 0)
+            hashes, _ = get_prefix_hashes_incremental(update.prompt_ids, block_size, 0, 0)
             hash_strs = [str(h) for h in hashes]
+
+        # Dispatch predictions use the engine's prefix hash unit and lookahead.
+        # Inflight accounting continues to pin complete physical blocks.
+        _, unit, lookahead = self._kv.hash_schema()
+        prediction_hashes = hash_strs if unit == block_size and lookahead == 0 else []
+        if update.prompt_ids and unit and (unit != block_size or lookahead):
+            hashes, _ = get_prefix_hashes_incremental(update.prompt_ids, unit, 0, 0, lookahead=lookahead)
+            prediction_hashes = [str(h) for h in hashes]
 
         if active is not None:
             logger.warning(f"re-acquire without release request={rid} on {active.replica_id} — unwinding old dispatch")
@@ -126,8 +134,9 @@ class InflightState:
             )
         if hash_strs:
             self._kv.incr_block_refs(update.node_id, hash_strs)
-            result.blocks_recorded = self._kv.record_dispatch_blocks(update.node_id, hash_strs)
             self._kv.put_marker(rid, update.node_id, hash_strs)
+        if prediction_hashes:
+            result.blocks_recorded = self._kv.record_dispatch_blocks(update.node_id, prediction_hashes)
 
         metrics[MetricKey.INFLIGHT_TURN_SUM] = turn
         self._incr(result, update.node_id, metrics)

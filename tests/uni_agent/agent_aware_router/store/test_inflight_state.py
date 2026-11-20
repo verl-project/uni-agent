@@ -76,13 +76,18 @@ def test_store_owns_turn_replacement_and_release_amounts(store, rid, target, blo
     assert store.inflight.apply(InflightUpdate("release", target, "unknown")).metrics == []
 
 
-def test_store_resolves_using_block_size_learned_after_fact_creation(store):
-    fact = InflightUpdate("acquire", "s0", "r", (1, 2, 3, 4))
+def test_store_resolves_using_block_size_learned_after_fact_creation(store, layout, install_metadata):
+    fact = InflightUpdate("acquire", "s0", "r", (1, 2, 3, 4, 5))
     store.set_block_size(2)
+    metadata = layout((("full_attention", 4),), unit=4)
+    metadata["native_hash_config"]["lookahead_tokens"] = 1
+    install_metadata(store, "s0", metadata)
     result = store.inflight.apply(fact)
-    hashes, _ = get_prefix_hashes_incremental([1, 2, 3, 4], 2, 0, 0)
-    assert result.blocks_recorded == 2
-    assert store.get_marker("r") == {"replica": "s0", "hashes": [str(h) for h in hashes]}
+    held, _ = get_prefix_hashes_incremental(fact.prompt_ids, 2, 0, 0)
+    hints, _ = get_prefix_hashes_incremental(fact.prompt_ids, 4, 0, 0, lookahead=1)
+    assert result.blocks_recorded == 1
+    assert store.estimate_prefixes(["s0"], [str(h) for h in hints], 5)["s0"].estimated_hit_tokens == 4
+    assert store.get_marker("r") == {"replica": "s0", "hashes": [str(h) for h in held]}
     # A later memo change must not affect the acquire-time release amount.
     store.requests.book_prompt_length("r", 999)
     store.requests.book_turn("r", 99)
