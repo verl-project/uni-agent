@@ -45,11 +45,15 @@ agent_aware_router/
    └── insight/emitter.py            ← push to rl-insight → Prometheus → Grafana
 ```
 
-### Optional vLLM cache metadata
+### Hybrid prefix matching
 
-Before creating the verl server manager, a custom inference entry point can call `register_vllm_metadata_replica()` from `uni_agent.agent_aware_router.server`. The registered replica exposes `get_kv_cache_metadata()` on its server actor. Entry points using the default replica continue to use verl's original server.
+The vLLM inference example registers the metadata-enabled replica before creating the server manager. Custom launchers can call `register_vllm_metadata_replica()` from `uni_agent.agent_aware_router.server`. Install uni-agent in the engine environment and include `uni_agent_native_hash` in any explicit `VLLM_PLUGINS` allowlist. The metadata server includes its opt-in flag in `VLLM_RAY_EXTRA_ENV_VARS_TO_COPY` for Ray EngineCore actors.
 
-Install uni-agent in the engine environment so vLLM can discover the `uni_agent_native_hash` general plugin. Include that name in any explicit `VLLM_PLUGINS` allowlist. Before engine startup, the metadata server adds its opt-in flag (`UNI_AGENT_ENABLE_NATIVE_HASH_METADATA`) to `VLLM_RAY_EXTRA_ENV_VARS_TO_COPY` so Ray EngineCore actors receive it alongside any user-specified variables. The server exposes group metadata and reports optional native hash or allocation profiles separately when the engine supports them.
+The router reads the cache group layout at startup and subscribes to incremental KV events (`--kv-events` in the example). For each replica it estimates how many prompt tokens are reusable across all required Full Attention, Sliding Window, Chunked Local and Mamba groups. Hit alignment and the number of tokens that need replay come from the engine. The existing scorer uses the resulting fraction of prefill work saved. Dispatch predictions and engine-reported residency are tracked separately.
+
+For lookahead hashing, the event, dispatch and query paths include the engine's required token suffix in each prefix identity. When vLLM recomputes the trailing EAGLE block for a single Full Attention group with equal block size, hash unit and hit alignment, the router discounts that block once. Zero prefix savings are reported for unsupported drop policies or unavailable matching metadata.
+
+If a KV event batch cannot be decoded or a local removal cannot be applied, the collector reconnects that replica's subscription. It replays history if a replay endpoint is configured, applies any buffered live events, then enters `ready` and resets the decode failure count. If decoding keeps failing before `ready` and exhausts `max_retry_attempts`, the subscription enters `fatal`. Before restarting it, fix the event source and, if replay is enabled, ensure the bad batch has left replay history.
 
 ## Routing decision flow
 
@@ -76,7 +80,7 @@ pick         = soft-pick(max remaining among eligible)       # random within a s
 ```
 
 - `inflight_blocks[i]` is the router's own load account: a per-replica pin book of the KV blocks held by in-flight requests, ref-counted at acquire (pin the request's full-block prefix hashes) and at release (unpin the snapshotted set; a shared prefix block leaves the book when its last holder releases). kv-events carry no request identity, so engine-side residency alone cannot separate "cached and idle" from "held and about to grow" — the pin book is the occupancy signal the router owns synchronously on the acquire/release path. `avail` is deliberately not derived from the polled `kv_cache_usage_perc`: that is an async snapshot with cold-start blind spots, while the pin book is up to date at decision time.
-- `gpu_hit[i]` comes from the per-replica remote→local block-hash index built from kv-events (extended at dispatch time with the request's own prefix), so a returning session is ranked with its real hit rate.
+- `gpu_hit[i]` is the estimated fraction of this prompt’s prefill saved on replica `i`, accounting for its cache groups and any required replay.
 - Prefill hit rate participates via the `need` term: a replica with a higher hit rate needs fewer recomputed tokens, so `remaining` is larger and it wins among eligible replicas.
 - Load balancing first filters via the pure-capacity hard gate `eligible` — replicas that are full are filtered out and no longer assigned. If no replica passes (all under water), the pick switches to `min need`: deficit magnitudes would dominate a `remaining` ranking (`|avail| ≫ plen`) and drown the cache signal, so the saturated pick is the cheapest assignment instead — the replica where this request recomputes the fewest tokens.
 - Ranking participates via the `avail` term: among eligible replicas, one with higher `avail` has lower load and thus larger `remaining`.

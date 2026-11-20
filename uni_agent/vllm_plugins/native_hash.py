@@ -30,12 +30,10 @@ def cache_capacity_blocks(num_blocks):
     return max(0, num_blocks - 1)
 
 
-def _get_hit_alignment(scheduler, version):
+def _get_hit_alignment(coordinator, version):
     """Read the alignment used by the running coordinator's prefix lookup."""
     from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator, UnitaryKVCacheCoordinator
 
-    manager = getattr(scheduler, "kv_cache_manager", None)
-    coordinator = getattr(manager, "coordinator", None)
     alignment = None
     if isinstance(coordinator, UnitaryKVCacheCoordinator):
         alignment = coordinator.block_size
@@ -57,10 +55,23 @@ def _get_native_hash_profile(self):
     lookahead = getattr(scheduler, "num_lookahead_tokens", None)
     prefill_lookahead = getattr(scheduler, "num_prefill_lookahead", 0)
     hash_lookahead = getattr(config, "num_hash_lookahead_tokens", 0)
+    hash_lookahead = hash_lookahead if type(hash_lookahead) is int and hash_lookahead >= 0 else None
+    coordinator = getattr(getattr(scheduler, "kv_cache_manager", None), "coordinator", None)
+    managers = getattr(coordinator, "single_type_managers", None)
+    # Each manager has the effective policy after vLLM combines groups with the same spec.
+    drops = [getattr(manager, "use_eagle", None) for manager in managers] if isinstance(managers, list | tuple) else []
     root = getattr(kv_cache_utils, "NONE_HASH", None)
     resolve = getattr(kv_cache_utils, "resolve_kv_cache_block_sizes", None)
     int_hashes = getattr(envs, "VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES", None)
-    profile = {"schema_version": 1, "vllm_version": vllm.__version__, "unit": None}
+    profile = {
+        "schema_version": 1,
+        "vllm_version": vllm.__version__,
+        "unit": None,
+        "lookahead_tokens": hash_lookahead,
+        "drop_eagle_group_ids": [i for i, drop in enumerate(drops) if drop]
+        if drops and all(type(drop) is bool for drop in drops)
+        else None,
+    }
     if not callable(resolve):
         return {**profile, "codec_unavailable_reason": "hash_unit_resolver_unavailable"}
     # Use the same resolver that initializes EngineCore's request hasher.
@@ -68,16 +79,19 @@ def _get_native_hash_profile(self):
     if type(unit) is not int or unit <= 0:
         return {**profile, "codec_unavailable_reason": "invalid_native_hash_unit"}
     profile["unit"] = unit
-    profile["hit_alignment"] = _get_hit_alignment(scheduler, vllm.__version__)
+    profile["hit_alignment"] = _get_hit_alignment(coordinator, vllm.__version__)
     unsupported = (
         (getattr(self, "request_block_hasher", None) is None, "hasher_uninitialized"),
         (not getattr(cache, "enable_prefix_caching", False), "prefix_caching_disabled"),
         (getattr(cache, "prefix_caching_hash_algo", None) != "sha256", "unsupported_hash_algorithm"),
         (getattr(cache, "mamba_cache_mode", None) == "all", "unsupported_mamba_all_codec"),
         (getattr(config, "kv_transfer_config", None) is not None, "unsupported_kv_transfer"),
-        (type(lookahead) is not int or lookahead != 0, "unsupported_lookahead"),
-        (type(prefill_lookahead) is not int or prefill_lookahead != 0, "unsupported_prefill_lookahead"),
-        (type(hash_lookahead) is not int or hash_lookahead != 0, "unsupported_hash_lookahead"),
+        (hash_lookahead is None, "unsupported_hash_lookahead"),
+        (type(lookahead) is not int or lookahead < 0 or (lookahead and not hash_lookahead), "unsupported_lookahead"),
+        (
+            type(prefill_lookahead) is not int or prefill_lookahead < 0 or (prefill_lookahead and not hash_lookahead),
+            "unsupported_prefill_lookahead",
+        ),
         (type(int_hashes) is not bool, "invalid_int_hashes"),
         (not isinstance(root, bytes) or len(root) != 32, "invalid_root_hash"),
     )
@@ -90,7 +104,6 @@ def _get_native_hash_profile(self):
         "root_hash_hex": root.hex(),
         "pickle_protocol": pickle.HIGHEST_PROTOCOL,
         "int_hashes": int_hashes,
-        "lookahead_tokens": 0,
     }
 
 

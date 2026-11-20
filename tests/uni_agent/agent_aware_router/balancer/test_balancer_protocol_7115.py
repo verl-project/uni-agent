@@ -52,9 +52,9 @@ def test_release_without_request_id_cannot_balance_prompt_tokens():
     assert balancer._store.get_metric("s0", MetricKey.INFLIGHT_TOKENS) == 3
 
 
-def test_clear_sticky_cache_preserves_prefix_checkpoint_and_reports_load():
+def test_clear_sticky_cache_preserves_prefix_checkpoint_and_reports_load(layout, install_metadata):
     balancer = _make_balancer({"s0": "h0"})
-    balancer._store.set_block_size(16)
+    install_metadata(balancer._store, "s0", layout((("full_attention", 16),), unit=16))
     balancer.acquire_server("request-1", list(range(32)))
 
     result = balancer.clear_sticky_cache()

@@ -41,6 +41,7 @@ def test_registration_is_idempotent_and_does_not_replace_other_methods(monkeypat
         monkeypatch.setattr(EngineCore, name, None, raising=False)
     native_hash.register()
     installed = {name: getattr(EngineCore, name) for name in names}
+    assert all(map(callable, installed.values()))
     native_hash.register()
     assert all(getattr(EngineCore, name) is method for name, method in installed.items())
 
@@ -68,7 +69,13 @@ def core(monkeypatch):
         scheduler=SimpleNamespace(
             kv_cache_config=object(),
             num_lookahead_tokens=0,
-            kv_cache_manager=SimpleNamespace(coordinator=Mock(spec=UnitaryKVCacheCoordinator, block_size=16)),
+            kv_cache_manager=SimpleNamespace(
+                coordinator=Mock(
+                    spec=UnitaryKVCacheCoordinator,
+                    block_size=16,
+                    single_type_managers=[SimpleNamespace(use_eagle=False)],
+                )
+            ),
         ),
         vllm_config=SimpleNamespace(
             cache_config=SimpleNamespace(enable_prefix_caching=True, prefix_caching_hash_algo="sha256"),
@@ -98,9 +105,27 @@ def test_profile_reads_actual_root_unit_and_emitter_mode_without_seed_reconstruc
         "pickle_protocol": pickle.HIGHEST_PROTOCOL,
         "int_hashes": True,
         "lookahead_tokens": 0,
+        "drop_eagle_group_ids": [],
     }
     assert kv_cache_utils.NONE_HASH is root
     assert native_hash._get_native_hash_profile(core) == result
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize("length", [1, 2])
+def test_hash_profile_reports_lookahead_even_when_codec_is_unavailable(core, length):
+    core.vllm_config.num_hash_lookahead_tokens = length
+    core.scheduler.num_lookahead_tokens = length
+    core.scheduler.num_prefill_lookahead = length
+    profile = native_hash._get_native_hash_profile(core)
+    assert profile["lookahead_tokens"] == length
+    assert profile["algorithm"] == "sha256"
+
+    core.vllm_config.cache_config.prefix_caching_hash_algo = "sha256_cbor"
+    profile = native_hash._get_native_hash_profile(core)
+    assert profile["lookahead_tokens"] == length
+    assert profile["codec_unavailable_reason"] == "unsupported_hash_algorithm"
 
 
 @pytest.mark.cpu
@@ -160,13 +185,14 @@ def test_unsupported_codec_keeps_unit_except_when_resolver_missing(core, monkeyp
     elif unsupported == "prefill":
         core.scheduler.num_prefill_lookahead = 1
     elif unsupported == "hash_lookahead":
-        core.vllm_config.num_hash_lookahead_tokens = 1
+        core.vllm_config.num_hash_lookahead_tokens = -1
     elif unsupported == "root":
         monkeypatch.setattr(kv_cache_utils, "NONE_HASH", b"short")
     else:
         monkeypatch.delattr(kv_cache_utils, "resolve_kv_cache_block_sizes")
     profile = native_hash._get_native_hash_profile(core)
     assert profile is not None
+    assert profile["lookahead_tokens"] == (None if unsupported == "hash_lookahead" else 0)
     if unsupported == "resolver":
         assert profile["unit"] is None
         assert profile["codec_unavailable_reason"] == "hash_unit_resolver_unavailable"

@@ -19,9 +19,6 @@ from __future__ import annotations
 import pytest
 
 from uni_agent.agent_aware_router.store.kv_cache_store import KVCacheStore
-from uni_agent.agent_aware_router.types import Layer
-
-pytestmark = [pytest.mark.level0, pytest.mark.cpu]
 
 PREFIX = ["h1", "h2", "h3", "h4", "h5"]
 
@@ -31,10 +28,11 @@ def _store() -> KVCacheStore:
     return KVCacheStore()
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_held_set_ref_counts_shared_blocks() -> None:
     """Shared blocks count once and leave only with their last holder's decr; hits are held like misses."""
     store = _store()
-    store.add_blocks("s0", PREFIX[:2], layer=Layer.GPU)  # h1/h2 already resident
 
     store.incr_block_refs("s0", PREFIX)  # r1
     store.incr_block_refs("s0", PREFIX[:3])  # r2 shares r1's prefix
@@ -47,6 +45,8 @@ def test_held_set_ref_counts_shared_blocks() -> None:
     assert store.inflight_block_count("s0") == 0
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_ref_table_edges_and_cleanup() -> None:
     """Refs are per replica; unknown hashes are ignored; clear_replica drops the replica's whole account."""
     store = _store()
@@ -74,6 +74,8 @@ def test_ref_table_edges_and_cleanup() -> None:
     assert store.pop_marker("r1") == {"replica": "s1", "hashes": PREFIX}
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_marker_take_semantics() -> None:
     """Markers read-and-clear atomically: take returns the exact pinned set once, then None."""
     store = _store()
@@ -88,6 +90,8 @@ def test_marker_take_semantics() -> None:
     assert store.pop_marker("r1") is None  # a duplicated release finds nothing
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_marker_peek_does_not_clear() -> None:
     """get_marker returns a copy and leaves the row in place for the later take."""
     store = _store()

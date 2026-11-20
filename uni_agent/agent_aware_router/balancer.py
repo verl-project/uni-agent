@@ -57,6 +57,7 @@ class KVCAwareBalancer:
         self._provider_factory = provider_factory
 
         self._servers: dict[str, Any] = dict(servers)
+        self._initial_servers = dict(servers)
         rollout_config = self._fetch_rollout_config()
         self._config = self._init_config(config, rollout_config)
         logger.info("KVCAwareBalancer, config=%s", self._config)
@@ -176,7 +177,34 @@ class KVCAwareBalancer:
             kv_event_endpoints=kv_event_endpoints,
             balancer_handler=self,
         )
+        self._install_initial_metadata()
         self._provider.start()
+
+    def _install_initial_metadata(self) -> None:
+        """Install available layouts before consuming the initial event streams."""
+        sources = {}
+        for replica_id, handle in self._servers.items():
+            method = getattr(handle, "get_kv_cache_metadata", None)
+            if method is None:
+                continue
+            try:
+                sources[method.remote()] = replica_id
+            except Exception as exc:
+                logger.warning("Cannot request KV cache metadata for %s: %s", replica_id, exc)
+
+        if not sources:
+            return
+        ready, pending = ray.wait(list(sources), num_returns=len(sources), timeout=self._DISCOVERY_TIMEOUT_SECONDS)
+        for ref in pending:
+            logger.warning("KV cache metadata timed out for %s", sources[ref])
+        for ref in ready:
+            node = sources[ref]
+            try:
+                metadata = ray.get(ref)
+            except Exception as exc:
+                logger.warning("Cannot read KV cache metadata for %s: %s", node, exc)
+                continue
+            self._store.refresh_replica_metadata(node, metadata)
 
     def _discover_kv_event_endpoints(self, server_addresses: dict[str, str]) -> dict[str, list[str]]:
         if not server_addresses:
@@ -279,6 +307,7 @@ class KVCAwareBalancer:
             "sticky_size": self._store.sticky_status()["size"],
             "total_inflight": self.get_total_inflight(),
             "collectors": collector_status() if callable(collector_status) else [],
+            "cache": self._store.get_cache_status(),
         }
 
     def release_server(self, server_id: str, request_id: str | None = None) -> None:
@@ -347,7 +376,10 @@ class KVCAwareBalancer:
         return sum(self._inflight.values())
 
     def add_servers(self, servers: dict[str, Any]) -> None:
-        """Bulk-add servers to the pool (provider is keyed by init-time addresses, untouched here)."""
+        """Add routing targets without changing the collector source set."""
+        for sid, handle in servers.items():
+            if sid in self._initial_servers and handle != self._initial_servers[sid]:
+                raise ValueError(f"Replacing the event source for replica {sid!r} requires a new balancer")
         for sid, handle in servers.items():
             self._servers[sid] = handle
             self._inflight.setdefault(sid, 0)
