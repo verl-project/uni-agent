@@ -23,6 +23,14 @@ import zmq.asyncio
 END_SEQ = (-1).to_bytes(8, "big", signed=True)
 
 
+async def until(predicate):
+    async def wait():
+        while not predicate():
+            await asyncio.sleep(0.01)
+
+    await asyncio.wait_for(wait(), 5)
+
+
 class Publisher:
     def __init__(self, addresses=None, *, replay=True):
         self.context = zmq.asyncio.Context()

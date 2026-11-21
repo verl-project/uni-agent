@@ -37,7 +37,7 @@ def coerce_knob_value(name: str, raw: Any, default: Any) -> Any:
     - bool: matched before int (bool subclasses int; ``bool("false")`` is True)
     - Enum: ``type(default)(raw)`` (validates the value is a known member)
     - dict: JSON object, keys normalized through the default's key enum when
-      it has one (e.g. ``layer_weights``)
+      it has one
     - float / int: direct cast
     - otherwise: returned unchanged
     """

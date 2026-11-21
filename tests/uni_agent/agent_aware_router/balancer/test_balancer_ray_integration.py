@@ -28,17 +28,23 @@ ROUTER_CONFIG_PATH = os.path.join(
     os.path.dirname(agent_aware_router_package.__file__), "configs", "agent_aware_router.yaml"
 )
 
-pytestmark = [pytest.mark.level0, pytest.mark.cpu]
-
 
 @ray.remote
 class _MockServer:
+    def __init__(self, metadata=None):
+        self._metadata = metadata
+
     def get_server_address(self):
         return ("127.0.0.1", 8000)
 
+    def get_kv_cache_metadata(self):
+        if self._metadata is None:
+            return {"status": "unsupported", "reason": "metadata_method_unavailable"}
+        return self._metadata
 
-def _servers(*server_ids: str) -> dict:
-    return {server_id: _MockServer.remote() for server_id in server_ids}
+
+def _servers(*server_ids: str, metadata=None) -> dict:
+    return {server_id: _MockServer.remote(metadata) for server_id in server_ids}
 
 
 @pytest.fixture(scope="session")
@@ -48,14 +54,19 @@ def ray_runtime():
     ray.shutdown()
 
 
-def test_actor_exposes_balancer_protocol(ray_runtime):
-    servers = _servers("s0", "s1")
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_actor_exposes_balancer_protocol(ray_runtime, layout):
+    servers = _servers("s0", "s1", metadata=layout((("full_attention", 4),), unit=4))
     router = get_router_handle(servers, router_config_path=ROUTER_CONFIG_PATH)
 
     status = ray.get(router.get_status.remote())
     assert status["provider"] == "CollectorManager"
     assert status["route_calls"] == 0
     assert set(status["servers"]) == set(servers)
+    for server_id in servers:
+        assert status["cache"][server_id]["ready"]
+        assert status["cache"][server_id]["matching"] == "registered"
     assert ray.get(router.require_acquire_fields.remote()) == ["prompt_ids"]
     assert ray.get(router.require_release_fields.remote()) == ["request_id"]
 
@@ -69,6 +80,8 @@ def test_actor_exposes_balancer_protocol(ray_runtime):
     assert status["total_inflight"] == 0
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_actor_pool_mutations_are_visible(ray_runtime):
     router = get_router_handle(_servers("s0"), router_config_path=ROUTER_CONFIG_PATH)
 

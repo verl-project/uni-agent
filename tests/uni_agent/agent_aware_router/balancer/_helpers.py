@@ -23,13 +23,20 @@ class _FakeCollectorManager:
     """Run real callback collectors without starting network collectors."""
 
     def __init__(
-        self, collectors_config, collection_names, server_addresses=None, kv_event_endpoints=None, balancer_handler=None
+        self,
+        collectors_config,
+        collection_names,
+        server_addresses=None,
+        kv_event_endpoints=None,
+        balancer_handler=None,
+        metadata_servers=None,
     ):
         self.collectors_config = collectors_config
         self.collection_names = collection_names
         self.server_addresses = server_addresses
         self.kv_event_endpoints = kv_event_endpoints
         self.balancer_handler = balancer_handler
+        self.metadata_servers = dict(metadata_servers or {})
         self.started = False
         self.stopped = False
         from uni_agent.agent_aware_router.collectors.collector import get_collector

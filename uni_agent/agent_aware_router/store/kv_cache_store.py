@@ -12,57 +12,88 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""KVCacheStore — backend-agnostic data carrier for KV cache mapping tables."""
+"""Ordered cache events and a single group-aware prefix index per replica."""
 
 from __future__ import annotations
 
+import logging
 import threading
-from collections.abc import Iterable
-from typing import Any
+import time
+from collections import Counter, defaultdict
+from collections.abc import Mapping
+from copy import deepcopy
+from dataclasses import dataclass, field, replace
 
-from ..types import Layer
+from ..types.kv_cache import DispatchSchema, KVCacheUpdate, NativeHashCodecFactory, NativeHashCodecResult
+from .cache_registry import CacheRegistryState, build_cache_registry
+from .group_cache import PrefixEstimate, ReplicaCacheIndex
+from .prefix_identity import PrefixIdentityIndex
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _SchemaHolds:
+    requests: int = 0
+    shared: Counter[tuple[int, str]] = field(default_factory=Counter)
+
+
+@dataclass
+class _ReplicaHolds:
+    by_schema: dict[DispatchSchema | None, _SchemaHolds] = field(default_factory=dict)
+    known_blocks: int = 0
+    unknown_requests: int = 0
+
+    def update(self, schema, reservations, *, delta: int) -> None:
+        """Apply one pin (+1) or its matching release (-1) under the store lock."""
+        bucket = self.by_schema.get(schema)
+        if bucket is None:
+            bucket = self.by_schema[schema] = _SchemaHolds()
+        previous_shared = len(bucket.shared)
+        for group in reservations:
+            for block_hash in group.block_hashes:
+                key = (group.group_idx, block_hash)
+                count = bucket.shared[key] + delta
+                if count:
+                    bucket.shared[key] = count
+                else:
+                    del bucket.shared[key]
+        self.known_blocks += len(bucket.shared) - previous_shared
+        if schema is None or any(group.private_blocks is None for group in reservations):
+            self.unknown_requests += delta
+        self.known_blocks += delta * sum(group.private_blocks or 0 for group in reservations)
+        bucket.requests += delta
+        if not bucket.requests:
+            del self.by_schema[schema]
 
 
 class KVCacheStore:
-    """Mutable data carrier for KV cache mapping tables.
-
-    Attributes:
-        block_size: Learned block size (None until first BlockStored event).
-        replicas_by_block: local prefix hash → set of replica_ids that cache
-            it on GPU.  CPU/SSD blocks are counted but not indexed here.
-    """
+    """Own the pool layout, stream progress, and per-replica cache indexes."""
 
     _instance: KVCacheStore | None = None
 
     def __init__(self) -> None:
-        self.block_size: int | None = None
-        self.replicas_by_block: dict[str, set[str]] = {}
-        # Track GPU ownership in both directions so replica cleanup stays local.
-        self._resident_blocks_by_replica: dict[str, set[str]] = {}
-        # Gate prefix-hit queries and optimistic dispatch writes while KV events
-        # rebuild residency. Ungate after replay succeeds or the unavailable
-        # fallback discards old residency and enables fresh dispatch estimates.
+        self.registry_generation = 0
+        self.group_caches: dict[str, ReplicaCacheIndex] = {}
+        self._native_codec_factory: NativeHashCodecFactory | None = None
+        self._replica_metadata: Mapping[str, Mapping] = {}
+        self._replica_registries: dict[str, CacheRegistryState] = {}
+        self._native_indexes: dict[object, PrefixIdentityIndex] = {}
+        self._native_by_node: dict[str, PrefixIdentityIndex] = {}
+        self._native_results: dict[str, NativeHashCodecResult] = {}
+        self._schema_generations: dict[str, int] = {}
+        self._metadata_revisions: Counter[str] = Counter()
+        self._replay_revisions: Counter[str] = Counter()
+        self._metadata_requests: dict[str, int] = {}
+        self._metadata_errors: dict[str, str] = {}
+        self._diagnostics: dict[str, Counter] = {}
+        self._diagnostic_deltas: Counter = Counter()
+        self._diagnostic_logged: dict[tuple, float] = {}
+        self._index_diagnostics: dict[str, tuple[ReplicaCacheIndex, Counter]] = {}
         self._gated_replicas: set[str] = set()
-        # Per-layer per-replica block counts, maintained alongside replicas_by_block.
-        self._replica_layer_counts: dict[Layer, dict[str, int]] = {
-            Layer.GPU: {},
-            Layer.CPU: {},
-            Layer.SSD: {},
-        }
-        # Per-replica block reference counts (multiset: block hash → ref count) —
-        # the router's own held-block occupancy book, written via
-        # ``incr_block_refs`` / ``decr_block_refs``. Unlike ``replicas_by_block``
-        # (resident, evictable) these are held by live requests, which only the
-        # router's own acquire/release can track — kv-events carry no request
-        # identity. Same lock as the reverse index.
-        self._inflight_blocks: dict[str, dict[str, int]] = {}
-        # Per-request marker rows: request_id → arbitrary snapshot payload. Never
-        # evicted — bounded by the true in-flight count, removed only by
-        # ``pop_marker``/``clear_replica`` — because a dropped marker would leak
-        # the references it accounts for. Deliberately NOT in the LRU
-        # ``PerRequestStore`` for that reason.
-        self._inflight_pins: dict[str, dict[str, Any]] = {}
-        self._lock: threading.Lock = threading.Lock()
+        self._inflight_holds: dict[str, _ReplicaHolds] = defaultdict(_ReplicaHolds)
+        self._inflight_pins: dict[str, dict] = {}
+        self._lock = threading.Lock()
 
     @classmethod
     def singleton(cls) -> KVCacheStore:
@@ -71,255 +102,519 @@ class KVCacheStore:
             cls._instance = cls()
         return cls._instance
 
-    # ── Replica management ──────────────────────────────────────────────
+    def registry_state(self, node) -> CacheRegistryState:
+        with self._lock:
+            return self._node_layout_state_locked(node)
+
+    def hash_schema(self) -> tuple[int, int | None, int]:
+        with self._lock:
+            unit, lookahead = self._hash_parameters_locked()
+            return self.registry_generation, unit, lookahead
+
+    def _hash_parameters_locked(self):
+        return next(
+            (
+                (state.registry.local_hash_unit, state.registry.lookahead_tokens)
+                for state in self._replica_registries.values()
+                if state.registry is not None
+            ),
+            (None, 0),
+        )
+
+    def _node_layout_state_locked(self, node):
+        return self._replica_registries.get(node, CacheRegistryState(reason="replica_metadata_unavailable"))
+
+    def capacity_blocks(self, node) -> int | None:
+        """Read only this replica's normalized capacity; never borrow another node's."""
+        with self._lock:
+            state = self._replica_registries.get(node)
+            return state.capacity_blocks if state is not None else None
+
+    def set_native_hash_codec_factory(self, factory: NativeHashCodecFactory) -> None:
+        """Bind a backend before collection; backend replacement discards residency."""
+        with self._lock:
+            if factory == self._native_codec_factory:
+                return
+            indexes: dict[object, PrefixIdentityIndex] = {}
+            by_node = {}
+            results = {}
+            for node, metadata in self._replica_metadata.items():
+                registry = self._node_layout_state_locked(node).registry
+                result, index = self._build_native_binding(metadata, registry, factory, indexes)
+                if result is not None:
+                    results[node] = result
+                if index is not None:
+                    by_node[node] = index
+            self._native_codec_factory = factory
+            self._native_indexes = indexes
+            self._native_by_node = by_node
+            self._native_results = results
+            self.group_caches.clear()
+            self._index_diagnostics.clear()
+            for node, result in results.items():
+                self._record_codec_failure_locked(node, result)
+
+    @staticmethod
+    def _native_required(registry) -> bool:
+        if registry is None:
+            return False
+        full_sizes = [group.block_size for group in registry.required_groups if group.match_kind == "full"]
+        return bool(full_sizes and registry.local_hash_unit not in full_sizes)
+
+    def _build_native_binding(self, metadata, registry, factory, indexes):
+        if not self._native_required(registry):
+            return None, None
+        result = (
+            factory(metadata, registry.local_hash_unit)
+            if factory is not None
+            else NativeHashCodecResult(reason="native_codec_unbound")
+        )
+        if result.codec is None:
+            return result, None
+        key = result.codec.profile_key
+        index = indexes.get(key)
+        if index is None:
+            index = indexes[key] = PrefixIdentityIndex(result.codec)
+        return result, index
+
+    def _record_codec_failure_locked(self, node, result):
+        if result.codec is None:
+            self._record_diagnostic_locked(node, "codec", result.reason or "native_codec_unavailable", result.details)
+
+    def _record_diagnostic_locked(self, node, stage, reason, details=None, *, count=1, warning=True):
+        reason = reason.split(":", 1)[0]
+        self._diagnostics.setdefault(node, Counter())[(stage, reason)] += count
+        key = node, stage, reason
+        self._diagnostic_deltas[key] += count
+        now = time.monotonic()
+        if warning and (key not in self._diagnostic_logged or now - self._diagnostic_logged[key] >= 300):
+            self._diagnostic_logged[key] = now
+            logger.warning(
+                "KV cache capability unavailable: replica=%s stage=%s reason=%s details=%s",
+                node,
+                stage,
+                reason,
+                dict(details or {}),
+            )
+
+    def _collect_index_diagnostics_locked(self, node, index):
+        old_index, previous = self._index_diagnostics.get(node, (None, Counter()))
+        if old_index is not index:
+            previous = Counter()
+        for reason, count in (index.diagnostics - previous).items():
+            stage = (
+                "pending" if reason.startswith("pending_") else "identity" if reason.startswith("native_") else "event"
+            )
+            self._record_diagnostic_locked(node, stage, reason, count=count, warning=reason != "native_events_resolved")
+        self._index_diagnostics[node] = index, index.diagnostics.copy()
+
+    def drain_cache_diagnostics(self):
+        with self._lock:
+            result = [(*key, count) for key, count in self._diagnostic_deltas.items()]
+            self._diagnostic_deltas.clear()
+            return result
+
+    def record_cache_diagnostic(self, node, stage, reason, details=None, *, count=1):
+        with self._lock:
+            self._record_diagnostic_locked(node, stage, reason, details, count=count)
+
+    def _metadata_status_locked(self, node):
+        state = self._node_layout_state_locked(node)
+        result = self._native_results.get(node)
+        index = self.group_caches.get(node)
+        paused = bool(index is not None and index.native_reconstruction_paused)
+        native = "not_required"
+        native_reason = None
+        if self._native_required(state.registry):
+            native = (
+                "paused" if paused else "ready" if result is not None and result.codec is not None else "unavailable"
+            )
+            native_reason = (
+                "native_hash_mismatch" if paused else result.reason if result is not None else "native_codec_unbound"
+            )
+        budget_known = bool(state.reservation_groups) and all(
+            g.private_blocks is not None for g in state.reservation_groups
+        )
+        reason = (
+            self._metadata_errors.get(node)
+            or state.reason
+            or ("unknown_request_budget" if not budget_known else native_reason)
+        )
+        ready = (
+            state.status in {"registered", "disabled"}
+            and budget_known
+            and native not in {"paused", "unavailable"}
+            and node not in self._metadata_errors
+        )
+        return {
+            "ready": ready,
+            "reason": reason,
+            "matching": state.status,
+            "native": native,
+            "native_details": dict(result.details) if result is not None else {},
+            "capacity_known": state.capacity_blocks is not None,
+            "budget_known": budget_known,
+            "gated": node in self._gated_replicas,
+            "revision": self._metadata_revisions[node],
+            "refresh_pending": node in self._metadata_requests,
+            "counts": {f"{stage}:{why}": count for (stage, why), count in self._diagnostics.get(node, {}).items()},
+        }
+
+    def metadata_status(self, node):
+        with self._lock:
+            return self._metadata_status_locked(node)
+
+    def get_cache_status(self):
+        with self._lock:
+            nodes = set(self._replica_metadata) | set(self._diagnostics) | set(self._metadata_requests)
+            return {node: self._metadata_status_locked(node) for node in sorted(nodes)}
+
+    def metadata_revision(self, node):
+        with self._lock:
+            return self._metadata_revisions[node]
+
+    def replay_revision(self, node):
+        with self._lock:
+            return self._replay_revisions[node]
+
+    def _request_metadata_refresh_locked(self, node, reason):
+        if node not in self._metadata_requests or reason == "stream_reset":
+            self._metadata_revisions[node] += 1
+        self._metadata_requests[node] = self._metadata_revisions[node]
+        return self._metadata_revisions[node]
+
+    def request_metadata_refresh(self, node, reason):
+        with self._lock:
+            return self._request_metadata_refresh_locked(node, reason)
+
+    def metadata_refresh_requests(self):
+        with self._lock:
+            return dict(self._metadata_requests)
+
+    @staticmethod
+    def _reservation_key(state):
+        registry = state.registry
+        return (registry.local_hash_unit, registry.lookahead_tokens) if registry else None, state.reservation_groups
+
+    def refresh_replica_metadata(self, node, metadata, *, revision=None):
+        """Apply one validated source snapshot without resetting unrelated caches or holds."""
+        with self._lock:
+            if revision is not None and revision != self._metadata_revisions[node]:
+                return False
+            if not isinstance(metadata, Mapping) or metadata.get("status") != "ok":
+                reason = (
+                    metadata.get("reason", "metadata_unavailable")
+                    if isinstance(metadata, Mapping)
+                    else "invalid_metadata"
+                )
+                self._metadata_errors[node] = str(reason)
+                self._record_diagnostic_locked(node, "metadata", str(reason))
+                return False
+            old = self._replica_registries.get(node, CacheRegistryState())
+            previous_raw = self._replica_metadata.get(node)
+            previous_status = self._metadata_status_locked(node)
+            incoming = deepcopy(dict(metadata))
+            errors = incoming.get("metadata_errors")
+            if errors is not None and not isinstance(errors, Mapping):
+                self._metadata_errors[node] = "invalid_metadata_errors"
+                self._record_diagnostic_locked(node, "metadata", "invalid_metadata_errors")
+                return False
+            error_reason = None
+            if errors:
+                error = next(iter(errors.values()))
+                error_reason = str(error.get("reason", "metadata_unavailable") if isinstance(error, Mapping) else error)
+            errors = errors or {}
+            same_layout = previous_raw is not None and all(
+                previous_raw.get(key) == incoming.get(key)
+                for key in (
+                    "schema_version",
+                    "vllm_version",
+                    "groups",
+                    "cache_config",
+                    "parallel_config",
+                    "model_config",
+                )
+            )
+            same_identity = previous_raw is not None and (
+                previous_raw.get("native_hash_config") == incoming.get("native_hash_config")
+                or incoming.get("native_hash_config") is None
+                and "native_hash_config" in errors
+            )
+            if same_layout and errors and node not in self._metadata_requests:
+                for field in ("native_hash_config", "cache_reservation_profile"):
+                    if (
+                        incoming.get(field) is None
+                        and previous_raw.get(field) is not None
+                        and (field == "native_hash_config" or same_identity)
+                    ):
+                        incoming[field] = previous_raw[field]
+            state = build_cache_registry(incoming)
+            if not state.reservation_groups:
+                reason = state.reason or "invalid_metadata"
+                self._metadata_errors[node] = reason
+                self._record_diagnostic_locked(node, "metadata", reason)
+                return False
+            registry = state.registry
+            if registry is not None:
+                for other, peer in self._replica_registries.items():
+                    if other == node or peer.registry is None:
+                        continue
+                    candidate = peer.registry
+                    if any(
+                        getattr(registry, key) is not None
+                        and getattr(candidate, key) is not None
+                        and getattr(registry, key) != getattr(candidate, key)
+                        for key in ("layout_key", "model", "mamba_cache_mode")
+                    ):
+                        state = replace(
+                            state, status="unsupported", registry=None, reason="incompatible_replica_layout"
+                        )
+                        break
+            old_matching = (
+                (old.registry.layout_key, old.registry.model, old.registry.mamba_cache_mode) if old.registry else None
+            )
+            new_matching = (
+                (state.registry.layout_key, state.registry.model, state.registry.mamba_cache_mode)
+                if state.registry
+                else None
+            )
+            changed = old_matching != new_matching or (
+                previous_raw is not None
+                and previous_raw.get("native_hash_config") != incoming.get("native_hash_config")
+            )
+            # A factory failure must leave the current snapshot available for a retry.
+            indexes = self._native_indexes.copy()
+            result, index = self._build_native_binding(incoming, state.registry, self._native_codec_factory, indexes)
+            if self._reservation_key(old) != self._reservation_key(state):
+                self._schema_generations[node] = self._schema_generations.get(node, self.registry_generation) + 1
+            old_hash_parameters = self._hash_parameters_locked()
+            self._replica_metadata = {**self._replica_metadata, node: incoming}
+            self._replica_registries[node] = state
+            if old_hash_parameters != self._hash_parameters_locked():
+                self.registry_generation += 1
+            if result is None:
+                self._native_results.pop(node, None)
+            else:
+                self._native_results[node] = result
+                self._record_codec_failure_locked(node, result)
+            if index is None:
+                self._native_by_node.pop(node, None)
+            else:
+                self._native_by_node[node] = index
+            if error_reason is not None:
+                self._metadata_errors[node] = error_reason
+                for part, why in errors.items():
+                    reason = why.get("reason", "metadata_unavailable") if isinstance(why, Mapping) else str(why)
+                    self._record_diagnostic_locked(node, "metadata", str(reason), {"part": part, "error": why})
+            else:
+                self._metadata_errors.pop(node, None)
+                self._metadata_requests.pop(node, None)
+            cache = self.group_caches.get(node)
+            if cache is not None and not changed:
+                cache.native_hashes = self._native_by_node.get(node)
+                if not errors:
+                    cache.resume_native_reconstruction()
+                    self._apply_index_events_locked(cache, [])
+            if changed:
+                self._drop_cache_locked(node)
+                self._gated_replicas.add(node)
+                self._replay_revisions[node] += 1
+            if state.reason and state.status != "disabled":
+                self._record_diagnostic_locked(node, "unit" if "unit" in state.reason else "metadata", state.reason)
+            if not previous_status["ready"] and self._metadata_status_locked(node)["ready"]:
+                logger.info("KV cache metadata recovered: replica=%s", node)
+                self._record_diagnostic_locked(node, "metadata", "recovered", warning=False)
+            active = {index.codec.profile_key for index in self._native_by_node.values()}
+            self._native_indexes = {key: value for key, value in indexes.items() if key in active}
+            return bool(changed and state.registry is not None)
+
+    def _apply_index_events_locked(self, index, events):
+        index.apply(events)
+        self._collect_index_diagnostics_locked(index.replica_id, index)
+        if index.native_reconstruction_paused:
+            self._request_metadata_refresh_locked(index.replica_id, "native_hash_mismatch")
+
+    def apply_update(self, update: KVCacheUpdate) -> None:
+        """Apply ordered cache events under one lock."""
+        with self._lock:
+            node = update.replica_id
+            registry = self._node_layout_state_locked(node).registry
+            if registry is None:
+                if any(event.is_clear for event in update.events):
+                    self._drop_cache_locked(node)
+                return  # Valid events still feed observability with an unknown layout.
+            native = self._native_by_node.get(node)
+            revision = native.identity_revision if native else 0
+            index = self._replica_index_locked(node)
+            self._apply_index_events_locked(index, [registry.normalize_event(event) for event in update.events])
+            while native is not None and revision != native.identity_revision:
+                revision = native.identity_revision
+                for cache in self.group_caches.values():
+                    if cache.native_hashes is native:
+                        self._apply_index_events_locked(cache, [])
+
+    def estimate_prefixes(self, replica_ids, hashes, query_tokens) -> dict[str, PrefixEstimate]:
+        with self._lock:
+            result = {}
+            for node in replica_ids:
+                state = self._node_layout_state_locked(node)
+                index = self.group_caches.get(node)
+                unit = state.registry.local_hash_unit if state.registry else None
+                if node in self._gated_replicas:
+                    result[node] = PrefixEstimate("warming", 0, query_tokens, 0, unit, "stream_rebuilding")
+                elif state.registry is None:
+                    result[node] = PrefixEstimate(state.status, 0, query_tokens, 0, None, state.reason)
+                elif index is None:
+                    result[node] = PrefixEstimate(
+                        "warming", 0, query_tokens, state.registry.lookup_limit(query_tokens), unit, "no_events"
+                    )
+                else:
+                    result[node] = index.estimate(hashes, query_tokens)
+                    self._collect_index_diagnostics_locked(node, index)
+            return result
 
     def invalidate_replica(self, replica_id: str) -> None:
-        """Discard untrusted resident state and gate hits and dispatch estimates.
-
-        In-flight references and request markers belong to router requests and
-        survive transport interruptions, independently of the resident index.
-        """
+        """Discard residency and gate estimates while preserving request holds."""
         with self._lock:
             self._gated_replicas.add(replica_id)
-            self._clear_resident_blocks_locked(replica_id)
+            self._drop_cache_locked(replica_id)
 
-    def mark_replica_ready(self, replica_id: str) -> None:
-        """Allow prefix hits and dispatch estimates after residency is rebuilt."""
+    def mark_replica_ready(self, replica_id: str, *, revision: int | None = None) -> None:
+        """Expose the known resident subset after transport rebuilding."""
         with self._lock:
+            if revision is not None and revision != self._replay_revisions[replica_id]:
+                return
             self._gated_replicas.discard(replica_id)
 
     def enable_dispatch_estimates(self, replica_id: str) -> None:
-        """Discard untrusted residency and allow fresh dispatch estimates and hits.
-
-        Preserve live request references and markers while replacing any old
-        or partial replay view with an empty resident index.
-        """
+        """Discard the partial view and allow fresh dispatch predictions."""
         with self._lock:
-            self._clear_resident_blocks_locked(replica_id)
+            self._drop_cache_locked(replica_id)
             self._gated_replicas.discard(replica_id)
 
     def clear_resident_blocks(self, replica_id: str) -> None:
-        """Clear residency while preserving request accounting and gating state."""
+        """Clear residency without changing request holds or gating state."""
         with self._lock:
-            self._clear_resident_blocks_locked(replica_id)
+            self._drop_cache_locked(replica_id)
 
     def clear_replica(self, replica_id: str) -> None:
-        """Forget everything this replica accounts for: resident blocks, block refs, markers.
-
-        Resident cleanup visits this replica's blocks; marker cleanup visits
-        the in-flight request rows.
-        """
+        """Discard residency and request reservations without changing stream progress."""
         with self._lock:
-            self._clear_resident_blocks_locked(replica_id)
-            self._inflight_blocks.pop(replica_id, None)
-            stale_pins = [rid for rid, marker in self._inflight_pins.items() if marker["replica"] == replica_id]
-            for rid in stale_pins:
-                del self._inflight_pins[rid]
-
-    def _clear_resident_blocks_locked(self, replica_id: str) -> None:
-        """Remove one replica's reverse-index entries and counts; caller holds the lock."""
-        for bh in self._resident_blocks_by_replica.pop(replica_id, ()):
-            replicas = self.replicas_by_block[bh]
-            replicas.discard(replica_id)
-            if not replicas:
-                del self.replicas_by_block[bh]
-        for layer_counts in self._replica_layer_counts.values():
-            layer_counts.pop(replica_id, None)
-
-    # ── Block management ────────────────────────────────────────────────
-
-    def add_blocks(self, replica_id: str, block_hashes: Iterable[str], layer: Layer = Layer.GPU) -> None:
-        """Add blocks to a replica at a layer, updating the reverse index.
-
-        Only GPU blocks are indexed in ``replicas_by_block`` (CPU/SSD counted
-        only); GPU adds are idempotent — a block already resident is a no-op.
-        """
-        with self._lock:
-            self._add_blocks_locked(replica_id, block_hashes, layer)
-
-    def record_dispatch_blocks(self, replica_id: str, hash_strs: list[str]) -> int:
-        """Mark a dispatched request's prefix blocks *resident* on ``replica_id`` (GPU).
-
-        Called by the acquire path so ``gpu_hit`` sees the prefix immediately
-        instead of trailing the kv-event stream; idempotent against the engine's
-        later ``BlockStored`` for the same hashes, and the blocks stay indexed
-        after release until the engine evicts them (``BlockRemoved``).
-
-        Args:
-            replica_id: The replica the request was dispatched to.
-            hash_strs: The request's full-block chained prefix hashes (empty is
-                a no-op).
-
-        Returns:
-            Number of blocks this call newly made resident (0 for a full hit).
-        """
-        if not hash_strs:
-            return 0
-        with self._lock:
-            if replica_id in self._gated_replicas:
-                return 0
-            return self._add_blocks_locked(replica_id, hash_strs, Layer.GPU)
-
-    def remove_blocks(self, replica_id: str, block_hashes: Iterable[str], layer: Layer = Layer.GPU) -> None:
-        """Remove blocks from a replica at a layer, updating the reverse index.
-
-        Symmetric to :meth:`add_blocks`: a GPU block not resident on the replica
-        is a no-op, so a removal for a block it never had cannot under-count.
-        """
-        with self._lock:
-            self._remove_blocks_locked(replica_id, block_hashes, layer)
-
-    def _add_blocks_locked(self, replica_id: str, block_hashes: Iterable[str], layer: Layer) -> int:
-        """Index + count blocks; caller holds ``_lock``. Returns the blocks added.
-
-        GPU counting is transition-based (idempotent); CPU/SSD have no reverse
-        index to test against and count unconditionally.
-        """
-        layer_counts = self._replica_layer_counts.setdefault(layer, {})
-        added = 0
-        for bh in block_hashes:
-            if layer == Layer.GPU:
-                replicas = self.replicas_by_block.get(bh)
-                if replicas is not None and replica_id in replicas:
-                    continue  # already resident — idempotent, never double-count
-                if replicas is None:
-                    self.replicas_by_block[bh] = {replica_id}
-                else:
-                    replicas.add(replica_id)
-                self._resident_blocks_by_replica.setdefault(replica_id, set()).add(bh)
-            layer_counts[replica_id] = layer_counts.get(replica_id, 0) + 1
-            added += 1
-        return added
-
-    def _remove_blocks_locked(self, replica_id: str, block_hashes: Iterable[str], layer: Layer) -> None:
-        """Un-index + uncount blocks. Caller holds ``_lock`` (see :meth:`remove_blocks`)."""
-        layer_counts = self._replica_layer_counts.setdefault(layer, {})
-        for bh in block_hashes:
-            if layer == Layer.GPU:
-                replicas = self.replicas_by_block.get(bh)
-                if replicas is None or replica_id not in replicas:
-                    continue  # not resident — never decrement into the negative
-                replicas.discard(replica_id)
-                if not replicas:
-                    del self.replicas_by_block[bh]
-                owned = self._resident_blocks_by_replica[replica_id]
-                owned.discard(bh)
-                if not owned:
-                    del self._resident_blocks_by_replica[replica_id]
-            layer_counts[replica_id] = layer_counts.get(replica_id, 0) - 1
-
-    # ── Block reference counts and per-request markers ───────────────────
-
-    def incr_block_refs(self, replica_id: str, hash_strs: list[str]) -> None:
-        """Add one reference to every hash on ``replica_id`` (multiset insert).
-
-        Deduplicated by hash: a hash already referenced counts once more per
-        ``incr_block_refs`` call, not once per block. Blocks already resident in
-        the prefix cache are ref'd too. Empty ``hash_strs`` is a no-op.
-        """
-        with self._lock:
-            held = self._inflight_blocks.setdefault(replica_id, {})
-            for h in hash_strs:
-                held[h] = held.get(h, 0) + 1
-
-    def decr_block_refs(self, replica_id: str, hash_strs: list[str]) -> None:
-        """Drop one reference to every hash on ``replica_id`` (multiset remove).
-
-        A hash leaves the table when its last reference goes. ``hash_strs`` must
-        mirror the references previously added for them to reach zero.
-        """
-        with self._lock:
-            held = self._inflight_blocks.get(replica_id)
-            if not held:
-                return
-            for h in hash_strs:
-                ref_cnt = held.get(h, 0) - 1
-                if ref_cnt > 0:
-                    held[h] = ref_cnt
-                else:
-                    held.pop(h, None)
-
-    def inflight_block_count(self, replica_id: str) -> int:
-        """Number of distinct hashes currently referenced on ``replica_id``."""
-        with self._lock:
-            return len(self._inflight_blocks.get(replica_id, {}))
-
-    def put_marker(self, request_id: str, replica_id: str, hash_strs: list[str]) -> None:
-        """Store a per-request snapshot row (overwrites any previous row).
-
-        Caller-defined payload; the caller owns its semantics.
-        """
-        with self._lock:
-            self._inflight_pins[request_id] = {"replica": replica_id, "hashes": list(hash_strs)}
-
-    def get_marker(self, request_id: str) -> dict[str, Any] | None:
-        """Return a copy of ``request_id``'s marker row without clearing it (``None`` if absent)."""
-        with self._lock:
-            marker = self._inflight_pins.get(request_id)
-            if marker is None:
-                return None
-            return {"replica": marker["replica"], "hashes": list(marker["hashes"])}
-
-    def pop_marker(self, request_id: str) -> dict[str, Any] | None:
-        """Remove and return ``request_id``'s marker row (``None`` if absent).
-
-        Read-and-clear is one locked step, so a duplicated consumer can never
-        process the same row twice — the second one finds no row.
-        """
-        with self._lock:
-            return self._inflight_pins.pop(request_id, None)
-
-    def _is_cached_locked(self, replica_id: str, hash_str: str) -> bool:
-        """Whether ``replica_id`` already caches ``hash_str``. Caller holds ``_lock``."""
-        cached = self.replicas_by_block.get(hash_str)
-        return cached is not None and replica_id in cached
-
-    # ── Retained-cache size ─────────────────────────────────────────────
+            self._drop_cache_locked(replica_id)
+            self._clear_inflight_locked(replica_id)
 
     def per_replica_block_counts(self) -> dict[str, int]:
-        """Return ``{replica_id: number of distinct GPU prefix blocks it retains}``.
-
-        GPU-only count — feeds the retained-load formula. Maintained incrementally,
-        O(replicas). Divide by the per-replica block pool size for occupancy.
-        """
+        """Count reported group/hash identities, including unresolved Stored events."""
         with self._lock:
-            return dict(self._replica_layer_counts.get(Layer.GPU, {}))
+            return {node: len(index.retained_hashes) for node, index in self.group_caches.items()}
 
-    # ── Prefix hit rate queries ─────────────────────────────────────────
+    def _drop_cache_locked(self, node):
+        self.group_caches.pop(node, None)
+        self._index_diagnostics.pop(node, None)
 
-    def get_layer_prefix_hit_rate(
-        self,
-        replica_id: str,
-        hash_strs: list[str],
-        layer: Layer = Layer.GPU,
-    ) -> float:
-        """Prefix-cache hit rate for a node at a layer, ∈ [0.0, 1.0].
+    def _replica_index_locked(self, node):
+        index = self.group_caches.get(node)
+        if index is None:
+            index = self.group_caches[node] = ReplicaCacheIndex(
+                self._node_layout_state_locked(node).registry, node, native_hashes=self._native_by_node.get(node)
+            )
+        return index
 
-        GPU: walk the local reverse index (``replicas_by_block``) along the
-        supplied ``hash_strs`` chain until a hash isn't cached on this node.
+    def _dispatch_schema_locked(self, node) -> DispatchSchema | None:
+        state = self._node_layout_state_locked(node)
+        registry = state.registry
+        index = self.group_caches.get(node)
+        if index is not None and index.reason == "lookahead_length_mismatch":
+            registry = None
+        specs = state.reservation_groups
+        if not specs:
+            return None
+        return DispatchSchema(
+            self._schema_generations.get(node, self.registry_generation),
+            registry.local_hash_unit if registry is not None else None,
+            specs,
+            registry.lookahead_tokens if registry is not None else 0,
+        )
 
-        CPU/SSD return 0.0 today: ``add_blocks`` only indexes GPU blocks into
-        ``replicas_by_block``. Generic CPU/SSD writes only change counts;
-        the vLLM parser excludes CPU, SSD and unknown-medium events.
-        Supporting CPU/SSD hit queries would require extending the reverse
-        index to be layer-keyed (``dict[Layer, dict[str, set[str]]]``) and
-        indexing those blocks in ``add_blocks``; until then ``layer`` here is a
-        placeholder that short-circuits to 0.0.
-        """
-        if layer != Layer.GPU or self.block_size is None:
-            return 0.0
+    def dispatch_schema(self, node) -> DispatchSchema | None:
         with self._lock:
-            if replica_id in self._gated_replicas:
-                return 0.0
-            return self._gpu_hit_rate_locked(replica_id, hash_strs)
+            return self._dispatch_schema_locked(node)
 
-    def _gpu_hit_rate_locked(self, replica_id: str, hash_strs: list[str]) -> float:
-        """Walk the reverse index along the hash chain. Caller holds ``_lock``."""
-        if not hash_strs:
-            return 0.0
-        matched = 0
-        for i, hs in enumerate(hash_strs):
-            if not self._is_cached_locked(replica_id, hs):
-                break  # chain break — this node doesn't cache this hash
-            matched = i + 1
-        return matched / len(hash_strs)
+    def _clear_inflight_locked(self, replica_id):
+        self._inflight_holds.pop(replica_id, None)
+        for request in [rid for rid, marker in self._inflight_pins.items() if marker["replica"] == replica_id]:
+            del self._inflight_pins[request]
+
+    def inflight_block_count(self, replica_id) -> int:
+        """Estimated held pool blocks: distinct group refs plus private reservations."""
+        with self._lock:
+            holds = self._inflight_holds.get(replica_id)
+            return holds.known_blocks if holds is not None else 0
+
+    def inflight_reserved_blocks(self, replica_id) -> int | None:
+        """One pool-block budget for every layout; unknown after incompatible changes."""
+        with self._lock:
+            schema = self._dispatch_schema_locked(replica_id)
+            if schema is None or schema.request_blocks(1) is None:
+                return None
+            holds = self._inflight_holds.get(replica_id)
+            if holds is None:
+                return 0
+            if holds.unknown_requests or len(holds.by_schema) != 1 or schema not in holds.by_schema:
+                return None
+            return holds.known_blocks
+
+    def request_block_need(self, prompt_tokens, saved_tokens=0, *, replica_id):
+        with self._lock:
+            schema = self._dispatch_schema_locked(replica_id)
+            return schema.request_blocks(prompt_tokens, saved_tokens) if schema is not None else None
+
+    def get_booking(self, request_id):
+        with self._lock:
+            marker = self._inflight_pins.get(request_id)
+            return marker["booking"] if marker is not None else None
+
+    def get_marker(self, request_id):
+        with self._lock:
+            marker = self._inflight_pins.get(request_id)
+            return {**marker, "hashes": list(marker["hashes"])} if marker is not None else None
+
+    def _unpin_request_locked(self, request_id):
+        marker = self._inflight_pins.pop(request_id, None)
+        if marker is not None:
+            node = marker["replica"]
+            holds = self._inflight_holds[node]
+            holds.update(marker["schema"], marker["reservations"], delta=-1)
+            if not holds.by_schema:
+                del self._inflight_holds[node]
+
+    def unpin_request(self, request_id):
+        """Release exactly the acquire-time group refs and private reservation once."""
+        with self._lock:
+            self._unpin_request_locked(request_id)
+
+    def pin_request(self, request_id, replica_id, hashes, schema, *, reservations, predict=True, booking=None) -> int:
+        """Atomically retain group refs, private budgets, prediction and release marker."""
+        with self._lock:
+            self._unpin_request_locked(request_id)
+            reservations = tuple(reservations)
+            self._inflight_holds[replica_id].update(schema, reservations, delta=1)
+            self._inflight_pins[request_id] = {
+                "booking": booking,
+                "replica": replica_id,
+                "hashes": list(hashes),
+                "schema": schema,
+                "reservations": reservations,
+            }
+            return self._record_dispatch_locked(replica_id, hashes, schema) if predict else 0
+
+    def _record_dispatch_locked(self, replica_id, hashes, schema) -> int:
+        if (
+            not hashes
+            or schema is None
+            or schema.hash_unit is None
+            or schema != self._dispatch_schema_locked(replica_id)
+            or replica_id in self._gated_replicas
+        ):
+            return 0
+        return self._replica_index_locked(replica_id).record_dispatch(hashes)

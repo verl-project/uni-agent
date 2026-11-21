@@ -67,6 +67,8 @@ class EmitKey:
     NEED_RATIO: str = "need_ratio"
     REMAINING_RATIO: str = "remaining_ratio"
     ROUTE_LATENCY_SECONDS: str = "route_latency_seconds"
+    CACHE_DIAGNOSTICS: str = "cache_diagnostics"
+    CACHE_CAPABILITY_READY: str = "cache_capability_ready"
 
 
 # ── Emit definitions (single source of truth) ────────────────────────
@@ -76,6 +78,16 @@ class EmitKey:
 #   labels  : list of label names; ["replica"] for per-replica, [] for global
 #   help    : Prometheus HELP string
 EMIT_SPECS: dict[str, dict[str, Any]] = {
+    EmitKey.CACHE_DIAGNOSTICS: {
+        "type": "counter",
+        "labels": ["replica", "stage", "reason"],
+        "help": "Cache metadata, identity and pending-event diagnostic occurrences",
+    },
+    EmitKey.CACHE_CAPABILITY_READY: {
+        "type": "gauge",
+        "labels": ["replica", "capability"],
+        "help": "Whether a replica cache capability is currently validated and usable",
+    },
     # ── B-class gauge · vLLM cumulative counters forwarded as-is ──
     # vLLM already maintains these as monotonic counters; the emitter sets the
     # cumulative value directly (no prev, no delta). rate() on a gauge works.

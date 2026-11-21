@@ -28,9 +28,7 @@ from enum import Enum
 class Layer(str, Enum):
     """Canonical cache-layer names (backend-agnostic).
 
-    Inherits ``str`` so members interoperate with plain strings: YAML-loaded
-    ``layer_weights`` keys (``"gpu"``) index the same dict slot as ``Layer.GPU``,
-    and ``Layer.GPU == "gpu"`` holds for set/validation comparisons.
+    Inherits ``str`` so members interoperate with plain strings.
     """
 
     GPU = "gpu"  # GPU — local reverse index
