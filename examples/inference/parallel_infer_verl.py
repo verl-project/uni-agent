@@ -339,7 +339,7 @@ def _report(
         logger.info(f"wrote result file to: {result_path}")
 
 
-def main() -> None:
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Parallel agent inference over a verl-launched engine (framework + TQ)."
     )
@@ -490,6 +490,14 @@ def main() -> None:
     if args.prompt_length < 1:
         parser.error("--prompt-length must be >= 1")
 
+    return args
+
+
+def main() -> None:
+    run_inference(parse_args())
+
+
+def run_inference(args: argparse.Namespace) -> None:
     ray.init()
 
     TaskConfigResolver.from_file(args.task_config)
