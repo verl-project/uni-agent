@@ -2,7 +2,7 @@
 
 The agent-facing unit is :class:`ShellTool` (registry key ``stateful_shell``, seen
 by the model as ``shell``): it holds a live :class:`Shell` -- either
-:class:`SandboxShell` (sandbox ``open_shell``, e.g. openyuanrong) or
+:class:`SandboxShell` (sandbox ``open_shell``, e.g. openyuanrong, veFaaS) or
 :class:`TmuxShell` (tmux over one-shot exec) -- so cwd / exports persist
 across calls.
 
@@ -24,6 +24,7 @@ from typing import Any, Protocol, runtime_checkable
 from pydantic import BaseModel, ConfigDict, Field
 
 from uni_agent.sandbox import Sandbox, SandboxBackend
+from uni_agent.sandbox.snapshot_shell import SnapshotStateError
 from .base import Tool, ToolError, ToolResult, register_tool
 
 logger = logging.getLogger(__name__)
@@ -83,9 +84,13 @@ class SandboxShell:
             stderr = res.stderr or ""
         except Exception as exc:
             name = type(exc).__name__
+            partial = getattr(exc, "result", None)
             if name == "CommandTimeoutError" or isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
                 timed_out = True
-                stderr = str(exc)
+                stdout = partial.stdout if partial is not None else ""
+                stderr = "\n".join(filter(None, [partial.stderr if partial is not None else "", str(exc)]))
+            elif isinstance(exc, SnapshotStateError):
+                raise ToolError(f"{exc}\n{_format(partial.stdout, partial.stderr, partial.exit_code)}") from exc
             else:
                 raise
         end = time.monotonic()
