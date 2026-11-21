@@ -35,8 +35,6 @@ from uni_agent.agent_aware_router.collectors.parse.vllm.metrics import VLLMMetri
 from uni_agent.agent_aware_router.store.data_store import DataStore
 from uni_agent.agent_aware_router.types import MetricKey
 
-pytestmark = [pytest.mark.level0, pytest.mark.cpu]
-
 POLL_WAIT = 0.3
 
 
@@ -59,6 +57,8 @@ def _collect() -> DataStore:
 class TestVLLMMetricsCollector:
     """Unit tests: vLLM HTTP metrics collector with an injected metrics payload."""
 
+    @pytest.mark.cpu
+    @pytest.mark.level0
     def test_start_and_metrics_exist(self):
         """
         Feature: Collector writes metrics to the store after start()
@@ -75,6 +75,8 @@ class TestVLLMMetricsCollector:
         assert isinstance(store.get_metric(REPLICA_ID, MetricKey.NUM_REQUESTS_RUNNING), int)
         assert isinstance(store.get_metric(REPLICA_ID, MetricKey.NUM_REQUESTS_WAITING), int)
 
+    @pytest.mark.cpu
+    @pytest.mark.level0
     def test_metrics_values_are_sane(self):
         """
         Feature: Collected metric values are within reasonable bounds
@@ -89,6 +91,8 @@ class TestVLLMMetricsCollector:
         assert store.get_metric(REPLICA_ID, MetricKey.NUM_REQUESTS_RUNNING) >= 0
         assert store.get_metric(REPLICA_ID, MetricKey.NUM_REQUESTS_WAITING) >= 0
 
+    @pytest.mark.cpu
+    @pytest.mark.level0
     def test_store_get_node_dict(self):
         """
         Feature: DataStore.get_metrics(replica_id) returns the full node metrics dict
@@ -103,6 +107,8 @@ class TestVLLMMetricsCollector:
         assert MetricKey.NUM_REQUESTS_RUNNING in node_metrics
         assert MetricKey.NUM_REQUESTS_WAITING in node_metrics
 
+    @pytest.mark.cpu
+    @pytest.mark.level0
     def test_multiple_poll_cycles_refresh(self):
         """
         Feature: Multiple polling cycles refresh the store with updated values
@@ -112,3 +118,47 @@ class TestVLLMMetricsCollector:
         store = _collect()
 
         assert len(store.get_metrics(REPLICA_ID)) > 0, "Store should have metrics after multiple poll cycles"
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize(
+    "labels,expected,raw",
+    [
+        (["10"], 9, 10),
+        (["1"], 0, 1),
+        (["10", "10"], 9, 10),
+        (["10", "20"], None, 20),
+        (["10", "bad"], None, 10),
+        (["10", None], None, 10),
+        (["-1"], None, -1),
+        (["1.5"], None, 1),
+        (["true"], None, None),
+        (["nan"], None, None),
+        (["inf"], None, None),
+        ([], None, None),
+    ],
+)
+def test_capacity_info_is_normalized_without_summing_worker_series(labels, expected, raw):
+    lines = [
+        "vllm:cache_config_info{" + (f'num_gpu_blocks="{value}",' if value is not None else "") + f'worker="{i}"}} 1'
+        for i, value in enumerate(labels)
+    ]
+    update = VLLMMetricsParser().parse("\n".join(lines), REPLICA_ID)
+    assert update.metrics[MetricKey.KV_CACHE_CAPACITY_BLOCKS] == expected
+    assert update.metrics.get(MetricKey.NUM_GPU_BLOCKS) == raw
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_missing_capacity_poll_clears_previous_value_in_store():
+    parser = VLLMMetricsParser()
+    store = DataStore()
+    assert store.get_metric(REPLICA_ID, MetricKey.KV_CACHE_CAPACITY_BLOCKS) is None
+    for text, expected in [
+        ('vllm:cache_config_info{num_gpu_blocks="10"} 1', 9),
+        ("vllm:num_requests_running 0", None),
+    ]:
+        update = parser.parse(text, REPLICA_ID)
+        store.refresh_metrics({REPLICA_ID: update.metrics})
+        assert store.get_metric(REPLICA_ID, MetricKey.KV_CACHE_CAPACITY_BLOCKS) == expected

@@ -40,6 +40,9 @@ insight = ["rl-insight"]
 [dependency-groups]
 dev = ["pytest", "pytest-asyncio", "pytest-cov", "pre-commit"]
 
+[project.entry-points."vllm.general_plugins"]
+uni_agent_native_hash = "uni_agent.vllm_plugins.native_hash:register"
+
 [project.urls]
 Documentation = "https://uni-agent.readthedocs.io/"
 Repository = "https://github.com/verl-project/uni-agent"

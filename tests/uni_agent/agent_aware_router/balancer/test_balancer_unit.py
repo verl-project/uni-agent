@@ -28,8 +28,6 @@ from uni_agent.agent_aware_router.strategies.kvc_aware import KVCacheAwareStrate
 
 from ._helpers import _FakeCollectorManager, _make_balancer, _router_config
 
-pytestmark = [pytest.mark.level0, pytest.mark.cpu]
-
 
 class _RemoteMethod:
     def __init__(self, fn):
@@ -78,6 +76,8 @@ def _rollout_config(**overrides):
 
 
 class TestKVEventSourceDiscovery:
+    @pytest.mark.cpu
+    @pytest.mark.level0
     @pytest.mark.parametrize(
         ("replay_endpoint", "expected_replay"),
         [("tcp://10.0.0.1:41234", "10.0.0.1:41234"), (None, "")],
@@ -90,9 +90,13 @@ class TestKVEventSourceDiscovery:
             "kv-events",
         ]
 
+    @pytest.mark.cpu
+    @pytest.mark.level0
     def test_empty_response_disables_zmq_discovery(self):
         assert KVCAwareBalancer._parse_kv_event_sources({}) is None
 
+    @pytest.mark.cpu
+    @pytest.mark.level0
     @pytest.mark.parametrize(
         ("sources", "error"),
         [
@@ -108,6 +112,8 @@ class TestKVEventSourceDiscovery:
         with pytest.raises(RuntimeError, match=error):
             KVCAwareBalancer._parse_kv_event_sources(sources)
 
+    @pytest.mark.cpu
+    @pytest.mark.level0
     def test_fetch_uses_vllm_http_api(self, monkeypatch):
         requests = []
 
@@ -132,6 +138,8 @@ class TestKVEventSourceDiscovery:
         ]
         assert requests[0].url == httpx.URL("http://10.0.0.1:8000/kv_event_sources")
 
+    @pytest.mark.cpu
+    @pytest.mark.level0
     def test_provider_discovers_sources_in_parallel_and_tolerates_unavailable_servers(self, monkeypatch):
         monkeypatch.setattr(balancer_module.ray, "get", lambda value: value)
         concurrent_fetches = Barrier(3, timeout=5)
@@ -162,6 +170,8 @@ class TestKVEventSourceDiscovery:
 
 
 class TestConstruction:
+    @pytest.mark.cpu
+    @pytest.mark.level0
     def test_wires_strategy_and_collectors(self):
         balancer = _make_balancer({"s0": "h0"})
 
@@ -174,12 +184,16 @@ class TestConstruction:
         ]
         assert isinstance(balancer._strategy, KVCacheAwareStrategy)
 
+    @pytest.mark.cpu
+    @pytest.mark.level0
     def test_rejects_empty_servers_and_missing_strategy(self):
         with pytest.raises(ValueError, match="servers must be non-empty"):
             KVCAwareBalancer({}, _router_config())
         with pytest.raises(ConfigError):
             KVCAwareBalancer({"s0": "h0"}, OmegaConf.create({}))
 
+    @pytest.mark.cpu
+    @pytest.mark.level0
     def test_fetches_rollout_config_once(self, monkeypatch):
         monkeypatch.setattr(balancer_module.ray, "get", lambda value: value)
         monkeypatch.setattr(KVCAwareBalancer, "_fetch_kv_event_endpoints", classmethod(lambda _cls, _addr: None))
@@ -193,6 +207,8 @@ class TestConstruction:
         assert balancer._strategy._max_num_seqs == 128
         assert balancer._strategy._max_num_batched_tokens == 4096
 
+    @pytest.mark.cpu
+    @pytest.mark.level0
     def test_uses_next_server_when_rollout_config_rpc_fails(self, monkeypatch):
         monkeypatch.setattr(balancer_module.ray, "get", lambda value: value)
         monkeypatch.setattr(KVCAwareBalancer, "_fetch_kv_event_endpoints", classmethod(lambda _cls, _addr: None))
@@ -209,6 +225,8 @@ class TestConstruction:
         assert healthy.get_rollout_config.calls == 1
         assert balancer._strategy._max_num_seqs == 32
 
+    @pytest.mark.cpu
+    @pytest.mark.level0
     def test_invalid_capacity_values_use_defaults(self, monkeypatch):
         monkeypatch.setattr(balancer_module.ray, "get", lambda value: value)
         monkeypatch.setattr(KVCAwareBalancer, "_fetch_kv_event_endpoints", classmethod(lambda _cls, _addr: None))
@@ -219,6 +237,8 @@ class TestConstruction:
         assert balancer._strategy._max_num_seqs == 256
         assert balancer._strategy._max_num_batched_tokens == 2048
 
+    @pytest.mark.cpu
+    @pytest.mark.level0
     @pytest.mark.parametrize(
         ("rollout_config", "expected_override", "expected_capacity"),
         [
@@ -251,6 +271,8 @@ class TestConstruction:
 
 
 class TestBalancerProtocol:
+    @pytest.mark.cpu
+    @pytest.mark.level0
     def test_status_describes_runtime_state(self):
         balancer = _make_balancer({"s0": "h0", "s1": "h1"})
 
@@ -263,8 +285,11 @@ class TestBalancerProtocol:
             "sticky_size": 0,
             "total_inflight": 0,
             "collectors": [],
+            "cache": {},
         }
 
+    @pytest.mark.cpu
+    @pytest.mark.level0
     @pytest.mark.parametrize("completion", ["error", "empty-zmq"])
     def test_status_exposes_completed_subscriptions(self, monkeypatch, caplog, completion):
         from uni_agent.agent_aware_router.collectors import provider as provider_module
@@ -317,6 +342,8 @@ class TestBalancerProtocol:
         finally:
             manager.stop()
 
+    @pytest.mark.cpu
+    @pytest.mark.level0
     def test_acquire_delegates_and_maps_selected_handle(self, monkeypatch):
         seen = {}
 
@@ -342,6 +369,8 @@ class TestBalancerProtocol:
             "request_id": "request-1",
         }
 
+    @pytest.mark.cpu
+    @pytest.mark.level0
     def test_empty_ranking_raises(self, monkeypatch):
         monkeypatch.setattr(balancer_module, "route", lambda *_args: [])
         balancer = _make_balancer({"s0": "h0"})
@@ -349,6 +378,8 @@ class TestBalancerProtocol:
         with pytest.raises(RuntimeError, match="no available replica"):
             balancer.acquire_server("request-1", [1])
 
+    @pytest.mark.cpu
+    @pytest.mark.level0
     def test_callback_failure_does_not_break_other_callbacks(self):
         balancer = _make_balancer({"s0": "h0"})
         received = []
@@ -363,6 +394,8 @@ class TestBalancerProtocol:
 
         assert received == ["payload"]
 
+    @pytest.mark.cpu
+    @pytest.mark.level0
     def test_periodic_route_stats_are_cumulative(self, monkeypatch):
         balancer = _make_balancer({"s0": "h0"})
         balancer._ROUTE_LOG_EVERY = 2
@@ -382,17 +415,21 @@ class TestBalancerProtocol:
         assert balancer._route_calls == 4
         assert balancer._route_time_total_ms >= balancer._route_time_max_ms >= 0
 
+    @pytest.mark.cpu
+    @pytest.mark.level0
     def test_add_and_remove_servers_update_pool_and_counters(self):
         balancer = _make_balancer({"s0": "h0"})
 
-        balancer.add_servers({"s0": "new-h0", "s1": "h1"})
-        assert balancer._servers == {"s0": "new-h0", "s1": "h1"}
+        balancer.add_servers({"s0": "h0", "s1": "h1"})
+        assert balancer._servers == {"s0": "h0", "s1": "h1"}
         assert balancer._inflight == {"s0": 0, "s1": 0}
 
         balancer.remove_servers(["s0", "missing"])
         balancer.remove_servers([])
         assert balancer.get_all_servers() == ["s1"]
 
+    @pytest.mark.cpu
+    @pytest.mark.level0
     def test_statistic_callbacks_unregister_on_provider_stop(self):
         balancer = _make_balancer({"s0": "h0"})
         assert any(balancer._callbacks.values())
