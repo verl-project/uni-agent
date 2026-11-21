@@ -202,20 +202,31 @@ class MultiAgentGatewayFramework(GatewayAgentFramework):
             "session_group_id": trajectory.extra_fields.get("session_group_id"),
         }
 
-    def _dump_trajectories(self, run_dir: Path, session_id: str, trajectories: list[Trajectory]) -> None:
+    def _dump_trajectories(
+        self,
+        run_dir: Path,
+        session_id: str,
+        trajectories: list[Trajectory],
+        dropped_trajectories: list[Trajectory] | None = None,
+    ) -> None:
         """Persist each role's JSON/NPZ trajectory dump under ``agents/<role>/``.
 
         The base framework writes one aggregate dump per session group. A
         multi-agent group has several roles, so keep each role's artifacts
         separate and reuse the base serializer for every role directory.
+
+        Trajectories discarded by a custom select function are grouped by the
+        same role directory; the base serializer writes them as
+        ``dropped_trajectory.*`` next to the kept ``trajectory.*`` artifacts.
         """
-        grouped: dict[str, list[Trajectory]] = {}
-        for trajectory in trajectories:
-            role = str(trajectory.extra_fields.get("role") or "unknown")
-            grouped.setdefault(role, []).append(trajectory)
+        kept_by_role = self._group_by_role(trajectories)
+        dropped_by_role = self._group_by_role(dropped_trajectories or [])
+
+        roles = list(kept_by_role)
+        roles.extend(role for role in dropped_by_role if role not in kept_by_role)
 
         used_dirnames: set[str] = set()
-        for role, role_trajectories in grouped.items():
+        for role in roles:
             dirname = re.sub(r"[^A-Za-z0-9_.-]+", "_", role).strip("._-") or "unknown"
             candidate = dirname
             # Sanitization may collapse distinct role names; suffix to avoid overwriting.
@@ -224,4 +235,18 @@ class MultiAgentGatewayFramework(GatewayAgentFramework):
                 candidate = f"{dirname}_{suffix}"
                 suffix += 1
             used_dirnames.add(candidate)
-            super()._dump_trajectories(run_dir / "agents" / candidate, session_id, role_trajectories)
+            super()._dump_trajectories(
+                run_dir / "agents" / candidate,
+                session_id,
+                kept_by_role.get(role, []),
+                dropped_by_role.get(role, []),
+            )
+
+    @staticmethod
+    def _group_by_role(trajectories: list[Trajectory]) -> dict[str, list[Trajectory]]:
+        """Group trajectories by their role metadata; missing roles go to ``unknown``."""
+        trajectories_by_role: dict[str, list[Trajectory]] = {}
+        for trajectory in trajectories:
+            role = str(trajectory.extra_fields.get("role") or "unknown")
+            trajectories_by_role.setdefault(role, []).append(trajectory)
+        return trajectories_by_role

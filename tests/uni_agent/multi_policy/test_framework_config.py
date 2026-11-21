@@ -399,3 +399,55 @@ def test_trajectory_dump_splits_agents(tmp_path):
     assert json.loads((unknown_dir / "trajectory.json").read_text())["num_trajectories"] == 1
     for directory in (planner_dir, answerer_dir, sanitized_dir, collision_dir, unknown_dir):
         assert (directory / "trajectory.npz").exists()
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_trajectory_dump_splits_kept_and_dropped_by_agent(tmp_path):
+    # The base framework calls this hook with four positional arguments, and a
+    # custom selector can drop trajectories from any role. Both properties are
+    # part of the override's contract: keep the fourth parameter positional and
+    # write each role's dropped artifacts next to its kept ones.
+    framework = MultiAgentGatewayFramework.__new__(MultiAgentGatewayFramework)
+    kept = [
+        Trajectory([1], [2], [1], extra_fields={"role": "planner"}),
+        Trajectory([1], [2, 3], [1, 1], extra_fields={"role": "planner"}),
+        Trajectory([1], [4], [1], extra_fields={"role": "answerer"}),
+        Trajectory([1], [5], [1], extra_fields={"role": "bad_role"}),
+    ]
+    dropped = [
+        Trajectory([1], [6], [1], extra_fields={"role": "planner"}),
+        Trajectory([1], [7], [1], extra_fields={"role": "verifier"}),
+        # Sanitizes to bad_role; must not overwrite the kept role's directory.
+        Trajectory([1], [8], [1], extra_fields={"role": "bad/role"}),
+    ]
+
+    framework._dump_trajectories(tmp_path, "session-1", kept, dropped)
+
+    planner_dir = tmp_path / "agents" / "planner"
+    answerer_dir = tmp_path / "agents" / "answerer"
+    verifier_dir = tmp_path / "agents" / "verifier"
+    kept_collision_dir = tmp_path / "agents" / "bad_role"
+    dropped_collision_dir = tmp_path / "agents" / "bad_role_2"
+
+    assert json.loads((planner_dir / "trajectory.json").read_text())["num_trajectories"] == 2
+    assert json.loads((planner_dir / "dropped_trajectory.json").read_text())["num_trajectories"] == 1
+    assert json.loads((answerer_dir / "trajectory.json").read_text())["num_trajectories"] == 1
+    assert not (answerer_dir / "dropped_trajectory.json").exists()
+    # A role that only has dropped trajectories still gets its own directory.
+    assert json.loads((verifier_dir / "dropped_trajectory.json").read_text())["num_trajectories"] == 1
+    assert not (verifier_dir / "trajectory.json").exists()
+    assert json.loads((kept_collision_dir / "trajectory.json").read_text())["num_trajectories"] == 1
+    assert json.loads((dropped_collision_dir / "dropped_trajectory.json").read_text())["num_trajectories"] == 1
+    assert not (dropped_collision_dir / "trajectory.json").exists()
+
+    assert (planner_dir / "trajectory.npz").exists()
+    assert (planner_dir / "dropped_trajectory.npz").exists()
+    assert (answerer_dir / "trajectory.npz").exists()
+    assert not (answerer_dir / "dropped_trajectory.npz").exists()
+    assert not (verifier_dir / "trajectory.npz").exists()
+    assert (verifier_dir / "dropped_trajectory.npz").exists()
+    assert (kept_collision_dir / "trajectory.npz").exists()
+    assert not (kept_collision_dir / "dropped_trajectory.npz").exists()
+    assert not (dropped_collision_dir / "trajectory.npz").exists()
+    assert (dropped_collision_dir / "dropped_trajectory.npz").exists()
