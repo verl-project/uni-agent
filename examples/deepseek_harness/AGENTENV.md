@@ -14,7 +14,19 @@
 | `AGENTENV_SANDBOX_URL` | Worker 访问 envd 数据面的地址 |
 | `AGENTENV_API_KEY` | AgentEnv API 凭据，通过部署的密钥注入方式提供 |
 
-AgentEnv 必须能拉取映射后的任务镜像和 DSH 工具镜像。样本的 `sandbox.image` 保持预处理生成的引用，按实际镜像仓库调整配置里的 `image_map`。DSH 工具镜像使用 `image_mounts[].image` 指定完整引用，独立于 `image_map`。自行构建工具镜像可参考 [DSH 构建说明](README.md)。
+AgentEnv 必须能拉取每条样本的任务镜像和 DSH 工具镜像。若任务镜像采用 `<repository>:<instance_id>`，重新生成 parquet，让预处理器把镜像引用直接写入每条样本的 `sandbox.image`。下面的命令适用于两个数据集的实例镜像都发布到同一仓库的部署。若验证集使用独立仓库，在第二条命令单独指定。
+
+```bash
+SWE_IMAGE_REPOSITORY=registry.90.91.181.189.nip.io:5000/swerebench-arm64-r
+python -m uni_agent.tasks.swe_rebench.preprocess \
+  --local-save-dir ~/data/swe_agent_agentenv \
+  --image-repository "$SWE_IMAGE_REPOSITORY"
+python -m uni_agent.tasks.swe_bench.preprocess \
+  --local-save-dir ~/data/swe_agent_agentenv \
+  --image-repository "$SWE_IMAGE_REPOSITORY"
+```
+
+例如，原始实例 ID `django__django-12345` 会生成 `registry.90.91.181.189.nip.io:5000/swerebench-arm64-r:django__django-12345`。DSH 工具镜像继续通过 `image_mounts[].image` 配置。自行构建工具镜像可参考 [DSH 构建说明](README.md)。
 
 ## 2. 选择任务配置和 Gateway 访问方式
 
@@ -73,6 +85,8 @@ PY
 
 ```bash
 TASK_CONFIG=examples/deepseek_harness/task_config_deepseek_harness_agentenv.yaml \
+TRAIN_DATA="$HOME/data/swe_agent_agentenv/swe_rebench_filtered.parquet" \
+VAL_DATA="$HOME/data/swe_agent_agentenv/swe_bench_verified.parquet" \
 MODEL_PATH=/path/to/model \
 bash examples/deepseek_harness/run_train.sh
 ```
