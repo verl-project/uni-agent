@@ -93,3 +93,39 @@ def test_resolver_rejects_missing_route():
     resolver = TaskConfigResolver({"other": {"name": "other"}})
     with pytest.raises(ValueError, match="no Task Config for sample task 'missing'"):
         resolver.resolve({"name": "missing"})
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_resolver_distributes_sample_image_to_routes():
+    from uni_agent.sandbox import SandboxConfig, build_sandbox
+    from uni_agent.sandbox.routes import RoutesSandbox
+
+    routes = [
+        {"config": {"provider": "agentenv", "image_map": [{"from": "swebench/**", "to": "mirror/swebench/**"}]}},
+        {"config": {"provider": "openyuanrong"}},
+        {"config": {"provider": "docker", "image": "fixed:latest"}},
+        {"config": {"provider": "e2b", "sandbox_kwargs": {"template": "fixed-template"}}},
+        {"config": {"provider": "local"}},
+    ]
+    defaults = {"swe_bench": {"sandbox": {"provider": "routes", "sandbox_kwargs": {"routes": routes}}}}
+    resolver = TaskConfigResolver(defaults)
+
+    for tag in ("first", "second"):
+        image = f"swebench/example:{tag}"
+        sample = {"name": "swe_bench", "sandbox": {"image": image}}
+        resolved = resolver.resolve(sample)
+        assert "image" not in resolved["sandbox"]
+        sandbox = build_sandbox(SandboxConfig.model_validate(resolved["sandbox"]))
+        assert isinstance(sandbox, RoutesSandbox)
+        assert [route.config.image for route in sandbox.routes] == [
+            f"mirror/swebench/example:{tag}",
+            image,
+            "fixed:latest",
+            None,
+            None,
+        ]
+        assert sample["sandbox"]["image"] == image
+
+    assert "image" not in routes[0]["config"]
+    assert "image" not in routes[1]["config"]
