@@ -7,8 +7,10 @@
     provider: agentenv
     runtime_timeout: 7200
     image_map:
-      - from: "registry.90.91.181.189.nip.io:5000/swerebench-arm64-rl"
-        to: "registry.90.91.181.189.nip.io:5000/swerebench-arm64-rl-dsh"
+      - from: "swebench/**"
+        to: "registry.90.91.181.189.nip.io:5000/swerebench-arm64-rl"
+      - from: "swerebench/**"
+        to: "registry.90.91.181.189.nip.io:5000/swerebench-arm64-rl"
     image_mounts:
       - image: registry.90.91.181.189.nip.io:5000/kunpeng-ai/dsh-tool:latest
         mount_path: /opt/dsh
@@ -31,8 +33,10 @@
     provider: agentenv
     runtime_timeout: 7200
     image_map:
-      - from: "registry.90.91.181.189.nip.io:5000/swerebench-arm64-rl"
-        to: "registry.90.91.181.189.nip.io:5000/swerebench-arm64-rl-dsh"
+      - from: "swebench/**"
+        to: "registry.90.91.181.189.nip.io:5000/swerebench-arm64-rl"
+      - from: "swerebench/**"
+        to: "registry.90.91.181.189.nip.io:5000/swerebench-arm64-rl"
     image_mounts:
       - image: registry.90.91.181.189.nip.io:5000/kunpeng-ai/dsh-tool:latest
         mount_path: /opt/dsh
