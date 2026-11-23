@@ -364,6 +364,10 @@ def test_exec_forwards_workdir_environment_and_argv(monkeypatch):
                 "--env",
                 "B=two",
                 "agent-test",
+                "timeout",
+                "-k",
+                "10",
+                "14",
                 "python",
                 "-c",
                 "print('hello')",
@@ -371,6 +375,9 @@ def test_exec_forwards_workdir_environment_and_argv(monkeypatch):
             12.0,
         )
     ]
+
+    asyncio.run(sandbox._exec(["true"]))
+    assert calls[-1] == (("exec", "agent-test", "true"), None)
 
 
 @pytest.mark.cpu
