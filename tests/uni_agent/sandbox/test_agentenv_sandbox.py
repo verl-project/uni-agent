@@ -307,19 +307,77 @@ def test_api_key_never_appears_in_start_failure(monkeypatch: pytest.MonkeyPatch,
 
 @pytest.mark.cpu
 @pytest.mark.level0
-def test_image_mounts_are_rejected_with_agentenv_wording(
-    monkeypatch: pytest.MonkeyPatch, clean_connection_env: None
+@pytest.mark.asyncio
+@pytest.mark.parametrize("template, fail_connect", [(None, False), ("task-template", False), (None, True)])
+async def test_agentenv_mounts_images_at_creation(
+    monkeypatch: pytest.MonkeyPatch, template: str | None, fail_connect: bool
 ) -> None:
-    _set_agentenv_env(monkeypatch)
+    import json
 
-    config = SandboxConfig(
-        provider="agentenv",
-        image="python:3.12",
-        image_mounts=[{"image": "example/agent:latest", "mount_path": "/opt/agent"}],
+    import httpx
+
+    _set_agentenv_env(monkeypatch)
+    _install_fake_e2b(monkeypatch)
+    sdk = sys.modules["e2b"]
+    events: list[str] = []
+    path = "/v2/sandboxes" if template else "/sandboxes-cold"
+
+    def control_plane(request: httpx.Request) -> httpx.Response:
+        assert request.headers["X-API-Key"] == _AGENTENV_API_KEY
+        events.append(f"{request.method} {request.url.path}")
+        if request.method == "DELETE":
+            return httpx.Response(204)
+        payload = json.loads(request.content)
+        assert payload["attachedDrives"] == [
+            {
+                "driveID": "image_mount_0",
+                "source": {"image": "registry.test/dsh-tool:latest"},
+                "mountPath": "/opt/dsh",
+                "readOnly": True,
+            },
+        ]
+        assert payload["network"] == {"denyOut": ["0.0.0.0/0"]}
+        if template:
+            assert payload["templateID"] == template
+            assert "image" not in payload
+        else:
+            assert payload["image"] == "registry.test/swebench/example"
+            assert "templateID" not in payload
+        return httpx.Response(201, json={"sandboxID": "mounted-sandbox"})
+
+    real_client = httpx.AsyncClient
+
+    def test_client(**kwargs: Any) -> httpx.AsyncClient:
+        return real_client(transport=httpx.MockTransport(control_plane), **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", test_client)
+
+    async def connect(sandbox_id: str, **kwargs: Any) -> Any:
+        events.append(f"connect {sandbox_id}")
+        assert kwargs["sandbox_url"] == _AGENTENV_SANDBOX_URL
+        if fail_connect:
+            raise RuntimeError("connect failed")
+        return SimpleNamespace(sandbox_id=sandbox_id)
+
+    monkeypatch.setattr(sdk.AsyncSandbox, "connect", connect, raising=False)
+    sandbox = build_sandbox(
+        SandboxConfig(
+            provider="agentenv",
+            image="swebench/example",
+            image_map=[{"from": "swebench/**", "to": "registry.test/swebench/**"}],
+            image_mounts=[{"image": "registry.test/dsh-tool:latest", "mount_path": "/opt/dsh"}],
+            sandbox_kwargs={"template": template, "network": {"deny_out": ["0.0.0.0/0"]}},
+        )
     )
 
-    with pytest.raises(NotImplementedError, match="AgentEnvSandbox does not support image mounts"):
-        build_sandbox(config)
+    if fail_connect:
+        with pytest.raises(RuntimeError, match="connect failed"):
+            await sandbox.start()
+        assert events == [f"POST {path}", "connect mounted-sandbox", "DELETE /sandboxes/mounted-sandbox"]
+    else:
+        await sandbox.start()
+        assert sandbox.sandbox_id == "mounted-sandbox"
+        assert events == [f"POST {path}", "connect mounted-sandbox"]
 
 
 @pytest.mark.cpu
