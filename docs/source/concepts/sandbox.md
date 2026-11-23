@@ -135,6 +135,74 @@ Some sandbox providers support a Gateway reverse tunnel and declare this with `s
 
 Each supporting provider owns its upstream format through the `Sandbox.tunnel_upstream(base_url)` classmethod. The default requires an explicit `host:port`; a provider can override it to preserve its required URL scheme, supply default ports, or handle IPv6 addresses. The task runner delegates this formatting to the selected provider.
 
+## GKE Agent Sandbox (`gke_agent_sandbox`)
+
+`gke_agent_sandbox` runs each sandbox as a pod on Google Kubernetes Engine, or on any Kubernetes cluster with the [`kubernetes-sigs/agent-sandbox`](https://github.com/kubernetes-sigs/agent-sandbox) controller and CRDs installed. Commands run through the Kubernetes `pods/exec` API, so the image needs `sh` and `timeout`.
+
+```yaml
+sandbox:
+  provider: gke_agent_sandbox
+  image: python:3.12
+  runtime_timeout: 7200
+  sandbox_kwargs:
+    namespace: default
+    node_selector:
+      cloud.google.com/gke-nodepool: sandbox-cpu-pool
+```
+
+This provider needs Python 3.11 or 3.12, because both client packages below require Python 3.11 or newer.
+
+Install the client dependencies (since `agent-sandbox-rl` is not on PyPI yet, install both client packages from `kubernetes-sigs/agent-sandbox`):
+
+```bash
+pip install -e '.[gke]'  # from a uni-agent checkout
+pip install 'git+https://github.com/kubernetes-sigs/agent-sandbox.git@9afee7039342f18fa9ad402929cabf8b66eebaa7#subdirectory=clients/python/agentic-sandbox-client'
+pip install 'git+https://github.com/kubernetes-sigs/agent-sandbox.git@9afee7039342f18fa9ad402929cabf8b66eebaa7#subdirectory=examples/agent-sandbox-rl'
+```
+
+The process needs Kubernetes credentials (in-cluster service account or kubeconfig) that may create `SandboxTemplate`, `SandboxWarmPool` and `SandboxClaim` objects and use `pods/exec` in the namespace.
+
+Options under `sandbox_kwargs`:
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `namespace` | `SANDBOX_NAMESPACE`, then the process's own namespace, then `default` | Namespace the sandbox pods run in. |
+| `run_id` | `SANDBOX_RUN_ID`, else a random ID per process | Sandboxes with the same run ID share warm pools across processes. |
+| `node_selector` | `NODE_SELECTOR_KEY` / `NODE_SELECTOR_VAL` | Node labels the pods require. A matching `NoSchedule` toleration is added for each label, so a node pool tainted with its own label is usable. |
+| `network_policy_management` | `Managed` | `Managed`: the controller creates a NetworkPolicy per image. `Unmanaged`: it creates none. |
+| `network_policy` | deny all ingress and egress | The NetworkPolicy rules for `Managed` mode. |
+
+The three environment fallbacks exist because those values change per run, which a Task Config file cannot express.
+
+**Network isolation.** Sandboxes have no network access by default; only the pod's loopback and `pods/exec` work. To allow traffic, pass `network_policy` rules. `Unmanaged` mode is for clusters where one namespace-wide policy is preferable to one per image (large GKE Dataplane V2 clusters): the provider then refuses to start unless a NetworkPolicy in the namespace restricts egress for the sandbox pods (label `app=agent-sandbox-rl`).
+
+**Lifetime.** A sandbox is stopped when `runtime_timeout` elapses, and the controller is asked to delete its claim at the same deadline in case the process has died.
+
+**Shell.** The `stateful_shell` tool uses a built-in shell session that needs only `bash`, because an isolated sandbox cannot download tmux.
+
+### Warm pools
+
+A sandbox starts without any preparation: the first one for an image creates the pod on demand and waits for the image pull. To avoid that wait, keep sandboxes started ahead of time:
+
+```python
+from uni_agent.sandbox.gke import GKEAgentSandbox
+
+# image -> number of ready sandboxes to keep; returns image -> ready
+ready = GKEAgentSandbox.prewarm({"python:3.12": 16}, run_id="my-run", timeout=900)
+...
+GKEAgentSandbox.unwarm(["python:3.12"], run_id="my-run")
+```
+
+Both calls take the same `sandbox_kwargs` as the sandboxes that will use the pools, and both block. Sandboxes in other processes use the pools when they share the `run_id`.
+
+### Cleanup
+
+When a process exits it releases its sandboxes and deletes the pools it created. A process that is killed cannot do that; remove what it left with the reaper from `agent-sandbox-rl`, using `--in-cluster` when running inside the cluster:
+
+```bash
+python -m agent_sandbox_rl.reaper --namespace <namespace> --run-id <run_id>
+```
+
 ## Custom Backend
 
 A minimal backend implements `start()`, `stop()`, and `_exec()`:
