@@ -9,6 +9,7 @@ routed to its own policy and generates trajectories independently.
 from __future__ import annotations
 
 import copy
+import inspect
 import logging
 import re
 from collections.abc import Mapping
@@ -19,6 +20,7 @@ from typing import Any
 from omegaconf import DictConfig, OmegaConf
 
 from uni_agent.framework.framework import GatewayAgentFramework, TrajectoryPostprocessor
+from uni_agent.framework.trajectory_selection import TrajectorySelectFunction
 from uni_agent.gateway.session import Trajectory
 from uni_agent.tasks import TaskResult
 
@@ -73,6 +75,10 @@ class MultiAgentGatewayFramework(GatewayAgentFramework):
         self._role_policy_mapping = dict(role_policy_mapping)
         self._policy_processors = dict(policy_processors)
         self._policy_rollout_configs = policy_rollout_configs or {}
+        self._select_functions = {
+            runner_name: self._wrap_select_fn_per_role(select_fn)
+            for runner_name, select_fn in self._select_functions.items()
+        }
 
     @classmethod
     def from_config(
@@ -118,6 +124,39 @@ class MultiAgentGatewayFramework(GatewayAgentFramework):
             policy_processors=policy_processors,
             **framework_kwargs,
         )
+
+    def _wrap_select_fn_per_role(
+        self,
+        select_fn: TrajectorySelectFunction,
+    ) -> TrajectorySelectFunction:
+        """Wrap ``select_fn`` so it is called once per role that has trajectories.
+
+        Every loaded custom select function is wrapped at construction time so a
+        rule can stay role-agnostic, the same way single-agent selectors are
+        written. Each role's trajectories are passed separately and the kept
+        results are flattened. Sync and async select functions are supported. If
+        a role's selector raises an exception, that role keeps all of its
+        trajectories so one bad rule cannot discard the other roles' data.
+        """
+
+        async def select_per_role(session_id: str, trajectories: list[Trajectory]) -> list[Trajectory]:
+            kept_trajectories: list[Trajectory] = []
+            for role, role_trajectories in self._group_by_role(trajectories).items():
+                try:
+                    selected_trajectories = select_fn(session_id, role_trajectories)
+                    if inspect.isawaitable(selected_trajectories):
+                        selected_trajectories = await selected_trajectories
+                    kept_trajectories.extend(selected_trajectories)
+                except Exception:
+                    logger.exception(
+                        "session %s: select function failed for role %s; keeping its trajectories",
+                        session_id,
+                        role,
+                    )
+                    kept_trajectories.extend(role_trajectories)
+            return kept_trajectories
+
+        return select_per_role
 
     def _build_session_sampling_params(
         self,
