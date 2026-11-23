@@ -95,7 +95,7 @@ bash examples/deepseek_harness/run_train.sh
 
 ## 4. 接入现有流量分配
 
-建议先用单一 AgentEnv provider 完成预跑。启用 `provider: routes` 时，每个 `routes[].config` 都是一份完整的子沙箱配置，`image`、`image_map`、`image_mounts` 和 `executable_paths` 放在各自的子配置里。SWE 样本通常把根镜像放在顶层 `sandbox.image`，因此需要在构造路由任务配置时，把样本镜像填入需要它的子配置，并从顶层移除该字段。
+建议先用单一 AgentEnv provider 完成预跑。启用 `provider: routes` 时，每个 `routes[].config` 都是一份完整的子沙箱配置，`image`、`image_map`、`image_mounts` 和 `executable_paths` 放在各自的子配置里。SWE 样本提供的 `sandbox.image` 会由任务配置解析器自动传给需要镜像的子路由，每个子路由再应用自己的 `image_map`。子路由已指定的镜像、E2B/AgentEnv 模板以及本地路由配置优先。
 
 需要隧道时，`proxy_port` 放在外层 `sandbox_kwargs`，AgentEnv 的 `tunnel_ssh_host` 放在对应子路由的 `config.sandbox_kwargs`。所有候选 provider 都需要支持隧道。按 Gateway session ID 固定路由的行为由 runner 提供，启动阶段的瞬时故障可按路由配置回退。详见 [沙箱流量分配配置](../../docs/source/quickstart/launch-sandbox.md#traffic-splitting-between-sandbox-providers)。
 
