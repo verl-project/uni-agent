@@ -303,6 +303,32 @@ The hook is disabled when `trajectory_postprocessor_fqn` is omitted or `null`.
 In that case no extension is imported or called, and finalized trajectories
 continue through the original scoring, logging, and TransferQueue path.
 
+### Generation spans
+
+Both Gateway session modes return `trajectory.extra_fields["generation_spans"]`
+for consumers that need to associate generated tokens with tool calls or agent
+identity. Each entry includes:
+
+- `session_id` and `chain_id`: the Gateway session and finalized trajectory.
+- `generation_index`: the zero-based generation ordinal within the chain.
+- `response_start` and `response_end`: half-open indices into this trajectory's
+  `response_ids`, covering the surviving model-generated tokens for this turn.
+- `tool_call_ids`: decoded Tool call IDs in response order.
+- `agent_context`: the normalized Agent Identity from that request, or an empty
+  mapping when absent.
+
+For example, two generations may occupy `response_ids[0:4]` and
+`response_ids[12:16]`, with the intervening tokens coming from a tool result
+and other continuation context. A rolled-back generation is removed from the
+list. A tree branch excludes generations that became part of its initial
+prompt. Empty ranges without tool calls are omitted, so ordinals may have
+gaps. Empty ranges with tool calls retain their IDs.
+
+Spans describe the token arrays at Gateway finalization. A trajectory
+postprocessor that changes the response token layout must update or remove
+this metadata. It is available on the in-memory trajectory and in
+TransferQueue extra fields.
+
 ## Multiple Turns and Chains
 
 One session may contain multiple model turns. Tool observations are encoded as continuation tokens and marked with `response_mask=0`, while model completions are marked with `response_mask=1`.

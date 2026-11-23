@@ -14,6 +14,12 @@ from typing import Any
 from fastapi import HTTPException
 
 from uni_agent.gateway.session.codec import MessageCodec
+from uni_agent.gateway.session.generation_spans import (
+    ResponseSpan,
+    decoded_tool_call_ids,
+    export_generation_spans,
+    trim_response_spans,
+)
 from uni_agent.gateway.session.types import (
     AgentContext,
     InternalGenerationRequest,
@@ -67,6 +73,8 @@ class TrajectoryBuffer:
             with the tokens it describes, so a dropped assistant no longer
             widens the trajectory's version span. Marks carry ``None`` when the
             backend reports no version.
+        generation_spans: One response range per committed generation, in
+            generation order. Rollback removes the same entry as the version mark.
     """
 
     prompt_ids: list[int]
@@ -75,6 +83,7 @@ class TrajectoryBuffer:
     response_logprobs: list[float] = field(default_factory=list)
     routed_experts: Any | None = None
     generation_versions: list[tuple[int | None, int | None]] = field(default_factory=list)
+    generation_spans: list[ResponseSpan] = field(default_factory=list)
 
 
 @dataclass
@@ -390,16 +399,20 @@ class GatewaySession:
                     )
 
             runtime_token_ids = encoded.buffer.prompt_ids + encoded.buffer.response_ids
-            merged_token_ids, response_mask, response_logprobs = self._codec.merge_assistant_tokens(
-                runtime_token_ids,
-                response_ids,
+            merge_result = self._codec.merge_assistant_tokens(runtime_token_ids, response_ids)
+            response_mask, response_logprobs = self._codec.align_response_metadata(
+                merge_result,
                 encoded.buffer.response_mask,
                 encoded.buffer.response_logprobs if encoded.sampling_params.get("logprobs", False) else None,
                 assistant_logprobs=assistant_logprobs,
             )
             prompt_length = len(encoded.buffer.prompt_ids)
+            merged_token_ids = merge_result.token_ids
             if merged_token_ids[:prompt_length] != encoded.buffer.prompt_ids:
                 raise RuntimeError("Continuous Token merge modified the immutable trajectory prompt")
+            if merge_result.removed_prefix_token_count:
+                retained_length = len(encoded.buffer.response_ids) - merge_result.removed_prefix_token_count
+                trim_response_spans(encoded.buffer.generation_spans, max(0, retained_length))
             encoded.buffer.response_ids = list(merged_token_ids[prompt_length:])
             encoded.buffer.response_mask = list(response_mask)
             encoded.buffer.response_logprobs = list(response_logprobs or [])
@@ -433,7 +446,8 @@ class GatewaySession:
                     tools=encoded.tools,
                     stop_reason=output.stop_reason,
                 )
-                chain_id = self._commit_generation_to_chain(encoded, assistant_msg)
+                response_start = len(encoded.buffer.response_ids) - merge_result.appended_token_count
+                chain_id = self._commit_generation_to_chain(encoded, assistant_msg, response_start=response_start)
                 if owner_request is not None and owner_request.waiter_count:
                     # Attribute at commit, even if waiters cancel or resume after finalize.
                     _, chain = self._find_active_chain(chain_id)
@@ -597,9 +611,10 @@ class GatewaySession:
                 last_assistant_start = selected_chain.last_assistant_start
                 assert last_assistant_start.response_ids_len <= len(buffer.response_ids)
                 rollback_dropped_trainable_tokens = sum(buffer.response_mask[last_assistant_start.response_ids_len :])
-                # One generation appends exactly one mark, so the rewritten
+                # One generation appends exactly one of each mark, so the rewritten
                 # assistant is always the last one.
                 del buffer.generation_versions[-1:]
+                del buffer.generation_spans[-1:]
 
                 if image_data is not None:
                     assert last_assistant_start.image_data_len <= len(image_data)
@@ -632,9 +647,7 @@ class GatewaySession:
 
             appended_images = None
             updated_messages = previous_messages + incremental_messages
-            merged_token_ids = None
-            merged_response_mask = None
-            merged_response_logprobs = None
+            context_merge = None
             current_trajectory_length = len(buffer.prompt_ids) + len(buffer.response_ids)
             capacity_exhausted = (
                 self._trajectory_capacity is not None and current_trajectory_length >= self._trajectory_capacity
@@ -653,23 +666,29 @@ class GatewaySession:
                 updated_images = None
                 if image_data is not None or appended_images is not None:
                     updated_images = [*(image_data or []), *(appended_images or [])]
-                merged_token_ids, merged_response_mask, merged_response_logprobs = self._codec.merge_context_tokens(
+                context_merge = self._codec.merge_context_tokens(
                     previous_messages,
                     updated_messages,
                     runtime_token_ids,
-                    buffer.response_mask,
-                    buffer.response_logprobs if sampling_params.get("logprobs", False) else None,
                     tools=tools,
                     image_data=updated_images,
                 )
                 capacity_exhausted = (
-                    self._trajectory_capacity is not None and len(merged_token_ids) >= self._trajectory_capacity
+                    self._trajectory_capacity is not None and len(context_merge.token_ids) >= self._trajectory_capacity
                 )
-            if not capacity_exhausted and merged_token_ids is not None:
-                assert merged_response_mask is not None
+            if not capacity_exhausted and context_merge is not None:
                 prompt_length = len(buffer.prompt_ids)
+                merged_token_ids = context_merge.token_ids
                 if merged_token_ids[:prompt_length] != buffer.prompt_ids:
                     raise RuntimeError("Continuous Token merge modified the immutable trajectory prompt")
+                merged_response_mask, merged_response_logprobs = self._codec.align_response_metadata(
+                    context_merge,
+                    buffer.response_mask,
+                    buffer.response_logprobs if sampling_params.get("logprobs", False) else None,
+                )
+                if context_merge.removed_prefix_token_count:
+                    retained_length = len(buffer.response_ids) - context_merge.removed_prefix_token_count
+                    trim_response_spans(buffer.generation_spans, max(0, retained_length))
                 buffer.response_ids = list(merged_token_ids[prompt_length:])
                 buffer.response_mask = list(merged_response_mask)
                 buffer.response_logprobs = list(merged_response_logprobs or [])
@@ -859,6 +878,7 @@ class GatewaySession:
             response_logprobs=list(buffer.response_logprobs),
             routed_experts=buffer.routed_experts,
             generation_versions=list(buffer.generation_versions),
+            generation_spans=list(buffer.generation_spans),
         )
 
     def _copy_chain_media(self, chain: ChainState) -> tuple[list[Any] | None, list[Any] | None]:
@@ -903,7 +923,9 @@ class GatewaySession:
         self._rollback_count += 1
         self._rollback_dropped_trainable_tokens_total += encoded.rollback_dropped_trainable_tokens
 
-    def _commit_generation_to_chain(self, encoded: EncodedData, assistant_msg: dict[str, Any]) -> int:
+    def _commit_generation_to_chain(
+        self, encoded: EncodedData, assistant_msg: dict[str, Any], *, response_start: int
+    ) -> int:
         message_history = list(encoded.messages) + [assistant_msg]
         message_prefix_hashes = self._extend_message_prefix_hashes(
             encoded.incoming_message_prefix_hashes,
@@ -912,6 +934,14 @@ class GatewaySession:
         assert len(message_prefix_hashes) == len(message_history)
         if encoded.last_assistant_start is None:
             raise RuntimeError("last assistant start is missing")
+        encoded.buffer.generation_spans.append(
+            ResponseSpan(
+                response_start,
+                len(encoded.buffer.response_ids),
+                decoded_tool_call_ids(assistant_msg),
+                encoded.agent_context,
+            )
+        )
         if encoded.chain_id is None:
             order_seq = self._next_order_seq()
             chain_id = self._allocate_chain_id()
@@ -1023,7 +1053,11 @@ class GatewaySession:
         # reads for staleness metrics. Omit the keys when no backend reported a
         # version so the framework falls back instead of tagging None.
         marks = [mark for mark in chain.buffer.generation_versions if mark[0] is not None]
-        trajectory_extra_fields: dict[str, Any] = {}
+        trajectory_extra_fields: dict[str, Any] = {
+            "generation_spans": export_generation_spans(
+                chain.buffer.generation_spans, self.handle.session_id, chain.chain_id
+            ),
+        }
         if chain.agent_context is not None:
             trajectory_extra_fields["agent_context"] = chain.agent_context.copy()
         if marks:
