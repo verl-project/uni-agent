@@ -164,6 +164,8 @@ agent_runners.task.runner_fqn = uni_agent.framework.task_runner.run_task
 
 ## Configuration reference
 
+For the AgentEnv deployment, see the [AgentEnv integration guide](AGENTENV.md).
+
 ### Task config (`task_config_deepseek_harness.yaml`)
 
 The single per-task source of truth for agent + sandbox knobs; tune it without
