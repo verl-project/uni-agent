@@ -48,6 +48,8 @@ sandbox_kwargs:
 
 ## 3. 验证挂载并启动预跑
 
+如果服务器只有 AgentEnv，直接按 [服务器冒烟验证手册](AGENTENV_SMOKE_TEST.md) 执行。
+
 先在已配置凭据的 worker 环境检查一个可拉取的 SWE 样本镜像。将 `SWE_IMAGE` 设为 AgentEnv 能拉取的完整 OCI 引用。
 
 ```bash
