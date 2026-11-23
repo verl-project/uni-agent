@@ -12,7 +12,7 @@ import test_opencode_cli_probe as probe
 import test_opencode_process_cleanup as cleanup
 import test_opencode_sidecar_environment as sidecar
 
-from examples.opencode.smoke_task import run_smoke, scripted_endpoint
+from examples.blackbox_recipes.opencode_swe_task.smoke_task import run_smoke, scripted_endpoint
 from uni_agent.agents.base import ModelConfig
 from uni_agent.agents.opencode2 import OpenCode2Agent, OpenCode2Config
 from uni_agent.sandbox.local import LocalSandbox

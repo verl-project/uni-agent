@@ -14,8 +14,6 @@ on:
       - "tests/uni_agent/sandbox/**"
       - "scripts/validation/**"
       - "tests/uni_agent/tasks/test_swe*"
-      - "examples/opencode/**"
-      - "examples/sidecar/opencode/**"
       - "examples/blackbox_recipes/opencode_swe_task/**"
       - ".github/workflows/opencode2-integration.yml"
 permissions:
@@ -72,11 +70,12 @@ jobs:
       - name: Build pinned native Linux musl payload
         run: |
           mkdir -p results
-          docker build --progress=plain \
-            --build-arg OPENCODE_VERSION=2.2.5 \
-            --build-arg OPENCODE_PACKAGE=@opencode/cli-linux-x64-baseline-musl \
-            --build-arg OPENCODE_SHA512=bae1fce61b19330d03ff788ede0205d34c1197ef8e7d24673090055eae5c324927d32f744aed25c73ac6f73820bc9aab326fca8123136b884cccec9b687b22a4 \
-            -t ua-opencode2 examples/sidecar/opencode 2>&1 | tee results/build.log
+          TOOL_IMAGE=ua-opencode2 TOOL_TAG=latest \
+            bash examples/blackbox_recipes/opencode_swe_task/build_tool.sh --progress=plain \
+              --build-arg OPENCODE_VERSION=2.2.5 \
+              --build-arg OPENCODE_PACKAGE=@opencode/cli-linux-x64-baseline-musl \
+              --build-arg OPENCODE_SHA512=bae1fce61b19330d03ff788ede0205d34c1197ef8e7d24673090055eae5c324927d32f744aed25c73ac6f73820bc9aab326fca8123136b884cccec9b687b22a4 \
+              2>&1 | tee results/build.log
           docker image inspect ua-opencode2 > results/image.json
           cid=$(docker create ua-opencode2 /bin/true)
           mkdir -p "$RUNNER_TEMP/payload"

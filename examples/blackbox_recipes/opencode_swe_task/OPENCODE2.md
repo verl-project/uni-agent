@@ -41,11 +41,11 @@ The existing sidecar launcher also supports the scoped v2 platform package.
 Keep the package, version and SHA-512 together:
 
 ```sh
-docker build -t ua-opencode2 \
-  --build-arg OPENCODE_VERSION=2.2.5 \
-  --build-arg OPENCODE_PACKAGE=@opencode/cli-linux-x64-baseline-musl \
-  --build-arg OPENCODE_SHA512=bae1fce61b19330d03ff788ede0205d34c1197ef8e7d24673090055eae5c324927d32f744aed25c73ac6f73820bc9aab326fca8123136b884cccec9b687b22a4 \
-  examples/sidecar/opencode
+TOOL_IMAGE=ua-opencode2 TOOL_TAG=2.2.5 \
+  bash examples/blackbox_recipes/opencode_swe_task/build_tool.sh \
+    --build-arg OPENCODE_VERSION=2.2.5 \
+    --build-arg OPENCODE_PACKAGE=@opencode/cli-linux-x64-baseline-musl \
+    --build-arg OPENCODE_SHA512=bae1fce61b19330d03ff788ede0205d34c1197ef8e7d24673090055eae5c324927d32f744aed25c73ac6f73820bc9aab326fca8123136b884cccec9b687b22a4
 ```
 
 Mount the payload read-only at `/opt/opencode`, as for the 1.x recipe. The musl

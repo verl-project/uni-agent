@@ -131,7 +131,7 @@ Template placeholders use Task metadata. A configured template replaces the inpu
 CLI. It accepts one text user message, uses an OpenAI Chat Completions provider
 pointed at `agent.model.base_url`, and checks JSON events as well as the process
 exit code before marking a run finished. The CLI must already be installed in
-the Sandbox. See the [configuration and compatibility notes](https://github.com/verl-project/uni-agent/tree/main/examples/opencode)
+the Sandbox. See the [configuration and compatibility notes](https://github.com/verl-project/uni-agent/blob/main/examples/blackbox_recipes/opencode_swe_task/OPENCODE.md)
 for provisioning, credentials, permissions, and validation limits. Real model,
 Gateway trajectory, and RL training integration are not yet validated.
 

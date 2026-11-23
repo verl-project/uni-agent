@@ -2,14 +2,15 @@
 
 This recipe trains a policy with the OpenCode CLI as the in-sandbox agent on
 SWE-rebench tasks. Sandboxes come from an E2B-compatible backend. OpenCode
-**1.19.3** is mounted read-only at `/opt/opencode` from the sidecar image in
-[`examples/sidecar/opencode`](../../sidecar/opencode). The OpenCode adapter is
-described in [`examples/opencode`](../../opencode/README.md).
+**1.19.3** is mounted read-only at `/opt/opencode` from the tool image built in
+this directory. See [OpenCode 1.x configuration](OPENCODE.md) and the
+[OpenCode 2.2.5 adapter notes](OPENCODE2.md).
 
 | File | Purpose |
 |---|---|
 | `task_config_opencode_e2b.yaml` | Task defaults: E2B sandbox, image map, sidecar mount, agent, prompt |
 | `run_train.sh` | Megatron + V1 async GRPO launcher (Ascend NPU defaults) |
+| `Dockerfile.opencode-tool`, `build_tool.sh` | Build the Linux amd64 tool image |
 
 ## How a rollout runs
 
@@ -31,12 +32,16 @@ described in [`examples/opencode`](../../opencode/README.md).
 
 ## Prepare images
 
-Build the sidecar on an x86_64 host and push it next to the task images:
+From the repository root, build the tool image with Docker. On ARM hosts,
+enable amd64 emulation first.
 
 ```bash
-docker build --platform linux/amd64 --target tool \
-  -t <registry>/swe-rebench/opencode-tool:1.19.3 examples/sidecar/opencode
-docker push <registry>/swe-rebench/opencode-tool:1.19.3
+bash examples/blackbox_recipes/opencode_swe_task/build_tool.sh
+docker image inspect opencode-tool:1.19.3 --format '{{.Os}}/{{.Architecture}} {{.Size}} bytes'
+
+# Build and push to the registry that serves the task images.
+bash examples/blackbox_recipes/opencode_swe_task/build_tool.sh \
+  --registry registry.example.com/swe-rebench
 ```
 
 Push the SWE-rebench task images (`swerebench/sweb.eval.x86_64.<tag>`) to the
