@@ -26,6 +26,31 @@ def _deep_merge(base: dict, overrides: dict) -> dict:
     return result
 
 
+def _distribute_sample_image(sandbox: dict[str, Any], image: Any) -> dict[str, Any]:
+    """Use the sample image as a default for image-backed child routes."""
+    kwargs = sandbox.get("sandbox_kwargs")
+    routes = kwargs.get("routes") if isinstance(kwargs, dict) else None
+    if not isinstance(routes, list):
+        return sandbox
+
+    def with_sample_image(route: Any) -> Any:
+        config = route.get("config") if isinstance(route, dict) else None
+        if not isinstance(config, dict) or config.get("image") is not None:
+            return route
+        provider = config.get("provider")
+        if provider == "local":
+            return route
+        child_kwargs = config.get("sandbox_kwargs")
+        if provider in ("agentenv", "e2b") and isinstance(child_kwargs, dict) and child_kwargs.get("template"):
+            return route
+        return {**route, "config": {**config, "image": image}}
+
+    return {
+        **{key: value for key, value in sandbox.items() if key != "image"},
+        "sandbox_kwargs": {**kwargs, "routes": [with_sample_image(route) for route in routes]},
+    }
+
+
 def render_prompt_template(
     metadata: object,
     prompt_template: object,
@@ -128,6 +153,15 @@ class TaskConfigResolver:
 
         file_defaults = self.defaults_by_name.get(str(task_name), {})
         resolved = _deep_merge(dict(file_defaults), dict(sample_config))
+        sandbox = resolved.get("sandbox")
+        sample_sandbox = sample_config.get("sandbox")
+        if (
+            isinstance(sandbox, dict)
+            and sandbox.get("provider") == "routes"
+            and isinstance(sample_sandbox, Mapping)
+            and sample_sandbox.get("image") is not None
+        ):
+            resolved["sandbox"] = _distribute_sample_image(sandbox, sample_sandbox["image"])
         if "prompt_template" in file_defaults:
             resolved["prompt_template"] = file_defaults["prompt_template"]
 
