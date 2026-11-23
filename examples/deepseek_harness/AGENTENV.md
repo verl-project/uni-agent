@@ -51,7 +51,7 @@ async def main():
         provider="agentenv",
         image=os.environ["SWE_IMAGE"],
         image_mounts=[{
-            "image": "swr.cn-east-3.myhuaweicloud.com/openyuanrong/dsh-tool:latest",
+            "image": "registry.90.91.181.189.nip.io:5000/kunpeng-ai/dsh-tool:latest",
             "mount_path": "/opt/dsh",
         }],
         executable_paths={"dsh": "/opt/dsh/bin/dsh", "node": "/opt/dsh/bin/node"},
