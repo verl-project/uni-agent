@@ -39,8 +39,8 @@ Two providers adapt or compose other backends instead of owning an environment
 of their own:
 
 - `agentenv` is an E2B-compatible deployment. It inherits the E2B data plane
-  (commands, file transfer, port exposure, template handling) and only resolves
-  connection settings differently: `AGENTENV_API_URL` / `AGENTENV_SANDBOX_URL` /
+  (commands, file transfer, port exposure, template handling). Connection
+  settings use the following precedence: `AGENTENV_API_URL` / `AGENTENV_SANDBOX_URL` /
   `AGENTENV_API_KEY` take priority over `E2B_API_URL` / `E2B_SANDBOX_URL` /
   `E2B_API_KEY`, and explicit `sandbox_kwargs.api_url` / `sandbox_url` /
   `api_key` override both. It requires the `e2b` extra. Prefer
@@ -90,7 +90,7 @@ sandbox:
     claude: /opt/agent-runtime/bin/claude
 ```
 
-Docker, Modal, OpenJiuwen agent-dx and OpenYuanRong support `image_mounts`. `image_map` rewrites only the task `image`, so mounted image references must already be complete and pullable. `executable_paths` exposes selected mounted commands after startup; Local and veFaaS reject it.
+AgentEnv, Docker, Modal, OpenJiuwen agent-dx and OpenYuanRong support `image_mounts`. `image_map` rewrites only the task `image`, so mounted image references must already be complete and pullable. `executable_paths` exposes selected mounted commands after startup; Local and veFaaS reject it.
 
 ## Lifecycle
 
