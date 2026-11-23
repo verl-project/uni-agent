@@ -174,6 +174,12 @@ class E2BSandbox(Sandbox):
         if self._sandbox is not None:
             return
 
+        sandbox = await self._create_sandbox()
+        self._sandbox = sandbox
+        self.sandbox_id = str(sandbox.sandbox_id)
+        await self._setup_executable_paths(self.executable_paths)
+
+    async def _create_sandbox(self) -> Any:
         from e2b import AsyncSandbox
 
         template = self.template
@@ -200,10 +206,7 @@ class E2BSandbox(Sandbox):
         if self.lifecycle is not None:
             create_kwargs["lifecycle"] = self.lifecycle
 
-        sandbox = await AsyncSandbox.create(**create_kwargs, **self._connection_kwargs)
-        self._sandbox = sandbox
-        self.sandbox_id = str(sandbox.sandbox_id)
-        await self._setup_executable_paths(self.executable_paths)
+        return await AsyncSandbox.create(**create_kwargs, **self._connection_kwargs)
 
     async def stop(self) -> None:
         sandbox, self._sandbox = self._sandbox, None
