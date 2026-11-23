@@ -1,10 +1,8 @@
 # ruff: noqa: E501
 """Preprocess SWE-bench Verified into the new-framework SWE task format.
 
-Provider-agnostic on purpose: the row only carries the canonical *open-source*
-image ref (the published ``swebench/sweb.eval.x86_64.<id>``); mapping that to a
-service-provider image is the sandbox provider's job (e.g. ``_to_vefaas_image``),
-decided at run time, not baked into the dataset.
+Rows default to the canonical open-source image reference. Set
+``--image-repository`` for registries that tag task images by instance ID.
 
 Example::
 
@@ -25,9 +23,10 @@ def get_image_name(instance_id: str) -> str:
     return f"swebench/sweb.eval.x86_64.{instance_id.lower().replace('__', '_1776_')}"
 
 
-def build_swe_bench_verified(max_instances: int | None = None):
+def build_swe_bench_verified(max_instances: int | None = None, *, image_repository: str | None = None):
     def process(example):
         instance_id = example["instance_id"]
+        image = f"{image_repository}:{instance_id}" if image_repository else get_image_name(instance_id)
 
         metadata = {
             "instance_id": instance_id,
@@ -42,7 +41,7 @@ def build_swe_bench_verified(max_instances: int | None = None):
         }
         task_config = {
             "name": "swe_bench",
-            "sandbox": {"image": get_image_name(instance_id)},
+            "sandbox": {"image": image},
             "metadata": metadata,
         }
 
@@ -76,12 +75,16 @@ if __name__ == "__main__":
         default=None,
         help="Optional cap on the number of instances kept (smoke testing).",
     )
+    parser.add_argument(
+        "--image-repository",
+        help="OCI repository without a tag. Use the original instance ID as the image tag.",
+    )
     args = parser.parse_args()
 
     save_dir = os.path.expanduser(args.local_save_dir)
     os.makedirs(save_dir, exist_ok=True)
 
-    dataset = build_swe_bench_verified(max_instances=args.max_instances)
+    dataset = build_swe_bench_verified(max_instances=args.max_instances, image_repository=args.image_repository)
     out_path = f"{save_dir}/swe_bench_verified.parquet"
     dataset.to_parquet(out_path)
     print(f"Wrote {len(dataset)} instances to {out_path}", flush=True)
