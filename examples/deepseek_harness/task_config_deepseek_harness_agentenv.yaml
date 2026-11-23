@@ -9,10 +9,6 @@
     image_map:
       - from: "registry.90.91.181.189.nip.io:5000/swerebench-arm64-rl"
         to: "registry.90.91.181.189.nip.io:5000/swerebench-arm64-rl-dsh"
-      - from: "swebench/**"
-        to: "swr.cn-east-3.myhuaweicloud.com/openyuanrong/swebench/**"
-      - from: "swerebench/**"
-        to: "swr.cn-east-3.myhuaweicloud.com/openyuanrong/swerebench/**"
     image_mounts:
       - image: registry.90.91.181.189.nip.io:5000/kunpeng-ai/dsh-tool:latest
         mount_path: /opt/dsh
@@ -37,10 +33,6 @@
     image_map:
       - from: "registry.90.91.181.189.nip.io:5000/swerebench-arm64-rl"
         to: "registry.90.91.181.189.nip.io:5000/swerebench-arm64-rl-dsh"
-      - from: "swebench/**"
-        to: "swr.cn-east-3.myhuaweicloud.com/openyuanrong/swebench/**"
-      - from: "swerebench/**"
-        to: "swr.cn-east-3.myhuaweicloud.com/openyuanrong/swerebench/**"
     image_mounts:
       - image: registry.90.91.181.189.nip.io:5000/kunpeng-ai/dsh-tool:latest
         mount_path: /opt/dsh
