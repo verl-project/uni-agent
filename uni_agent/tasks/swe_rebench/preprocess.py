@@ -21,9 +21,10 @@ def get_image_name(instance_id: str) -> str:
     return f"swerebench/sweb.eval.x86_64.{instance_id.lower().replace('__', '_1776_')}"
 
 
-def build_swe_rebench(max_instances: int | None = None):
+def build_swe_rebench(max_instances: int | None = None, *, image_repository: str | None = None):
     def process(example):
         instance_id = example["instance_id"]
+        image = f"{image_repository}:{instance_id}" if image_repository else get_image_name(instance_id)
 
         install_config = example["install_config"]
         metadata = {
@@ -43,7 +44,7 @@ def build_swe_rebench(max_instances: int | None = None):
         }
         task_config = {
             "name": "swe_rebench",
-            "sandbox": {"image": get_image_name(instance_id)},
+            "sandbox": {"image": image},
             "metadata": metadata,
         }
 
@@ -77,12 +78,16 @@ if __name__ == "__main__":
         default=None,
         help="Optional cap on the number of instances kept (smoke testing).",
     )
+    parser.add_argument(
+        "--image-repository",
+        help="OCI repository without a tag. Use the original instance ID as the image tag.",
+    )
     args = parser.parse_args()
 
     save_dir = os.path.expanduser(args.local_save_dir)
     os.makedirs(save_dir, exist_ok=True)
 
-    dataset = build_swe_rebench(max_instances=args.max_instances)
+    dataset = build_swe_rebench(max_instances=args.max_instances, image_repository=args.image_repository)
     out_path = f"{save_dir}/swe_rebench_filtered.parquet"
     dataset.to_parquet(out_path)
     print(f"Wrote {len(dataset)} instances to {out_path}", flush=True)
