@@ -7,23 +7,9 @@ only its rollout name is forwarded here to select a matching tool parser.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from dataclasses import dataclass
-from ipaddress import ip_address
 from typing import Any
-
-
-def _concrete_ip(value: str, field: str) -> str:
-    """Normalize an address that can be used both for listening and in a URL."""
-    try:
-        if not isinstance(value, str) or "%" in value:
-            raise ValueError
-        address = ip_address(value)
-        if address.is_unspecified or address.is_multicast or address.is_link_local:
-            raise ValueError
-    except ValueError:
-        raise ValueError(f"{field} must be a concrete, unscoped IPv4 or IPv6 address") from None
-    return str(address)
 
 
 @dataclass(frozen=True)
@@ -61,12 +47,6 @@ class GatewayActorConfig:
         use_tree_trajectory_manager: Select TreeGatewaySession for shared-prefix
             trajectories when true. Defaults to false, using GatewaySession
             to manage linear chains directly.
-        bind_address: Optional local IP used for both HTTP listening and session
-            URLs. Defaults to the actor's Ray node IP. Mutually exclusive with
-            bind_address_by_node.
-        bind_address_by_node: Optional mapping from each Ray node IP to a local
-            HTTP address on that node. A gateway's node must be in the mapping;
-            entries are not shared defaults for other nodes.
     """
 
     tokenizer: Any
@@ -85,24 +65,8 @@ class GatewayActorConfig:
     enable_last_assistant_rollback: bool = True
     coalesce_reserved_exact_requests: bool = True
     use_tree_trajectory_manager: bool = False
-    bind_address: str | None = None
-    bind_address_by_node: dict[str, str] | None = None
 
     def __post_init__(self) -> None:
-        if self.bind_address is not None and self.bind_address_by_node is not None:
-            raise ValueError("bind_address and bind_address_by_node are mutually exclusive")
-        if self.bind_address is not None:
-            object.__setattr__(self, "bind_address", _concrete_ip(self.bind_address, "bind_address"))
-        if self.bind_address_by_node is not None:
-            if not isinstance(self.bind_address_by_node, Mapping) or not self.bind_address_by_node:
-                raise ValueError("bind_address_by_node must be a nonempty mapping of node IPs to local IPs")
-            addresses = {}
-            for node, address in self.bind_address_by_node.items():
-                node = _concrete_ip(node, "bind_address_by_node key")
-                if node in addresses:
-                    raise ValueError(f"bind_address_by_node has duplicate normalized node IP {node}")
-                addresses[node] = _concrete_ip(address, "bind_address_by_node value")
-            object.__setattr__(self, "bind_address_by_node", addresses)
         if type(self.use_tree_trajectory_manager) is not bool:
             raise ValueError("use_tree_trajectory_manager must be a bool")
         if type(self.enable_tool_parser_cache) is not bool:
@@ -123,13 +87,3 @@ class GatewayActorConfig:
             raise ValueError(f"prompt_length must be positive when set, got {self.prompt_length}")
         if self.response_length is not None and self.response_length <= 0:
             raise ValueError(f"response_length must be positive when set, got {self.response_length}")
-
-    def resolve_bind_address(self, ray_node_address: str) -> str:
-        """Select this actor's local HTTP address without changing Ray networking."""
-        if self.bind_address_by_node is not None:
-            node = _concrete_ip(ray_node_address.strip("[]"), "Ray node address")
-            try:
-                return self.bind_address_by_node[node]
-            except KeyError:
-                raise ValueError(f"bind_address_by_node has no address for Ray node {node}") from None
-        return self.bind_address or ray_node_address.strip("[]")

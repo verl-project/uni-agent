@@ -84,8 +84,6 @@ def build_gateway_manager(*, config, llm_client) -> GatewayManager:
         allowed_request_sampling_param_keys=allowed_sampling_keys,
         coalesce_reserved_exact_requests=af_cfg.get("coalesce_reserved_exact_requests", True),
         use_tree_trajectory_manager=af_cfg.get("use_tree_trajectory_manager", False),
-        bind_address=af_cfg.get("gateway_bind_address"),
-        bind_address_by_node=af_cfg.get("gateway_bind_address_by_node"),
     )
 
     return GatewayManager(

@@ -73,8 +73,6 @@ def build_policy_gateway_configs(
             # Not wired for multi-policy yet: all roles in a session group share
             # one log_dir, so TreeGatewaySession snapshots would collide.
             use_tree_trajectory_manager=False,
-            bind_address=agent_framework_config.get("gateway_bind_address"),
-            bind_address_by_node=agent_framework_config.get("gateway_bind_address_by_node"),
         )
     return policy_gateway_configs
 
