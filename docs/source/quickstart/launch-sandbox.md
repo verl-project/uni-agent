@@ -265,11 +265,14 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
     ```
 
     `sandbox_kwargs.template` takes priority: startup uses that template as-is
-    and never calls E2B's `Template.exists` / `Template.build`. Passing `image`
-    without `template` goes through the E2B template API, so the AgentEnv
-    deployment must implement template builds in that case; otherwise pass
-    `template` instead. Image mounts are not supported either; build a composite
-    AgentEnv/E2B template and reference it with `template`.
+    and never calls E2B's `Template.exists` / `Template.build`. An image-only
+    configuration without mounts uses the E2B template-build API.
+
+    With `image_mounts`, AgentEnv attaches each tool image as a read-only drive.
+    Set `template` for a warm start with one available drive slot per mount,
+    or supply the task `image` for a native cold start. The deployment must
+    support attached drives and be able to pull the configured image references.
+    `executable_paths` links the tools after the drives are attached.
 
     To reach an HTTP Gateway via an SSH relay, configure
     `sandbox_kwargs.proxy_port: 38197` and
@@ -652,7 +655,7 @@ Next, [verify task oracle solutions](oracle-verification.md) against the configu
 
 You can ask an AI assistant to follow this section. Provide the tool's name, version, and any custom scripts or dependencies.
 
-On Docker, Modal, OpenYuanRong, or OpenJiuwen agent-dx, use [`image_mounts`](../concepts/sandbox.md#runtime-images) to add a tool without rebuilding the task image.
+On AgentEnv, Docker, Modal, OpenYuanRong, or OpenJiuwen agent-dx, use [`image_mounts`](../concepts/sandbox.md#runtime-images) to add a tool without rebuilding the task image.
 Copy a Dockerfile and `build_tool.sh` into `examples/my_tool_swe_task/` from one of these examples:
 
 | Runtime | Dockerfile | Build script |
