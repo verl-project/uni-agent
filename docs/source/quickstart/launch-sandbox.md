@@ -271,6 +271,22 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
     `template` instead. Image mounts are not supported either; build a composite
     AgentEnv/E2B template and reference it with `template`.
 
+    To reach an HTTP Gateway via an SSH relay, configure
+    `sandbox_kwargs.proxy_port: 38197` and
+    `sandbox_kwargs.tunnel_ssh_host: gateway-relay`. The SSH alias is resolved
+    inside the sandbox as the configured sandbox user. Provision OpenSSH,
+    curl, the relay's trusted host key, and non-interactive authentication
+    for that user. The guest must reach the relay, and the relay must reach
+    the Gateway host and port and allow local forwarding to that destination.
+    Keep SSH credentials out of task YAML and shared images.
+
+    The runner supplies the Gateway address at runtime. AgentEnv binds the
+    guest listener to loopback and checks the HTTP path through the relay before
+    the task starts. The SSH process lives in the sandbox and exits when the
+    sandbox is killed. With `routes`, put `proxy_port` in the outer
+    `sandbox_kwargs` and put the SSH alias under the AgentEnv child's
+    `config.sandbox_kwargs`.
+
     `expose_port` requires a reachable `domain`: the E2B SDK derives the exposed
     host as `{port}-{sandbox_id}.{domain}` (or from `sandbox_url`), so the
     returned URL is only routable when the deployment's domain is configured and
