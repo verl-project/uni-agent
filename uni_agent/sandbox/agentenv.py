@@ -2,7 +2,7 @@
 
 AgentEnv exposes an E2B-compatible control plane and ``envd`` data plane, so this
 provider reuses :class:`~uni_agent.sandbox.e2b.E2BSandbox` (exec, file transfer,
-port exposure, template handling) and only fills in the connection settings. The
+port exposure, template handling) with native AgentEnv image mounts. The
 endpoint/credential triplet is resolved per sandbox rather than written into the
 process environment, which lets ``e2b`` and ``agentenv`` sandboxes coexist in one
 worker (and keeps the API key out of task YAML, which is logged).
@@ -24,19 +24,33 @@ variables to set (values themselves are never logged or echoed).
 
 from __future__ import annotations
 
+import logging
 import os
 import re
-from typing import Any
-from urllib.parse import urlsplit
+from typing import TYPE_CHECKING, Any
+from urllib.parse import quote, urlsplit
 
 from .e2b import E2BSandbox
 from .registry import register_sandbox
+
+if TYPE_CHECKING:
+    from .base import ImageMount
+
+logger = logging.getLogger(__name__)
 
 #: setting -> its environment fallbacks, highest priority first.
 _CONNECTION_ENV_VARS: dict[str, tuple[str, ...]] = {
     "api_url": ("AGENTENV_API_URL", "E2B_API_URL"),
     "sandbox_url": ("AGENTENV_SANDBOX_URL", "E2B_SANDBOX_URL"),
     "api_key": ("AGENTENV_API_KEY", "E2B_API_KEY"),
+}
+
+
+_NATIVE_NETWORK_FIELDS = {
+    "allow_public_traffic": "allowPublicTraffic",
+    "allow_out": "allowOut",
+    "deny_out": "denyOut",
+    "mask_request_host": "maskRequestHost",
 }
 
 
@@ -74,8 +88,9 @@ class AgentEnvSandbox(E2BSandbox):
       ``{port}-{sandbox_id}.{domain}`` (or from ``sandbox_url``). Without a
       configured/reachable domain the returned URL is not routable, so
       ``expose_port`` is only usable when the deployment's domain is known.
-    - image mounts are not supported; build a composite AgentEnv/E2B template
-      and reference it through ``template``.
+    - image mounts use native AgentEnv attached drives. With a template, the
+      snapshot needs a free drive slot per mount. Without a template, the task
+      image is cold-started directly.
 
     Everything else (``runtime_timeout``, ``executable_paths``, ``cpu_count``,
     ``memory_mb``, ``envs``, ``metadata``, ``proxy``, ``from_config``) is
@@ -93,6 +108,7 @@ class AgentEnvSandbox(E2BSandbox):
         upstream: str | None = None,
         proxy_port: int | None = None,
         tunnel_ssh_host: str | None = None,
+        image_mounts: list[ImageMount] | None = None,
         **kwargs: Any,
     ) -> None:
         resolved = {
@@ -107,11 +123,6 @@ class AgentEnvSandbox(E2BSandbox):
             )
             raise ValueError(
                 f"AgentEnvSandbox is missing required connection settings (values are never logged). Configure {hints}."
-            )
-        if kwargs.get("image_mounts"):
-            raise NotImplementedError(
-                "AgentEnvSandbox does not support image mounts; build a composite AgentEnv/E2B template "
-                "and reference it with sandbox_kwargs.template instead"
             )
         if proxy_port is not None or upstream is not None:
             if type(proxy_port) is not int or not 2 <= proxy_port <= 65535:
@@ -129,6 +140,73 @@ class AgentEnvSandbox(E2BSandbox):
             api_url=resolved["api_url"], sandbox_url=resolved["sandbox_url"], api_key=resolved["api_key"], **kwargs
         )
 
+        self.image_mounts = list(image_mounts or [])
+        if self.image_mounts:
+            if self.template is not None and not self.secure:
+                raise ValueError("AgentEnv warm image mounts require secure sandbox communication")
+            if self.network and self.network.keys() - _NATIVE_NETWORK_FIELDS.keys():
+                raise ValueError("AgentEnv image mounts received unsupported sandbox network settings")
+            lifecycle = self.lifecycle or {}
+            if lifecycle.keys() - {"on_timeout"} or lifecycle.get("on_timeout") not in (None, "kill", "pause"):
+                raise ValueError("AgentEnv image mounts support only lifecycle.on_timeout=kill or pause")
+
+    async def _create_sandbox(self) -> Any:
+        if not self.image_mounts:
+            return await super()._create_sandbox()
+
+        import httpx
+        from e2b import AsyncSandbox
+
+        request: dict[str, Any] = {
+            "timeout": max(1, int(self.runtime_timeout)),
+            "autoPause": (self.lifecycle or {}).get("on_timeout") == "pause",
+            "metadata": self.metadata,
+            "envVars": self.envs,
+            "attachedDrives": [
+                {
+                    "driveID": f"image_mount_{index}",
+                    "source": {"image": mount.image},
+                    "mountPath": mount.mount_path,
+                    "readOnly": True,
+                }
+                for index, mount in enumerate(self.image_mounts)
+            ],
+        }
+        if self.network is not None:
+            request["network"] = {_NATIVE_NETWORK_FIELDS[key]: value for key, value in self.network.items()}
+        if self.template is not None:
+            path = "/v2/sandboxes"
+            request.update(templateID=self.template, allow_internet_access=self.allow_internet_access)
+        else:
+            path = "/sandboxes-cold"
+            request.update(
+                image=self.image,
+                secure=self.secure,
+                allowInternetAccess=self.allow_internet_access,
+                cpuCount=self.cpu_count,
+                memoryMB=self.memory_mb,
+            )
+
+        base_url = self._connection_kwargs["api_url"].rstrip("/")
+        async with httpx.AsyncClient(
+            headers={"X-API-Key": self._connection_kwargs["api_key"]},
+            proxy=self.proxy,
+            http2=self._connection_kwargs.get("http_version") == "2",
+            timeout=httpx.Timeout(600.0, connect=10.0),
+        ) as client:
+            response = await client.post(f"{base_url}{path}", json=request)
+            response.raise_for_status()
+            sandbox_id = response.json()["sandboxID"]
+            try:
+                return await AsyncSandbox.connect(sandbox_id, **self._connection_kwargs)
+            except BaseException:
+                try:
+                    cleanup = await client.delete(f"{base_url}/sandboxes/{quote(sandbox_id, safe='')}", timeout=10)
+                    cleanup.raise_for_status()
+                except Exception:
+                    logger.warning("Failed to clean up AgentEnv sandbox %s after connect failed", sandbox_id)
+                raise
+
     @classmethod
     def tunnel_upstream(cls, base_url: str) -> str | None:
         # The task runner rewrites the URL to HTTP on the guest loopback.
@@ -139,13 +217,15 @@ class AgentEnvSandbox(E2BSandbox):
     async def start(self) -> None:
         if self._sandbox is not None:
             return
-        if self._tunnel_proxy_port is None:
+        if not self.image_mounts and self._tunnel_proxy_port is None:
             await super().start()
             return
 
         try:
             await super().start()
             port = self._tunnel_proxy_port
+            if port is None:
+                return
             assert self._tunnel_ssh_host is not None
             result = await self.exec(
                 [
