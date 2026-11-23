@@ -22,7 +22,7 @@ vLLM or ZMQ dependency.
 from __future__ import annotations
 
 import asyncio
-import struct
+from threading import Event
 
 import msgpack
 import pytest
@@ -31,7 +31,6 @@ from uni_agent.agent_aware_router.collectors.transport.base import Transport
 from uni_agent.agent_aware_router.store.kv_cache_store import KVCacheStore
 from uni_agent.agent_aware_router.store.per_replica_store import PerReplicaStore
 from uni_agent.agent_aware_router.store.per_request_store import PerRequestStore
-from uni_agent.agent_aware_router.types import Layer
 
 # ── Shared configuration constants ───────────────────────────────────────
 
@@ -90,12 +89,15 @@ class FakeZMQTransport(Transport):
     def __init__(self, payloads: list[bytes], interval: float = 1.0) -> None:
         self._payloads = list(payloads)
         self._interval = interval
+        self.payloads_handled = Event()
 
     async def subscribe(self, handler):
         try:
-            for p in self._payloads:
-                handler(p, REPLICA_ID)
-                await asyncio.sleep(self._interval)
+            for index, payload in enumerate(self._payloads):
+                if index:
+                    await asyncio.sleep(self._interval)
+                handler(payload, REPLICA_ID)
+            self.payloads_handled.set()
             while True:
                 await asyncio.sleep(self._interval)
         except (asyncio.CancelledError, GeneratorExit):
@@ -106,13 +108,6 @@ class FakeZMQTransport(Transport):
 
 
 # ── KV event payload helpers ────────────────────────────────────────────
-
-
-def _convert_token_ids(raw_ids: list[int], block_size: int) -> bytes:
-    """Encode token IDs as uint32 big-endian bytes (one block)."""
-    if len(raw_ids) != block_size:
-        raise ValueError(f"Expected {block_size} tokens, got {len(raw_ids)}")
-    return struct.pack(f">{block_size}I", *raw_ids)
 
 
 def make_stored_event(
@@ -137,8 +132,22 @@ def kv_payload(*events: list | dict) -> bytes:
 def mapping_event(event: list) -> dict:
     """Convert a positional vLLM event to named fields for mapping tests."""
     field_names = {
-        "BlockStored": ("block_hashes", "parent_block_hash", "token_ids", "block_size", "lora_id", "medium"),
-        "BlockRemoved": ("block_hashes", "medium", "group_idx"),
+        "BlockStored": (
+            "block_hashes",
+            "parent_block_hash",
+            "token_ids",
+            "block_size",
+            "lora_id",
+            "medium",
+            "lora_name",
+            "extra_keys",
+            "group_idx",
+            "kv_cache_spec_kind",
+            "kv_cache_spec_sliding_window",
+            "locality",
+            "ownership",
+        ),
+        "BlockRemoved": ("block_hashes", "medium", "group_idx", "locality", "ownership"),
         "AllBlocksCleared": (),
     }
     return {"type": event[0], **dict(zip(field_names[event[0]], event[1:], strict=False))}
@@ -155,16 +164,9 @@ def _reset_store_singletons():
     ``PerRequestStore`` — all singletons — so state would otherwise
     accumulate across test cases.
     """
+    KVCacheStore._instance = None
     yield
-    # KVCacheStore
-    kv = KVCacheStore.singleton()
-    kv.block_size = None
-    kv._gated_replicas.clear()
-    kv.replicas_by_block.clear()
-    kv._resident_blocks_by_replica.clear()
-    kv._replica_layer_counts = {Layer.GPU: {}, Layer.CPU: {}, Layer.SSD: {}}
-    kv._inflight_blocks.clear()
-    kv._inflight_pins.clear()
+    KVCacheStore._instance = None
     # PerReplicaStore
     pr = PerReplicaStore.singleton()
     pr._data.clear()

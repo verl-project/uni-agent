@@ -35,8 +35,7 @@ from uni_agent.agent_aware_router.store.per_request_store import PerRequestStore
 from uni_agent.agent_aware_router.strategies.base import ReplicaInfo
 from uni_agent.agent_aware_router.strategies.kvc_aware import KVCacheAwareStrategy
 from uni_agent.agent_aware_router.types import MetricKey, SlowCut
-
-pytestmark = [pytest.mark.level0, pytest.mark.cpu]
+from uni_agent.agent_aware_router.types.kv_cache import GroupReservation
 
 PROMPT_IDS = [1, 2, 3]
 
@@ -61,7 +60,6 @@ class _RecordingRLInsight:
 def _strat(**kwargs) -> KVCacheAwareStrategy:
     defaults = dict(
         load_threshold=0.9,
-        layer_weights={"gpu": 0.7, "cpu": 0.2, "ssd": 0.1},
     )
     defaults.update(kwargs)
     strat = KVCacheAwareStrategy(**defaults)
@@ -88,52 +86,38 @@ def _names(rl: _RecordingRLInsight, metric_type: str | None = None) -> set[str]:
     return {c[1] for c in rl.calls if metric_type is None or c[0] == metric_type}
 
 
-def test_capacity_token_aware_emits_capacity_fractions(recording):
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_capacity_token_aware_emits_capacity_fractions_and_route_latency(recording, layout, install_metadata):
     ds = DataStore()
-    ds.set_block_size(16)
+    install_metadata(ds, "s0", layout((("full_attention", 16),), unit=16))
     ds.refresh_metrics(
         {
             "s0": {
-                MetricKey.NUM_GPU_BLOCKS: 100,
-                MetricKey.KV_CACHE_USAGE_PERC: 0.2,
-                MetricKey.INFLIGHT_TOKENS: 320,
+                MetricKey.NUM_GPU_BLOCKS: 101,
+                MetricKey.KV_CACHE_CAPACITY_BLOCKS: 100,
+                MetricKey.KV_CACHE_USAGE_PERC: 0.6,
+                MetricKey.INFLIGHT_TOKENS: 160,
             }
         }
     )
-    ds.incr_block_refs("s0", [f"b{i}" for i in range(20)])  # 20 held blocks × 16 = 320 tokens
+    ds.pin_request(
+        "busy",
+        "s0",
+        [],
+        ds.dispatch_schema("s0"),
+        reservations=(GroupReservation(0, tuple(f"b{i}" for i in range(20))),),
+        predict=False,
+    )
     strat = _strat(slow_cut=SlowCut.CAPACITY_TOKEN_AWARE, do_shortcut=False)
 
     strat.score(PROMPT_IDS, ds, [ReplicaInfo(replica_id="s0")])
 
-    # cap = 100 blocks × 16 = 1600 tokens; avail = 1600 − 20×16 = 1280 → ratio 0.8
-    # (kv_perc and INFLIGHT_TOKENS are logged, never part of the capacity account).
-    # Components are emitted as fractions of capacity (default-bucket friendly).
+    # The 20 held blocks leave 80% available. Using GPU usage or raw tokens would yield 40% or 90%.
     assert {"avail_ratio", "need_ratio", "remaining_ratio"} <= _names(recording, "histogram")
     avail_call = next(c for c in recording.calls if c[1] == "avail_ratio")
     assert avail_call[2] == pytest.approx(0.8)
     assert avail_call[3] == {"replica": "s0"}
-
-
-def test_capacity_token_aware_skips_emit_without_capacity(recording):
-    # NUM_GPU_BLOCKS not yet scraped → cap=0, raw token values are garbage:
-    # routing still happens, but no capacity fractions are emitted.
-    ds = DataStore()
-    ds.set_block_size(16)
-    strat = _strat(slow_cut=SlowCut.CAPACITY_TOKEN_AWARE, do_shortcut=False)
-
-    strat.score(PROMPT_IDS, ds, [ReplicaInfo(replica_id="s0")])
-
-    assert not (_names(recording, "histogram") & {"avail_ratio", "need_ratio", "remaining_ratio"})
-
-
-def test_route_latency_fires_once_per_score_call_with_no_replica_label(recording):
-    ds = DataStore()
-    ds.set_block_size(16)
-    ds.refresh_metrics({"s0": {MetricKey.NUM_GPU_BLOCKS: 100, MetricKey.KV_CACHE_USAGE_PERC: 0.2}})
-    ds.incr_block_refs("s0", [f"b{i}" for i in range(20)])
-    strat = _strat(slow_cut=SlowCut.CAPACITY_TOKEN_AWARE, do_shortcut=False)
-
-    strat.score(PROMPT_IDS, ds, [ReplicaInfo(replica_id="s0")])
 
     route_calls = [c for c in recording.calls if c[1] == "route_latency_seconds"]
     assert len(route_calls) == 1  # exactly one sample per score() call
@@ -141,9 +125,27 @@ def test_route_latency_fires_once_per_score_call_with_no_replica_label(recording
     assert route_calls[0][3] == {}  # global — no replica label
 
 
-def test_route_latency_fires_even_on_sticky_short_circuit(recording):
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_capacity_token_aware_skips_emit_without_capacity(recording, layout, install_metadata):
+    # Normalized pool capacity not yet known → no capacity fractions:
+    # routing still happens, but no capacity fractions are emitted.
     ds = DataStore()
-    ds.refresh_metrics({"s0": {MetricKey.NUM_REQUESTS_RUNNING: 0, MetricKey.NUM_GPU_BLOCKS: 10}})
+    install_metadata(ds, "s0", layout((("full_attention", 16),), unit=16))
+    strat = _strat(slow_cut=SlowCut.CAPACITY_TOKEN_AWARE, do_shortcut=False)
+
+    strat.score(PROMPT_IDS, ds, [ReplicaInfo(replica_id="s0")])
+
+    assert not (_names(recording, "histogram") & {"avail_ratio", "need_ratio", "remaining_ratio"})
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_route_latency_fires_even_on_sticky_short_circuit(recording, layout, install_metadata):
+    ds = DataStore()
+    metadata = layout((("full_attention", 16),), unit=16)
+    metadata["cache_reservation_profile"]["capacity_blocks"] = 9
+    install_metadata(ds, "s0", metadata)
     ds.put_sticky_binding("r1", "s0")
     strat = _strat(slow_cut=SlowCut.CAPACITY_TOKEN_AWARE, do_shortcut=True)
 

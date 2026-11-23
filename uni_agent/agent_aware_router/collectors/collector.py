@@ -27,9 +27,10 @@ from ..debug import get_debug_var, is_debug_enabled
 from ..insight import WriteEvent, WriteKind, emitter
 from ..store.data_store import DataStore
 from ..types import EmitKey, MetricKey
+from ..types.kv_cache import LOCAL_GPU_DOMAIN, KVCacheUpdate
 from ..utils.knob import coerce_knob_value
 from ._loop_runner import _LoopRunner
-from .parse import InflightBlockUpdate, KVCacheUpdate, MetricsUpdate, Parser, StickyUpdate
+from .parse import InflightBlockUpdate, MetricsUpdate, Parser, StickyUpdate
 from .parse.basic.inflight import InflightParser
 from .transport.base import Transport
 from .transport.callback import StatisticEvent
@@ -67,11 +68,6 @@ _CUMULATIVE_KEYS: tuple[str, ...] = (
     MetricKey.EXTERNAL_PREFIX_CACHE_HITS,
     MetricKey.ESTIMATED_FLOPS_PER_GPU,
 )
-
-# Per-request bookkeeping key: prompt length recorded at dispatch (acquire) and
-# folded back out at release — releases carry no token list (verl #7115). All
-# inflight store access lives on the collector; the parser decides and emits.
-_PROMPT_LEN_KEY = "prompt_len"
 
 
 def _avg(delta_sum: float, delta_cnt: float) -> float:
@@ -193,47 +189,39 @@ class Collector:
 
     def _write_kv_update(self, update: KVCacheUpdate) -> None:
         """Write KVCacheUpdate via DataStore, then emit a periodic kv-events tally."""
-        if update.block_size is not None:
-            self._data_store.set_block_size(update.block_size)
-        if update.clear_all:
-            self._data_store.clear_kv_resident_blocks(update.replica_id)
-        for layer, hashes in update.remove_blocks.items():
-            if hashes:
-                self._data_store.remove_kv_blocks(update.replica_id, hashes, layer=layer)
-        for layer, hashes in update.add_blocks.items():
-            if hashes:
-                self._data_store.add_kv_blocks(update.replica_id, hashes, layer=layer)
-
-        # Tally for periodic summary — observe BlockStored/BlockRemoved flow.
-        n_added = sum(len(v) for v in update.add_blocks.values())
-        n_removed = sum(len(v) for v in update.remove_blocks.values())
-        if update.clear_all:
-            self._kv_event_counts["clear"] += 1
-        if n_added:
-            self._kv_event_counts["stored"] += 1
-            self._kv_block_counts["stored"] += n_added
-        if n_removed:
-            self._kv_event_counts["removed"] += 1
-            self._kv_block_counts["removed"] += n_removed
+        self._data_store.apply_kv_update(update)
+        gpu_evictions = 0
+        for event in update.events:
+            if event.is_store:
+                self._kv_event_counts["stored"] += 1
+                self._kv_block_counts["stored"] += len(event.block_hashes)
+            elif event.is_remove:
+                self._kv_event_counts["removed"] += 1
+                count = len(event.block_hashes)
+                self._kv_block_counts["removed"] += count
+                if event.storage_domain == LOCAL_GPU_DOMAIN:
+                    gpu_evictions += count
+            elif event.is_clear:
+                self._kv_event_counts["clear"] += 1
+        if gpu_evictions:
             emitter.on_write(
                 WriteEvent(
                     kind=WriteKind.KV_REMOVED,
                     node=update.replica_id,
-                    deltas={EmitKey.KV_EVICTIONS: n_removed},
+                    deltas={EmitKey.KV_EVICTIONS: gpu_evictions},
                 )
             )
         total = sum(self._kv_event_counts.values())
         if total - self._kv_last_logged_total >= _KV_EVENT_LOG_INTERVAL_S:
             self._kv_last_logged_total = total
-            # Unmapped removals can overstate residency; unknown parents skip
-            # chains conservatively and can understate it.
-            hash_map_stats = getattr(self._parser, "stats", None)
+            detail = (
+                f"retained_blocks/replica={self._data_store.per_replica_block_counts()} | "
+                f"dispatch_hints={self._dispatch_recorded_blocks}"
+            )
             logger.debug(
                 f"kv-events tally: events={dict(self._kv_event_counts)} "
                 f"blocks={dict(self._kv_block_counts)} (total_events={total}) | "
-                f"retained_blocks/replica={self._data_store.per_replica_block_counts()} | "
-                f"router_recorded={self._dispatch_recorded_blocks} | "
-                f"hash-map={dict(hash_map_stats or {})}"
+                f"{detail}"
             )
 
     def _write_metrics_update(self, update: MetricsUpdate) -> None:
@@ -252,8 +240,9 @@ class Collector:
         if update.is_delta:
             is_acquire = MetricKey.DISPATCHED_COUNT in update.metrics
             is_release = MetricKey.COMPLETED_COUNT in update.metrics
+            is_unwind = update.metrics.get(MetricKey.INFLIGHT_COUNT) == -1
             new_values = self._data_store.incr_metrics(update.replica_id, update.metrics)
-            if is_acquire or is_release:
+            if is_acquire or is_release or is_unwind:
                 emitter.on_write(
                     WriteEvent(
                         kind=WriteKind.ACQUIRE if is_acquire else WriteKind.RELEASE,
@@ -315,19 +304,14 @@ class Collector:
         """Gather the acquire state in the protocol's store order, then decide."""
         rid = event.request_id
         turn = self._data_store.incr_per_request(rid, "turn") if rid else 0
-        stale = self._data_store.get_marker(rid) if rid else None
-        booked_len = self._data_store.get_per_request(rid, _PROMPT_LEN_KEY, 0) if rid else 0
-        if rid:
-            self._data_store.set_per_request(rid, _PROMPT_LEN_KEY, len(event.prompt_ids))
-        block_size = self._data_store.get_block_size() or 0
-        return parser.parse(event, replica_id, turn=turn, stale=stale, block_size=block_size, booked_len=booked_len)
+        booking = self._data_store.get_booking(rid)
+        schema = self._data_store.dispatch_schema(event.replica_id)
+        return parser.parse(event, replica_id, turn=turn, booking=booking, schema=schema)
 
     def _inflight_release(self, parser: InflightParser, event: StatisticEvent, replica_id: str) -> list:
-        """Gather the release folds from the acquire-time rows, then decide."""
-        rid = event.request_id
-        turn = self._data_store.get_per_request(rid, "turn", 0) if rid else 0
-        booked_len = self._data_store.get_per_request(rid, _PROMPT_LEN_KEY, 0) if rid else 0
-        return parser.parse(event, replica_id, turn=turn, booked_len=booked_len)
+        """Use the original booking even if the request's LRU row was evicted."""
+        booking = self._data_store.get_booking(event.request_id)
+        return parser.parse(event, replica_id, booking=booking)
 
     def _apply_inflight_block_update(self, update: InflightBlockUpdate) -> None:
         """Apply an ``InflightBlockUpdate`` command to the held-block book — mechanically.
@@ -335,32 +319,22 @@ class Collector:
         The acquire/release protocol decisions (when to pin, when a re-acquire
         must first unwind a stale pin) live in ``InflightParser``; this applier
         only maps each command to store operations. Unpin sets always come from
-        the request's marker row (``KVCacheStore.pop_marker``) — the ground
+        the acquire-time marker (``KVCacheStore.unpin_request``) — the ground
         truth of what that dispatch pinned — so a release whose memo was later
         replaced still unwinds exactly the original set.
         """
         if update.action == "pin":
-            self._data_store.incr_block_refs(update.replica_id, update.block_hashes)
-            # Resident record runs after the ref count, on the same chain;
-            # idempotent against the engine's later ``BlockStored``.
-            if update.mark_resident:
-                self._dispatch_recorded_blocks += self._data_store.record_dispatch_blocks(
-                    update.replica_id, update.block_hashes
-                )
-            self._data_store.put_marker(update.request_id, update.replica_id, update.block_hashes)
-        elif update.action == "unpin":
-            marker = self._data_store.pop_marker(update.request_id)
-            if marker is None:
-                # Nothing was pinned at acquire — the held set never knew about this request.
-                logger.debug(f"release with no pinned blocks request={update.request_id} on {update.replica_id}")
-                return
-            self._data_store.decr_block_refs(marker["replica"], marker["hashes"])
-        elif update.action == "stale_unpin":
-            marker = self._data_store.pop_marker(update.request_id)
-            if marker is None:
-                logger.debug(f"stale-unpin found no marker request={update.request_id}")
-                return
-            self._data_store.decr_block_refs(marker["replica"], marker["hashes"])
+            self._dispatch_recorded_blocks += self._data_store.pin_request(
+                update.request_id,
+                update.replica_id,
+                update.block_hashes,
+                update.schema,
+                predict=update.mark_resident,
+                reservations=update.reservations,
+                booking=update.booking,
+            )
+        elif update.action in {"unpin", "stale_unpin"}:
+            self._data_store.unpin_request(update.request_id)
         else:
             logger.warning(f"unknown InflightBlockUpdate action: {update.action}")
 
@@ -521,25 +495,18 @@ def get_collector(
 
     if name == "vllm_zmq":
         from .parse.vllm.kv import VLLMKVParser
+        from .parse.vllm.native_hash import VLLMHashCodec
         from .transport.zmq import ZMQTransport
 
         kv_parser = VLLMKVParser()
         data_store = DataStore()
-
-        def reset_stream(replica_id: str) -> None:
-            # Gate routing reads before discarding the parser's old hash chain.
-            data_store.invalidate_kv_replica(replica_id)
-            kv_parser.reset_replica(replica_id)
-
-        def unavailable_stream(replica_id: str) -> None:
-            reset_stream(replica_id)
-            data_store.enable_kv_dispatch_estimates(replica_id)
+        data_store.set_native_hash_codec_factory(VLLMHashCodec.from_metadata)
 
         transport = ZMQTransport(
             endpoints=kv_event_endpoints or {},
-            on_stream_reset=reset_stream,
+            on_stream_reset=data_store.invalidate_kv_replica,
             on_stream_ready=data_store.mark_kv_replica_ready,
-            on_stream_unavailable=unavailable_stream,
+            on_stream_unavailable=data_store.enable_kv_dispatch_estimates,
             base_retry_delay=_debug_knob("base_retry_delay"),
             max_retry_delay=_debug_knob("max_retry_delay"),
             max_retry_attempts=_debug_knob("max_retry_attempts"),

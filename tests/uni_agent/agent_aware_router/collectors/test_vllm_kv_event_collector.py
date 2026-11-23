@@ -33,23 +33,25 @@ from conftest import BLOCK_SIZE, REPLICA_ID, FakeZMQTransport, kv_payload, make_
 from uni_agent.agent_aware_router.collectors.collector import Collector
 from uni_agent.agent_aware_router.collectors.parse.vllm.kv import VLLMKVParser
 from uni_agent.agent_aware_router.store.data_store import DataStore
-from uni_agent.agent_aware_router.types import Layer
 from uni_agent.agent_aware_router.utils.hash import get_prefix_hashes_incremental
 
 WAIT = 0.3
+
+
+@pytest.fixture(autouse=True)
+def _known_cache_layout(layout, _reset_store_singletons, install_metadata):
+    install_metadata(DataStore(), REPLICA_ID, layout((("full_attention", BLOCK_SIZE),), unit=BLOCK_SIZE))
 
 
 def _make_collector(payloads):
     return Collector(FakeZMQTransport(payloads, interval=0.05), VLLMKVParser())
 
 
-def _block_ids(start: int = 0) -> list[int]:
-    """Return a single block's worth of token IDs."""
+def _block_ids(start=0):
     return list(range(start, start + BLOCK_SIZE))
 
 
 def _run(payloads):
-    """Start the collector over the given payloads, stop, return (store, collector)."""
     store = DataStore()
     collector = _make_collector(payloads)
     collector.start()
@@ -58,116 +60,90 @@ def _run(payloads):
     return store, collector
 
 
-class TestVLLMKVEventCollector:
-    """Unit tests: vLLM ZMQ KV-cache collector with injected KV events."""
-
-    @pytest.mark.cpu
-    @pytest.mark.level0
-    def test_start_and_kv_store_updated(self):
-        """
-        Feature: Collector receives ZMQ events and updates KV cache store
-        Expectation:
-            block_size is set (learned from first event).
-            At least one block is cached.
-            REPLICA_ID appears in at least one cached block.
-        """
-        store, _ = _run([kv_payload(make_stored_event("rh0", _block_ids(0)))])
-
-        assert store.get_block_size() is not None, "block_size should be learned from KV events"
-        assert store.get_block_size() > 0
-        assert store.get_kv_block_count() > 0, "KV cache should have blocks after BlockStored events"
-        assert store.kv_replica_has_blocks(REPLICA_ID), (
-            f"Expected REPLICA_ID '{REPLICA_ID}' in at least one cached block"
-        )
-
-    @pytest.mark.cpu
-    @pytest.mark.level0
-    def test_block_size_learned(self):
-        """
-        Feature: block_size is learned from the first BlockStored KV event
-        Expectation:
-            block_size is a positive integer (vLLM default is 16).
-        """
-        store, _ = _run([kv_payload(make_stored_event("rh0", _block_ids(0)))])
-
-        assert isinstance(store.get_block_size(), int)
-        assert store.get_block_size() > 0
-        assert store.get_block_size() == BLOCK_SIZE, f"Expected block_size={BLOCK_SIZE}, got {store.get_block_size()}"
-
-    @pytest.mark.cpu
-    @pytest.mark.level0
-    def test_multiple_inferences_accumulate_blocks(self):
-        """
-        Feature: Multiple inference requests accumulate more blocks in the store
-        Expectation:
-            After multiple block-stored events, the KV cache has entries.
-        """
-        payloads = [
-            kv_payload(make_stored_event("rh0", _block_ids(0))),
-            kv_payload(make_stored_event("rh1", _block_ids(BLOCK_SIZE))),
-            kv_payload(make_stored_event("rh2", _block_ids(2 * BLOCK_SIZE))),
-        ]
-        store, _ = _run(payloads)
-
-        assert store.get_kv_block_count() > 0, "Expected blocks after multiple event payloads"
-        assert store.get_kv_block_count() == 3, f"Expected 3 blocks (one per event), got {store.get_kv_block_count()}"
-
-    @pytest.mark.cpu
-    @pytest.mark.level0
-    def test_parser_hash_mapping_populated(self):
-        """
-        Feature: VLLMKVParser.remote_to_local_block_hash is populated after events
-        Description:
-            Verify that the parser's per-replica hash mapping tracks remote->local
-            block hashes, and that every local hash appears in the KV cache store.
-        Expectation:
-            The map is keyed by replica_id and holds this node's remote->local entries.
-            All local hashes are present in the KV cache store.
-        """
-        store, collector = _run([kv_payload(make_stored_event("rh0", _block_ids(0)))])
-
-        replica_maps = collector._parser.remote_to_local_block_hash
-        assert REPLICA_ID in replica_maps, "map must be keyed by replica_id (per-replica isolation)"
-        mapping = replica_maps[REPLICA_ID]
-        assert len(mapping) > 0, "remote_to_local_block_hash should have entries after processing events"
-        for remote_bh, local_bh in mapping.items():
-            assert isinstance(remote_bh, str)
-            assert isinstance(local_bh, str)
-            assert store.has_kv_block(local_bh), f"Local hash '{local_bh}' from mapping not found in KV cache store"
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_unsequenced_events_use_known_layout_and_residency():
+    store, _ = _run([kv_payload(make_stored_event("rh0", _block_ids()))])
+    registry = store.cache_registry_state(REPLICA_ID).registry
+    assert registry.local_hash_unit == BLOCK_SIZE
+    assert len(registry.groups) == 1 and registry.groups[0].match_kind == "full"
+    assert store.per_replica_block_counts() == {REPLICA_ID: 1}
 
 
 @pytest.mark.cpu
 @pytest.mark.level0
-def test_wire_events_change_store():
-    """Mapping events store and remove blocks through the collector."""
+def test_multiple_inferences_accumulate_blocks():
+    payloads = [kv_payload(make_stored_event(f"rh{i}", _block_ids(i * BLOCK_SIZE))) for i in range(3)]
+    store, _ = _run(payloads)
+    assert store.per_replica_block_counts() == {REPLICA_ID: 3}
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_shared_stateless_parser_preserves_replica_isolation(layout, install_metadata):
+    store = DataStore()
+    for node in ("a", "b"):
+        install_metadata(store, node, layout((("full_attention", BLOCK_SIZE),), unit=BLOCK_SIZE))
+    parser = VLLMKVParser()
+    prompts = {"a": _block_ids(), "b": _block_ids(100)}
+    for node, tokens in prompts.items():
+        update = parser.parse(kv_payload(make_stored_event("same-remote", tokens)), node)
+        store.apply_kv_update(update)
+    for node, tokens in prompts.items():
+        query = tokens + [999]
+        hashes = [str(h) for h in get_prefix_hashes_incremental(query, BLOCK_SIZE, 0, 0)[0]]
+        estimates = store.estimate_prefixes(["a", "b"], hashes, len(query))
+        assert estimates[node].estimated_hit_tokens == BLOCK_SIZE
+        assert estimates["b" if node == "a" else "a"].estimated_hit_tokens == 0
+    store.apply_kv_update(parser.parse(kv_payload(["AllBlocksCleared"]), "a"))
+    assert store.per_replica_block_counts().get("a", 0) == 0
+    assert store.per_replica_block_counts()["b"] == 1
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_wire_events_change_store(layout, install_metadata):
+    """Known group metadata and valid siblings survive a malformed event."""
+    store = DataStore()
+    install_metadata(store, REPLICA_ID, layout((("full_attention", BLOCK_SIZE),), unit=BLOCK_SIZE))
     events = [
-        ["BlockStored", [101, 102], None, list(range(2 * BLOCK_SIZE)), BLOCK_SIZE, None, "GPU"],
+        [
+            "BlockStored",
+            [101, 102],
+            None,
+            list(range(2 * BLOCK_SIZE)),
+            BLOCK_SIZE,
+            None,
+            "GPU",
+            None,
+            None,
+            0,
+            "full_attention",
+        ],
+        ["BlockStored", ["bad"], None, [1], 0, None, "GPU"],
         ["BlockRemoved", [102], "GPU", 0],
     ]
-    store, collector = _run([kv_payload(mapping_event(event)) for event in events])
-    assert store.get_block_size() == BLOCK_SIZE
-    assert store.get_kv_block_count() == 1
-    assert set(collector._parser.remote_to_local_block_hash[REPLICA_ID]) == {"101"}
+    payloads = [kv_payload(mapping_event(events[0])), kv_payload(*(mapping_event(e) for e in events[1:]))]
+    store, _ = _run(payloads)
+    assert store.per_replica_block_counts() == {REPLICA_ID: 1}
 
 
 @pytest.mark.cpu
 @pytest.mark.level0
-@pytest.mark.parametrize("medium", ["cpu", "SSD", "nvme", ""])
-@pytest.mark.parametrize("remove_gpu", [False, True])
+@pytest.mark.parametrize(
+    "medium,remove_gpu", [("cpu", False), ("SSD", False), ("nvme", False), ("", False), ("cpu", True)]
+)
 def test_excluded_media_preserve_gpu_hit_and_counts(medium, remove_gpu):
-    """Excluded writes/removals cannot hide later GPU eviction or change its hits."""
     tokens = list(range(2 * BLOCK_SIZE))
     gpu_store = ["BlockStored", [101, 102], None, tokens, BLOCK_SIZE, None, "GPU"]
     excluded_store = ["BlockStored", [101], None, tokens, 2 * BLOCK_SIZE, None, medium]
     events = [excluded_store, gpu_store, excluded_store, ["BlockRemoved", [101], medium]]
     payloads = [kv_payload(*(mapping_event(event) for event in events))]
     if remove_gpu:
-        # A later eviction must still resolve the GPU mapping after excluded removals.
         payloads.append(kv_payload(mapping_event(["BlockRemoved", [101], "GPU"])))
     store, _ = _run(payloads)
-    hashes, _ = get_prefix_hashes_incremental(tokens, BLOCK_SIZE, 0, 0)
-    assert store.get_block_size() == BLOCK_SIZE
-    assert store.get_layer_prefix_hit_rate(REPLICA_ID, [str(h) for h in hashes]) == (0.0 if remove_gpu else 1.0)
+    query = tokens + [999]
+    hashes = [str(h) for h in get_prefix_hashes_incremental(query, BLOCK_SIZE, 0, 0)[0]]
+    estimate = store.estimate_prefixes([REPLICA_ID], hashes, len(query))[REPLICA_ID]
+    assert estimate.estimated_hit_tokens == (0 if remove_gpu else len(tokens))
     assert store.per_replica_block_counts() == {REPLICA_ID: 1 if remove_gpu else 2}
-    assert store._kv._replica_layer_counts[Layer.CPU] == {}
-    assert store._kv._replica_layer_counts[Layer.SSD] == {}

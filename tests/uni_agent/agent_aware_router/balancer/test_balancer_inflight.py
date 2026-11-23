@@ -22,9 +22,9 @@ from uni_agent.agent_aware_router.types import MetricKey
 
 from ._helpers import _make_balancer
 
-pytestmark = [pytest.mark.level0, pytest.mark.cpu]
 
-
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_acquire_release_updates_gauge_and_counters():
     balancer = _make_balancer({"s0": "h0"})
 
@@ -38,6 +38,8 @@ def test_acquire_release_updates_gauge_and_counters():
     assert balancer._store.get_metric(server_id, MetricKey.COMPLETED_COUNT) == 1
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_turn_values_are_attributed_to_the_receiving_replica():
     balancer = _make_balancer({"s0": "h0"})
 
@@ -46,5 +48,12 @@ def test_turn_values_are_attributed_to_the_receiving_replica():
     balancer.acquire_server("request-2", [1])
 
     assert balancer._store.get_per_request("request-1", "turn", 0) == 3
-    assert balancer._store.get_metric("s0", MetricKey.INFLIGHT_TURN_SUM) == 7
+    # Only the current turns (3 and 1) contribute to in-flight gauges.
+    assert balancer._store.get_metric("s0", MetricKey.INFLIGHT_TURN_SUM) == 4
+    assert balancer._store.get_metric("s0", MetricKey.INFLIGHT_COUNT) == 2
     assert balancer._store.get_metric("s0", MetricKey.DISPATCHED_COUNT) == 4
+
+    balancer.release_server("s0", request_id="request-1")
+    assert balancer._store.get_metric("s0", MetricKey.INFLIGHT_TURN_SUM) == 1
+    balancer.release_server("s0", request_id="request-2")
+    assert balancer._store.get_metric("s0", MetricKey.INFLIGHT_TURN_SUM) == 0

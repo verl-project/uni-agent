@@ -35,11 +35,11 @@ class MetricKey:
     KV_CACHE_USAGE_PERC: str = "kv_cache_usage_perc"
     NUM_REQUESTS_RUNNING: str = "num_requests_running"
     NUM_REQUESTS_WAITING: str = "num_requests_waiting"
-    # Per-replica total GPU KV blocks — from the ``num_gpu_blocks`` label of
-    # vLLM's ``cache_config_info`` gauge (the value itself is 1.0; the real
-    # number lives in the label). Used to turn retained-block counts into an
-    # occupancy ratio that, unlike kv_cache_usage_perc, reflects the free pool.
+    # Raw configured GPU KV blocks, including backend-reserved blocks.
     NUM_GPU_BLOCKS: str = "num_gpu_blocks"
+    # Backend-normalized pool capacity available for request allocations.
+    # None means unavailable; zero is a known pool with no allocatable blocks.
+    KV_CACHE_CAPACITY_BLOCKS: str = "kv_cache_capacity_blocks"
     PREFIX_CACHE_QUERIES: str = "prefix_cache_queries"
     PREFIX_CACHE_HITS: str = "prefix_cache_hits"
     # ── Evidence metrics — cumulative counters/histograms polled from vLLM
@@ -113,6 +113,11 @@ METRIC_SPECS: dict[str, dict[str, Any]] = {
         "default": 0,
         "value_type": int,
         "describe": "Per-replica total GPU KV blocks (cache_config_info num_gpu_blocks label)",
+    },
+    MetricKey.KV_CACHE_CAPACITY_BLOCKS: {
+        "default": None,
+        "value_type": int,
+        "describe": "Per-replica allocatable KV pool blocks, excluding backend reservations",
     },
     MetricKey.PREFIX_CACHE_QUERIES: {
         "default": 0,
