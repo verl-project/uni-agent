@@ -72,6 +72,7 @@ class MultiAgentGatewayManager(GatewayManager):
         role_policy_mapping: Mapping[str, str],
         sampling_params: Mapping[str, Mapping[str, Any]] | None = None,
         metadata: Mapping[str, Any] | None = None,
+        pass_through_message_history: bool = False,
     ) -> SessionGroupHandle:
         """Create one Gateway session for each role in a MAS session group.
 
@@ -84,6 +85,9 @@ class MultiAgentGatewayManager(GatewayManager):
             role_policy_mapping: Mapping from role names to policy names.
             sampling_params: Optional parameters keyed by policy name.
             metadata: Optional metadata copied to each role session.
+            pass_through_message_history: Whether each role session should copy
+                its chains' chat text onto materialized trajectories for a custom
+                select function.
 
         Raises:
             RuntimeError: If the manager has already been shut down.
@@ -136,6 +140,7 @@ class MultiAgentGatewayManager(GatewayManager):
                     },
                     sampling_params=dict(policy_sampling_params.get(role_session.policy_name, {})),
                     policy_name=role_session.policy_name,
+                    pass_through_message_history=pass_through_message_history,
                 )
                 role_base_urls[role_name] = handle.base_url
         except BaseException:

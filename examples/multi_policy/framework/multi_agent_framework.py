@@ -172,16 +172,15 @@ class MultiAgentGatewayFramework(GatewayAgentFramework):
     ) -> SessionGroupHandle:
         """Create a session group with one session per role.
 
-        ``pass_through_message_history`` is accepted for signature compatibility
-        with the base hook and ignored: a group creates one gateway session per
-        role, and this manager does not forward the flag to them.
+        ``pass_through_message_history`` is forwarded to every role session so a
+        custom select function can read each chain's chat text.
         """
-        del pass_through_message_history
         return await self.gateway_manager.create_session(
             session_id,
             role_policy_mapping=self._role_policy_mapping,
             sampling_params=sampling_params,
             metadata=metadata,
+            pass_through_message_history=pass_through_message_history,
         )
 
     def _resolve_processor(self, trajectory: Trajectory):
