@@ -12,7 +12,7 @@
       - from: "swerebench/**"
         to: "swr.cn-east-3.myhuaweicloud.com/openyuanrong/swerebench/**"
     image_mounts:
-      - image: swr.cn-east-3.myhuaweicloud.com/openyuanrong/dsh-tool:latest
+      - image: registry.90.91.181.189.nip.io:5000/kunpeng-ai/dsh-tool:latest
         mount_path: /opt/dsh
     executable_paths:
       dsh: /opt/dsh/bin/dsh
@@ -38,7 +38,7 @@
       - from: "swerebench/**"
         to: "swr.cn-east-3.myhuaweicloud.com/openyuanrong/swerebench/**"
     image_mounts:
-      - image: swr.cn-east-3.myhuaweicloud.com/openyuanrong/dsh-tool:latest
+      - image: registry.90.91.181.189.nip.io:5000/kunpeng-ai/dsh-tool:latest
         mount_path: /opt/dsh
     executable_paths:
       dsh: /opt/dsh/bin/dsh
