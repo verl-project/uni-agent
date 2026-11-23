@@ -431,6 +431,10 @@ Each entry in `routes` is a full child sandbox config:
   top-level `routes` config only reads `sandbox_kwargs`: `image`, `image_map`,
   `image_mounts`, and `executable_paths` set there are rejected, and a
   top-level `runtime_timeout` is not used.
+- When a dataset sample supplies `sandbox.image`, the Task Config resolver
+  uses it as the default image for child routes without an explicit image
+  or an E2B/AgentEnv template. Each child applies its own `image_map`. Local
+  routes keep their existing configuration.
 - `start_timeout` (optional, positive seconds): overrides the routes-level
   `start_timeout` for this route, which in turn falls back to
   `SANDBOX_STARTUP_TIMEOUT`.
