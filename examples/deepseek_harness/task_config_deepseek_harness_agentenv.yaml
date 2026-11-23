@@ -1,16 +1,12 @@
 # Select with TASK_CONFIG when running run_train.sh.
 # Configure AGENTENV_API_URL, AGENTENV_SANDBOX_URL, and AGENTENV_API_KEY on
 # the rollout workers. The AgentEnv deployment must be able to pull both
-# the sample's mapped task image and the DSH tool image.
+# the sample's task image and the DSH tool image. See AGENTENV.md for
+# preparing samples with instance-tagged registry images.
 - name: swe_rebench
   sandbox:
     provider: agentenv
     runtime_timeout: 7200
-    image_map:
-      - from: "swebench/**"
-        to: "registry.90.91.181.189.nip.io:5000/swerebench-arm64-rl"
-      - from: "swerebench/**"
-        to: "registry.90.91.181.189.nip.io:5000/swerebench-arm64-rl"
     image_mounts:
       - image: registry.90.91.181.189.nip.io:5000/kunpeng-ai/dsh-tool:latest
         mount_path: /opt/dsh
@@ -32,11 +28,6 @@
   sandbox:
     provider: agentenv
     runtime_timeout: 7200
-    image_map:
-      - from: "swebench/**"
-        to: "registry.90.91.181.189.nip.io:5000/swerebench-arm64-rl"
-      - from: "swerebench/**"
-        to: "registry.90.91.181.189.nip.io:5000/swerebench-arm64-rl"
     image_mounts:
       - image: registry.90.91.181.189.nip.io:5000/kunpeng-ai/dsh-tool:latest
         mount_path: /opt/dsh
