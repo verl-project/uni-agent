@@ -17,6 +17,7 @@
 import pytest
 
 from uni_agent.agent_aware_router.collectors.parse import (
+    InflightUpdate,
     KVCacheUpdate,
     MetricsUpdate,
     StickyUpdate,
@@ -27,7 +28,7 @@ from uni_agent.agent_aware_router.store.data_store import DataStore
 from uni_agent.agent_aware_router.store.kv_cache_store import KVCacheStore
 from uni_agent.agent_aware_router.store.per_replica_store import PerReplicaStore
 from uni_agent.agent_aware_router.store.per_request_store import PerRequestStore
-from uni_agent.agent_aware_router.types import InflightUpdate, Layer, MetricKey
+from uni_agent.agent_aware_router.types import Layer, MetricKey
 
 pytestmark = [pytest.mark.cpu, pytest.mark.level0]
 
@@ -114,22 +115,24 @@ def test_kv_clear_remove_add_order_and_first_block_size_wins(application):
     assert store.get_block_size() == 16
 
 
-def test_inflight_updater_delegates_without_interpreting_callback_state(application, monkeypatch):
+@pytest.mark.parametrize("action", ["acquire", "release"])
+def test_inflight_updater_dispatches_by_action_without_interpreting_state(application, monkeypatch, action):
     from uni_agent.agent_aware_router.store.inflight import InflightMetricsApplied, InflightResult
 
     store, observer, updater = application
-    fact = InflightUpdate("release", "s0", "r")
+    fact = InflightUpdate(action, "s0", "r", (1, 2))
     deltas = {MetricKey.INFLIGHT_COUNT: -1}
     values = {MetricKey.INFLIGHT_COUNT: 0}
     seen = []
 
-    def apply(update):
-        assert update is fact
-        seen.append(update)
+    def transition(replica_id, request_id, *prompt_ids):
+        # Only acquires carry prompt tokens.
+        assert (replica_id, request_id, prompt_ids) == ("s0", "r", ((1, 2),) if action == "acquire" else ())
+        seen.append(fact)
         store.metrics.refresh_metrics({"s0": values})
         return InflightResult([InflightMetricsApplied("s0", deltas, values)], blocks_recorded=2)
 
-    monkeypatch.setattr(store.inflight, "apply", apply)
+    monkeypatch.setattr(store.inflight, action, transition)
     updater.apply_inflight(fact)
     assert seen == [fact]
     assert observer.calls == [("blocks", 2), ("metrics", values)]
@@ -138,12 +141,20 @@ def test_inflight_updater_delegates_without_interpreting_callback_state(applicat
 def test_failed_inflight_transition_is_not_observed(application, monkeypatch):
     store, observer, updater = application
 
-    def fail(update):
+    def fail(*args):
         raise RuntimeError("transition failed")
 
-    monkeypatch.setattr(store.inflight, "apply", fail)
+    monkeypatch.setattr(store.inflight, "acquire", fail)
     with pytest.raises(RuntimeError, match="transition failed"):
         updater.apply_inflight(InflightUpdate("acquire", "s0", "r"))
+    assert observer.calls == []
+
+
+def test_unknown_inflight_action_is_rejected_before_the_store(application):
+    store, observer, updater = application
+    with pytest.raises(ValueError, match="Unknown inflight action"):
+        updater.apply_inflight(InflightUpdate("pause", "s0", "r"))
+    assert store.get_metrics("s0") == {}
     assert observer.calls == []
 
 
@@ -171,7 +182,7 @@ def test_observer_failure_cannot_leave_an_applied_dispatch_unbooked(application,
 def test_sticky_updates_keep_other_request_state(application):
     store, _, updater = application
     for rid, replica in [("r1", "s0"), ("r2", "s0"), ("r3", "s1")]:
-        store.requests.next_turn(rid)
+        store.requests.book_turn(rid, 1)
         updater.apply_sticky(StickyUpdate("put", rid, replica))
     updater.apply_sticky(StickyUpdate("invalidate", "r1"))
     updater.apply_sticky(StickyUpdate("invalidate_replica", replica_ids=("s0",)))
@@ -182,12 +193,11 @@ def test_sticky_updates_keep_other_request_state(application):
 
 def test_named_request_operations_share_the_original_lru_lifetime():
     requests = RequestState(PerRequestStore(max_size=2))
-    requests.next_turn("old")
-    requests.book_prompt_length("old", 17)
+    requests.book_turn("old", 1)
     requests.put_sticky_binding("old", "s0")
     requests.set_prefix_cache("old", {"hash_strs": ["h"], "parent_hash": 1})
-    requests.next_turn("middle")
-    requests.next_turn("new")
-    assert requests.get_turn("old") == requests.get_prompt_length("old") == 0
+    requests.book_turn("middle", 1)
+    requests.book_turn("new", 1)
+    assert requests.get_turn("old") == 0
     assert requests.get_sticky_binding("old") is None
     assert requests.get_prefix_cache("old") is None

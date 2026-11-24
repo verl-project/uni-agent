@@ -28,7 +28,7 @@ import asyncio
 import pytest
 from conftest import BLOCK_SIZE
 
-from uni_agent.agent_aware_router.collectors.parse import MetricsUpdate, StickyUpdate
+from uni_agent.agent_aware_router.collectors.parse import InflightUpdate, MetricsUpdate, StickyUpdate
 from uni_agent.agent_aware_router.collectors.parse.basic.inflight import InflightParser
 from uni_agent.agent_aware_router.collectors.parse.basic.sticky import StickyParser
 from uni_agent.agent_aware_router.collectors.transport.callback import (
@@ -38,7 +38,7 @@ from uni_agent.agent_aware_router.collectors.transport.callback import (
 from uni_agent.agent_aware_router.store import inflight as inflight_module
 from uni_agent.agent_aware_router.store.data_store import DataStore
 from uni_agent.agent_aware_router.strategies import route
-from uni_agent.agent_aware_router.types import InflightUpdate, MetricKey
+from uni_agent.agent_aware_router.types import MetricKey
 
 pytestmark = [pytest.mark.level0, pytest.mark.cpu]
 

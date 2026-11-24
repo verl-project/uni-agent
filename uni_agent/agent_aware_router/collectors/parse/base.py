@@ -25,9 +25,9 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
-from ...types import InflightUpdate, Layer
+from ...types import Layer
 
 
 @dataclass
@@ -114,6 +114,27 @@ class StickyUpdate:
     request_id: str | None = None
     replica_id: str | None = None
     replica_ids: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class InflightUpdate:
+    """An acquire/release fact, with no derived turn, booking or block state.
+
+    Emitted by ``InflightParser`` from the Balancer's ``on_acquire`` /
+    ``on_release`` callbacks; the amounts to book or debit are derived by
+    ``DataStore.inflight`` when the update is applied.
+
+    Attributes:
+        action: ``"acquire"`` / ``"release"``.
+        replica_id: Replica the dispatch was routed to (acquire) or released from.
+        request_id: Routing request id (``None`` for an anonymous dispatch).
+        prompt_ids: The acquiring request's input token ids (acquire only).
+    """
+
+    action: Literal["acquire", "release"]
+    replica_id: str
+    request_id: str | None = None
+    prompt_ids: tuple[int, ...] = ()
 
 
 class Parser(ABC):

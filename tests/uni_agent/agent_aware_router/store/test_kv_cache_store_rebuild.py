@@ -96,8 +96,7 @@ def test_removed_resident_blocks_are_not_revisited_by_invalidation():
     assert store.per_replica_block_counts() == {"b": 1}
 
 
-@pytest.mark.parametrize("clear_method", ["invalidate_replica", "clear_replica"])
-def test_clear_without_gpu_ownership_clears_other_layer_counts_without_scanning(clear_method):
+def test_clear_without_gpu_ownership_clears_other_layer_counts_without_scanning():
     store = KVCacheStore()
     store.add_blocks("b", ["shared"])
     store.add_blocks("a", ["cpu-1", "cpu-2"], Layer.CPU)
@@ -106,7 +105,7 @@ def test_clear_without_gpu_ownership_clears_other_layer_counts_without_scanning(
     index = _ObservedBlockIndex(store.replicas_by_block)
     store.replicas_by_block = index
 
-    getattr(store, clear_method)("a")
+    store.invalidate_replica("a")
 
     assert index.inspected == []
     assert index == {"shared": {"b"}}
@@ -183,30 +182,6 @@ def test_clear_resident_blocks_preserves_request_state_and_rebuilding(gated):
         store.mark_replica_ready("a")
         assert store.get_layer_prefix_hit_rate("a", ["rebuilt"]) == 1.0
         assert store.record_dispatch_blocks("a", ["dispatch-only"]) == 1
-
-
-def test_clear_replica_cleans_request_state_but_does_not_end_rebuilding():
-    store = KVCacheStore()
-    store.block_size = 2
-    for replica_id in ("a", "b"):
-        store.add_blocks(replica_id, ["h1"])
-        store.incr_block_refs(replica_id, ["h1"])
-        store.put_marker(f"request-{replica_id}", replica_id, ["h1"])
-    store.invalidate_replica("a")
-    store.add_blocks("a", ["before-clear"])
-
-    store.clear_replica("a")
-
-    assert store.inflight_block_count("a") == 0
-    assert store.get_marker("request-a") is None
-    assert "before-clear" not in store.replicas_by_block
-    assert store.inflight_block_count("b") == 1
-    assert store.get_marker("request-b") == {"replica": "b", "hashes": ["h1"]}
-    store.add_blocks("a", ["h1"])
-    assert store.get_layer_prefix_hit_rate("a", ["h1"]) == 0.0
-    assert store.record_dispatch_blocks("a", ["dispatch-only"]) == 0
-    store.mark_replica_ready("a")
-    assert store.get_layer_prefix_hit_rate("a", ["h1"]) == 1.0
 
 
 def test_data_store_repeated_invalidation_discards_partial_replay_until_ready(monkeypatch):

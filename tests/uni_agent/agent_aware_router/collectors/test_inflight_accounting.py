@@ -79,13 +79,11 @@ def test_hash_failure_does_not_book_or_replace_dispatch(running, existing):
     before = store.get_metrics("s0")
     marker = store.get_marker("r")
     turn = store.requests.get_turn("r")
-    length = store.requests.get_prompt_length("r")
     with pytest.raises(struct.error):
         callbacks.acquire(prompt=(-1, 2))
     assert store.get_metrics("s0") == before
     assert store.get_marker("r") == marker
     assert store.requests.get_turn("r") == turn
-    assert store.requests.get_prompt_length("r") == length
     callbacks.release()
     assert_idle(store)
     assert store.get_metric("s0", MetricKey.COMPLETED_COUNT) == int(existing)
@@ -140,7 +138,7 @@ def test_active_booking_survives_real_request_lru_eviction(running, blocks, reac
     callbacks.acquire()
     store.requests.put_sticky_binding("other1", "s0")
     store.requests.put_sticky_binding("other2", "s0")
-    assert store.requests.get_turn("r") == store.requests.get_prompt_length("r") == 0
+    assert store.requests.get_turn("r") == 0
     if reacquire:
         callbacks.acquire()
         assert store.get_metric("s0", MetricKey.INFLIGHT_TURN_SUM) == 2
@@ -157,10 +155,10 @@ def test_overlapping_acquires_are_serialized_through_booking_commit(running, mon
     finish = threading.Event()
     second_started = threading.Event()
     second_prepared = threading.Event()
-    original = collector._sink._inflight.apply
+    original = collector._sink._inflight.acquire
     calls = 0
 
-    def pause_before_transition(event):
+    def pause_before_transition(*args):
         nonlocal calls
         calls += 1
         if calls == 1:
@@ -168,9 +166,9 @@ def test_overlapping_acquires_are_serialized_through_booking_commit(running, mon
             assert finish.wait(5)
         else:
             second_prepared.set()
-        return original(event)
+        return original(*args)
 
-    monkeypatch.setattr(collector._sink._inflight, "apply", pause_before_transition)
+    monkeypatch.setattr(collector._sink._inflight, "acquire", pause_before_transition)
 
     def second():
         second_started.set()
@@ -195,7 +193,7 @@ def test_overlapping_acquires_are_serialized_through_booking_commit(running, mon
 
 
 def test_recorded_blocks_are_logged_by_inflight_observer_not_kv_observer(running, caplog, monkeypatch):
-    from uni_agent.agent_aware_router.insight import collector as observer_module
+    from uni_agent.agent_aware_router.collectors import observer as observer_module
 
     callbacks, store, _ = running
     store.set_block_size(2)

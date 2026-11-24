@@ -20,10 +20,10 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
-from ..insight.collector import CollectorObserver, UpdateObserver
 from ..store.data_store import DataStore
-from ..types import InflightUpdate
-from .parse import KVCacheUpdate, MetricsUpdate, StickyUpdate
+from .observer import CollectorObserver
+from .parse import InflightUpdate, KVCacheUpdate, MetricsUpdate, StickyUpdate
+from .sink import UpdateObserver
 
 logger = logging.getLogger(__name__)
 
@@ -43,14 +43,19 @@ class StoreUpdater:
         self._observer = observer
 
     def apply_inflight(self, update: InflightUpdate) -> None:
-        """Delegate the whole transition to DataStore, then observe applied effects."""
-        result = self._inflight.apply(update)
+        """Dispatch the fact to DataStore, then observe applied effects."""
+        if update.action == "acquire":
+            result = self._inflight.acquire(update.replica_id, update.request_id, update.prompt_ids)
+        elif update.action == "release":
+            result = self._inflight.release(update.replica_id, update.request_id)
+        else:
+            raise ValueError(f"Unknown inflight action: {update.action}")
         try:
             if result.blocks_recorded is not None:
                 self._observer.on_blocks_recorded(result.blocks_recorded)
             for applied in result.metrics:
                 self._observer.on_metrics_applied(
-                    MetricsUpdate(applied.node_id, applied.deltas, is_delta=True, request_id=update.request_id),
+                    MetricsUpdate(applied.replica_id, applied.deltas, is_delta=True, request_id=update.request_id),
                     applied.values,
                 )
         except Exception:

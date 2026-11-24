@@ -31,7 +31,6 @@ from .per_request_store import PerRequestStore
 
 _STICKY_KEY = "sticky_replica"
 _TURN_KEY = "turn"
-_PROMPT_LEN_KEY = "prompt_len"
 _PREFIX_HASH_KEY = "prefix_hashes"
 
 
@@ -292,22 +291,12 @@ class RequestState:
         """Return a debugging snapshot of the sticky bindings."""
         return {"max_size": self._per_request.max_size, "size": self._per_request.count(_STICKY_KEY)}
 
-    def next_turn(self, request_id: str) -> int:
-        """Book the next dispatch turn, preserving the shared row's LRU lifetime."""
-        return self._per_request.incr(request_id, _TURN_KEY)
-
     def get_turn(self, request_id: str) -> int:
         return self._per_request.get(request_id, _TURN_KEY, 0)
 
     def book_turn(self, request_id: str, turn: int) -> None:
         """Commit the successfully applied dispatch's prospective turn."""
         self._per_request.set(request_id, _TURN_KEY, turn)
-
-    def get_prompt_length(self, request_id: str) -> int:
-        return self._per_request.get(request_id, _PROMPT_LEN_KEY, 0)
-
-    def book_prompt_length(self, request_id: str, length: int) -> None:
-        self._per_request.set(request_id, _PROMPT_LEN_KEY, length)
 
     def get_prefix_cache(self, request_id: str) -> dict[str, Any] | None:
         """Return the live append-only hash memo, preserving existing recency semantics."""

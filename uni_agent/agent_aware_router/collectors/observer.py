@@ -20,12 +20,12 @@ import logging
 import time
 from collections import defaultdict
 from collections.abc import Callable
-from typing import Any, Protocol
+from typing import Any
 
-from ..collectors.parse import KVCacheUpdate, MetricsUpdate
+from ..insight import WriteEvent, WriteKind, emitter
 from ..store.contracts import KVReader, MetricsReader
 from ..types import EmitKey, MetricKey
-from . import WriteEvent, WriteKind, emitter
+from .parse import KVCacheUpdate, MetricsUpdate
 
 logger = logging.getLogger(__name__)
 
@@ -60,14 +60,6 @@ def _avg(delta_sum: float, delta_cnt: float) -> float:
 def _ms(value: float) -> str:
     """Format a seconds value as millis for the evidence log ('-' if NaN)."""
     return f"{value * 1000:.1f}" if value == value else "-"
-
-
-class UpdateObserver(Protocol):
-    def on_kv_applied(self, update: KVCacheUpdate) -> None: ...
-
-    def on_metrics_applied(self, update: MetricsUpdate, values: dict[str, Any]) -> None: ...
-
-    def on_blocks_recorded(self, count: int) -> None: ...
 
 
 class CollectorObserver:

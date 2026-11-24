@@ -41,12 +41,13 @@ agent_aware_router/
    ├── collectors/                   ← collect vLLM signals
    │    ├── collector.py/provider.py ← collector lifecycle
    │    ├── sink.py/updater.py       ← typed application boundary + observation dispatch
+   │    ├── observer.py              ← post-write observation: evidence logs and insight events
    │    ├── parse/vllm/metrics.py  ← /metrics polling → dict
    │    ├── parse/vllm/kv.py, kv_event.py  ← kv-events zmq → incremental block state
    │    └── transport/{http,zmq,callback}.py
    ├── config/                       ← KVCAwareConfig + StrategyConfig
    ├── types/                        ← SlowCut / OverloadMode / Layer / MetricKey enums
-   └── insight/collector.py / emitter.py ← observe applied updates → rl-insight → Prometheus → Grafana
+   └── insight/emitter.py            ← push to rl-insight → Prometheus → Grafana
 ```
 
 ### Collector application boundary
@@ -54,12 +55,12 @@ agent_aware_router/
 `Collector` owns transport lifecycle and ordered parser dispatch. Its optional
 `sink` argument implements `UpdateSink`: one operation per typed update kind.
 Tests can inject a sink without constructing `DataStore`. The default
-`StoreUpdater` applies KV, metrics and sticky updates and forwards inflight
-facts to `DataStore.inflight`. DataStore composes four capabilities:
+`StoreUpdater` applies KV, metrics and sticky updates and dispatches inflight
+acquires/releases to `DataStore.inflight`. DataStore composes four capabilities:
 
 - `metrics`: merged polling snapshots and signed metric increments.
 - `kv`: cache residency, block references, and acquire-time pin markers.
-- `requests`: sticky bindings, historical turn/prompt memos and the prefix-hash memo.
+- `requests`: sticky bindings, the historical turn memo and the prefix-hash memo.
 - `inflight`: acquire/release transitions, active bookings and their accounting.
 
 `InflightParser` only decodes the callback into an `InflightUpdate` containing

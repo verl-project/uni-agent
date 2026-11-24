@@ -58,7 +58,7 @@ class KVCacheStore:
         self._inflight_blocks: dict[str, dict[str, int]] = {}
         # Per-request marker rows: request_id → arbitrary snapshot payload. Never
         # evicted — bounded by the true in-flight count, removed only by
-        # ``pop_marker``/``clear_replica`` — because a dropped marker would leak
+        # ``pop_marker`` — because a dropped marker would leak
         # the references it accounts for. Deliberately NOT in the LRU
         # ``PerRequestStore`` for that reason.
         self._inflight_pins: dict[str, dict[str, Any]] = {}
@@ -102,19 +102,6 @@ class KVCacheStore:
         """Clear residency while preserving request accounting and gating state."""
         with self._lock:
             self._clear_resident_blocks_locked(replica_id)
-
-    def clear_replica(self, replica_id: str) -> None:
-        """Forget everything this replica accounts for: resident blocks, block refs, markers.
-
-        Resident cleanup visits this replica's blocks; marker cleanup visits
-        the in-flight request rows.
-        """
-        with self._lock:
-            self._clear_resident_blocks_locked(replica_id)
-            self._inflight_blocks.pop(replica_id, None)
-            stale_pins = [rid for rid, marker in self._inflight_pins.items() if marker["replica"] == replica_id]
-            for rid in stale_pins:
-                del self._inflight_pins[rid]
 
     def _clear_resident_blocks_locked(self, replica_id: str) -> None:
         """Remove one replica's reverse-index entries and counts; caller holds the lock."""

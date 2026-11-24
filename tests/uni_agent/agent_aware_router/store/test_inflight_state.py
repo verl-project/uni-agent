@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""DataStore must account for facts without a contextual parser or updater."""
+"""DataStore must account for acquire/release without a contextual parser or updater."""
 
 import struct
 
@@ -22,7 +22,7 @@ from uni_agent.agent_aware_router.store.data_store import DataStore
 from uni_agent.agent_aware_router.store.kv_cache_store import KVCacheStore
 from uni_agent.agent_aware_router.store.per_replica_store import PerReplicaStore
 from uni_agent.agent_aware_router.store.per_request_store import PerRequestStore
-from uni_agent.agent_aware_router.types import InflightUpdate, MetricKey
+from uni_agent.agent_aware_router.types import MetricKey
 from uni_agent.agent_aware_router.utils.hash import get_prefix_hashes_incremental
 
 pytestmark = [pytest.mark.cpu, pytest.mark.level0]
@@ -51,42 +51,36 @@ def test_store_owns_turn_replacement_and_release_amounts(store, rid, target, blo
     if block_size:
         store.set_block_size(block_size)
     store.requests.set_prefix_cache(rid, {"hash_strs": ["memo"], "parent_hash": 1})
-    # Facts contain no prospective turn or booked length; create all of them
-    # before application. Only the store knows what to unwind at each step.
-    first = InflightUpdate("acquire", "s0", rid, (1, 2, 3, 4))
-    replacement = InflightUpdate("acquire", target, rid, (5, 6))
-    release = InflightUpdate("release", target, rid)
-    store.inflight.apply(first)
+    # Calls carry no prospective turn or booked length. Only the store knows
+    # what to unwind at each step.
+    store.inflight.acquire("s0", rid, (1, 2, 3, 4))
     assert_booking(store, "s0", 1, 4, 1)
-    result = store.inflight.apply(replacement)
-    assert [(m.node_id, m.deltas[MetricKey.INFLIGHT_TURN_SUM]) for m in result.metrics] == [("s0", -1), (target, 2)]
+    result = store.inflight.acquire(target, rid, (5, 6))
+    assert [(m.replica_id, m.deltas[MetricKey.INFLIGHT_TURN_SUM]) for m in result.metrics] == [("s0", -1), (target, 2)]
     assert_booking(store, target, 1, 2, 2)
     if target != "s0":
         assert_booking(store, "s0", 0, 0, 0)
-        assert store.inflight.apply(InflightUpdate("release", "s0", rid)).metrics == []
+        assert store.inflight.release("s0", rid).metrics == []
     assert store.requests.get_turn(rid) == 2
-    assert store.requests.get_prompt_length(rid) == 2
     assert store.requests.get_prefix_cache(rid)["hash_strs"] == ["memo"]
-    store.inflight.apply(release)
+    store.inflight.release(target, rid)
     assert_booking(store, target, 0, 0, 0)
     assert store.inflight_block_count(target) == store.inflight_block_count("s0") == 0
     assert store.get_marker(rid) is None
-    assert store.inflight.apply(release).metrics == []
+    assert store.inflight.release(target, rid).metrics == []
     assert store.get_metric(target, MetricKey.COMPLETED_COUNT) == 1
-    assert store.inflight.apply(InflightUpdate("release", target, "unknown")).metrics == []
+    assert store.inflight.release(target, "unknown").metrics == []
 
 
-def test_store_resolves_using_block_size_learned_after_fact_creation(store):
-    fact = InflightUpdate("acquire", "s0", "r", (1, 2, 3, 4))
+def test_release_debits_the_booked_turn_not_the_turn_memo(store):
     store.set_block_size(2)
-    result = store.inflight.apply(fact)
+    result = store.inflight.acquire("s0", "r", (1, 2, 3, 4))
     hashes, _ = get_prefix_hashes_incremental([1, 2, 3, 4], 2, 0, 0)
     assert result.blocks_recorded == 2
     assert store.get_marker("r") == {"replica": "s0", "hashes": [str(h) for h in hashes]}
     # A later memo change must not affect the acquire-time release amount.
-    store.requests.book_prompt_length("r", 999)
     store.requests.book_turn("r", 99)
-    store.inflight.apply(InflightUpdate("release", "s0", "r"))
+    store.inflight.release("s0", "r")
     assert_booking(store, "s0", 0, 0, 0)
     assert store.inflight_block_count("s0") == 0
 
@@ -94,10 +88,10 @@ def test_store_resolves_using_block_size_learned_after_fact_creation(store):
 def test_replacement_pins_its_actual_prefix_even_with_same_length_routing_memo(store):
     store.set_block_size(2)
     old_hashes, old_parent = get_prefix_hashes_incremental([1, 2], 2, 0, 0)
-    store.inflight.apply(InflightUpdate("acquire", "s0", "r", (1, 2)))
+    store.inflight.acquire("s0", "r", (1, 2))
     store.requests.set_prefix_cache("r", {"hash_strs": [str(h) for h in old_hashes], "parent_hash": old_parent})
 
-    store.inflight.apply(InflightUpdate("acquire", "s1", "r", (3, 4)))
+    store.inflight.acquire("s1", "r", (3, 4))
 
     new_hashes, _ = get_prefix_hashes_incremental([3, 4], 2, 0, 0)
     assert store.get_marker("r") == {"replica": "s1", "hashes": [str(h) for h in new_hashes]}
@@ -108,33 +102,32 @@ def test_replacement_pins_its_actual_prefix_even_with_same_length_routing_memo(s
 def test_failed_cross_replica_resolution_leaves_entire_old_dispatch_intact(store, existing):
     store.set_block_size(2)
     if existing:
-        store.inflight.apply(InflightUpdate("acquire", "s0", "r", (1, 2, 3, 4)))
+        store.inflight.acquire("s0", "r", (1, 2, 3, 4))
     before = store.get_metrics("s0")
     marker = store.get_marker("r")
     with pytest.raises(struct.error):
-        store.inflight.apply(InflightUpdate("acquire", "s1", "r", (-1, 2)))
+        store.inflight.acquire("s1", "r", (-1, 2))
     assert store.get_metrics("s0") == before
     assert store.get_metrics("s1") == {}
     assert store.get_marker("r") == marker
     assert store.requests.get_turn("r") == int(existing)
-    assert store.requests.get_prompt_length("r") == (4 if existing else 0)
-    store.inflight.apply(InflightUpdate("release", "s0", "r"))
+    store.inflight.release("s0", "r")
     assert_booking(store, "s0", 0, 0, 0)
     assert store.inflight_block_count("s0") == 0
 
 
 def test_anonymous_releases_balance_only_anonymous_acquires(store):
     store.set_block_size(2)
-    store.inflight.apply(InflightUpdate("acquire", "s0", "named", (1, 2, 3, 4)))
-    store.inflight.apply(InflightUpdate("acquire", "s0", prompt_ids=(1, 2)))
-    store.inflight.apply(InflightUpdate("acquire", "s0", prompt_ids=(3,)))
-    store.inflight.apply(InflightUpdate("release", "s0"))
+    store.inflight.acquire("s0", "named", (1, 2, 3, 4))
+    store.inflight.acquire("s0", None, (1, 2))
+    store.inflight.acquire("s0", None, (3,))
+    store.inflight.release("s0", None)
     assert_booking(store, "s0", 2, 5, 1)
-    store.inflight.apply(InflightUpdate("release", "s0"))
-    assert store.inflight.apply(InflightUpdate("release", "s0")).metrics == []
+    store.inflight.release("s0", None)
+    assert store.inflight.release("s0", None).metrics == []
     assert_booking(store, "s0", 1, 4, 1)
     assert store.inflight_block_count("s0") == 2
-    store.inflight.apply(InflightUpdate("release", "s0", "named"))
+    store.inflight.release("s0", "named")
     assert_booking(store, "s0", 0, 0, 0)
     assert store.get_metric("s0", MetricKey.COMPLETED_COUNT) == 3
     assert store.inflight_block_count("s0") == 0
@@ -142,7 +135,7 @@ def test_anonymous_releases_balance_only_anonymous_acquires(store):
 
 def test_new_facade_can_release_live_booking_after_resident_clear(store):
     store.set_block_size(2)
-    store.inflight.apply(InflightUpdate("acquire", "s0", "r", (1, 2)))
+    store.inflight.acquire("s0", "r", (1, 2))
     marker = store.get_marker("r")
     recreated = DataStore()
     recreated.clear_kv_resident_blocks("s0")
@@ -150,7 +143,7 @@ def test_new_facade_can_release_live_booking_after_resident_clear(store):
     assert recreated.inflight_block_count("s0") == 1
     assert recreated.get_marker("r") == marker
 
-    recreated.inflight.apply(InflightUpdate("release", "s0", "r"))
+    recreated.inflight.release("s0", "r")
     assert_booking(store, "s0", 0, 0, 0)
     assert store.get_marker("r") is None
     assert store.inflight_block_count("s0") == 0

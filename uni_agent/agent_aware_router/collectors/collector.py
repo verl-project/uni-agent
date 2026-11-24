@@ -24,13 +24,13 @@ from typing import Any
 from ..config.collector import CollectorConfig
 from ..debug import get_debug_var, is_debug_enabled
 from ..store.data_store import DataStore
-from ..types import InflightUpdate
 from ..utils.knob import coerce_knob_value
 from ._loop_runner import _LoopRunner
-from .parse import KVCacheUpdate, MetricsUpdate, Parser, StickyUpdate
+from .parse import InflightUpdate, KVCacheUpdate, MetricsUpdate, Parser, StickyUpdate
 from .parse.basic.inflight import InflightParser
 from .sink import UpdateSink
 from .transport.base import Transport
+from .updater import default_updater
 
 logger = logging.getLogger(__name__)
 
@@ -49,8 +49,6 @@ class Collector:
 
     def __init__(self, transport: Transport, parser: Parser, sink: UpdateSink | None = None) -> None:
         if sink is None:
-            from .updater import default_updater
-
             sink = default_updater(lambda: getattr(parser, "stats", None))
         self._transport = transport
         self._parser = parser
