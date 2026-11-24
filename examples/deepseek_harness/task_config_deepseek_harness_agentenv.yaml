@@ -15,7 +15,6 @@
       node: /opt/dsh/bin/node
     sandbox_kwargs:
       proxy_port: 38197
-      tunnel_ssh_host: gateway-relay
   agent:
     name: deepseek_harness
     run_timeout: 7200
@@ -35,7 +34,6 @@
       node: /opt/dsh/bin/node
     sandbox_kwargs:
       proxy_port: 38197
-      tunnel_ssh_host: gateway-relay
   agent:
     name: deepseek_harness
     run_timeout: 7200
