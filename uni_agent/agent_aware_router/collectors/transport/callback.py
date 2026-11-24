@@ -51,8 +51,8 @@ class StatisticEvent:
             (``on_release``) — unified under one field so one parser can treat
             both as "the replica this event is about".
         server_ids: Removed server ids (``on_servers_removed``).
-        prompt_ids: The acquiring request's input token ids (empty when the
-            caller forwarded none). The inflight parser derives the prompt
+        prompt_ids: The acquiring request's input token ids (None when the
+            caller omitted them). The inflight parser derives the prompt
             length from them and resolves the dispatch's block-hash chain to
             pin its blocks on the chosen replica (the router's held-block
             account). Set on ``on_acquire`` only.
@@ -62,7 +62,7 @@ class StatisticEvent:
     request_id: str | None = None
     replica_id: str | None = None
     server_ids: tuple[str, ...] = ()
-    prompt_ids: tuple[int, ...] = ()
+    prompt_ids: tuple[int, ...] | None = None
 
 
 class CallbackTransport(Transport):
@@ -96,7 +96,7 @@ class CallbackTransport(Transport):
                     "on_acquire",
                     request_id=request_id,
                     replica_id=chosen,
-                    prompt_ids=tuple(prompt_ids) if prompt_ids else (),
+                    prompt_ids=tuple(prompt_ids) if prompt_ids is not None else None,
                 ),
                 "",
             )

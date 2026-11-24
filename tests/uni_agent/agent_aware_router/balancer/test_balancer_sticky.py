@@ -19,10 +19,9 @@ from __future__ import annotations
 import pytest
 
 from uni_agent.agent_aware_router.types import MetricKey
+from uni_agent.agent_aware_router.types.kv_cache import GroupReservation
 
 from ._helpers import _make_balancer
-
-pytestmark = [pytest.mark.level0, pytest.mark.cpu]
 
 
 def _kv_metrics(per_replica: dict[str, dict]) -> dict[str, dict]:
@@ -47,6 +46,8 @@ class TestStickyEndToEnd:
         balancer._store.refresh_metrics(metrics)
         return balancer
 
+    @pytest.mark.cpu
+    @pytest.mark.level0
     def test_second_turn_same_request_stays_sticky(self):
         balancer = self._make_balancer(
             {"s0": "h0", "s1": "h1"},
@@ -56,27 +57,40 @@ class TestStickyEndToEnd:
         sid2, _ = balancer.acquire_server("r1", [1, 2])
         assert sid1 == sid2
 
-    def test_overloaded_sticky_falls_back_to_healthy(self):
-        """Feature: bound replica saturates (load>0.9) → rebind to a healthy one.
-        Description: s0 is saturated in BOTH books — the engine-side load=1.0 (kv+running+
-          waiting alone cap at 0.7, so inflight must contribute) and the router's own
-          capacity book (10 held blocks → avail=0 < thresh=16); s1 healthy.
-        Expectation: turn2 routes to s1 (not saturated s0) and rebinds r1→s1
-        """
+    @pytest.mark.cpu
+    @pytest.mark.level0
+    def test_overloaded_sticky_falls_back_to_healthy(self, layout, install_metadata):
+        """The second turn rebinds when the first turn's replica is saturated."""
         balancer = self._make_balancer(
             {"s0": "h0", "s1": "h1"},
-            _kv_metrics({"s0": {}, "s1": {}}),
+            _kv_metrics({"s0": {}, "s1": {"inflight": 1}}),
         )
-        balancer.acquire_server("r1", [1, 2])
+        install_metadata(balancer._store, "s0", layout((("full_attention", 16),), unit=16))
+        install_metadata(balancer._store, "s1", layout((("full_attention", 16),), unit=16))
+        sid1, _ = balancer.acquire_server("r1", [1, 2])
+        assert sid1 == balancer._store.get_sticky_binding("r1") == "s0"
         balancer._store.refresh_metrics(
             _kv_metrics({"s0": {"kv": 1.0, "running": 64, "waiting": 1000, "inflight": 64}, "s1": {"kv": 0.3}})
         )
-        balancer._store.add_kv_blocks("s0", [f"b{i}" for i in range(10)])
-        balancer._store.refresh_metrics({"s0": {MetricKey.NUM_GPU_BLOCKS: 10}})
-        balancer._store.incr_block_refs("s0", [f"b{i}" for i in range(10)])  # 10 held blocks → avail=0 < thresh=16
+        balancer._store.refresh_metrics(
+            {
+                "s0": {MetricKey.NUM_GPU_BLOCKS: 10, MetricKey.KV_CACHE_CAPACITY_BLOCKS: 9},
+                "s1": {MetricKey.NUM_GPU_BLOCKS: 10, MetricKey.KV_CACHE_CAPACITY_BLOCKS: 9},
+            }
+        )
+        balancer._store.pin_request(
+            "busy",
+            "s0",
+            [],
+            balancer._store.dispatch_schema("s0"),
+            reservations=(GroupReservation(0, tuple(f"b{i}" for i in range(10))),),
+            predict=False,
+        )
         sid2, _ = balancer.acquire_server("r1", [1, 2])
-        assert sid2 == "s1"
+        assert sid2 == balancer._store.get_sticky_binding("r1") == "s1"
 
+    @pytest.mark.cpu
+    @pytest.mark.level0
     def test_removed_sticky_server_reselects(self):
         balancer = self._make_balancer(
             {"s0": "h0", "s1": "h1", "s2": "h2"},
@@ -88,6 +102,8 @@ class TestStickyEndToEnd:
         assert sid2 in {"s1", "s2"}
         assert balancer._store.get_sticky_binding("r1") in {"s1", "s2"}
 
+    @pytest.mark.cpu
+    @pytest.mark.level0
     def test_get_status_reports_sticky_size(self):
         balancer = self._make_balancer(
             {"s0": "h0", "s1": "h1"},

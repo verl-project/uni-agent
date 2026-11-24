@@ -51,7 +51,7 @@ class WriteKind:
     POLL = "poll"  # vLLM /metrics absolute snapshot (refresh_metrics)
     ACQUIRE = "acquire"  # request dispatched (incr_metrics on acquire)
     RELEASE = "release"  # request completed (incr_metrics on release)
-    KV_REMOVED = "kv_removed"  # KV blocks removed (remove_kv_blocks)
+    KV_REMOVED = "kv_removed"  # Reported KV block removals
 
 
 # B-class gauge primitives read from a poll event's ``new_values`` (the 3 vLLM
@@ -132,6 +132,14 @@ class Emitter:
         """
         self._emit(EmitKey.ROUTE_LATENCY_SECONDS, latency_s)
 
+    def on_cache_diagnostic(self, replica: str, stage: str, reason: str, count: int = 1) -> None:
+        """Emit a diagnostic delta with bounded stage and reason labels."""
+        self._emit(EmitKey.CACHE_DIAGNOSTICS, count, replica, stage=stage, reason=reason)
+
+    def on_cache_capability(self, replica: str, capability: str, ready: bool) -> None:
+        """Expose whether a replica currently has a validated cache capability."""
+        self._emit(EmitKey.CACHE_CAPABILITY_READY, int(ready), replica, capability=capability)
+
     # ── B-class: store writes ─────────────────────────────────────────
     def on_write(self, event: WriteEvent) -> None:
         """Emit the B-class primitives for one store write, dispatched by kind.
@@ -177,10 +185,11 @@ class Emitter:
         self._emit(EmitKey.INFLIGHT_AVG_TURN, avg, replica)
 
     # ── fan-out ───────────────────────────────────────────────────────
-    def _emit(self, key: str, value: float, replica: str | None = None) -> None:
+    def _emit(self, key: str, value: float, replica: str | None = None, **extra_labels: str) -> None:
         """Map one canonical key to the right facade call via ``EMIT_SPECS``."""
         spec = EMIT_SPECS[key]
         labels: dict[str, Any] = {"replica": replica} if spec["labels"] else {}
+        labels.update(extra_labels)
         metric_type = spec["type"]
         if metric_type == "counter":
             metric_count(key, value, spec["help"], **labels)

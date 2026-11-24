@@ -25,8 +25,6 @@ from uni_agent.agent_aware_router.collectors.provider import CollectorManager
 from uni_agent.agent_aware_router.collectors.transport.base import Transport
 from uni_agent.agent_aware_router.config.collector import CollectorConfig
 
-pytestmark = [pytest.mark.cpu, pytest.mark.level0]
-
 
 class RecordingTransport(Transport):
     is_async = False
@@ -50,6 +48,8 @@ class RecordingTransport(Transport):
         self.registered = False
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.parametrize("rollback_fails", [False, True])
 def test_start_rolls_back_partial_current_and_prefix_without_hiding_failure(monkeypatch, rollback_fails):
     calls = []
@@ -77,6 +77,8 @@ def test_start_rolls_back_partial_current_and_prefix_without_hiding_failure(monk
             manager.stop()
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_start_preflight_preserves_an_existing_session(monkeypatch):
     calls = []
     transports = [RecordingTransport(index, calls) for index in range(2)]
@@ -93,6 +95,8 @@ def test_start_preflight_preserves_an_existing_session(monkeypatch):
         manager.stop()
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 @pytest.mark.parametrize("failed_indices", [(0,), (0, 2)], ids=["one-failure", "multiple-failures"])
 def test_stop_attempts_every_collector_and_can_retry_after_failures(monkeypatch, caplog, failed_indices):
     calls = []
@@ -126,3 +130,26 @@ def test_stop_attempts_every_collector_and_can_retry_after_failures(monkeypatch,
     manager.stop()
     assert calls == [0, 1, 2, 0, 1, 2]
     assert all(collector.attempts == 2 for collector in collectors.values())
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_metadata_initial_window_finishes_before_other_collectors_start(monkeypatch):
+    calls = []
+
+    class InitialMetadataTransport(RecordingTransport):
+        def wait_initial(self, timeout):
+            calls.append(("initial", timeout))
+            return False
+
+    metadata = Collector(InitialMetadataTransport("metadata", calls), StickyParser())
+    other = Collector(RecordingTransport("events", calls), StickyParser())
+    monkeypatch.setattr(
+        provider_module, "get_collector", lambda name, *args, **kwargs: metadata if name == "vllm_metadata" else other
+    )
+    manager = CollectorManager(CollectorConfig(), ["events"], metadata_servers={"a": "handle"})
+    try:
+        manager.start()
+        assert calls == [("start", "metadata"), ("initial", 5.0), ("start", "events")]
+    finally:
+        manager.stop()

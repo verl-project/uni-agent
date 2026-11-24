@@ -35,8 +35,6 @@ from uni_agent.agent_aware_router.insight.emitter import (
 )
 from uni_agent.agent_aware_router.types.emit_spec import EMIT_SPECS, EmitKey
 
-pytestmark = [pytest.mark.level0, pytest.mark.cpu]
-
 
 class FakeRLInsight:
     """Records metric_* calls as uniform dicts."""
@@ -110,6 +108,8 @@ def _by_name(calls: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
 # ── env gating ───────────────────────────────────────────────────────
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_disabled_short_circuits_before_importing_rl_insight(monkeypatch: pytest.MonkeyPatch):
     # env off — the facade must short-circuit before it ever imports rl_insight.
     monkeypatch.delenv(facade.ENABLE_ENV, raising=False)
@@ -123,6 +123,8 @@ def test_disabled_short_circuits_before_importing_rl_insight(monkeypatch: pytest
 # ── A-class: on_score / on_route ─────────────────────────────────────
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_on_score_emits_each_component_with_replica_label(
     enabled_emitter: FakeRLInsight,
 ):
@@ -135,12 +137,16 @@ def test_on_score_emits_each_component_with_replica_label(
     assert _by_name(enabled_emitter.calls)[EmitKey.AVAIL_RATIO]["value"] == 0.3
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_on_score_skips_unknown_component_keys(enabled_emitter: FakeRLInsight):
     emitter.on_score("n0", {"avail_ratio": 0.3, "not_a_metric": 9.9})
 
     assert [c["name"] for c in enabled_emitter.calls] == [EmitKey.AVAIL_RATIO]
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_on_route_emits_global_latency_histogram(enabled_emitter: FakeRLInsight):
     emitter.on_route(0.005)
 
@@ -154,9 +160,26 @@ def test_on_route_emits_global_latency_histogram(enabled_emitter: FakeRLInsight)
     assert call["labels"] == {}  # global — no replica label
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_cache_diagnostics_emit_reason_counts_and_capability_state(enabled_emitter: FakeRLInsight):
+    emitter.on_cache_diagnostic("n0", "native_identity", "digest_mismatch", count=3)
+    emitter.on_cache_capability("n0", "native_identity", False)
+    emitter.on_cache_capability("n0", "native_identity", True)
+
+    calls = enabled_emitter.calls
+    assert [(call["method"], call["value"]) for call in calls] == [("counter", 3), ("gauge", 0), ("gauge", 1)]
+    assert calls[0]["name"] == EmitKey.CACHE_DIAGNOSTICS
+    assert calls[0]["labels"] == {"replica": "n0", "stage": "native_identity", "reason": "digest_mismatch"}
+    assert calls[1]["name"] == calls[2]["name"] == EmitKey.CACHE_CAPABILITY_READY
+    assert calls[1]["labels"] == calls[2]["labels"] == {"replica": "n0", "capability": "native_identity"}
+
+
 # ── B-class: on_write by kind ────────────────────────────────────────
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_on_write_poll_emits_levels_cumulatives_and_load(
     enabled_emitter: FakeRLInsight,
 ):
@@ -180,6 +203,8 @@ def test_on_write_poll_emits_levels_cumulatives_and_load(
     assert all(c["labels"] == {"replica": "n0"} for c in enabled_emitter.calls)
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_on_write_acquire_emits_counters_tokens_and_avg_turn(
     enabled_emitter: FakeRLInsight,
 ):
@@ -211,6 +236,8 @@ def test_on_write_acquire_emits_counters_tokens_and_avg_turn(
     assert by_name[EmitKey.INFLIGHT_AVG_TURN]["value"] == 1.5
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_on_write_release_emits_completed_tokens_and_avg_turn_zero_when_idle(
     enabled_emitter: FakeRLInsight,
 ):
@@ -235,6 +262,8 @@ def test_on_write_release_emits_completed_tokens_and_avg_turn_zero_when_idle(
     assert by_name[EmitKey.INFLIGHT_AVG_TURN]["value"] == 0.0  # count 0 → defined as 0
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_on_write_kv_removed_emits_eviction_delta(enabled_emitter: FakeRLInsight):
     emitter.on_write(WriteEvent(kind=WriteKind.KV_REMOVED, node="n0", deltas={EmitKey.KV_EVICTIONS: 7}))
 
@@ -247,6 +276,8 @@ def test_on_write_kv_removed_emits_eviction_delta(enabled_emitter: FakeRLInsight
     )
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_on_write_acquire_without_optional_fields_skips_them(
     enabled_emitter: FakeRLInsight,
 ):
@@ -265,6 +296,8 @@ def test_on_write_acquire_without_optional_fields_skips_them(
 # ── contract sanity: every WriteEvent-reachable primitive is in EMIT_SPECS ──
 
 
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_emit_spec_contract_covers_all_referenced_primitives():
     referenced = {
         EmitKey.KV_CACHE_USAGE_PERC,

@@ -24,13 +24,14 @@ import asyncio
 import logging
 import threading
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Callable, Coroutine
 
 import zmq
 import zmq.asyncio
 from zmq.utils.monitor import recv_monitor_message
 
 from ...collectors.transport.base import Transport
+from ...types.kv_cache import InvalidKVEventPayload
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,7 @@ class _EndpointSocketSet:
     closed: bool = False
     pending_live: dict[int, bytes] = field(default_factory=dict)
     pending_bytes: int = 0
+    replay_revision: int = 0
 
 
 class ZMQTransport(Transport):
@@ -80,7 +82,7 @@ class ZMQTransport(Transport):
         base_retry_delay: Initial retry delay in seconds.
         max_retry_delay: Maximum retry delay cap in seconds.
         max_retry_attempts: Retries per recovery round, and retries for invalid
-            framing before the endpoint stops. Recovery rounds cool down and
+            framing or undecodable KV payloads before the endpoint stops. Recovery rounds cool down and
             continue until stopped.
         retry_backoff_factor: Exponential backoff multiplier.
         on_stream_reset: Gate and clear the replica's view before rebuilding,
@@ -89,6 +91,8 @@ class ZMQTransport(Transport):
             subscription-only mode.
         on_stream_unavailable: Clear stale stream state and permit dispatch
             estimates while disconnected. If omitted, reset remains the fallback.
+        get_replay_revision: Snapshot the metadata revision when opening a session.
+        on_stream_ready_revision: Revision-aware alternative to ``on_stream_ready``.
     """
 
     _CONNECTION_TIMEOUT = 5.0
@@ -108,6 +112,9 @@ class ZMQTransport(Transport):
         on_stream_reset: Callable[[str], None] | None = None,
         on_stream_ready: Callable[[str], None] | None = None,
         on_stream_unavailable: Callable[[str], None] | None = None,
+        on_stream_refresh: Callable[[str], None] | None = None,
+        get_replay_revision: Callable[[str], int] | None = None,
+        on_stream_ready_revision: Callable[[str, int], None] | None = None,
     ) -> None:
         self._replay_cursors: dict[str, int] = {}
         self._base_retry_delay = base_retry_delay
@@ -117,6 +124,9 @@ class ZMQTransport(Transport):
         self._on_stream_reset = on_stream_reset
         self._on_stream_ready = on_stream_ready
         self._on_stream_unavailable = on_stream_unavailable
+        self._on_stream_refresh = on_stream_refresh
+        self._get_replay_revision = get_replay_revision
+        self._on_stream_ready_revision = on_stream_ready_revision
 
         # endpoints: {replica_id: [sub_endpoint, replay_endpoint, publisher, topic]}
         # replay_endpoint may be empty ("") for sub-only mode (e.g. standalone
@@ -125,24 +135,55 @@ class ZMQTransport(Transport):
         self._replay_endpoints: dict[str, str] = {}
         self._topics: dict[str, str] = {}
         for replica_id, addrs in endpoints.items():
-            if len(addrs) < 4:
-                raise ValueError(
-                    f"endpoint '{replica_id}' needs 4 elements [sub, replay, publisher, topic], got {len(addrs)}"
-                )
-            if addrs[2] != "zmq":
-                raise ValueError(f"endpoint '{replica_id}' publisher must be 'zmq', got '{addrs[2]}'")
-            self._sub_endpoints[replica_id] = f"tcp://{addrs[0]}"
-            self._replay_endpoints[replica_id] = f"tcp://{addrs[1]}" if addrs[1] else ""
-            self._topics[replica_id] = addrs[3]
+            sub, replay, topic = self._endpoint_addresses(replica_id, addrs)
+            self._sub_endpoints[replica_id] = sub
+            self._replay_endpoints[replica_id] = replay
+            self._topics[replica_id] = topic
 
         self._stopped = False
         self._endpoint_sockets: dict[str, _EndpointSocketSet] = {}
         self._retry_counts: dict[str, int] = {}
         self._malformed_counts: dict[str, int] = {}
+        self._decode_failures: dict[str, int] = {}
         self._stream_states: dict[str, str] = {}
         self._stream_reasons: dict[str, str | None] = {}
         self._stream_status_lock = threading.Lock()
         self._sub_tasks: dict[str, asyncio.Task] = {}
+        self._replay_events = {replica_id: asyncio.Event() for replica_id in endpoints}
+        self._metadata_revisions: dict[str, int] = {}
+        self._endpoints_changed = asyncio.Event()
+        self._subscription_owner: asyncio.Task | None = None
+
+    @staticmethod
+    def _endpoint_addresses(replica_id, addrs):
+        if len(addrs) < 4:
+            raise ValueError(
+                f"endpoint '{replica_id}' needs 4 elements [sub, replay, publisher, topic], got {len(addrs)}"
+            )
+        if addrs[2] != "zmq":
+            raise ValueError(f"endpoint '{replica_id}' publisher must be 'zmq', got '{addrs[2]}'")
+        return f"tcp://{addrs[0]}", f"tcp://{addrs[1]}" if addrs[1] else "", addrs[3]
+
+    def register_endpoints(self, endpoints: dict[str, list[str]]) -> None:
+        """Install previously undiscovered startup sources on the subscription loop."""
+        for replica_id, addresses in endpoints.items():
+            if replica_id in self._sub_endpoints:
+                continue
+            sub, replay, topic = self._endpoint_addresses(replica_id, addresses)
+            self._sub_endpoints[replica_id] = sub
+            self._replay_endpoints[replica_id] = replay
+            self._topics[replica_id] = topic
+            self._replay_events[replica_id] = asyncio.Event()
+            self._endpoints_changed.set()
+
+    def request_replay(self, replica_id: str, metadata_revision: int) -> None:
+        """Replay a metadata revision on the loop after its caller gates the replica view."""
+        if self._stopped or replica_id not in self._replay_events:
+            return
+        if metadata_revision <= self._metadata_revisions.get(replica_id, -1):
+            return
+        self._metadata_revisions[replica_id] = metadata_revision
+        self._replay_events[replica_id].set()
 
     def get_stream_status(self) -> dict:
         """Return independent last-observed stream states, retained after stop."""
@@ -155,37 +196,52 @@ class ZMQTransport(Transport):
     async def subscribe(self, handler: Callable[[bytes | str, str], None]) -> None:
         """Run endpoints independently; consumer exceptions stop only that endpoint."""
         self._stopped = False
+        owner = self._subscription_owner = asyncio.current_task()
+        changed = self._endpoints_changed = asyncio.Event()
+        self._replay_events = {replica_id: asyncio.Event() for replica_id in self._sub_endpoints}
         self._retry_counts.clear()
         self._malformed_counts.clear()
+        self._decode_failures.clear()
         with self._stream_status_lock:
             self._stream_states.clear()
             self._stream_reasons.clear()
-        tasks = {
-            replica_id: asyncio.create_task(self._subscribe_for_endpoint(replica_id, handler))
-            for replica_id in self._sub_endpoints
-        }
-        self._sub_tasks.update(tasks)
+        tasks: dict[str, asyncio.Task] = {}
         try:
-            await asyncio.gather(*tasks.values(), return_exceptions=True)
+            while not self._stopped and self._subscription_owner is owner:
+                changed.clear()
+                for node in self._sub_endpoints:
+                    if node not in tasks:
+                        tasks[node] = self._sub_tasks[node] = asyncio.create_task(
+                            self._subscribe_for_endpoint(node, handler)
+                        )
+                await changed.wait()
         finally:
             for task in tasks.values():
                 task.cancel()
             try:
+                if tasks:
+                    await asyncio.wait(tasks.values())
                 await asyncio.gather(*tasks.values(), return_exceptions=True)
             finally:
                 for replica_id, task in tasks.items():
                     if self._sub_tasks.get(replica_id) is task:
                         del self._sub_tasks[replica_id]
+                if self._subscription_owner is owner:
+                    self._subscription_owner = None
 
     def stop(self) -> None:
         """Cancel the current subscription and close its sockets and monitors."""
         self._stopped = True
+        self._endpoints_changed.set()
         for task in self._sub_tasks.values():
             task.cancel()
         self._sub_tasks.clear()
         for sockets in list(self._endpoint_sockets.values()):
             self._close_zmq_sockets_for(sockets)
         self._replay_cursors.clear()
+        self._metadata_revisions.clear()
+        for event in self._replay_events.values():
+            event.clear()
 
     # ── ZMQ connection management ───────────────────────────────────────
 
@@ -199,6 +255,8 @@ class ZMQTransport(Transport):
             sub_monitor = sub_socket.get_monitor_socket()
             opened.append(sub_monitor)
             sockets = _EndpointSocketSet(replica_id, ctx, sub_socket, sub_monitor)
+            if self._get_replay_revision is not None:
+                sockets.replay_revision = self._get_replay_revision(replica_id)
             sub_socket.setsockopt_string(zmq.SUBSCRIBE, self._topics[replica_id])
             sub_socket.connect(self._sub_endpoints[replica_id])
             replay_addr = self._replay_endpoints[replica_id]
@@ -257,13 +315,15 @@ class ZMQTransport(Transport):
 
     # ── Per-endpoint subscription ────────────────────────────────────────
 
-    def _transition_stream(self, replica_id: str, state: str, reason: str | None = None) -> None:
+    def _transition_stream(
+        self, replica_id: str, state: str, reason: str | None = None, *, force_reset: bool = False, revision: int = 0
+    ) -> None:
         """Notify availability changes once; fatal always retries safe invalidation."""
         with self._stream_status_lock:
             previous = self._stream_states.get(replica_id)
             self._stream_states[replica_id] = state
             self._stream_reasons[replica_id] = reason
-        if state == previous and state != "fatal":
+        if state == previous and state != "fatal" and not force_reset:
             if state != "unavailable" or self._on_stream_unavailable is not None:
                 return
         callback = self._on_stream_reset
@@ -271,10 +331,13 @@ class ZMQTransport(Transport):
             callback = self._on_stream_unavailable
         elif state == "ready":
             callback = self._on_stream_ready
-        elif state == "rebuilding" and previous == "unavailable" and self._on_stream_unavailable is None:
+        elif not force_reset and state == "rebuilding" and previous == "unavailable":
             # Legacy callers already gated the view through the reset fallback.
-            callback = None
-        if callback is not None:
+            if self._on_stream_unavailable is None:
+                callback = None
+        if state == "ready" and self._on_stream_ready_revision is not None:
+            self._on_stream_ready_revision(replica_id, revision)
+        elif callback is not None:
             callback(replica_id)
         if state != previous and state in ("unavailable", "rebuilding"):
             logger.info("ZMQ replica %s %s", replica_id, state)
@@ -286,31 +349,52 @@ class ZMQTransport(Transport):
                 return
             self._replay_cursors.pop(replica_id, None)
             self._transition_stream(replica_id, "unavailable")
+            refresh_on_loss = False
+            controlled = False
             while not self._stopped and self._sub_tasks.get(replica_id) is asyncio.current_task():
-                malformed = False
+                if controlled:
+                    # A replay can interrupt either the live session or its reconnect backoff.
+                    self._transition_stream(replica_id, "rebuilding", force_reset=True)
+                malformed_kind = None
                 reason = None
                 sockets = await self._connect_zmq_for(replica_id)
                 if sockets is not None:
                     try:
-                        await self._consume_session(sockets, handler)
-                    except _StreamReset as exc:
-                        malformed = isinstance(exc, _MalformedFrame)
+                        controlled = await self._run_until_replay(replica_id, self._consume_session(sockets, handler))
+                    except (_StreamReset, InvalidKVEventPayload) as exc:
+                        # A failed decode may hide a removal. Rebuild the index just as for a gap.
+                        if isinstance(exc, _MalformedFrame):
+                            malformed_kind = "malformed-frame"
+                        elif isinstance(exc, InvalidKVEventPayload):
+                            malformed_kind = "invalid-payload"
+                        controlled = False
                         reason = f"{type(exc).__name__}: {exc}"
                         logger.warning("ZMQ stream interrupted for %s: %s", replica_id, exc)
                     finally:
                         self._close_zmq_sockets_for(sockets)
+                else:
+                    controlled = False
                 if self._stopped or self._sub_tasks.get(replica_id) is not asyncio.current_task():
                     return
                 self._replay_cursors.pop(replica_id, None)
-                if malformed:
-                    failures = self._malformed_counts.get(replica_id, 0) + 1
-                    self._malformed_counts[replica_id] = failures
+                refresh_on_loss = refresh_on_loss or self._stream_states[replica_id] == "ready"
+                if controlled:
+                    continue
+                # Handshake retries during one outage must not obsolete a slow metadata reply.
+                if refresh_on_loss and self._on_stream_refresh is not None:
+                    self._on_stream_refresh(replica_id)
+                refresh_on_loss = False
+                failures = 0
+                if malformed_kind is not None:
+                    counts = self._decode_failures if malformed_kind == "invalid-payload" else self._malformed_counts
+                    failures = counts.get(replica_id, 0) + 1
+                    counts[replica_id] = failures
                     if failures > self._max_retry_attempts:
-                        self._transition_stream(replica_id, "fatal", f"malformed-frame retries exhausted: {reason}")
-                        logger.warning("ZMQ malformed-frame retries exhausted for replica %s", replica_id)
+                        self._transition_stream(replica_id, "fatal", f"{malformed_kind} retries exhausted: {reason}")
+                        logger.warning("ZMQ %s retries exhausted for replica %s", malformed_kind, replica_id)
                         return
                 self._transition_stream(replica_id, "unavailable", reason)
-                await self._wait_to_retry(replica_id, malformed)
+                controlled = await self._run_until_replay(replica_id, self._wait_to_retry(replica_id, failures))
         except asyncio.CancelledError:
             pass
         except Exception as exc:
@@ -326,10 +410,30 @@ class ZMQTransport(Transport):
             if sockets is not None:
                 self._close_zmq_sockets_for(sockets)
 
-    async def _wait_to_retry(self, replica_id: str, malformed: bool) -> None:
+    async def _run_until_replay(self, replica_id: str, operation: Coroutine[None, None, None]) -> bool:
+        event = self._replay_events[replica_id]
+        session = asyncio.create_task(operation)
+        replay = asyncio.create_task(event.wait())
+        try:
+            if event.is_set():
+                event.clear()
+                return True
+            done, _ = await asyncio.wait((session, replay), return_when=asyncio.FIRST_COMPLETED)
+            if session in done:
+                await session
+                return False
+            await replay
+            event.clear()
+            return True
+        finally:
+            session.cancel()
+            replay.cancel()
+            await asyncio.gather(session, replay, return_exceptions=True)
+
+    async def _wait_to_retry(self, replica_id: str, protocol_failures: int) -> None:
         """Bound recovery bursts without letting healthy replay hide invalid framing."""
-        if malformed:
-            retry_count = self._malformed_counts[replica_id] - 1
+        if protocol_failures:
+            retry_count = protocol_failures - 1
         else:
             retry_count = self._retry_counts.get(replica_id, 0)
             if retry_count >= self._max_retry_attempts:
@@ -361,7 +465,10 @@ class ZMQTransport(Transport):
         if sockets.replay_socket is not None:
             await self._consume_replay(sockets, poller, handler)
         await self._merge_pending_live(sockets, poller, handler)
-        self._transition_stream(sockets.replica_id, "ready")
+        self._transition_stream(sockets.replica_id, "ready", revision=sockets.replay_revision)
+        # Reaching ready ends this decode-recovery episode, even on a quiet
+        # subscription. Valid replay frames before a failed batch do not.
+        self._decode_failures.pop(sockets.replica_id, None)
         logger.info("ZMQ replica %s ready", sockets.replica_id)
         await self._consume_live(sockets, poller, handler)
 
