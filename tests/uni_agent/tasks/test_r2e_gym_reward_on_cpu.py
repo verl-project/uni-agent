@@ -13,7 +13,7 @@ from uni_agent.tasks.r2e_gym import reward, task
 
 PASSING_OUTPUT = "=== short test summary info ===\nPASSED r2e_tests/test_fix.py::test_fix\n"
 METADATA = {"instance_id": "repo__abc", "expected_output_json": '{"test_fix": "PASSED"}'}
-_ABSOLUTE_PATH = re.compile(r"(?<![\w./$-])/(root|testbed|tmp|r2e_tests|run_tests\.sh)(?=[/\s\"';]|$)")
+_ABSOLUTE_PATH = re.compile(r"(?<![\w./$-])/(root|testbed|tmp|usr|opt|r2e_tests|run_tests\.sh)(?=[/\s\"';]|$)")
 
 
 def _in_fake_root(script: str, root: Path) -> str:
@@ -98,3 +98,39 @@ def test_r2e_setup_hides_held_out_tests_and_restore_brings_them_back(tmp_path):
     assert (testbed / "r2e_tests").resolve() == (tmp_path / "root" / "r2e_tests").resolve()
     assert (testbed / "r2e_tests" / "test_fix.py").read_text() == "def test_fix(): pass\n"
     assert not archive.exists()
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.skipif(shutil.which("tar") is None, reason="needs tar")
+def test_r2e_setup_removes_symlink_targets_outside_testbed(tmp_path):
+    (tmp_path / "tmp").mkdir()
+    (tmp_path / "testbed").mkdir()
+    (tmp_path / "testbed" / "conftest.py").write_text("# repository file\n")
+    (tmp_path / "run_tests.sh").write_text("echo held-out runner\n")
+    held_out = tmp_path / "opt" / "r2e_tests"
+    held_out.mkdir(parents=True)
+    (held_out / "test_fix.py").write_text("def test_fix(): pass\n")
+    (tmp_path / "opt" / "helper.py").write_text("HELPER = 1\n")
+    (held_out / "helper.py").symlink_to(tmp_path / "opt" / "helper.py")
+    (held_out / "conftest.py").symlink_to(tmp_path / "testbed" / "conftest.py")
+    (tmp_path / "usr" / "lib").mkdir(parents=True)
+    (tmp_path / "usr" / "lib" / "plugin.py").write_text("# runtime environment\n")
+    (held_out / "plugin.py").symlink_to(tmp_path / "usr" / "lib" / "plugin.py")
+    (tmp_path / "root").mkdir()
+    (tmp_path / "root" / "r2e_tests").symlink_to(held_out)
+
+    setup = _run(task._SETUP_SCRIPT, tmp_path)
+    assert setup.returncode == 0, setup.stderr
+
+    assert not held_out.exists()
+    assert not (tmp_path / "opt" / "helper.py").exists()
+    assert not (tmp_path / "root" / "r2e_tests").is_symlink()
+    assert (tmp_path / "testbed" / "conftest.py").read_text() == "# repository file\n"
+    assert (tmp_path / "usr" / "lib" / "plugin.py").read_text() == "# runtime environment\n"
+
+    restore = _run(reward._RESTORE_SCRIPT, tmp_path)
+    assert restore.returncode == 0, restore.stderr
+    restored = tmp_path / "root" / "r2e_tests"
+    assert (restored / "test_fix.py").read_text() == "def test_fix(): pass\n"
+    assert (restored / "helper.py").read_text() == "HELPER = 1\n"

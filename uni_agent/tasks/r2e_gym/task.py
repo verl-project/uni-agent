@@ -52,7 +52,26 @@ cp -RL "$tests_dir" "$stage/r2e_tests"
 find "$stage" -name '__pycache__' -type d -prune -exec rm -rf {} +
 find "$stage" -name '*.pyc' -delete
 tar -czf /tmp/r2e_eval_assets.tar.gz -C "$stage" run_tests.sh r2e_tests
-rm -rf "$stage" /r2e_tests /root/r2e_tests /testbed/r2e_tests /run_tests.sh /root/run_tests.sh /testbed/run_tests.sh
+rm -rf "$stage"
+
+# Also remove what the runner, the test tree, and links inside it point to, so a symlinked copy elsewhere (for
+# example /opt/r2e_tests) does not stay readable. Repository files (/testbed) and the runtime environment
+# (system and virtualenv paths) are kept.
+hide_target() {
+    local target
+    target="$(readlink -f "$1" 2>/dev/null || true)"
+    case "$target" in
+        "" | / | /testbed | /testbed/* | /root | /root/.venv* | /root/.local* | /tmp | /opt | /opt/conda* | \
+            /usr | /usr/* | /bin* | /sbin* | /lib* | /etc* | /proc* | /sys* | /dev* | /var* | /home) ;;
+        *) rm -rf "$target" ;;
+    esac
+}
+while IFS= read -r -d '' link; do
+    hide_target "$link"
+done < <(find "$tests_dir/" -type l -print0)
+hide_target "$runner"
+hide_target "$tests_dir"
+rm -rf /r2e_tests /root/r2e_tests /testbed/r2e_tests /run_tests.sh /root/run_tests.sh /testbed/run_tests.sh
 
 find /testbed -name '*.pyc' -delete
 find /testbed -name '__pycache__' -type d -prune -exec rm -rf {} +
