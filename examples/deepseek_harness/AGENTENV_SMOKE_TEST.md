@@ -104,7 +104,7 @@ PY
 )
 ```
 
-看到 `AGENTENV_DSH_TOOL_EXEC_OK` 就确认 DSH 完成了模型调用并实际执行了 Bash 工具。这是一条工具执行冒烟用例。验证真实 SWE 修复时，使用同一实例的 `problem_statement`，再运行该实例的测试来评估修复结果。验证 Uni-Agent 的路由、Gateway SSH 中继和训练集成时，使用 [AgentEnv 接入手册](AGENTENV.md) 中的 rollout 流程。
+看到 `AGENTENV_DSH_TOOL_EXEC_OK` 就确认 DSH 完成了模型调用并实际执行了 Bash 工具。这是一条工具执行冒烟用例。验证真实 SWE 修复时，使用同一实例的 `problem_statement`，再运行该实例的测试来评估修复结果。验证 Uni-Agent 的路由、Gateway 直连和训练集成时，使用 [AgentEnv 接入手册](AGENTENV.md) 中的 rollout 流程。
 
 ## 故障定位
 
