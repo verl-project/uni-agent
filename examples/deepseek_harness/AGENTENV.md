@@ -34,16 +34,7 @@ python -m uni_agent.tasks.swe_bench.preprocess \
 
 配置默认从每个样本的任务镜像 cold start。已有对应 AgentEnv 模板时，可以在该任务的 `sandbox_kwargs.template` 指定模板 ID 或别名。模板优先于样本镜像，每个挂载需要一个可用的 drive slot。整批样本使用不同任务镜像时，继续使用样本驱动的 cold start，或由调用方为每条样本选择对应模板。
 
-示例已启用 SSH 中继。若 guest 能直连模型 Gateway，可以移除 `proxy_port`。
-
-```yaml
-sandbox_kwargs:
-  proxy_port: 38197
-```
-
-在 guest 内为沙箱执行用户配置 `gateway-relay` SSH host alias、受信任的 host key 和非交互认证，并确保 `ssh` 和 `curl` 可执行。guest 需要能连接中继，中继需要能访问模型 Gateway，并允许向其地址和端口转发。凭据通过部署环境提供。
-
-`run_task` 从当前 Gateway session 提取 HTTP 上游并保留 session 路径，将 DSH 的模型地址改写为 `http://127.0.0.1:38197/…`。上游使用带显式端口的 HTTP 地址。AgentEnv 在启动阶段检查中继能否返回 HTTP 响应，单次真实 rollout 用于验证带认证的流式请求。
+示例配置 `sandbox_kwargs.proxy_port: 38197`。`run_task` 保留 Gateway session URL 的协议、主机和路径，将端口替换为 `38197`。DSH 从 guest 直接连接该地址，Gateway 必须在该端口提供服务。若 session URL 自带的端口可直接使用，可以移除 `proxy_port`。
 
 ## 3. 验证挂载并启动预跑
 
@@ -92,13 +83,13 @@ MODEL_PATH=/path/to/model \
 bash examples/deepseek_harness/run_train.sh
 ```
 
-在 `AGENT_LOG_DIR` 对应的 session 日志中检查 DSH 启动、首个模型响应和任务结束状态。如果启用了隧道，确认流式响应在请求结束前到达，且对应的 Gateway session 能收到完整请求。
+在 `AGENT_LOG_DIR` 对应的 session 日志中检查 DSH 启动、首个模型响应和任务结束状态。确认流式响应在请求结束前到达，且对应的 Gateway session 能收到完整请求。
 
 ## 4. 接入现有流量分配
 
 建议先用单一 AgentEnv provider 完成预跑。启用 `provider: routes` 时，每个 `routes[].config` 都是一份完整的子沙箱配置，`image`、`image_map`、`image_mounts` 和 `executable_paths` 放在各自的子配置里。SWE 样本提供的 `sandbox.image` 会由任务配置解析器自动传给需要镜像的子路由，每个子路由再应用自己的 `image_map`。子路由已指定的镜像、E2B/AgentEnv 模板以及本地路由配置优先。
 
-需要隧道时，`proxy_port` 放在外层 `sandbox_kwargs`。所有候选 provider 都需要支持隧道。按 Gateway session ID 固定路由的行为由 runner 提供，启动阶段的瞬时故障可按路由配置回退。详见 [沙箱流量分配配置](../../docs/source/quickstart/launch-sandbox.md#traffic-splitting-between-sandbox-providers)。
+使用包含 AgentEnv 的混合路由时，外层配置应省略 `proxy_port`，让各候选 guest 使用同一个可直连的 Gateway session URL。按 Gateway session ID 固定路由的行为由 runner 提供，启动阶段的瞬时故障可按路由配置回退。详见 [沙箱流量分配配置](../../docs/source/quickstart/launch-sandbox.md#traffic-splitting-between-sandbox-providers)。
 
 ## 常见故障
 
@@ -109,5 +100,4 @@ bash examples/deepseek_harness/run_train.sh
 | 创建镜像挂载失败 | 检查任务镜像和工具镜像的仓库访问权限、部署的原生挂载能力，以及 warm start 的 drive slot |
 | cold start 超时 | 查看根镜像和工具镜像的拉取、转换日志，以及 worker 的 `SANDBOX_STARTUP_TIMEOUT` |
 | `dsh` 或 `node` 启动失败 | 检查工具镜像架构，以及挂载目录下的 `bin/dsh`、`bin/node` 和运行库 |
-| Gateway SSH 隧道启动失败 | 检查 guest 的 SSH alias、认证、host key 和本地监听端口 |
-| Gateway 经隧道不可达 | 检查中继到 Gateway 的访问与转发权限，以及上游是否提供 HTTP 服务 |
+| Gateway 直连失败 | 从 guest 检查 Gateway 主机、端口和网络访问策略 |
