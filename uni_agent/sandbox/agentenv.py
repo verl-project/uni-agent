@@ -26,9 +26,8 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 from typing import TYPE_CHECKING, Any
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote
 
 from .e2b import E2BSandbox
 from .registry import register_sandbox
@@ -97,15 +96,12 @@ class AgentEnvSandbox(E2BSandbox):
     inherited from :class:`E2BSandbox`.
     """
 
-    supports_reverse_tunnel = True
-
     def __init__(
         self,
         *,
         api_url: str | None = None,
         sandbox_url: str | None = None,
         api_key: str | None = None,
-        upstream: str | None = None,
         proxy_port: int | None = None,
         image_mounts: list[ImageMount] | None = None,
         **kwargs: Any,
@@ -123,15 +119,6 @@ class AgentEnvSandbox(E2BSandbox):
             raise ValueError(
                 f"AgentEnvSandbox is missing required connection settings (values are never logged). Configure {hints}."
             )
-        if proxy_port is not None or upstream is not None:
-            if type(proxy_port) is not int or not 2 <= proxy_port <= 65535:
-                raise ValueError("AgentEnv tunnel proxy_port must be an integer between 2 and 65535")
-            if upstream is None or not re.fullmatch(r"[a-zA-Z0-9_.-]+:[0-9]{1,5}", upstream):
-                raise ValueError("AgentEnv tunnel upstream must be a hostname or IPv4 address with a port")
-            if not 1 <= int(upstream.rsplit(":", 1)[1]) <= 65535:
-                raise ValueError("AgentEnv tunnel upstream port must be between 1 and 65535")
-        self._tunnel_proxy_port = proxy_port
-        self._tunnel_upstream = upstream
         super().__init__(
             api_url=resolved["api_url"], sandbox_url=resolved["sandbox_url"], api_key=resolved["api_key"], **kwargs
         )
@@ -203,69 +190,10 @@ class AgentEnvSandbox(E2BSandbox):
                     logger.warning("Failed to clean up AgentEnv sandbox %s after connect failed", sandbox_id)
                 raise
 
-    @classmethod
-    def tunnel_upstream(cls, base_url: str) -> str | None:
-        # The task runner rewrites the URL to HTTP on the guest loopback.
-        if urlsplit(base_url).scheme != "http":
-            return None
-        return super().tunnel_upstream(base_url)
-
     async def start(self) -> None:
-        if self._sandbox is not None:
-            return
-        if not self.image_mounts and self._tunnel_proxy_port is None:
-            await super().start()
-            return
-
         try:
             await super().start()
-            port = self._tunnel_proxy_port
-            if port is None:
-                return
-            result = await self.exec(
-                [
-                    "ssh",
-                    "-fNT",
-                    "-o",
-                    "BatchMode=yes",
-                    "-o",
-                    "StrictHostKeyChecking=yes",
-                    "-o",
-                    "ExitOnForwardFailure=yes",
-                    "-o",
-                    "ConnectTimeout=10",
-                    "-o",
-                    "ServerAliveInterval=15",
-                    "-o",
-                    "ServerAliveCountMax=3",
-                    "-L",
-                    f"127.0.0.1:{port}:{self._tunnel_upstream}",
-                    "gateway-relay",
-                ],
-                timeout=20,
-            )
-            if result.exit_code != 0:
-                raise ConnectionError("AgentEnv could not start the Gateway SSH tunnel")
-
-            # SSH confirms the local bind. An HTTP response confirms that the
-            # relay can also reach the Gateway (including gateways with no / route).
-            result = await self.exec(
-                [
-                    "curl",
-                    "-q",
-                    "--noproxy",
-                    "*",
-                    "--silent",
-                    "--output",
-                    "/dev/null",
-                    "--max-time",
-                    "5",
-                    f"http://127.0.0.1:{port}/",
-                ],
-                timeout=8,
-            )
-            if result.exit_code != 0:
-                raise ConnectionError("AgentEnv Gateway is unreachable through the SSH tunnel")
         except BaseException:
-            await self.stop()
+            if self.image_mounts:
+                await self.stop()
             raise
