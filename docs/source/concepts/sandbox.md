@@ -119,7 +119,7 @@ These checks require the normal test dependencies, including `pytest`, `pydantic
 
 All providers share the public `Sandbox.exec()` error policy:
 
-- A timeout becomes `ExecResult(exit_code=-1)`.
+- A timeout becomes `ExecResult(exit_code=-1, timed_out=True)`; check `timed_out`, since a command can legitimately exit with a negative code.
 - A normal command/provider error while the sandbox is alive becomes `exit_code=127`.
 - An infrastructure error after the sandbox has died is re-raised.
 - A provider's `_is_fatal_exec_error()` hook can preserve infrastructure errors even while the runtime is alive. Agent DX uses this for unknown command outcomes, lost results, and truncated output.
