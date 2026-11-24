@@ -320,7 +320,7 @@ async def test_agentenv_mounts_images_at_creation(
     _install_fake_e2b(monkeypatch)
     sdk = sys.modules["e2b"]
     events: list[str] = []
-    path = "/v2/sandboxes" if template else "/sandboxes-cold"
+    path = "/sandboxes" if template else "/sandboxes-cold"
 
     def control_plane(request: httpx.Request) -> httpx.Response:
         assert request.headers["X-API-Key"] == _AGENTENV_API_KEY
