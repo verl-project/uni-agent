@@ -270,7 +270,8 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
 
     With `image_mounts`, AgentEnv attaches each tool image as a read-only drive.
     Set `template` for a warm start with one available drive slot per mount,
-    or supply the task `image` for a native cold start. The deployment must
+    or supply the task `image` for a native cold start. Warm mounts require
+    `POST /sandboxes` to support `attachedDrives`. The deployment must
     support attached drives and be able to pull the configured image references.
     `executable_paths` links the tools after the drives are attached.
 
