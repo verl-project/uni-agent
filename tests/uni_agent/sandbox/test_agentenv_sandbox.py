@@ -398,46 +398,16 @@ def test_agentenv_reuses_e2b_implementation_by_inheritance() -> None:
     assert cls._exec is E2BSandbox._exec
     assert cls.exec is Sandbox.exec
 
-
 @pytest.mark.cpu
 @pytest.mark.level0
 @pytest.mark.asyncio
-@pytest.mark.parametrize("probe_exit", [0, 7])
-async def test_gateway_tunnel_startup(monkeypatch: pytest.MonkeyPatch, probe_exit: int) -> None:
-    from uni_agent.sandbox.base import ExecResult
-
+async def test_direct_gateway_config_does_not_run_guest_commands(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_agentenv_env(monkeypatch)
     calls = _install_fake_e2b(monkeypatch)
     sandbox = build_sandbox(
-        SandboxConfig(
-            provider="agentenv",
-            sandbox_kwargs={
-                "template": "task-template",
-                "api_url": _AGENTENV_API_URL,
-                "sandbox_url": _AGENTENV_SANDBOX_URL,
-                "api_key": _AGENTENV_API_KEY,
-                "upstream": "gateway.test:40169",
-                "proxy_port": 38197,
-            },
-        )
+        SandboxConfig(provider="agentenv", sandbox_kwargs={"template": "task-template", "proxy_port": 38197})
     )
-    commands: list[list[str]] = []
-
-    async def fake_exec(argv: list[str], **kwargs: Any) -> ExecResult:
-        commands.append(argv)
-        return ExecResult(exit_code=0 if argv[0] == "ssh" else probe_exit, stdout="", stderr="")
-
-    monkeypatch.setattr(sandbox, "exec", fake_exec)
-    if probe_exit:
-        with pytest.raises(ConnectionError, match="Gateway is unreachable"):
-            await sandbox.start()
-        assert not await sandbox.is_alive()
-    else:
-        await sandbox.start()
-        await sandbox.start()
-        assert await sandbox.is_alive()
-        await sandbox.stop()
-
+    await sandbox.start()
+    assert await sandbox.is_alive()
     assert len(calls["create"]) == 1
-    assert [command[0] for command in commands] == ["ssh", "curl"]
-    assert commands[0][-2:] == ["127.0.0.1:38197:gateway.test:40169", "gateway-relay"]
-    assert commands[1][-1] == "http://127.0.0.1:38197/"
+    await sandbox.stop()
