@@ -13,10 +13,9 @@
     executable_paths:
       dsh: /opt/dsh/bin/dsh
       node: /opt/dsh/bin/node
-    # Enable these settings when the guest needs the SSH relay for Gateway.
-    # sandbox_kwargs:
-    #   proxy_port: 38197
-    #   tunnel_ssh_host: gateway-relay
+    sandbox_kwargs:
+      proxy_port: 38197
+      tunnel_ssh_host: gateway-relay
   agent:
     name: deepseek_harness
     run_timeout: 7200
@@ -34,10 +33,9 @@
     executable_paths:
       dsh: /opt/dsh/bin/dsh
       node: /opt/dsh/bin/node
-    # Enable these settings when the guest needs the SSH relay for Gateway.
-    # sandbox_kwargs:
-    #   proxy_port: 38197
-    #   tunnel_ssh_host: gateway-relay
+    sandbox_kwargs:
+      proxy_port: 38197
+      tunnel_ssh_host: gateway-relay
   agent:
     name: deepseek_harness
     run_timeout: 7200
