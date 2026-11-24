@@ -275,8 +275,7 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
     `executable_paths` links the tools after the drives are attached.
 
     To reach an HTTP Gateway via an SSH relay, configure
-    `sandbox_kwargs.proxy_port: 38197` and
-    `sandbox_kwargs.tunnel_ssh_host: gateway-relay`. The SSH alias is resolved
+    `sandbox_kwargs.proxy_port: 38197`. The `gateway-relay` SSH alias is resolved
     inside the sandbox as the configured sandbox user. Provision OpenSSH,
     curl, the relay's trusted host key, and non-interactive authentication
     for that user. The guest must reach the relay, and the relay must reach
@@ -287,8 +286,7 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
     guest listener to loopback and checks the HTTP path through the relay before
     the task starts. The SSH process lives in the sandbox and exits when the
     sandbox is killed. With `routes`, put `proxy_port` in the outer
-    `sandbox_kwargs` and put the SSH alias under the AgentEnv child's
-    `config.sandbox_kwargs`.
+    `sandbox_kwargs`.
 
     `expose_port` requires a reachable `domain`: the E2B SDK derives the exposed
     host as `{port}-{sandbox_id}.{domain}` (or from `sandbox_url`), so the
