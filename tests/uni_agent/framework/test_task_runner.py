@@ -316,3 +316,12 @@ def test_score_from_runner_result_passes_through_runner_reward_info():
         reward_router_address="http://reward-router",
         reward_model_tokenizer=object(),
     ) == {"score": 0.5, "acc": True, "format": 0.8}
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_agentenv_gateway_uses_direct_port():
+    task = {"sandbox": {"provider": "agentenv", "sandbox_kwargs": {"proxy_port": 38197}}}
+    result = _inject_gateway_tunnel(task, "https://gateway.example:40169/sessions/abc/v1")
+    assert result["agent"]["model"]["base_url"] == "https://gateway.example:38197/sessions/abc/v1"
+    assert result["sandbox"]["sandbox_kwargs"] == {"proxy_port": 38197}
