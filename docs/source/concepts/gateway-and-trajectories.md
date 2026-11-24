@@ -50,6 +50,19 @@ POST /sessions/{session_id}/v1/messages
 
 Sessions are held in Gateway memory until they are finalized or aborted.
 
+## Gateway Network Address
+
+If external agents reach a Gateway through a different address than its Ray
+node IP, set `UNI_AGENT_GATEWAY_BIND_ADDRESS` to that node's reachable, bare
+IPv4 or IPv6 address before `ray start`. Set each node's value separately.
+
+```bash
+export UNI_AGENT_GATEWAY_BIND_ADDRESS="2001:db8:1::10"
+```
+
+The Gateway uses this address for HTTP listening and session URLs. If the
+variable is unset or empty, it uses the Ray node IP.
+
 ## Agent Identity
 
 Gateway can preserve the identity of agents sharing one rollout session. Claude

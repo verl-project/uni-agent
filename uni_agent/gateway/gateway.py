@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from collections.abc import Mapping
 from typing import Any
 
@@ -144,7 +145,7 @@ class _GatewayActor:
         self._sessions: dict[str, GatewaySession] = {}
         self._session_policies: dict[str, str] = {}
 
-        self._server_address = ray.util.get_node_ip_address().strip("[]")
+        self._server_address = os.getenv("UNI_AGENT_GATEWAY_BIND_ADDRESS") or ray.util.get_node_ip_address().strip("[]")
         self._server_port: int | None = None
         self._server_task: asyncio.Task[Any] | None = None
         self._server_base_url: str | None = None
