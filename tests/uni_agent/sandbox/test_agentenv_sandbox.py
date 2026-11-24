@@ -417,7 +417,6 @@ async def test_gateway_tunnel_startup(monkeypatch: pytest.MonkeyPatch, probe_exi
                 "api_key": _AGENTENV_API_KEY,
                 "upstream": "gateway.test:40169",
                 "proxy_port": 38197,
-                "tunnel_ssh_host": "gateway-relay",
             },
         )
     )
