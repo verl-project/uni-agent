@@ -107,7 +107,6 @@ class AgentEnvSandbox(E2BSandbox):
         api_key: str | None = None,
         upstream: str | None = None,
         proxy_port: int | None = None,
-        tunnel_ssh_host: str | None = None,
         image_mounts: list[ImageMount] | None = None,
         **kwargs: Any,
     ) -> None:
@@ -131,9 +130,6 @@ class AgentEnvSandbox(E2BSandbox):
                 raise ValueError("AgentEnv tunnel upstream must be a hostname or IPv4 address with a port")
             if not 1 <= int(upstream.rsplit(":", 1)[1]) <= 65535:
                 raise ValueError("AgentEnv tunnel upstream port must be between 1 and 65535")
-            if tunnel_ssh_host is None or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_.-]*", tunnel_ssh_host):
-                raise ValueError("AgentEnv tunnel requires sandbox_kwargs.tunnel_ssh_host (a guest SSH host alias)")
-        self._tunnel_ssh_host = tunnel_ssh_host
         self._tunnel_proxy_port = proxy_port
         self._tunnel_upstream = upstream
         super().__init__(
@@ -226,7 +222,6 @@ class AgentEnvSandbox(E2BSandbox):
             port = self._tunnel_proxy_port
             if port is None:
                 return
-            assert self._tunnel_ssh_host is not None
             result = await self.exec(
                 [
                     "ssh",
@@ -245,7 +240,7 @@ class AgentEnvSandbox(E2BSandbox):
                     "ServerAliveCountMax=3",
                     "-L",
                     f"127.0.0.1:{port}:{self._tunnel_upstream}",
-                    self._tunnel_ssh_host,
+                    "gateway-relay",
                 ],
                 timeout=20,
             )
