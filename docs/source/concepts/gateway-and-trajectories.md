@@ -52,43 +52,16 @@ Sessions are held in Gateway memory until they are finalized or aborted.
 
 ## Gateway Network Address
 
-By default, each Gateway listens on its own Ray node IP and returns that address
-in session URLs. In a cluster with multiple network interfaces, an external
-Agent or Sandbox may be able to reach a different address on the same node.
-Set `UNI_AGENT_GATEWAY_BIND_ADDRESS` to that local IP for both HTTP listening
-and session URLs. Each actor reads this environment variable when it initializes
-on its actual Ray node, including when it serves multiple policies.
-
-Export the value on **each node that can run a Gateway, before `ray start`**.
-Use an address assigned to that node. In this example, Ray uses IPv4 addresses
-and the Gateways use separate IPv6 addresses.
+If external agents reach a Gateway through a different address than its Ray
+node IP, set `UNI_AGENT_GATEWAY_BIND_ADDRESS` to that node's reachable, bare
+IPv4 or IPv6 address before `ray start`. Set each node's value separately.
 
 ```bash
-# On the head node, before starting Ray:
 export UNI_AGENT_GATEWAY_BIND_ADDRESS="2001:db8:1::10"
-ray start --head --node-ip-address="192.0.2.10" --port=6379
-
-# On a worker node, before starting Ray:
-export UNI_AGENT_GATEWAY_BIND_ADDRESS="2001:db8:1::11"
-ray start --address="192.0.2.10:6379" --node-ip-address="192.0.2.11"
 ```
 
-Replace these example addresses with your deployment's addresses. Ray workers
-inherit the value from the node's Ray process. To change that value, restart the
-node's Ray processes with the updated environment. Omit this key from job-wide
-`runtime_env.env_vars` when nodes need different addresses. A job-wide value
-overrides the node-local value on every worker.
-
-The value must be an unbracketed IPv4 or IPv6 literal. The Gateway normalizes
-it and brackets IPv6 addresses in session URLs. An unset variable preserves the
-Ray node IP default; an empty or invalid value fails actor construction.
-Wildcard, multicast, link-local, and scoped addresses are rejected because the
-chosen address also appears in the returned URL. Loopback addresses remain
-available for local testing.
-
-The Agent network must allow the Gateway's address and port. If the client
-connects to a different endpoint than the Gateway listens on, use your
-provider's forwarding or tunnel configuration.
+The Gateway uses this address for HTTP listening and session URLs. If the
+variable is unset or empty, it uses the Ray node IP.
 
 ## Agent Identity
 

@@ -11,7 +11,6 @@ import asyncio
 import logging
 import os
 from collections.abc import Mapping
-from ipaddress import ip_address
 from typing import Any
 
 import ray
@@ -57,23 +56,6 @@ DEFAULT_ALLOWED_REQUEST_SAMPLING_KEYS = frozenset({"max_tokens", "stop"})
 SINGLE_POLICY_NAME = "__single__"
 
 logger = logging.getLogger(__name__)
-
-
-def _get_bind_address() -> str:
-    """Resolve HTTP listening and session URLs from the actor's environment."""
-    value = os.environ.get("UNI_AGENT_GATEWAY_BIND_ADDRESS")
-    if value is None:
-        return ray.util.get_node_ip_address().strip("[]")
-    try:
-        if "%" in value:
-            raise ValueError
-        address = ip_address(value)
-        unicast_address = getattr(address, "ipv4_mapped", None) or address
-        if unicast_address.is_unspecified or unicast_address.is_multicast or unicast_address.is_link_local:
-            raise ValueError
-    except ValueError:
-        raise ValueError("UNI_AGENT_GATEWAY_BIND_ADDRESS must be a concrete, unscoped IPv4 or IPv6 address") from None
-    return str(address)
 
 
 def _normalize_gateway_inputs(
@@ -163,7 +145,7 @@ class _GatewayActor:
         self._sessions: dict[str, GatewaySession] = {}
         self._session_policies: dict[str, str] = {}
 
-        self._server_address = _get_bind_address()
+        self._server_address = os.getenv("UNI_AGENT_GATEWAY_BIND_ADDRESS") or ray.util.get_node_ip_address().strip("[]")
         self._server_port: int | None = None
         self._server_task: asyncio.Task[Any] | None = None
         self._server_base_url: str | None = None
