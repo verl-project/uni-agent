@@ -51,6 +51,17 @@ def _inject_gateway_tunnel(task: dict[str, Any], base_url: str) -> dict[str, Any
     ``127.0.0.1`` address).
     """
     provider = (task.get("sandbox") or {}).get("provider")
+    proxy_port = task["sandbox"]["sandbox_kwargs"]["proxy_port"]
+    if isinstance(proxy_port, bool) or not isinstance(proxy_port, int) or not 2 <= proxy_port <= 65535:
+        raise ValueError("gateway tunnel proxy_port must be an integer between 2 and 65535")
+    if provider == "agentenv":
+        gateway = urlparse(base_url)
+        if not gateway.hostname or gateway.scheme not in ("http", "https"):
+            raise ValueError("AgentEnv requires an HTTP or HTTPS model Gateway URL")
+        host = f"[{gateway.hostname}]" if ":" in gateway.hostname else gateway.hostname
+        direct_url = gateway._replace(netloc=f"{host}:{proxy_port}").geturl()
+        return _deep_merge(task, {"agent": {"model": {"base_url": direct_url}}})
+
     sandbox_cls = get_sandbox_cls(provider) if provider else None
     if sandbox_cls is None or not sandbox_cls.supports_reverse_tunnel:
         raise ValueError(
@@ -59,9 +70,6 @@ def _inject_gateway_tunnel(task: dict[str, Any], base_url: str) -> dict[str, Any
             f"got provider={provider!r}; "
             "switch the sandbox provider or drop proxy_port"
         )
-    proxy_port = task["sandbox"]["sandbox_kwargs"]["proxy_port"]
-    if isinstance(proxy_port, bool) or not isinstance(proxy_port, int) or not 2 <= proxy_port <= 65535:
-        raise ValueError("gateway tunnel proxy_port must be an integer between 2 and 65535")
     upstream = sandbox_cls.tunnel_upstream(base_url)
     if upstream is None:
         raise ValueError(f"cannot derive gateway tunnel upstream from base_url={base_url!r}")
