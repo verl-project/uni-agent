@@ -5,7 +5,7 @@
 ## 1. 配置 AgentEnv 和 rollout worker
 
 - 使用包含 AgentEnv provider 的 Uni-Agent 代码，在 rollout worker 的 Python 环境安装 `e2b` extra。从仓库根目录可执行 `pip install -e '.[e2b]'`。
-- 部署需提供 E2B 兼容控制面、envd 数据面和 AgentEnv 原生 `attachedDrives`。按样本镜像启动需要 `POST /sandboxes-cold`，按模板启动需要 `POST /v2/sandboxes`。创建后 SDK 会按 sandbox ID 连接沙箱。
+- 部署需提供 E2B 兼容控制面、envd 数据面和 AgentEnv 原生 `attachedDrives`。按样本镜像启动需要 `POST /sandboxes-cold`，按模板启动使用 `POST /sandboxes`，该接口也需要支持 `attachedDrives`。上游 AgentENV 的旧版 `/sandboxes` 接口没有该字段，使用该版本时请走 cold start 挂载。创建后 SDK 会按 sandbox ID 连接沙箱。
 - 给执行 rollout 的 worker 注入下列环境变量。Ray 集群通过部署的 worker 环境或作业的 `runtime_env.env_vars` 注入。当前 DSH 启动脚本主动转发的是 `OPENYUANRONG_*`，因此从提交端执行 `export` 无法替代 Ray worker 的 AgentEnv 环境配置。
 
 | 变量 | 用途 |
