@@ -179,7 +179,10 @@ actor_rollout_ref:
             session_timeout_seconds: 600
             # Concurrent session-group limit.
             max_concurrent_sessions: 128
-            # all keeps every trajectory; longest keeps only the longest.
+            # all keeps every trajectory; longest keeps only one across the
+            # whole session group, so other policies get no data. A
+            # custom_select_function is called once per role (see
+            # trajectory_selectors/README.md).
             trajectory_selection: all
             runner_kwargs:
               # External MAS command/result/log defaults live in the recipe-local

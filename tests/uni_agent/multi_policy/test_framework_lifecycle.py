@@ -347,6 +347,7 @@ async def test_session_group_creation_uses_group_manager_lifecycle():
         "r",
         metadata={"global_steps": 1},
         sampling_params={"p1": {"temperature": 0.1}},
+        pass_through_message_history=True,
     )
     assert opened is handle
     gateway.create_session.assert_awaited_once_with(
@@ -354,6 +355,7 @@ async def test_session_group_creation_uses_group_manager_lifecycle():
         role_policy_mapping={"a": "p1", "b": "p2"},
         sampling_params={"p1": {"temperature": 0.1}},
         metadata={"global_steps": 1},
+        pass_through_message_history=True,
     )
 
     assert await framework.gateway_manager.finalize_session("r") == []
@@ -380,6 +382,18 @@ async def test_session_group_sampling_is_forwarded_to_manager():
     sampling = {"p1": {"temperature": 0.1}}
     await framework._create_session("r", sampling_params=sampling)
     assert gateway.create_session.call_args.kwargs["sampling_params"] is sampling
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.asyncio
+async def test_pass_through_message_history_defaults_to_false():
+    gateway = SimpleNamespace(
+        create_session=AsyncMock(return_value=SessionGroupHandle("r", {"a": "http://gateway/sessions/r:a/v1"}))
+    )
+    framework = _framework(gateway_manager=gateway)
+    await framework._create_session("r")
+    assert gateway.create_session.call_args.kwargs["pass_through_message_history"] is False
 
 
 @pytest.mark.cpu

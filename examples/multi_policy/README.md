@@ -126,7 +126,7 @@ The MAS integration is configured under
 | `agent_runners.multi_agent.runner_fqn` | Python entry point that binds a MAS rollout to the role Gateway endpoints and launches the configured task. |
 | `dispatch_mode` | Runner dispatch strategy; the example uses `ray_task`. |
 | `session_timeout_seconds` / `max_concurrent_sessions` | Bound runner duration and concurrent MAS session groups. |
-| `trajectory_selection` | Selects which role trajectories are retained; the example keeps all of them. |
+| `trajectory_selection` | Which role trajectories are retained. `all` keeps everything; `longest` keeps one trajectory across the whole session group, so other policies get no data. A `custom_select_function` is called once per role; see [`trajectory_selectors/`](trajectory_selectors/README.md). |
 | `role_policy_mapping` | Maps each role name in the MAS config to a configured policy name. The role names in this mapping must match the role keys in the MAS template. |
 | `mask_unfinished_episode` | Controls whether unfinished MAS episodes contribute to the policy loss. |
 

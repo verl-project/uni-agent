@@ -9,6 +9,7 @@ routed to its own policy and generates trajectories independently.
 from __future__ import annotations
 
 import copy
+import inspect
 import logging
 import re
 from collections.abc import Mapping
@@ -19,6 +20,7 @@ from typing import Any
 from omegaconf import DictConfig, OmegaConf
 
 from uni_agent.framework.framework import GatewayAgentFramework, TrajectoryPostprocessor
+from uni_agent.framework.trajectory_selection import TrajectorySelectFunction
 from uni_agent.gateway.session import Trajectory
 from uni_agent.tasks import TaskResult
 
@@ -73,6 +75,10 @@ class MultiAgentGatewayFramework(GatewayAgentFramework):
         self._role_policy_mapping = dict(role_policy_mapping)
         self._policy_processors = dict(policy_processors)
         self._policy_rollout_configs = policy_rollout_configs or {}
+        self._select_functions = {
+            runner_name: self._wrap_select_fn_per_role(select_fn)
+            for runner_name, select_fn in self._select_functions.items()
+        }
 
     @classmethod
     def from_config(
@@ -118,6 +124,39 @@ class MultiAgentGatewayFramework(GatewayAgentFramework):
             policy_processors=policy_processors,
             **framework_kwargs,
         )
+
+    def _wrap_select_fn_per_role(
+        self,
+        select_fn: TrajectorySelectFunction,
+    ) -> TrajectorySelectFunction:
+        """Wrap ``select_fn`` so it is called once per role that has trajectories.
+
+        Every loaded custom select function is wrapped at construction time so a
+        rule can stay role-agnostic, the same way single-agent selectors are
+        written. Each role's trajectories are passed separately and the kept
+        results are flattened. Sync and async select functions are supported. If
+        a role's selector raises an exception, that role keeps all of its
+        trajectories so one bad rule cannot discard the other roles' data.
+        """
+
+        async def select_per_role(session_id: str, trajectories: list[Trajectory]) -> list[Trajectory]:
+            kept_trajectories: list[Trajectory] = []
+            for role, role_trajectories in self._group_by_role(trajectories).items():
+                try:
+                    selected_trajectories = select_fn(session_id, role_trajectories)
+                    if inspect.isawaitable(selected_trajectories):
+                        selected_trajectories = await selected_trajectories
+                    kept_trajectories.extend(selected_trajectories)
+                except Exception:
+                    logger.exception(
+                        "session %s: select function failed for role %s; keeping its trajectories",
+                        session_id,
+                        role,
+                    )
+                    kept_trajectories.extend(role_trajectories)
+            return kept_trajectories
+
+        return select_per_role
 
     def _build_session_sampling_params(
         self,
@@ -172,16 +211,15 @@ class MultiAgentGatewayFramework(GatewayAgentFramework):
     ) -> SessionGroupHandle:
         """Create a session group with one session per role.
 
-        ``pass_through_message_history`` is accepted for signature compatibility
-        with the base hook and ignored: a group creates one gateway session per
-        role, and this manager does not forward the flag to them.
+        ``pass_through_message_history`` is forwarded to every role session so a
+        custom select function can read each chain's chat text.
         """
-        del pass_through_message_history
         return await self.gateway_manager.create_session(
             session_id,
             role_policy_mapping=self._role_policy_mapping,
             sampling_params=sampling_params,
             metadata=metadata,
+            pass_through_message_history=pass_through_message_history,
         )
 
     def _resolve_processor(self, trajectory: Trajectory):
@@ -202,20 +240,31 @@ class MultiAgentGatewayFramework(GatewayAgentFramework):
             "session_group_id": trajectory.extra_fields.get("session_group_id"),
         }
 
-    def _dump_trajectories(self, run_dir: Path, session_id: str, trajectories: list[Trajectory]) -> None:
+    def _dump_trajectories(
+        self,
+        run_dir: Path,
+        session_id: str,
+        trajectories: list[Trajectory],
+        dropped_trajectories: list[Trajectory] | None = None,
+    ) -> None:
         """Persist each role's JSON/NPZ trajectory dump under ``agents/<role>/``.
 
         The base framework writes one aggregate dump per session group. A
         multi-agent group has several roles, so keep each role's artifacts
         separate and reuse the base serializer for every role directory.
+
+        Trajectories discarded by a custom select function are grouped by the
+        same role directory; the base serializer writes them as
+        ``dropped_trajectory.*`` next to the kept ``trajectory.*`` artifacts.
         """
-        grouped: dict[str, list[Trajectory]] = {}
-        for trajectory in trajectories:
-            role = str(trajectory.extra_fields.get("role") or "unknown")
-            grouped.setdefault(role, []).append(trajectory)
+        kept_by_role = self._group_by_role(trajectories)
+        dropped_by_role = self._group_by_role(dropped_trajectories or [])
+
+        roles = list(kept_by_role)
+        roles.extend(role for role in dropped_by_role if role not in kept_by_role)
 
         used_dirnames: set[str] = set()
-        for role, role_trajectories in grouped.items():
+        for role in roles:
             dirname = re.sub(r"[^A-Za-z0-9_.-]+", "_", role).strip("._-") or "unknown"
             candidate = dirname
             # Sanitization may collapse distinct role names; suffix to avoid overwriting.
@@ -224,4 +273,18 @@ class MultiAgentGatewayFramework(GatewayAgentFramework):
                 candidate = f"{dirname}_{suffix}"
                 suffix += 1
             used_dirnames.add(candidate)
-            super()._dump_trajectories(run_dir / "agents" / candidate, session_id, role_trajectories)
+            super()._dump_trajectories(
+                run_dir / "agents" / candidate,
+                session_id,
+                kept_by_role.get(role, []),
+                dropped_by_role.get(role, []),
+            )
+
+    @staticmethod
+    def _group_by_role(trajectories: list[Trajectory]) -> dict[str, list[Trajectory]]:
+        """Group trajectories by their role metadata; missing roles go to ``unknown``."""
+        trajectories_by_role: dict[str, list[Trajectory]] = {}
+        for trajectory in trajectories:
+            role = str(trajectory.extra_fields.get("role") or "unknown")
+            trajectories_by_role.setdefault(role, []).append(trajectory)
+        return trajectories_by_role

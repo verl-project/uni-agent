@@ -64,6 +64,7 @@ async def test_create_session_returns_handle_with_role_base_urls(fake_gateway_po
             "policy_b": {"temperature": 0.9},
         },
         metadata={"team": "alpha"},
+        pass_through_message_history=True,
     )
 
     assert handle.session_group_id == "group-1"
@@ -84,6 +85,10 @@ async def test_create_session_returns_handle_with_role_base_urls(fake_gateway_po
     assert planner_call[1]["metadata"]["session_group_id"] == "group-1"
     assert planner_call[1]["metadata"]["team"] == "alpha"
     assert planner_call[1]["sampling_params"] == {"temperature": 0.7}
+    assert planner_call[1]["pass_through_message_history"] is True
+    actor_call = gateway.create_session.calls[1]
+    assert actor_call[1]["session_id"] == "group-1:actor"
+    assert actor_call[1]["pass_through_message_history"] is True
     assert manager._group_sessions["group-1"]["planner"].policy_name == "policy_a"
     assert manager._group_sessions["group-1"]["planner"].role_session_id == "group-1:planner"
 
