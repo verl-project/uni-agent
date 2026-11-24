@@ -31,7 +31,6 @@ from uni_agent.agent_aware_router.collectors.transport.base import Transport
 from uni_agent.agent_aware_router.store.kv_cache_store import KVCacheStore
 from uni_agent.agent_aware_router.store.per_replica_store import PerReplicaStore
 from uni_agent.agent_aware_router.store.per_request_store import PerRequestStore
-from uni_agent.agent_aware_router.types import Layer
 
 # ── Shared configuration constants ───────────────────────────────────────
 
@@ -148,26 +147,7 @@ def mapping_event(event: list) -> dict:
 
 
 @pytest.fixture(autouse=True)
-def _reset_store_singletons():
-    """Reset the three singleton stores before each test.
-
-    ``DataStore`` wraps ``PerReplicaStore``, ``KVCacheStore``, and
-    ``PerRequestStore`` — all singletons — so state would otherwise
-    accumulate across test cases.
-    """
-    yield
-    # KVCacheStore
-    kv = KVCacheStore.singleton()
-    kv.block_size = None
-    kv._gated_replicas.clear()
-    kv.replicas_by_block.clear()
-    kv._resident_blocks_by_replica.clear()
-    kv._replica_layer_counts = {Layer.GPU: {}, Layer.CPU: {}, Layer.SSD: {}}
-    kv._inflight_blocks.clear()
-    kv._inflight_pins.clear()
-    # PerReplicaStore
-    pr = PerReplicaStore.singleton()
-    pr._data.clear()
-    # PerRequestStore
-    prq = PerRequestStore.singleton()
-    prq.reset()
+def _reset_store_singletons(monkeypatch):
+    """Give each test fresh stores and a fresh shared inflight ledger."""
+    for store in (KVCacheStore, PerReplicaStore, PerRequestStore):
+        monkeypatch.setattr(store, "_instance", None)

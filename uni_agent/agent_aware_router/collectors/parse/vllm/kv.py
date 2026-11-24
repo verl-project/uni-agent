@@ -15,7 +15,7 @@
 """VLLMKVParser — vLLM KV-cache event parser.
 
 Parses msgpack payloads from ZMQ and returns structured update commands.
-Store writes are handled by Collector via DataStore.
+Store writes are handled by the typed application sink.
 """
 
 from __future__ import annotations

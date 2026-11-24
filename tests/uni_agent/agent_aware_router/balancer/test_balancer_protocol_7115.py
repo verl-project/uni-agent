@@ -42,14 +42,20 @@ def test_release_balances_latest_prompt_tokens():
         assert balancer._store.get_metric("s0", MetricKey.INFLIGHT_TOKENS) == 0
 
 
-def test_release_without_request_id_cannot_balance_prompt_tokens():
+def test_legacy_release_cannot_consume_named_dispatch():
     balancer = _make_balancer({"s0": "h0"})
     server_id, _ = balancer.acquire_server("request-1", [1, 2, 3])
 
-    balancer.release_server(server_id)
-
-    assert balancer._store.get_metric("s0", MetricKey.INFLIGHT_COUNT) == 0
+    for _ in range(2):
+        balancer.release_server(server_id)
+    assert balancer.get_total_inflight() == 1
+    assert balancer._store.get_metric("s0", MetricKey.INFLIGHT_COUNT) == 1
     assert balancer._store.get_metric("s0", MetricKey.INFLIGHT_TOKENS) == 3
+
+    balancer.release_server(server_id, request_id="request-1")
+    assert balancer.get_total_inflight() == 0
+    assert balancer._store.get_metric("s0", MetricKey.INFLIGHT_COUNT) == 0
+    assert balancer._store.get_metric("s0", MetricKey.INFLIGHT_TOKENS) == 0
 
 
 def test_clear_sticky_cache_preserves_prefix_checkpoint_and_reports_load():

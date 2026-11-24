@@ -66,6 +66,11 @@ class KVCAwareBalancer:
         self._strategy_summary = str(self._strategy)
 
         self._inflight: dict[str, int] = {sid: 0 for sid in self._servers}
+        # Named requests have one active dispatch, matching the inflight updater.
+        # Re-acquiring replaces that dispatch rather than adding drain work.
+        self._active_requests: dict[str, str] = {}
+        self._anonymous_inflight: dict[str, int] = {}
+        self._anonymous_removed: dict[str, int] = {}
         max_num_seqs = self._rollout_config_int(rollout_config, "max_num_seqs", 256)
         max_num_batched_tokens = self._rollout_config_int(rollout_config, "max_num_batched_tokens", 2048)
         if hasattr(self._strategy, "set_capacity"):
@@ -80,6 +85,8 @@ class KVCAwareBalancer:
         self._route_time_total_ms = 0.0
         self._route_time_max_ms = 0.0
         self._callbacks: dict[str, list[Callable[..., None]]] = {
+            "on_account_acquire": [],
+            "on_account_release": [],
             "on_acquire": [],
             "on_release": [],
             "on_servers_removed": [],
@@ -256,12 +263,14 @@ class KVCAwareBalancer:
         if fn in lst:
             lst.remove(fn)
 
-    def _fire(self, event: str, *args: Any) -> None:
-        """Invoke every registered callback for ``event``; errors are swallowed."""
+    def _fire(self, event: str, *args: Any, required: bool = False) -> None:
+        """Invoke accounting callbacks before publishing best-effort events."""
         for fn in self._callbacks.get(event, []):
             try:
                 fn(*args)
             except Exception as exc:  # noqa: BLE001
+                if required:
+                    raise
                 logger.warning("callback %s failed: %s: %s", event, type(exc).__name__, exc)
 
     def get_all_servers(self) -> list[str]:
@@ -276,18 +285,44 @@ class KVCAwareBalancer:
             "provider": type(self._provider).__name__,
             "strategies": [{"type": type(self._strategy).__name__}],  # legacy key; single strategy
             "route_calls": self._route_calls,
-            "sticky_size": self._store.sticky_status()["size"],
+            "sticky_size": self._store.requests.sticky_status()["size"],
             "total_inflight": self.get_total_inflight(),
             "collectors": collector_status() if callable(collector_status) else [],
         }
 
     def release_server(self, server_id: str, request_id: str | None = None) -> None:
-        """Release a server and notify statistic collectors."""
-        if self._inflight.get(server_id, 0) > 0:
+        """Release a named dispatch or consume one matching anonymous acquire.
+
+        Without a dispatch generation, a delayed release on the same replica
+        cannot be distinguished from the current turn's release. Named callers
+        must forward request_id and preserve per-request callback ordering.
+        """
+        self._fire("on_account_release", server_id, request_id, required=True)
+        if request_id is None:
+            self._release_anonymous(server_id)
+        elif self._active_requests.get(request_id) == server_id:
+            del self._active_requests[request_id]
             self._inflight[server_id] -= 1
+        # Still notify collectors: removed replicas no longer count toward drain,
+        # but their outstanding store bookings may need this release for cleanup.
         self._fire("on_release", server_id, request_id)
 
-    def acquire_server(self, request_id: str, prompt_ids: list[int] | None = None) -> tuple[str, Any]:
+    def _release_anonymous(self, server_id: str) -> None:
+        # DataStore consumes anonymous bookings in FIFO order. Releases for
+        # removed work must not decrease drain counts after a replica rejoins.
+        removed = server_id in self._anonymous_removed
+        pending = self._anonymous_removed if removed else self._anonymous_inflight
+        count = pending.get(server_id, 0)
+        if count == 0:
+            return
+        if count == 1:
+            del pending[server_id]
+        else:
+            pending[server_id] = count - 1
+        if not removed:
+            self._inflight[server_id] -= 1
+
+    def acquire_server(self, request_id: str | None, prompt_ids: list[int] | None = None) -> tuple[str, Any]:
         """Return the highest-ranked server id and handle."""
         replicas = [ReplicaInfo(replica_id=sid) for sid in self._servers]
         self._route_calls += 1
@@ -305,6 +340,15 @@ class KVCAwareBalancer:
         if not ranking:
             raise RuntimeError("no available replica to route to")
         server_id = ranking[0]
+        # A failed booking keeps the old DataStore and drain state paired.
+        self._fire("on_account_acquire", request_id, server_id, prompt_ids, required=True)
+        if request_id is not None:
+            previous = self._active_requests.get(request_id)
+            if previous is not None and self._inflight.get(previous, 0) > 0:
+                self._inflight[previous] -= 1
+            self._active_requests[request_id] = server_id
+        else:
+            self._anonymous_inflight[server_id] = self._anonymous_inflight.get(server_id, 0) + 1
         self._inflight[server_id] = self._inflight.get(server_id, 0) + 1
         self._fire("on_acquire", request_id, server_id, prompt_ids)
         logger.debug(
@@ -337,7 +381,7 @@ class KVCAwareBalancer:
 
     def clear_sticky_cache(self) -> dict:
         """Clear sticky bindings while preserving prefix checkpoints."""
-        cleared = self._store.clear_sticky_bindings()
+        cleared = self._store.requests.clear_sticky_bindings()
         loads = dict(self._inflight)
         logger.info("clear_sticky_cache: cleared %s binding(s); server_loads=%s", cleared, loads)
         return {"cleared_entries": cleared, "server_loads": loads}
@@ -357,5 +401,10 @@ class KVCAwareBalancer:
         for sid in server_ids:
             self._servers.pop(sid, None)
             self._inflight.pop(sid, None)
+            anonymous = self._anonymous_inflight.pop(sid, 0)
+            if anonymous:
+                self._anonymous_removed[sid] = self._anonymous_removed.get(sid, 0) + anonymous
         if server_ids:
+            removed = set(server_ids)
+            self._active_requests = {rid: sid for rid, sid in self._active_requests.items() if sid not in removed}
             self._fire("on_servers_removed", server_ids)

@@ -236,13 +236,13 @@ def test_consumer_failure_discards_partial_cache_and_keeps_dispatch_gated():
             CollectorConfig(),
             kv_event_endpoints={"a": [*publisher.addresses, "zmq", "topic"]},
         )
-        write = collector._write_kv_update
+        write = collector._sink.apply_kv
 
         def write_then_fail(update):
             write(update)
             raise ValueError("consumer failed after writing")
 
-        collector._write_kv_update = write_then_fail
+        collector._sink.apply_kv = write_then_fail
         store = DataStore()
         tokens = list(range(BLOCK_SIZE))
         hashes, _ = get_prefix_hashes_incremental(tokens, BLOCK_SIZE, 0, 0)
@@ -277,6 +277,7 @@ def test_replayed_clear_preserves_requests_created_after_the_original_clear():
     async def run():
         publisher = Publisher()
         collector = get_collector("vllm_zmq", CollectorConfig(), kv_event_endpoints=publisher.endpoints)
+        event_counts = collector._sink._observer._kv_event_counts
         collector._transport._base_retry_delay = 0.01
         collector._transport._max_retry_delay = 0.02
         store = DataStore()
@@ -295,7 +296,7 @@ def test_replayed_clear_preserves_requests_created_after_the_original_clear():
             await publisher.batch(identity, 11, stored)
             await publisher.end(identity)
             await until(lambda: store.get_layer_prefix_hit_rate("a", hashes) == 1.0)
-            assert collector._kv_event_counts["clear"] == 1
+            assert event_counts["clear"] == 1
             store.incr_block_refs("a", hashes)
             store.put_marker("request-r", "a", hashes)
 
@@ -310,7 +311,7 @@ def test_replayed_clear_preserves_requests_created_after_the_original_clear():
             await asyncio.wait_for(publisher.pub.recv(), 3)
 
             await publisher.batch(identity, 10, clear)
-            await until(lambda: collector._kv_event_counts["clear"] == 2)
+            await until(lambda: event_counts["clear"] == 2)
             assert store.inflight_block_count("a") == 1
             assert store.get_marker("request-r") == marker
             assert store.get_layer_prefix_hit_rate("other", hashes) == 1.0
@@ -324,7 +325,7 @@ def test_replayed_clear_preserves_requests_created_after_the_original_clear():
 
             # A live clear discards residency without starting another replay gate.
             await publisher.publish(12, clear)
-            await until(lambda: collector._kv_event_counts["clear"] == 3)
+            await until(lambda: event_counts["clear"] == 3)
             assert not store.kv_replica_has_blocks("a")
             assert store.inflight_block_count("a") == 1
             assert store.get_marker("request-r") == marker
