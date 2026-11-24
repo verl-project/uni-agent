@@ -158,7 +158,7 @@ class AgentEnvSandbox(E2BSandbox):
         if self.network is not None:
             request["network"] = {_NATIVE_NETWORK_FIELDS[key]: value for key, value in self.network.items()}
         if self.template is not None:
-            path = "/v2/sandboxes"
+            path = "/sandboxes"
             request.update(templateID=self.template, allow_internet_access=self.allow_internet_access)
         else:
             path = "/sandboxes-cold"
