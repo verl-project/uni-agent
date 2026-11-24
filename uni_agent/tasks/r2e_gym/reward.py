@@ -11,6 +11,24 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+EVAL_ASSETS_PATH = "/tmp/r2e_eval_assets.tar.gz"
+
+# Puts the held-out runner and tests back in the layout ``run_tests.sh`` expects (``/root/r2e_tests``, linked from
+# ``/testbed/r2e_tests``), replacing anything the agent left at those paths.
+_RESTORE_SCRIPT = f"""
+set -euo pipefail
+stage="$(mktemp -d /tmp/r2e_eval_restore.XXXXXX)"
+tar -xzf {EVAL_ASSETS_PATH} -C "$stage"
+rm -rf /root/run_tests.sh /root/r2e_tests /testbed/r2e_tests
+mv "$stage/run_tests.sh" /root/run_tests.sh
+chmod +x /root/run_tests.sh
+mv "$stage/r2e_tests" /root/r2e_tests
+ln -s /root/r2e_tests /testbed/r2e_tests
+rm -rf "$stage" {EVAL_ASSETS_PATH}
+""".strip()
+
+_RUN_TESTS = "export PATH=/testbed/.venv/bin:/root/.venv/bin:/root/.local/bin:$PATH\nbash /root/run_tests.sh 2>&1"
+
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m|\r")
 
 
@@ -65,24 +83,26 @@ def _get_eval_report(metadata: Mapping[str, Any], eval_output: str) -> dict[str,
     }
 
 
-async def compute_reward(metadata, sandbox, eval_timeout: float = 300.0) -> dict[str, Any]:
-    """Run the image-provided R2E tests and compare them with the expected map."""
+async def compute_reward(
+    metadata, sandbox, eval_timeout: float = 300.0, eval_assets: bytes | None = None
+) -> dict[str, Any]:
+    """Run the image-provided R2E tests and compare them with the expected map.
+
+    ``eval_assets`` is the archive of held-out tests that ``R2EGymTask`` took out of the sandbox before the agent
+    ran. It is written back and restored first; a restore failure is an infrastructure error and raises instead
+    of scoring the sample as unresolved.
+    """
     instance_id = metadata.get("instance_id", "?")
     logger.info(f"running R2E-Gym eval for {instance_id} (timeout={eval_timeout:.0f}s)")
-    restore_and_test = (
-        "export PATH=/testbed/.venv/bin:/root/.venv/bin:/root/.local/bin:$PATH\n"
-        "if [ -d /root/.r2e_eval/r2e_tests ]; then "
-        "rm -rf /root/r2e_tests /testbed/r2e_tests && "
-        "cp -a /root/.r2e_eval/r2e_tests /root/r2e_tests && "
-        "ln -s /root/r2e_tests /testbed/r2e_tests; fi\n"
-        "if [ -f /root/.r2e_eval/run_tests.sh ]; then bash /root/.r2e_eval/run_tests.sh; "
-        "elif [ -f /root/run_tests.sh ]; then bash /root/run_tests.sh; "
-        "elif [ -f /run_tests.sh ]; then bash /run_tests.sh; "
-        "else echo 'run_tests.sh not found' >&2; exit 1; fi"
-    )
+    if eval_assets is not None:
+        await sandbox.write_file(EVAL_ASSETS_PATH, eval_assets)
+        restored = await sandbox.exec_shell(_RESTORE_SCRIPT, workdir="/testbed", timeout=eval_timeout)
+        if restored.exit_code != 0:
+            detail = restored.stderr.strip() or restored.stdout.strip() or f"exit code {restored.exit_code}"
+            raise RuntimeError(f"failed to restore held-out R2E-Gym tests for {instance_id}: {detail}")
     execution_t0 = time.perf_counter()
     response = await sandbox.exec_shell(
-        f"{restore_and_test} 2>&1",
+        _RUN_TESTS,
         workdir="/testbed",
         timeout=eval_timeout,
     )
