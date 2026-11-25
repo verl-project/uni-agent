@@ -1,9 +1,13 @@
+import subprocess
+import sys
+import time
+from pathlib import Path
 from typing import Any
 
 import pytest
 
 from uni_agent.sandbox import ExecResult
-from uni_agent.tools.shell import TmuxShell
+from uni_agent.tools.shell import _APT_LOCK_WAIT, TmuxShell
 
 
 class RecordingBackend:
@@ -119,3 +123,95 @@ async def test_run_marks_timeout_even_when_interrupt_reports_an_exit_code(
 
     assert result.timed_out is True
     assert result.exit_code == 130
+
+
+def _real_installer_running() -> bool:
+    """Whether an unrelated live apt/dpkg process is visible on the host."""
+    if sys.platform != "linux":
+        return False
+    for comm_path in Path("/proc").glob("[0-9]*/comm"):
+        try:
+            name = comm_path.read_text().strip()
+            if name not in {"apt", "apt-get", "dpkg", "unattended-upgr"}:
+                continue
+            state = (comm_path.parent / "stat").read_text().split()
+            if len(state) >= 3 and state[2] != "Z":
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def _wait_for_comm(pid: int, expected: str, timeout: float = 5.0) -> None:
+    """Block until the fake installer's comm is set (no startup race).
+
+    Popen returns before the child's interpreter has executed PR_SET_NAME;
+    starting the lock-wait fragment in that window lets it scan /proc before
+    the fake installer is visible, which made this test flaky on slow CI hosts.
+    """
+    expected = expected[:15]
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            if Path(f"/proc/{pid}/comm").read_text().strip() == expected:
+                return
+        except OSError:
+            pass
+        time.sleep(0.05)
+    raise AssertionError(f"fake installer pid {pid} did not reach comm {expected!r}")
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.skipif(sys.platform != "linux", reason="requires /proc comm inspection")
+@pytest.mark.parametrize("fake_name", ["apt-get", "unattended-upgrades"])
+def test_apt_lock_wait_blocks_until_existing_installer_exits(fake_name):
+    if _real_installer_running():
+        pytest.skip("unrelated apt/dpkg installer active on host")
+    # PR_SET_NAME (=15) writes comm directly and the kernel truncates it to
+    # 15 characters (unattended-upgrades -> unattended-upgr). Setting the name
+    # explicitly is more portable than relying on symlink/exec filename
+    # semantics, which vary across kernels and container runtimes.
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            f"import ctypes, time; ctypes.CDLL(None).prctl(15, b'{fake_name}', 0, 0, 0); time.sleep(6)",
+        ]
+    )
+    _wait_for_comm(proc.pid, fake_name)
+    try:
+        start = time.monotonic()
+        result = subprocess.run(
+            ["bash", "-c", _APT_LOCK_WAIT + "; echo waited"],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        elapsed = time.monotonic() - start
+    finally:
+        proc.kill()
+        proc.wait()
+    assert result.returncode == 0
+    assert result.stdout.strip() == "waited"
+    # The wait blocked until the fake installer exited instead of racing its lock.
+    assert elapsed >= 2.5
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.skipif(sys.platform != "linux", reason="requires /proc comm inspection")
+def test_apt_lock_wait_returns_immediately_without_installers():
+    if _real_installer_running():
+        pytest.skip("unrelated apt/dpkg installer active on host")
+    start = time.monotonic()
+    result = subprocess.run(
+        ["bash", "-c", _APT_LOCK_WAIT + "; echo waited"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    elapsed = time.monotonic() - start
+    assert result.returncode == 0
+    assert result.stdout.strip() == "waited"
+    assert elapsed < 3
