@@ -110,8 +110,14 @@ class BoxdSandbox(Sandbox):
         self.machine_id: str | None = None
         self.machine_name: str | None = None
         self._container: str | None = None
+        #: The container's working directory, which relative file paths resolve against.
+        self._container_workdir: str | None = None
         #: Name of a machine whose create call has not returned an id yet.
         self._pending_name: str | None = None
+        #: Machines (ids, or names of interrupted creates) that an earlier ``stop()`` could not
+        #: confirm deleted. They are kept apart from ``machine_id`` so ``start()`` never reuses one.
+        self._cleanup_ids: list[str] = []
+        self._cleanup_names: list[str] = []
 
     @classmethod
     def from_config(cls, config: SandboxConfig) -> BoxdSandbox:
@@ -242,53 +248,89 @@ class BoxdSandbox(Sandbox):
         self._container = name
 
     async def stop(self) -> None:
+        """Delete the machine. A machine whose delete is not confirmed is kept for the next ``stop()``."""
         client, self._client = self._client, None
         machine_id, self.machine_id = self.machine_id, None
         pending_name, self._pending_name = self._pending_name, None
+        ids, self._cleanup_ids = self._cleanup_ids, []
+        names, self._cleanup_names = self._cleanup_names, []
         self._container = None
-        if client is None:
+        self._container_workdir = None
+        if machine_id is not None:
+            ids.append(machine_id)
+        elif pending_name is not None:
+            names.append(pending_name)
+        if not ids and not names:
+            if client is not None:
+                await self._close_client(client)
             return
-        try:
-            if machine_id is None and pending_name is not None:
-                machine_id = await self._find_machine(client, pending_name)
-            if machine_id is not None:
-                await self._delete_machine(client, machine_id)
-        finally:
+        if client is None:
             try:
-                await client.close()
+                client = self._make_client()
             except Exception:
-                logger.debug("Failed to close the boxd client", exc_info=True)
+                self._cleanup_ids, self._cleanup_names = ids, names
+                raise
+        try:
+            for name in names:
+                found = await self._find_machine(client, name)
+                if found is not None:
+                    ids.append(found)
+            for mid in ids:
+                if not await self._delete_machine(client, mid):
+                    self._cleanup_ids.append(mid)
+        finally:
+            await self._close_client(client)
+
+    async def _close_client(self, client: Any) -> None:
+        try:
+            await client.close()
+        except Exception:
+            logger.debug("Failed to close the boxd client", exc_info=True)
 
     async def _find_machine(self, client: Any, name: str) -> str | None:
-        """Return the id of machine ``name`` if it exists (a create interrupted before it returned)."""
+        """Return the id of machine ``name`` if it exists (a create interrupted before it returned).
+
+        If the lookup fails for another reason than the machine not existing, the name is kept
+        for the next ``stop()``.
+        """
+        from boxd.errors import NotFoundError
+
         try:
             machine = await client.machines.get(name, region=self.region)
-        except Exception:
+        except NotFoundError:
+            return None
+        except Exception as exc:
+            logger.warning("Failed to look up boxd machine %s: %s", name, exc)
+            self._cleanup_names.append(name)
             return None
         return str(machine.id)
 
-    async def _delete_machine(self, client: Any, machine_id: str) -> None:
-        """Delete the machine; after an error, check whether it is gone and retry once if not."""
+    async def _delete_machine(self, client: Any, machine_id: str) -> bool:
+        """Delete the machine; after an error, check whether it is gone and retry once if not.
+
+        Return whether the machine is confirmed gone.
+        """
         from boxd.errors import NotFoundError
 
         error: Exception | None = None
         for attempt in range(2):
             try:
                 await client.machines.delete(machine_id, region=self.region)
-                return
+                return True
             except NotFoundError:
-                return
+                return True
             except Exception as exc:
                 error = exc
             try:
                 await client.machines.get(machine_id, region=self.region)
             except NotFoundError:
-                return
+                return True
             except Exception:
                 pass
             if attempt == 0:
                 await asyncio.sleep(_DELETE_RETRY_DELAY)
-        logger.warning("Failed to delete boxd machine %s: %s", machine_id, error)
+        logger.warning("Failed to delete boxd machine %s: %s (a later stop() tries again)", machine_id, error)
+        return False
 
     async def is_alive(self) -> bool:
         if self._client is None or self.machine_id is None:
@@ -336,13 +378,31 @@ class BoxdSandbox(Sandbox):
         except Exception:
             logger.debug("Failed to remove %s on boxd machine %s", staged, self.machine_id, exc_info=True)
 
+    async def _container_path(self, path: str) -> str:
+        """Return ``path`` in the container as an absolute path.
+
+        ``docker cp`` resolves a relative path against ``/``; a relative path here is under the
+        container's working directory, as for ``exec``.
+        """
+        if PurePosixPath(path).is_absolute():
+            return path
+        if self._container_workdir is None:
+            assert self._container is not None
+            result = await self._checked(
+                ["docker", "inspect", "--format", "{{.Config.WorkingDir}}", self._container],
+                "reading the container's working directory",
+            )
+            self._container_workdir = result.stdout.strip() or "/"
+        return str(PurePosixPath(self._container_workdir) / path)
+
     async def read_file(self, path: str) -> bytes:
         if self._container is None:
             return await self._download_bytes(path)
+        source = await self._container_path(path)
         staged = self._staging_path()
         try:
             # -L copies what a symlink points to, as reading the path in the container would.
-            await self._checked(["docker", "cp", "-L", f"{self._container}:{path}", staged], f"read_file {path!r}")
+            await self._checked(["docker", "cp", "-L", f"{self._container}:{source}", staged], f"read_file {path!r}")
             return await self._download_bytes(staged)
         finally:
             await self._remove_staged(staged)
@@ -354,14 +414,17 @@ class BoxdSandbox(Sandbox):
             await self._checked(["mkdir", "-p", parent], f"write_file {path!r}")
             await self._upload_bytes(path, data)
             return
+        target = await self._container_path(path)
+        # docker cp copies a file into a destination directory under the file's own name.
+        if (await self.exec(["test", "-d", target])).exit_code == 0:
+            raise RuntimeError(f"write_file {path!r} failed: it is a directory")
+        created = await self.exec(["mkdir", "-p", str(PurePosixPath(target).parent)])
+        if created.exit_code != 0:
+            raise RuntimeError(f"write_file {path!r} failed: {created.stderr.strip()}")
         staged = self._staging_path()
         try:
             await self._upload_bytes(staged, data)
-            parent = str(PurePosixPath(path).parent)
-            created = await self.exec(["mkdir", "-p", parent])
-            if created.exit_code != 0:
-                raise RuntimeError(f"write_file {path!r} failed: {created.stderr.strip()}")
-            await self._checked(["docker", "cp", staged, f"{self._container}:{path}"], f"write_file {path!r}")
+            await self._checked(["docker", "cp", staged, f"{self._container}:{target}"], f"write_file {path!r}")
         finally:
             await self._remove_staged(staged)
 

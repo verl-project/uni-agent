@@ -47,6 +47,7 @@ class FakeMachines:
         self.exec_error: BaseException | None = None
         self.exec_delay = 0.0
         self.names: set[str] = set()
+        self.dirs: set[str] = set()
         self.create_blocks = False
 
     async def create(self, name, **kwargs):
@@ -65,6 +66,8 @@ class FakeMachines:
             await asyncio.sleep(self.exec_delay)
         if self.exec_error is not None:
             raise self.exec_error
+        if command[-3:-1] == ["test", "-d"]:
+            return SimpleNamespace(exit_code=0 if command[-1] in self.dirs else 1, stdout="", stderr="")
         key = " ".join(command[:3])
         return self.exec_results.get(key, SimpleNamespace(exit_code=0, stdout="", stderr=""))
 
@@ -478,6 +481,35 @@ def test_stop_retries_once_then_logs_delete_failures(fake_boxd, monkeypatch, cap
 
 @pytest.mark.cpu
 @pytest.mark.level0
+def test_a_machine_whose_delete_failed_is_deleted_by_a_later_stop(fake_boxd, monkeypatch):
+    monkeypatch.setattr("uni_agent.sandbox.boxd._DELETE_RETRY_DELAY", 0)
+    sandbox = BoxdSandbox()
+
+    async def run():
+        await sandbox.start()
+        first = fake_boxd.instances[-1]
+
+        async def broken_delete(machine_id, *, region=None):
+            first.machines.calls.append(("delete", machine_id))
+            raise FakeBoxdError("unavailable")
+
+        first.machines.delete = broken_delete
+        await sandbox.stop()
+        assert sandbox.machine_id is None
+        await sandbox.stop()
+        return first, fake_boxd.instances[-1]
+
+    first, second = asyncio.run(run())
+
+    assert first.closed is True
+    assert second is not first
+    assert ("delete", "vm-1") in second.machines.calls
+    assert second.closed is True
+    assert sandbox._cleanup_ids == []
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_files_on_the_machine_use_the_native_transfer(fake_boxd, tmp_path):
     sandbox = BoxdSandbox()
     payload = os.urandom(4096)
@@ -514,14 +546,61 @@ def test_files_in_the_container_are_staged_and_copied(fake_boxd):
 
     assert data == "héllo".encode()
     assert [call[:3] for call in machines.calls] == [
-        ("upload", "vm-1", STAGED),
+        ("exec", "vm-1", ["docker", "exec", CONTAINER, "test", "-d", "/repo/a.txt"]),
         ("exec", "vm-1", ["docker", "exec", CONTAINER, "mkdir", "-p", "/repo"]),
+        ("upload", "vm-1", STAGED),
         ("exec", "vm-1", ["docker", "cp", STAGED, f"{CONTAINER}:/repo/a.txt"]),
         ("exec", "vm-1", ["rm", "-rf", STAGED]),
         ("exec", "vm-1", ["docker", "cp", "-L", f"{CONTAINER}:/repo/a.txt", STAGED]),
         ("download", "vm-1", STAGED),
         ("exec", "vm-1", ["rm", "-rf", STAGED]),
     ]
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_relative_container_paths_resolve_against_the_working_directory(fake_boxd):
+    sandbox = BoxdSandbox(image="python:3.12", run_args=["--workdir", "/repo"])
+
+    async def run():
+        await sandbox.start()
+        machines = fake_boxd.instances[0].machines
+        machines.exec_results["docker inspect --format"] = SimpleNamespace(exit_code=0, stdout="/repo\n", stderr="")
+        machines.calls.clear()
+        await sandbox.write_file("sub/a.txt", "x")
+        await sandbox.read_file("sub/a.txt")
+        await sandbox.read_file("/abs/b.txt")
+        return machines
+
+    machines = asyncio.run(run())
+
+    execs = _execs(machines)
+    assert execs.count(["docker", "inspect", "--format", "{{.Config.WorkingDir}}", CONTAINER]) == 1
+    assert ["docker", "exec", CONTAINER, "mkdir", "-p", "/repo/sub"] in execs
+    assert ["docker", "cp", STAGED, f"{CONTAINER}:/repo/sub/a.txt"] in execs
+    assert ["docker", "cp", "-L", f"{CONTAINER}:/repo/sub/a.txt", STAGED] in execs
+    assert ["docker", "cp", "-L", f"{CONTAINER}:/abs/b.txt", STAGED] in execs
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_write_file_refuses_a_directory_destination(fake_boxd):
+    sandbox = BoxdSandbox(image="python:3.12")
+    machines: list[FakeMachines] = []
+
+    async def run():
+        await sandbox.start()
+        machines.append(fake_boxd.instances[0].machines)
+        machines[0].dirs.add("/repo")
+        machines[0].calls.clear()
+        await sandbox.write_file("/repo", "x")
+
+    with pytest.raises(RuntimeError, match="is a directory"):
+        asyncio.run(run())
+
+    # Nothing is staged or copied, so no staging-named file lands in the directory.
+    assert not [call for call in machines[0].calls if call[0] == "upload"]
+    assert not [command for command in _execs(machines[0]) if command[:2] == ["docker", "cp"]]
 
 
 @pytest.mark.cpu
@@ -634,6 +713,7 @@ def test_live_lifecycle(image, tmp_path):
         region=os.getenv("BOXD_REGION", "nyc"),
         org=os.getenv("BOXD_ORG"),
         name_prefix=os.getenv("BOXD_E2E_NAME_PREFIX", "uni-agent-e2e"),
+        run_args=["--workdir", "/work"] if image else None,
     )
     payload = os.urandom(5 * 1024 * 1024)
     (tmp_path / "tree" / "sub").mkdir(parents=True)
@@ -665,6 +745,13 @@ def test_live_lifecycle(image, tmp_path):
             assert await sandbox.read_file(f"{remote}/note.txt") == b"written\n"
             assert (await sandbox.exec(["ln", "-sfn", "note.txt", f"{remote}/link.txt"])).exit_code == 0
             assert await sandbox.read_file(f"{remote}/link.txt") == b"written\n"
+            if image is not None:
+                await sandbox.write_file("rel/r.txt", "relative\n")
+                assert (await sandbox.exec(["cat", "/work/rel/r.txt"])).stdout == "relative\n"
+                assert await sandbox.read_file("rel/r.txt") == b"relative\n"
+                with pytest.raises(RuntimeError, match="is a directory"):
+                    await sandbox.write_file(remote, "x")
+                assert (await sandbox.exec_shell(f"ls {remote} | grep -c uni-agent-xfer || true")).stdout.strip() == "0"
             assert await sandbox.is_alive()
         assert sandbox.machine_id is None
         return machine_id
