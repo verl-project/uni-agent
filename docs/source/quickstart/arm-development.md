@@ -23,41 +23,6 @@ For RL training, use a GPU or NPU host instead; see
     Gateway; all development and test workflows below work without a local
     inference service.
 
-## Configure Mirrors (Recommended on Slow or CN Networks)
-
-### pip index
-
-```bash
-pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
-```
-
-Or set `PIP_INDEX_URL` per command/CI job instead of changing global config.
-
-### Docker registry mirrors
-
-```json
-// /etc/docker/daemon.json
-{"registry-mirrors": ["https://docker.m.daocloud.io"]}
-```
-
-```bash
-systemctl restart docker
-docker pull python:3.12
-```
-
-### In-container apt mirrors
-
-Sandbox tools may install packages inside task images (for example,
-`stateful_shell` installs `tmux` on first use). Debian-based images default to
-`deb.debian.org`, which can be slow; switch to a nearby mirror first:
-
-```bash
-# deb822 format (Debian trixie and newer)
-sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list.d/debian.sources
-# legacy format (bookworm and older)
-sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list
-```
-
 ## Install Uni-Agent
 
 ```bash
@@ -122,9 +87,6 @@ Before opening a pull request, run the same checks as CI:
 .venv/bin/pre-commit run --all-files --show-diff-on-failure
 ```
 
-pre-commit downloads its hook environments from GitHub; configure a network
-proxy first if your host cannot reach GitHub reliably.
-
 ## Run the Sandbox Quickstart
 
 ```bash
@@ -132,8 +94,71 @@ DEBUG_MODE=1 SANDBOX_PROVIDER=docker .venv/bin/python examples/quickstart/sandbo
 ```
 
 The demo finishes with `Demo done`. On a fresh `python:3.12` image,
-`stateful_shell` installs `tmux` through apt on first use. On slow networks,
-pre-install it to keep tool startup fast and deterministic:
+`stateful_shell` installs `tmux` through apt on first use; see the
+troubleshooting notes below if your network makes that slow.
+
+## Troubleshooting
+
+The default flows above use the official package sources. Use the options
+below only when you hit the corresponding problem.
+
+### PyPI is unreachable or slow
+
+Switch to a nearby mirror such as Tsinghua's:
+
+```bash
+pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
+```
+
+Or set `PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple` per command
+instead of changing global config.
+
+### Docker Hub is unreachable or slow
+
+Configure a registry mirror in `/etc/docker/daemon.json` and restart Docker:
+
+```json
+{"registry-mirrors": ["https://docker.m.daocloud.io"]}
+```
+
+```bash
+systemctl restart docker
+docker pull python:3.12
+```
+
+### GitHub clone/fetch or pre-commit hooks fail
+
+pre-commit downloads its hook environments from GitHub on first use. On hosts
+with unstable GitHub access, retry the operation or route git/pip traffic
+through an HTTP proxy:
+
+```bash
+export http_proxy=http://<proxy-host>:<port>
+export https_proxy=http://<proxy-host>:<port>
+.venv/bin/pre-commit run --all-files --show-diff-on-failure
+```
+
+Once the hook environments are cached, pre-commit works offline.
+
+### apt is slow inside task images
+
+Sandbox tools may install packages inside task images (for example,
+`stateful_shell` installs `tmux` on first use). Debian-based images default to
+`deb.debian.org`; switch to a nearby mirror first:
+
+```bash
+# deb822 format (Debian trixie and newer)
+sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list.d/debian.sources
+# legacy format (bookworm and older)
+sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list
+```
+
+### stateful_shell startup is slow or times out on first use
+
+The first start installs `tmux` in the container. If an attempt times out,
+later retries wait for the in-flight installer and converge instead of
+failing on the apt lock. To avoid the install entirely, pre-install tmux into
+a base image and select it with `IMAGE=`:
 
 ```dockerfile
 FROM python:3.12
@@ -149,17 +174,52 @@ DEBUG_MODE=1 SANDBOX_PROVIDER=docker IMAGE=uni-agent-arm-base:latest \
   .venv/bin/python examples/quickstart/sandbox/demo.py
 ```
 
-!!! note "Docker < 26: image mounts"
-    `image_mounts` (mounting sidecar tool images) requires **Docker >= 26**
-    with the containerd image store enabled. On older Docker versions, build a
-    combined task image instead and reference it as the sandbox `image`:
+### `image_mounts` fails on Docker < 26
 
-    ```dockerfile
-    FROM python:3.12
-    COPY --from=<tool-image>:<tag> / /opt/<tool>
-    ```
+`image_mounts` (mounting sidecar tool images) requires **Docker >= 26** with
+the containerd image store enabled. On older Docker versions, build a combined
+task image instead and reference it as the sandbox `image`:
 
-    Keep the same `executable_paths` as the mount-based configuration.
+```dockerfile
+FROM python:3.12
+COPY --from=<tool-image>:<tag> / /opt/<tool>
+```
+
+Keep the same `executable_paths` as the mount-based configuration.
+
+### Tests skip or behave differently when run as root
+
+Some sandbox tests exercise permission errors that do not occur for root
+(for example, writing to a read-only file). They skip with a message such as
+`root can write read-only files`; this is expected and not a failure. For
+closer parity with CI, run the suite as an unprivileged user.
+
+### `make` is missing for the docs build
+
+Minimal ARM images may not ship `make`. Either install it
+(`dnf install -y make`) or invoke MkDocs directly from the repository root:
+
+```bash
+.venv/bin/pip install -r docs/requirements.txt
+.venv/bin/mkdocs build
+```
+
+### Sidecar image builds need a proxy or pip mirror
+
+Tool images based on `python-build-standalone` download a Python tarball from
+GitHub releases and packages from PyPI. Use the recipe's pip-index build
+argument and, when needed, Docker's built-in proxy build arguments:
+
+```bash
+docker build --network host \
+  --build-arg http_proxy=http://127.0.0.1:<port> \
+  --build-arg https_proxy=http://127.0.0.1:<port> \
+  --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
+  -f Dockerfile.<tool>-tool -t <tool-image>:<tag> .
+```
+
+`--network host` lets build steps reach a proxy listening on the host's
+loopback address.
 
 ## Verify Your Setup
 
