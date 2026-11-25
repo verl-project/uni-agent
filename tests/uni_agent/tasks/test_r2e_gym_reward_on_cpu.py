@@ -134,3 +134,91 @@ def test_r2e_setup_removes_symlink_targets_outside_testbed(tmp_path):
     restored = tmp_path / "root" / "r2e_tests"
     assert (restored / "test_fix.py").read_text() == "def test_fix(): pass\n"
     assert (restored / "helper.py").read_text() == "HELPER = 1\n"
+
+
+def _git(testbed: Path, *args: str) -> None:
+    subprocess.run(
+        ["git", "-c", "user.name=test", "-c", "user.email=test@example.com", "-C", str(testbed), *args],
+        check=True,
+        capture_output=True,
+    )
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.skipif(shutil.which("tar") is None, reason="needs tar")
+def test_r2e_setup_follows_symlinks_inside_symlinked_directories(tmp_path):
+    (tmp_path / "tmp").mkdir()
+    (tmp_path / "testbed").mkdir()
+    (tmp_path / "run_tests.sh").write_text("echo held-out runner\n")
+    held_out = tmp_path / "opt" / "r2e_tests"
+    held_out.mkdir(parents=True)
+    (held_out / "test_fix.py").write_text("def test_fix(): pass\n")
+    group = tmp_path / "opt" / "group"
+    group.mkdir()
+    secret = tmp_path / "srv" / "held_out.py"
+    secret.parent.mkdir()
+    secret.write_text("SECRET = 1\n")
+    # r2e_tests/fixtures -> /opt/group, and /opt/group/data.py -> /srv/held_out.py: two levels of links.
+    (group / "data.py").symlink_to(secret)
+    (held_out / "fixtures").symlink_to(group)
+    (tmp_path / "root").mkdir()
+    (tmp_path / "root" / "r2e_tests").symlink_to(held_out)
+
+    setup = _run(task._SETUP_SCRIPT, tmp_path)
+    assert setup.returncode == 0, setup.stderr
+
+    assert not held_out.exists()
+    assert not group.exists()
+    assert not secret.exists()
+
+    restore = _run(reward._RESTORE_SCRIPT, tmp_path)
+    assert restore.returncode == 0, restore.stderr
+    assert (tmp_path / "root" / "r2e_tests" / "fixtures" / "data.py").read_text() == "SECRET = 1\n"
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.skipif(shutil.which("tar") is None or shutil.which("git") is None, reason="needs tar and git")
+def test_r2e_setup_removes_untracked_symlink_targets_inside_testbed(tmp_path):
+    (tmp_path / "tmp").mkdir()
+    testbed = tmp_path / "testbed"
+    testbed.mkdir()
+    (testbed / "module.py").write_text("VALUE = 1\n")
+    _git(testbed, "init", "-q")
+    _git(testbed, "add", "module.py")
+    _git(testbed, "commit", "-q", "-m", "init")
+    (tmp_path / "run_tests.sh").write_text("echo held-out runner\n")
+    held_out = testbed / "held_out"
+    held_out.mkdir()
+    (held_out / "test_fix.py").write_text("def test_fix(): pass\n")
+    (tmp_path / "root").mkdir()
+    (tmp_path / "root" / "r2e_tests").symlink_to(held_out)
+
+    setup = _run(task._SETUP_SCRIPT, tmp_path)
+    assert setup.returncode == 0, setup.stderr
+
+    assert not held_out.exists()
+    assert (testbed / "module.py").read_text() == "VALUE = 1\n"
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.skipif(shutil.which("tar") is None or shutil.which("git") is None, reason="needs tar and git")
+def test_r2e_setup_fails_when_held_out_tests_resolve_to_tracked_files(tmp_path):
+    (tmp_path / "tmp").mkdir()
+    testbed = tmp_path / "testbed"
+    (testbed / "suite").mkdir(parents=True)
+    (testbed / "suite" / "test_fix.py").write_text("def test_fix(): pass\n")
+    _git(testbed, "init", "-q")
+    _git(testbed, "add", "suite")
+    _git(testbed, "commit", "-q", "-m", "init")
+    (tmp_path / "run_tests.sh").write_text("echo held-out runner\n")
+    (tmp_path / "root").mkdir()
+    (tmp_path / "root" / "r2e_tests").symlink_to(testbed / "suite")
+
+    setup = _run(task._SETUP_SCRIPT, tmp_path)
+
+    assert setup.returncode != 0
+    assert "cannot hide held-out R2E-Gym tests" in setup.stderr
+    assert (testbed / "suite" / "test_fix.py").read_text() == "def test_fix(): pass\n"

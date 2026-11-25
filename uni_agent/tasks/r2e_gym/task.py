@@ -54,28 +54,61 @@ find "$stage" -name '*.pyc' -delete
 tar -czf /tmp/r2e_eval_assets.tar.gz -C "$stage" run_tests.sh r2e_tests
 rm -rf "$stage"
 
-# Also remove what the runner, the test tree, and links inside it point to, so a symlinked copy elsewhere (for
-# example /opt/r2e_tests) does not stay readable. Repository files (/testbed) and the runtime environment
-# (system and virtualenv paths) are kept.
-hide_target() {
-    local target
-    target="$(readlink -f "$1" 2>/dev/null || true)"
-    case "$target" in
-        "" | / | /testbed | /testbed/* | /root | /root/.venv* | /root/.local* | /tmp | /opt | /opt/conda* | \
-            /usr | /usr/* | /bin* | /sbin* | /lib* | /etc* | /proc* | /sys* | /dev* | /var* | /home) ;;
-        *) rm -rf "$target" ;;
+# Also remove what the runner and the test tree resolve to, following symlinks transitively (links inside linked
+# directories too), so no held-out file stays readable through a link target. Git-tracked repository files and the
+# runtime environment (system and virtualenv paths) are kept; if the runner or the test tree itself resolves to such
+# a path, setup fails instead of leaving the held-out tests readable.
+git config --global --add safe.directory /testbed 2>/dev/null || true
+testbed_is_git=0
+if git -C /testbed rev-parse --is-inside-work-tree >/dev/null 2>&1; then testbed_is_git=1; fi
+tracked() {
+    [ "$testbed_is_git" = 1 ] && [ -n "$(git -C /testbed ls-files -- "${1#/testbed/}" 2>/dev/null | head -n 1)" ]
+}
+removable() {
+    case "$1" in
+        /testbed/r2e_tests | /testbed/r2e_tests/* | /testbed/run_tests.sh)
+            ! tracked "$1" ;;
+        "" | / | /root | /tmp | /opt | /home | /testbed | /testbed/.git | /testbed/.git/* | /testbed/.venv | \
+            /testbed/.venv/* | /root/.venv* | /root/.local* | /opt/conda* | /usr | /usr/* | /bin* | /sbin* | /lib* | \
+            /etc* | /proc* | /sys* | /dev* | /var*)
+            return 1 ;;
+        /testbed/*)
+            [ "$testbed_is_git" = 1 ] && ! tracked "$1" ;;
+        *) return 0 ;;
     esac
 }
-while IFS= read -r -d '' link; do
-    hide_target "$link"
-done < <(find "$tests_dir/" -type l -print0)
-hide_target "$runner"
-hide_target "$tests_dir"
+runner_target="$(readlink -f "$runner")"
+tests_target="$(readlink -f "$tests_dir")"
+declare -A seen=()
+targets=()
+queue=("$runner" "$tests_dir")
+while ((${#queue[@]})); do
+    path="${queue[0]}"
+    queue=("${queue[@]:1}")
+    target="$(readlink -f "$path" 2>/dev/null || true)"
+    if [ -z "$target" ] || [ -n "${seen[$target]+x}" ]; then continue; fi
+    seen[$target]=1
+    targets+=("$target")
+    if [ -d "$target" ]; then
+        while IFS= read -r -d '' link; do queue+=("$link"); done < <(find "$target" -type l -print0)
+    fi
+done
+for target in "${targets[@]}"; do
+    if removable "$target"; then
+        rm -rf "$target"
+        if [ -e "$target" ] || [ -L "$target" ]; then
+            echo "failed to remove held-out R2E-Gym path $target" >&2
+            exit 1
+        fi
+    elif [ "$target" = "$runner_target" ] || [ "$target" = "$tests_target" ]; then
+        echo "cannot hide held-out R2E-Gym tests: $target is a tracked or protected path" >&2
+        exit 1
+    fi
+done
 rm -rf /r2e_tests /root/r2e_tests /testbed/r2e_tests /run_tests.sh /root/run_tests.sh /testbed/run_tests.sh
 
 find /testbed -name '*.pyc' -delete
 find /testbed -name '__pycache__' -type d -prune -exec rm -rf {} +
-git config --global --add safe.directory /testbed 2>/dev/null || true
 git -C /testbed reset --hard 2>/dev/null || true
 """.strip()
 
