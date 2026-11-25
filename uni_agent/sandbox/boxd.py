@@ -271,13 +271,21 @@ class BoxdSandbox(Sandbox):
                 self._cleanup_ids, self._cleanup_names = ids, names
                 raise
         try:
-            for name in names:
-                found = await self._find_machine(client, name)
+            # Each entry leaves ids or names only once it is settled, so an interrupted stop()
+            # (a cancellation) puts the rest back for the next one.
+            while names:
+                found = await self._find_machine(client, names[0])
                 if found is not None:
                     ids.append(found)
-            for mid in ids:
-                if not await self._delete_machine(client, mid):
-                    self._cleanup_ids.append(mid)
+                names.pop(0)
+            while ids:
+                if not await self._delete_machine(client, ids[0]):
+                    self._cleanup_ids.append(ids[0])
+                ids.pop(0)
+        except BaseException:
+            self._cleanup_ids.extend(ids)
+            self._cleanup_names.extend(names)
+            raise
         finally:
             await self._close_client(client)
 
@@ -351,7 +359,11 @@ class BoxdSandbox(Sandbox):
         env: dict[str, str] | None = None,
     ) -> ExecResult:
         if self._container is None:
-            return await self._machine_exec(list(argv), timeout=timeout, env=env, cwd=workdir)
+            command = list(argv)
+            if timeout is not None:
+                # Bound the command on the machine too, as in the container below.
+                command = ["timeout", "-k", "10", str(math.ceil(timeout) + 2), *command]
+            return await self._machine_exec(command, timeout=timeout, env=env, cwd=workdir)
         args = ["docker", "exec"]
         if workdir:
             args.extend(["--workdir", workdir])

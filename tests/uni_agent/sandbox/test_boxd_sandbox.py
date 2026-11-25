@@ -351,6 +351,23 @@ def test_exec_on_machine_uses_native_cwd_and_env(fake_boxd):
 
 @pytest.mark.cpu
 @pytest.mark.level0
+def test_exec_on_machine_bounds_the_command_on_the_machine(fake_boxd):
+    sandbox = BoxdSandbox()
+
+    async def run():
+        await sandbox.start()
+        await sandbox.exec(["sleep", "60"], timeout=12.5)
+        return fake_boxd.instances[0].machines
+
+    machines = asyncio.run(run())
+
+    # The machine exec stops waiting at its timeout; ``timeout`` ends the command on the machine too.
+    assert machines.calls[-1][2] == ["timeout", "-k", "10", "15", "sleep", "60"]
+    assert machines.calls[-1][5] == 12.5
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_exec_timeout_becomes_the_shared_timeout_result(fake_boxd):
     sandbox = BoxdSandbox()
 
@@ -505,6 +522,39 @@ def test_a_machine_whose_delete_failed_is_deleted_by_a_later_stop(fake_boxd, mon
     assert second is not first
     assert ("delete", "vm-1") in second.machines.calls
     assert second.closed is True
+    assert sandbox._cleanup_ids == []
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_a_cancelled_stop_keeps_the_machine_for_a_later_stop(fake_boxd):
+    sandbox = BoxdSandbox()
+
+    async def run():
+        await sandbox.start()
+        first = fake_boxd.instances[-1]
+        entered = asyncio.Event()
+
+        async def hanging_delete(machine_id, *, region=None):
+            first.machines.calls.append(("delete", machine_id))
+            entered.set()
+            await asyncio.Event().wait()
+
+        first.machines.delete = hanging_delete
+        task = asyncio.create_task(sandbox.stop())
+        await entered.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert sandbox._cleanup_ids == ["vm-1"]
+        await sandbox.stop()
+        return first, fake_boxd.instances[-1]
+
+    first, second = asyncio.run(run())
+
+    assert first.closed is True
+    assert second is not first
+    assert ("delete", "vm-1") in second.machines.calls
     assert sandbox._cleanup_ids == []
 
 
