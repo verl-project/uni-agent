@@ -18,10 +18,11 @@ For RL training, use a GPU or NPU host instead; see
 - No GPU is needed for development, sandbox workflows, or CPU tests
 
 !!! note "Model inference on ARM hosts"
-    vLLM does not provide aarch64 CPU wheels, so do not expect to serve models
-    locally. Point agents at an external OpenAI-compatible endpoint or a remote
-    Gateway; all development and test workflows below work without a local
-    inference service.
+    The CPU-only workflows in this guide do not require a local inference
+    service; point agents at an external OpenAI-compatible endpoint or a remote
+    Gateway. On ARM hosts with a supported NVIDIA GPU, you can build vLLM from
+    source and serve models locally. Follow vLLM's source-build instructions
+    for your ARM64 platform, GPU, and CUDA environment.
 
 ## Install Uni-Agent
 
@@ -46,9 +47,10 @@ install it without its heavy dependencies:
 .venv/bin/pip install --no-deps -e ./verl
 ```
 
-Do **not** run `pip install -r requirements-test.txt` on an ARM CPU host: it
-pins `vllm==0.23.0`, which is unavailable there. Install the test dependencies
-selectively instead (next section).
+Do **not** run `pip install -r requirements-test.txt` for this CPU-only setup:
+it pins `vllm==0.23.0`, which is unnecessary for the vLLM-independent tests
+covered here and may require a source build on ARM. Install the test
+dependencies selectively instead (next section).
 
 ## Run CPU Tests
 
@@ -71,9 +73,9 @@ aligned with the bundled `verl`):
 ```
 
 Tests that exercise vLLM parser integrations (under `tests/uni_agent/gateway/`
-and `tests/uni_agent/agent_aware_router/`) require vLLM and are expected to
-fail with `ModuleNotFoundError: No module named 'vllm'` on ARM CPU hosts. Skip
-them explicitly when running the full directory:
+and `tests/uni_agent/agent_aware_router/`) require vLLM. If it is not installed,
+they fail with `ModuleNotFoundError: No module named 'vllm'`; skip them
+explicitly when running the full directory:
 
 ```bash
 .venv/bin/python -m pytest tests/uni_agent/ -m 'cpu and level0' -q \
