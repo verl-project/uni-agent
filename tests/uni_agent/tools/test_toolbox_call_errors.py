@@ -222,3 +222,29 @@ if __name__ == "__main__":
     import sys
 
     sys.exit(pytest.main([__file__, "-v"]))
+
+
+class _Shell(Tool):
+    """Stands in for the stateful shell, which the model sees as ``shell``."""
+
+    name = "shell"
+
+    async def run(self, args, *, timeout=None):
+        return ToolResult(text=f"ran {args['command']}")
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_bash_alias_runs_the_shell_tool():
+    toolbox = Toolbox([_Shell(object()), _Echo(object())])
+    result = asyncio.run(toolbox.call("bash", json.dumps({"command": "ls"})))
+    assert result.status == "ok"
+    assert result.text == "ran ls"
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_bash_alias_without_a_shell_tool_is_still_a_format_error():
+    result = asyncio.run(_toolbox().call("bash", json.dumps({"command": "ls"})))
+    assert result.status == "format_error"
+    assert "Invalid action: function 'bash' is not defined" in result.text

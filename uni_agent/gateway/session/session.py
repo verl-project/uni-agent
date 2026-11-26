@@ -363,6 +363,9 @@ class GatewaySession:
                 backend_kwargs = {}
                 if encoded.agent_context is not None and getattr(backend, "supports_agent_context", False) is True:
                     backend_kwargs["agent_context"] = encoded.agent_context.copy()
+                if "_request_priority" in self._metadata:
+                    # Lower is served first under vLLM priority scheduling (the framework stamps the dispatch step).
+                    backend_kwargs["priority"] = int(self._metadata["_request_priority"])
                 output = await backend.generate(
                     request_id=self.handle.session_id,
                     prompt_ids=encoded.context_ids,

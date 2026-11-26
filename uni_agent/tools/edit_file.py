@@ -9,10 +9,12 @@ behaviour across rollouts.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
 from collections import defaultdict
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
@@ -84,6 +86,28 @@ class StrReplaceEditorArguments(BaseModel):
             return value
 
 
+# One exec answers "what is at `path`?" and, when asked, also returns what the command
+# needs next, so validation plus the read cost one sandbox round trip instead of 3-4.
+# Output: a type token line (`D` directory, `F` other existing path, `N` missing); then
+# for `create` a parent token (`P` parent is a directory, else `-`); for reads the
+# `base64` of the file. `[ -e ]` / `[ -d ]` follow symlinks like `test -e` / `test -d`.
+_PROBE_SCRIPT = (
+    'if [ -d "$1" ]; then echo D; '
+    'elif [ -e "$1" ]; then echo F; if [ "$2" = read ]; then base64 "$1" || exit 3; fi; '
+    'else echo N; if [ "$2" = create ] && [ -d "$3" ]; then echo P; else echo -; fi; fi'
+)
+
+
+@dataclass
+class _Probe:
+    """What a single probe exec learned about ``path``."""
+
+    exists: bool
+    is_dir: bool
+    parent_is_dir: bool | None = None  # Only for `create` on a missing path.
+    content: bytes | None = None  # Only when the read was folded into the probe.
+
+
 def _as_lf(text: str) -> str:
     return text.replace("\r\n", "\n").replace("\r", "\n")
 
@@ -152,17 +176,50 @@ class EditFileTool(Tool):
 
     # ----- data-plane helpers -----
     @staticmethod
-    async def _exists(sandbox: SandboxBackend, path: str) -> bool:
-        return (await sandbox.exec(["test", "-e", path])).exit_code == 0
-
-    @staticmethod
     async def _is_dir(sandbox: SandboxBackend, path: str) -> bool:
         return (await sandbox.exec(["test", "-d", path])).exit_code == 0
 
     @staticmethod
-    async def _read(sandbox: SandboxBackend, path: str) -> str:
+    def _uses_exec_read(sandbox: SandboxBackend) -> bool:
+        """Whether ``read_file`` is the base64-over-exec floor, so the probe may fold it in.
+
+        Providers with a native file channel keep using their own ``read_file``.
+        """
+        from uni_agent.sandbox.base import Sandbox
+
+        return getattr(type(sandbox), "read_file", None) is Sandbox.read_file
+
+    @classmethod
+    async def _probe(cls, sandbox: SandboxBackend, command: str, path: str) -> _Probe:
+        """Classify ``path`` in one exec, also fetching what ``command`` needs next."""
+        mode, parent = "none", ""
+        if command == "create":
+            mode, parent = "create", os.path.dirname(path.rstrip("/")) or "/"
+        elif command in ("view", "str_replace", "insert") and cls._uses_exec_read(sandbox):
+            mode = "read"
+        res = await sandbox.exec(["bash", "-c", _PROBE_SCRIPT, "probe", path, mode, parent])
+        token, _, rest = res.stdout.partition("\n")
+        token = token.strip()
+        if token == "D":
+            return _Probe(exists=True, is_dir=True)
+        if token == "F":
+            if mode != "read":
+                return _Probe(exists=True, is_dir=False)
+            if res.exit_code != 0:
+                # Same error the base64 `read_file` floor raises.
+                raise RuntimeError(f"read_file {path!r} failed: {res.stderr.strip()}")
+            return _Probe(exists=True, is_dir=False, content=base64.b64decode(rest))
+        # `N`, or a failed exec: like a failed `test -e`, the path does not exist.
+        parent_is_dir = rest.strip() == "P" if token == "N" and mode == "create" else None
+        return _Probe(exists=False, is_dir=False, parent_is_dir=parent_is_dir)
+
+    @staticmethod
+    async def _read(sandbox: SandboxBackend, path: str, probe: _Probe | None = None) -> str:
         """The text of the file as it is: tabs, line endings and the final newline are kept."""
-        data = await sandbox.read_file(path)
+        if probe is not None and probe.content is not None:
+            data = probe.content
+        else:
+            data = await sandbox.read_file(path)
         try:
             return data.decode("utf-8")
         except UnicodeDecodeError as exc:
@@ -178,9 +235,7 @@ class EditFileTool(Tool):
         try:
             args = StrReplaceEditorArguments(**args).model_dump()
         except ValidationError as exc:
-            details = "; ".join(
-                f"`{'.'.join(str(p) for p in err['loc'])}`: {err['msg']}" for err in exc.errors()
-            )
+            details = "; ".join(f"`{'.'.join(str(p) for p in err['loc'])}`: {err['msg']}" for err in exc.errors())
             return f"Invalid arguments for str_replace_editor: {details}"
         command = args.get("command")
         path = args.get("path")
@@ -189,18 +244,21 @@ class EditFileTool(Tool):
         if not path:
             raise ToolError("Parameter `path` is required.")
 
-        invalid = await self._validate_path(command, sandbox, path)
+        if command == "create" and path.endswith("/"):
+            return f"The path `{path}` ends with `/`. The `create` command requires a file path."
+        probe = await self._probe(sandbox, command, path)
+        invalid = self._validate_path(command, path, probe)
         if invalid is not None:
             return invalid
 
         if command == "view":
-            return await self._view(sandbox, path, args.get("view_range"))
+            return await self._view(sandbox, path, args.get("view_range"), probe)
         if command == "create":
-            return await self._create(sandbox, path, args.get("file_text"))
+            return await self._create(sandbox, path, args.get("file_text"), probe)
         if command == "str_replace":
-            return await self._str_replace(sandbox, path, args.get("old_str"), args.get("new_str"))
+            return await self._str_replace(sandbox, path, args.get("old_str"), args.get("new_str"), probe)
         if command == "insert":
-            return await self._insert(sandbox, path, args.get("insert_line"), args.get("new_str"))
+            return await self._insert(sandbox, path, args.get("insert_line"), args.get("new_str"), probe)
         if command == "undo_edit":
             return await self._undo_edit(sandbox, path)
         return (
@@ -209,11 +267,9 @@ class EditFileTool(Tool):
             "`view`, `create`, `str_replace`, `insert`, `undo_edit`"
         )
 
-    async def _validate_path(self, command: str, sandbox: SandboxBackend, path: str) -> str | None:
-        if command == "create" and path.endswith("/"):
-            return f"The path `{path}` ends with `/`. The `create` command requires a file path."
-        exists = await self._exists(sandbox, path)
-        is_dir = await self._is_dir(sandbox, path) if exists else False
+    @staticmethod
+    def _validate_path(command: str, path: str, probe: _Probe) -> str | None:
+        exists, is_dir = probe.exists, probe.is_dir
         if not exists and command != "create":
             return f"The path `{path}` does not exist. Please provide a valid path."
         if exists and command == "create":
@@ -223,8 +279,11 @@ class EditFileTool(Tool):
         return None
 
     # ----- commands -----
-    async def _view(self, sandbox: SandboxBackend, path: str, view_range: list[int] | None) -> str:
-        if await self._is_dir(sandbox, path):
+    async def _view(
+        self, sandbox: SandboxBackend, path: str, view_range: list[int] | None, probe: _Probe | None = None
+    ) -> str:
+        is_dir = probe.is_dir if probe is not None else await self._is_dir(sandbox, path)
+        if is_dir:
             if view_range:
                 return "The `view_range` parameter is not allowed when `path` points to a directory."
             res = await sandbox.exec(["find", path, "-maxdepth", "2", "-not", "-path", "*/.*"])
@@ -235,7 +294,7 @@ class EditFileTool(Tool):
                 f"excluding hidden items:\n{res.stdout}\n"
             )
 
-        file_lines = _file_lines(await self._read(sandbox, path))
+        file_lines = _file_lines(await self._read(sandbox, path, probe))
         init_line = 1
         if view_range:
             if len(view_range) != 2 or not all(isinstance(i, int) for i in view_range):
@@ -264,22 +323,32 @@ class EditFileTool(Tool):
 
         return _make_output(file_lines, str(path), init_line=init_line)
 
-    async def _create(self, sandbox: SandboxBackend, path: str, file_text: str | None) -> str:
+    async def _create(
+        self, sandbox: SandboxBackend, path: str, file_text: str | None, probe: _Probe | None = None
+    ) -> str:
         if file_text is None:
             return "Parameter `file_text` is required for command: create"
         parent = os.path.dirname(path.rstrip("/")) or "/"
-        if not await self._is_dir(sandbox, parent):
+        parent_is_dir = probe.parent_is_dir if probe is not None else None
+        if parent_is_dir is None:
+            parent_is_dir = await self._is_dir(sandbox, parent)
+        if not parent_is_dir:
             return f"The parent directory {parent} does not exist. Please create it first."
         await sandbox.write_file(path, file_text)
         self._history[path].append("")
         return f"File created successfully at: {path}"
 
     async def _str_replace(
-        self, sandbox: SandboxBackend, path: str, old_str: str | None, new_str: str | None
+        self,
+        sandbox: SandboxBackend,
+        path: str,
+        old_str: str | None,
+        new_str: str | None,
+        probe: _Probe | None = None,
     ) -> str:
         if not old_str:
             return "Parameter `old_str` is required for command: str_replace and must be a non-empty string."
-        file_content = await self._read(sandbox, path)
+        file_content = await self._read(sandbox, path, probe)
         displayed = _as_lf(file_content)
         target = _as_lf(old_str)
         replacement = _as_lf(new_str or "")
@@ -317,14 +386,19 @@ class EditFileTool(Tool):
         return success_msg
 
     async def _insert(
-        self, sandbox: SandboxBackend, path: str, insert_line: int | None, new_str: str | None
+        self,
+        sandbox: SandboxBackend,
+        path: str,
+        insert_line: int | None,
+        new_str: str | None,
+        probe: _Probe | None = None,
     ) -> str:
         if insert_line is None:
             return "Parameter `insert_line` is required for command: insert"
         if new_str is None:
             return "Parameter `new_str` is required for command: insert"
 
-        file_text = await self._read(sandbox, path)
+        file_text = await self._read(sandbox, path, probe)
         file_lines = _file_lines(file_text)
         n_lines = len(file_lines)
 

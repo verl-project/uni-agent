@@ -582,6 +582,7 @@ class Sandbox(abc.ABC):
         # Stage chunks in /tmp, then decode in one shot; a read-only target
         # directory does not break large writes to a writable file.
         tmp = shlex.quote(f"/tmp/uni-agent-{uuid.uuid4().hex[:8]}.b64")
+        cleaned = False
         try:
             for index, offset in enumerate(range(0, len(b64), _WRITE_FILE_B64_CHUNK_SIZE)):
                 chunk = shlex.quote(b64[offset : offset + _WRITE_FILE_B64_CHUNK_SIZE])
@@ -590,14 +591,19 @@ class Sandbox(abc.ABC):
                 res = await self.exec_shell(f"{prefix}printf %s {chunk} {redirect} {tmp}")
                 if res.exit_code != 0:
                     raise RuntimeError(f"write_file {path!r} failed: {res.stderr.strip()}")
-            res = await self.exec_shell(f"base64 -d {tmp} > {q}")
+            # Decode and drop the staging file in the same exec (one round trip fewer);
+            # the decode's exit status is what the caller sees.
+            res = await self.exec_shell(f"base64 -d {tmp} > {q}; rc=$?; rm -f {tmp}; exit $rc")
             if res.exit_code != 0:
                 raise RuntimeError(f"write_file {path!r} failed: {res.stderr.strip()}")
+            cleaned = True
         finally:
-            try:
-                await asyncio.shield(self.exec_shell(f"rm -f {tmp}"))
-            except Exception:
-                logger.warning("write_file failed to clean temp file for %r", path, exc_info=True)
+            if not cleaned:
+                # Best effort: a failed or interrupted write may have left the staging file.
+                try:
+                    await asyncio.shield(self.exec_shell(f"rm -f {tmp}"))
+                except Exception:
+                    logger.warning("write_file failed to clean temp file for %r", path, exc_info=True)
 
     async def upload(self, local_path: Path | str, remote_path: str) -> None:
         """Upload a host file or directory tree into the sandbox.

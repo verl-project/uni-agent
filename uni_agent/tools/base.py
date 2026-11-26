@@ -27,6 +27,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Tool names a model may use for a registered tool. Applied only when the alias itself is not a registered tool.
+TOOL_NAME_ALIASES: dict[str, str] = {"bash": "shell"}
+
 ToolStatus = Literal["ok", "format_error", "error", "timeout"]
 
 
@@ -356,6 +359,10 @@ class Toolbox:
         """Dispatch one tool call, returning the :class:`ToolResult` for the model."""
         try:
             tool = self._tools.get(name)
+            if tool is None and name in TOOL_NAME_ALIASES:
+                # Models trained on bash-tool scaffolds often call the shell ``bash``; run it as the shell tool
+                # instead of burning the turn on a format error.
+                tool = self._tools.get(TOOL_NAME_ALIASES[name])
             if tool is None:
                 raise ToolCallFormatError(
                     f"Invalid action: function {name!r} is not defined in the tools list.\n"

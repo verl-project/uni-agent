@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from uni_agent.sandbox.base import ExecResult, Sandbox, SandboxConfig
+from uni_agent.sandbox.base import _WRITE_FILE_B64_CHUNK_SIZE, ExecResult, Sandbox, SandboxConfig
 from uni_agent.sandbox.docker import DockerSandbox
 from uni_agent.sandbox.registry import SANDBOX_MODULES, build_sandbox
 
@@ -481,8 +481,10 @@ def test_write_file_large_payload_is_chunked_and_argv_safe(monkeypatch):
         if match:
             staged += match.group(1)
     assert base64.b64decode(staged) == payload
-    assert any(script.startswith("base64 -d ") for script in scripts)
-    assert scripts[-1].startswith("rm -f ")
+    # The staging file is removed by the decode exec itself: no trailing `rm` round trip.
+    assert scripts[-1].startswith("base64 -d ")
+    assert "rm -f " in scripts[-1]
+    assert len(scripts) == -(-len(base64.b64encode(payload)) // _WRITE_FILE_B64_CHUNK_SIZE) + 1
 
 
 @pytest.mark.cpu

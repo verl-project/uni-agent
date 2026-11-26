@@ -352,6 +352,7 @@ class GatewayAgentFramework(AgentFramework):
         self._rollout_config = rollout_config
         self._runner_semaphores: dict[str, asyncio.Semaphore] = {}
         self._semaphore_loop: asyncio.AbstractEventLoop | None = None
+        self._dispatched_train_groups: int = 0
         self._log_dir = log_dir
         self._mask_unfinished_episode = mask_unfinished_episode
         self._trajectory_postprocessor = trajectory_postprocessor
@@ -621,8 +622,13 @@ class GatewayAgentFramework(AgentFramework):
 
         # Batch layer: each sample/prompt owns its own group of sessions (rollout.n by default).
         # Prompt tasks are isolated so one prompt failure does not drop the whole batch.
+        base_group_order: int | None = None
+        if partition_id == "train":
+            base_group_order = self._dispatched_train_groups
+            self._dispatched_train_groups += len(prompts)
         tasks = []
         for sample_index in range(len(prompts)):
+            group_order = None if base_group_order is None else base_group_order + sample_index
             tasks.append(
                 self._run_prompt_rollouts(
                     sample_fields=samples[sample_index],
@@ -630,6 +636,7 @@ class GatewayAgentFramework(AgentFramework):
                     global_steps=global_steps,
                     partition_id=partition_id,
                     num_sessions=session_counts[sample_index],
+                    group_order=group_order,
                 )
             )
         outcomes = await asyncio.gather(*tasks, return_exceptions=True)
@@ -670,6 +677,7 @@ class GatewayAgentFramework(AgentFramework):
         global_steps: int | None,
         partition_id: str,
         num_sessions: int,
+        group_order: int | None = None,
     ) -> dict:
         """Run the requested number of independent sessions for one prompt and persist their outputs."""
         uid = sample_fields.get("uid")
@@ -693,6 +701,7 @@ class GatewayAgentFramework(AgentFramework):
                 global_steps=global_steps,
                 partition_id=partition_id,
                 sampling_params=sampling_params,
+                group_order=group_order,
             )
             for session_index in range(num_sessions)
         ]
@@ -746,6 +755,7 @@ class GatewayAgentFramework(AgentFramework):
         global_steps: int | None,
         partition_id: str,
         sampling_params: dict[str, object],
+        group_order: int | None = None,
     ) -> list[Trajectory]:
         """Run one session, write its trajectories to TQ, then publish its terminal session status."""
         schema = _session_tq_schema()
@@ -763,6 +773,7 @@ class GatewayAgentFramework(AgentFramework):
                 session_index=session_index,
                 global_steps=global_steps,
                 sampling_params=sampling_params,
+                group_order=group_order,
             )
             if not trajectories:
                 raise RuntimeError(f"empty trajectories for uid={uid} session_index={session_index}")
@@ -800,6 +811,7 @@ class GatewayAgentFramework(AgentFramework):
         session_index: int,
         global_steps: int | None,
         sampling_params: dict[str, object],
+        group_order: int | None = None,
     ) -> tuple[list[Trajectory], dict[str, object]]:
         # Lazy-init semaphores on first use and rebind if the running loop
         # changed: asyncio.Semaphore binds to the loop at construction, but
@@ -833,6 +845,7 @@ class GatewayAgentFramework(AgentFramework):
                 runner_name=runner_name,
                 runner_config=runner_config,
                 sampling_params=sampling_params,
+                group_order=group_order,
             )
 
         runner_semaphore = self._runner_semaphores.get(runner_name)
@@ -849,6 +862,7 @@ class GatewayAgentFramework(AgentFramework):
                 runner_name=runner_name,
                 runner_config=runner_config,
                 sampling_params=sampling_params,
+                group_order=group_order,
             )
 
     async def _run_agent_episode(
@@ -861,6 +875,7 @@ class GatewayAgentFramework(AgentFramework):
         runner_name: str,
         runner_config: _RunnerConfig,
         sampling_params: dict[str, object],
+        group_order: int | None = None,
     ) -> tuple[list[Trajectory], dict[str, object]]:
         """Run one AgentRunner episode inside a Framework-created Gateway session."""
         session_id = f"session-sample-{sample_index}-rollout-{session_index}-{uuid4().hex}"
@@ -894,7 +909,7 @@ class GatewayAgentFramework(AgentFramework):
         async with _log_scope(parent_log):
             session = await self._create_session(
                 session_id,
-                metadata={"_trace_identity": trace_identity, "_log_dir": str(run_dir) if run_dir is not None else None},
+                metadata=_session_metadata(trace_identity, run_dir, global_steps, group_order=group_order),
                 sampling_params=dict(sampling_params),
                 pass_through_message_history=select_fn is not None,
             )
@@ -1438,3 +1453,34 @@ class GatewayAgentFramework(AgentFramework):
         are not overwritten.
         """
         return {}
+
+
+def _session_metadata(
+    trace_identity: dict,
+    run_dir: object,
+    global_steps: int | None,
+    *,
+    group_order: int | None = None,
+) -> dict[str, object]:
+    """Gateway session metadata for one episode.
+
+    ``UNI_AGENT_REQUEST_PRIORITY`` assigns an integer vLLM request priority to every turn of a training episode when
+    paired with ``actor_rollout_ref.rollout.scheduling_policy=priority`` (lower values are served first):
+
+    * ``dispatch_step``: ``int(global_steps)``, so older training-step batches finish before newer batches.
+    * ``group_order``: monotonic FIFO prompt-group index ``0, 1, 2, ...``, which also breaks ties across the initial
+      multi-batch async warmup window (all of whose prompts share ``global_steps == 1``) so earlier warmup groups
+      complete first and naturally stagger the pipeline from step 1.
+
+    Leave it unset with FCFS scheduling: vLLM rejects request priorities unless priority scheduling is on.
+    """
+    metadata: dict[str, object] = {
+        "_trace_identity": trace_identity,
+        "_log_dir": str(run_dir) if run_dir is not None else None,
+    }
+    mode = os.getenv("UNI_AGENT_REQUEST_PRIORITY", "").strip().lower()
+    if mode == "dispatch_step" and global_steps is not None:
+        metadata["_request_priority"] = int(global_steps)
+    elif mode == "group_order" and group_order is not None:
+        metadata["_request_priority"] = int(group_order)
+    return metadata
