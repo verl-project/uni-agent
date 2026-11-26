@@ -9,3 +9,4 @@ ray==2.54.1
 TransferQueue==0.1.11
 loguru
 pyzmq
+nono-py==0.16.0
