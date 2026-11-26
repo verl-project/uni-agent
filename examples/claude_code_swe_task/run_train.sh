@@ -23,6 +23,44 @@ SERVED_MODEL_NAME="${SERVED_MODEL_NAME:-$(basename "${MODEL_PATH}")}"
 MASK_UNFINISHED_EPISODE="${MASK_UNFINISHED_EPISODE:-False}"
 TRAJECTORY_SELECTION="${TRAJECTORY_SELECTION:-longest}"
 
+# Agent-aware router is off unless ROUTER_CONFIG points to a plugin YAML.
+# From the repository root:
+#   ROUTER_CONFIG=uni_agent/agent_aware_router/configs/agent_aware_router.yaml \
+#     bash examples/claude_code_swe_task/run_train.sh
+ROUTER_CONFIG="${ROUTER_CONFIG:-}"
+ROUTER_LOAD_THRESHOLD="${ROUTER_LOAD_THRESHOLD:-}"
+ROUTER_KV_EVENTS="${ROUTER_KV_EVENTS:-True}"
+
+ROUTER_ARGS=()
+if [[ -n "${ROUTER_CONFIG}" ]]; then
+    if [[ ! -f "${ROUTER_CONFIG}" || ! -r "${ROUTER_CONFIG}" ]]; then
+        echo "Router config does not exist or is not readable: ${ROUTER_CONFIG}" >&2
+        exit 1
+    fi
+
+    ROUTER_ARGS+=("++actor_rollout_ref.rollout.router_config_path=\"${ROUTER_CONFIG}\"")
+    if [[ -n "${ROUTER_LOAD_THRESHOLD}" ]]; then
+        ROUTER_ARGS+=("++actor_rollout_ref.rollout.custom.agent_framework.router.load_threshold=${ROUTER_LOAD_THRESHOLD}")
+    fi
+    if [[ "${ROUTER_KV_EVENTS,,}" == "true" ]]; then
+        ROUTER_ARGS+=(
+            '++actor_rollout_ref.rollout.engine_kwargs.vllm.kv-events-config.enable_kv_cache_events=True'
+            '++actor_rollout_ref.rollout.engine_kwargs.vllm.kv-events-config.publisher="zmq"'
+            '++actor_rollout_ref.rollout.engine_kwargs.vllm.kv-events-config.topic="kv-events"'
+            '++actor_rollout_ref.rollout.engine_kwargs.vllm.kv-events-config.endpoint="tcp://*:0"'
+            '++actor_rollout_ref.rollout.engine_kwargs.vllm.kv-events-config.replay_endpoint="tcp://*:0"'
+        )
+    fi
+
+    # Pass optional debug switches to the Ray workers that host the router.
+    for router_env_var in UNI_AGENT_ROUTER_DEBUG UNI_AGENT_ROUTER_SLOW_CUT UNI_AGENT_ROUTER_OVERLOAD_MODE UNI_AGENT_ROUTER_DO_SHORTCUT; do
+        router_env_value="${!router_env_var:-}"
+        if [[ -n "${router_env_value}" ]]; then
+            ROUTER_ARGS+=("++ray_kwargs.ray_init.runtime_env.env_vars.${router_env_var}=\"${router_env_value}\"")
+        fi
+    done
+fi
+
 rollout_mode="${ROLLOUT_MODE:-async}"
 rollout_name="${ROLLOUT_NAME:-vllm}"
 
@@ -204,6 +242,7 @@ ray job submit --no-wait --runtime-env $RUNTIME_ENV \
     actor_rollout_ref.rollout.multi_turn.max_parallel_calls=1 \
     ++actor_rollout_ref.rollout.multi_turn.format="${TOOL_PARSER}" \
     actor_rollout_ref.rollout.agent.num_workers="${NUM_AGENT_WORKERS}" \
+    "${ROUTER_ARGS[@]}" \
     ++actor_rollout_ref.rollout.agent.agent_loop_manager_class=uni_agent.framework.entry.AgentFrameworkRolloutAdapter \
     ++actor_rollout_ref.rollout.custom.agent_framework.gateway_count="${GATEWAY_COUNT}" \
     ++actor_rollout_ref.rollout.custom.agent_framework.log_dir="${AGENT_LOG_DIR}" \
