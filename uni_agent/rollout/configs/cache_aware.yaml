@@ -1,0 +1,7 @@
+router_class: uni_agent.rollout.router_balancer.SelectorRouter
+selector_class: uni_agent.rollout.decode_selectors.CacheAwareDecodeSelector
+cache_threshold: 0.5
+balance_abs_threshold: 32
+balance_rel_threshold: 1.1
+eviction_interval_secs: 120
+max_tree_size: 67108864
