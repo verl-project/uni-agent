@@ -19,6 +19,7 @@ Chained xxhash prefix hash computation.
 from __future__ import annotations
 
 import struct
+from collections.abc import Sequence
 
 import xxhash
 
@@ -51,11 +52,13 @@ def compute_hash(parent_hash: int, block_bytes: bytes, seed: int = 0) -> int:
 
 
 def get_prefix_hashes_incremental(
-    prompt_ids: list[int],
+    prompt_ids: Sequence[int],
     block_size: int,
     parent_hash: int,
     n_done: int,
     seed: int = 0,
+    *,
+    lookahead: int = 0,
 ) -> tuple[list[int], int]:
     """Continue a chained-prefix-hash computation from a checkpoint.
 
@@ -82,13 +85,14 @@ def get_prefix_hashes_incremental(
     """
     if block_size <= 0:
         raise ValueError(f"block_size must be > 0, got {block_size}")
-    n_full_blocks = len(prompt_ids) // block_size
+    n_full_blocks = (len(prompt_ids) - lookahead) // block_size
+    window = block_size + lookahead
     appended: list[int] = []
     cur = parent_hash
     for i in range(n_done, n_full_blocks):
         start = i * block_size
-        end = start + block_size
-        block_bytes = struct.pack(f">{block_size}I", *prompt_ids[start:end])
+        end = start + window
+        block_bytes = struct.pack(f">{window}I", *prompt_ids[start:end])
         cur = compute_hash(cur, block_bytes, seed)
         appended.append(cur)
     return appended, cur

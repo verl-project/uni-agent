@@ -67,7 +67,12 @@ def core(monkeypatch):
 
     monkeypatch.setattr(kv_cache_utils, "NONE_HASH", bytes(range(32)), raising=False)
     monkeypatch.setattr(envs, "VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES", False)
-    coordinator = Mock(spec=HybridKVCacheCoordinator, scheduler_block_size=8, _cache_hit_alignment_tokens=8)
+    coordinator = Mock(
+        spec=HybridKVCacheCoordinator,
+        scheduler_block_size=8,
+        _cache_hit_alignment_tokens=8,
+        single_type_managers=[SimpleNamespace(use_eagle=False), SimpleNamespace(use_eagle=False)],
+    )
     return SimpleNamespace(
         request_block_hasher=lambda _: [],
         scheduler=SimpleNamespace(
@@ -91,12 +96,16 @@ def core(monkeypatch):
 
 @pytest.mark.cpu
 @pytest.mark.level0
-def test_profile_reads_engine_root_and_resolved_hybrid_hash_unit(core, monkeypatch):
+@pytest.mark.parametrize(("mode", "connector"), [("align", None), ("all", None), ("align", "MooncakeStoreConnector")])
+def test_profile_reads_engine_root_and_resolved_hybrid_hash_unit(core, monkeypatch, mode, connector):
     import vllm
     import vllm.envs as envs
     from vllm.v1.core import kv_cache_utils
 
     monkeypatch.setattr(envs, "VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES", True)
+    core.vllm_config.cache_config.mamba_cache_mode = mode
+    if connector:
+        core.vllm_config.kv_transfer_config = SimpleNamespace(kv_connector=connector)
     root = kv_cache_utils.NONE_HASH
     result = native_hash._get_native_hash_profile(core)
     assert result == {
@@ -110,9 +119,27 @@ def test_profile_reads_engine_root_and_resolved_hybrid_hash_unit(core, monkeypat
         "pickle_protocol": pickle.HIGHEST_PROTOCOL,
         "int_hashes": True,
         "lookahead_tokens": 0,
+        "drop_eagle_group_ids": [],
     }
     assert kv_cache_utils.NONE_HASH is root
     assert native_hash._get_native_hash_profile(core) == result
+
+
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize("length", [1, 2])
+def test_hash_profile_reports_lookahead_even_when_codec_is_unavailable(core, length):
+    core.vllm_config.num_hash_lookahead_tokens = length
+    core.scheduler.num_lookahead_tokens = length
+    core.scheduler.num_prefill_lookahead = length
+    profile = native_hash._get_native_hash_profile(core)
+    assert profile["lookahead_tokens"] == length
+    assert profile["algorithm"] == "sha256"
+
+    core.vllm_config.cache_config.prefix_caching_hash_algo = "xxhash"
+    profile = native_hash._get_native_hash_profile(core)
+    assert profile["lookahead_tokens"] == length
+    assert profile["codec_unavailable_reason"] == "unsupported_hash_algorithm"
 
 
 @pytest.mark.cpu
@@ -152,7 +179,6 @@ def test_hybrid_profile_only_uses_scheduler_alignment_for_known_legacy_versions(
         "uninitialized",
         "disabled",
         "algorithm",
-        "all_mamba",
         "transfer",
         "lookahead",
         "prefill",
@@ -169,17 +195,15 @@ def test_unsupported_codec_keeps_unit_except_when_resolver_missing(core, monkeyp
     elif unsupported == "disabled":
         core.vllm_config.cache_config.enable_prefix_caching = False
     elif unsupported == "algorithm":
-        core.vllm_config.cache_config.prefix_caching_hash_algo = "sha256_cbor"
-    elif unsupported == "all_mamba":
-        core.vllm_config.cache_config.mamba_cache_mode = "all"
+        core.vllm_config.cache_config.prefix_caching_hash_algo = "xxhash"
     elif unsupported == "transfer":
-        core.vllm_config.kv_transfer_config = object()
+        core.vllm_config.kv_transfer_config = SimpleNamespace(kv_connector="MooncakeConnectorStoreV1")
     elif unsupported == "lookahead":
         core.scheduler.num_lookahead_tokens = 1
     elif unsupported == "prefill":
         core.scheduler.num_prefill_lookahead = 1
     elif unsupported == "hash_lookahead":
-        core.vllm_config.num_hash_lookahead_tokens = 1
+        core.vllm_config.num_hash_lookahead_tokens = -1
     elif unsupported == "root":
         monkeypatch.setattr(kv_cache_utils, "NONE_HASH", b"short")
     else:
@@ -187,6 +211,7 @@ def test_unsupported_codec_keeps_unit_except_when_resolver_missing(core, monkeyp
     profile = native_hash._get_native_hash_profile(core)
     assert profile is not None
     assert profile["enable_prefix_caching"] is (unsupported != "disabled")
+    assert profile["lookahead_tokens"] == (None if unsupported == "hash_lookahead" else 0)
     if unsupported == "resolver":
         assert profile["unit"] is None
         assert profile["codec_unavailable_reason"] == "hash_unit_resolver_unavailable"

@@ -65,17 +65,17 @@ class TestStickyEndToEnd:
         """
         balancer = self._make_balancer(
             {"s0": "h0", "s1": "h1"},
-            _kv_metrics({"s0": {}, "s1": {}}),
+            _kv_metrics({"s0": {}, "s1": {"inflight": 1}}),
         )
-        balancer.acquire_server("r1", [1, 2])
+        sid1, _ = balancer.acquire_server("r1", [1, 2])
+        assert sid1 == balancer._store.get_sticky_binding("r1") == "s0"
         balancer._store.refresh_metrics(
             _kv_metrics({"s0": {"kv": 1.0, "running": 64, "waiting": 1000, "inflight": 64}, "s1": {"kv": 0.3}})
         )
-        balancer._store.add_kv_blocks("s0", [f"b{i}" for i in range(10)])
         balancer._store.refresh_metrics({"s0": {MetricKey.NUM_GPU_BLOCKS: 10}})
         balancer._store.incr_block_refs("s0", [f"b{i}" for i in range(10)])  # 10 held blocks → avail=0 < thresh=16
         sid2, _ = balancer.acquire_server("r1", [1, 2])
-        assert sid2 == "s1"
+        assert sid2 == balancer._store.get_sticky_binding("r1") == "s1"
 
     def test_removed_sticky_server_reselects(self):
         balancer = self._make_balancer(

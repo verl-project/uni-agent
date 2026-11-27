@@ -12,38 +12,24 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""CPU unit tests for chained-prefix matching in :class:`KVCacheStore`."""
+"""Single-Full layouts use the same event index and token estimates as hybrid."""
 
-from __future__ import annotations
-
+import msgpack
 import pytest
 
+from uni_agent.agent_aware_router.collectors.parse.base import KVCacheUpdate
+from uni_agent.agent_aware_router.collectors.parse.vllm.kv import VLLMKVParser
 from uni_agent.agent_aware_router.store.kv_cache_store import KVCacheStore
-from uni_agent.agent_aware_router.types import Layer
 from uni_agent.agent_aware_router.utils.hash import get_prefix_hashes_incremental
 
-pytestmark = [pytest.mark.level0, pytest.mark.cpu]
 
-BLOCK_SIZE = 2
-SEED = 0
-
-
-def _store_with_block_size() -> KVCacheStore:
-    """A fresh non-singleton store with ``block_size`` set."""
-    store = KVCacheStore()
-    store.block_size = BLOCK_SIZE
-    return store
+def _hashes(tokens, unit=2):
+    hashes, _ = get_prefix_hashes_incremental(tokens, unit, 0, 0)
+    return [str(value) for value in hashes]
 
 
-def _hashes(prompt_ids: list[int]) -> list[str]:
-    """Prefix hashes for ``prompt_ids`` as the store keys them (str)."""
-    hashes, _ = get_prefix_hashes_incremental(prompt_ids, BLOCK_SIZE, SEED, 0, SEED)
-    return [str(h) for h in hashes]
-
-
-# ── 1. Chain property of the chained prefix hash ────────────────────────
-
-
+@pytest.mark.cpu
+@pytest.mark.level0
 def test_chained_hashes_are_cumulative() -> None:
     """Perturbing block i leaves hash[0..i-1] stable, changes hash[i..].
 
@@ -64,81 +50,99 @@ def test_chained_hashes_are_cumulative() -> None:
     assert pert_h[2] != base_h[2]
 
 
-# ── 2. Per-replica longest contiguous match ─────────────────────────────
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_max_contiguous_match_per_replica(layout, stored, parse, install_metadata):
+    store = KVCacheStore()
+    install_metadata(store, "a", layout((("full_attention", 2),), unit=2))
+    install_metadata(store, "b", layout((("full_attention", 2),), unit=2))
+    install_metadata(store, "c", layout((("full_attention", 2),), unit=2))
+    for node, count in [("a", 8), ("b", 4), ("c", 6)]:
+        store.apply_update(KVCacheUpdate(node, events=parse([stored(block=2, tokens=list(range(count)))])))
+    result = store.estimate_prefixes(["a", "b", "c"], _hashes(list(range(9))), 9)
+    assert {node: estimate.estimated_hit_tokens for node, estimate in result.items()} == {"a": 8, "b": 4, "c": 6}
+    assert result["a"].hit_rate == 8 / 9
 
 
-def test_max_contiguous_match_per_replica() -> None:
-    """Replicas caching different depths each get their own deepest percent.
-
-    With 4 full blocks, rep_a caches H1..H4 (100%), rep_b caches H1..H2
-    (50%), rep_c caches H1..H3 (75%). Each is credited exactly its own
-    contiguous depth — no replica overwrites another with a higher value.
-    """
-    prompt = list(range(1, 2 * 4 + 1))  # 8 tokens -> 4 blocks
-    h1, h2, h3, h4 = _hashes(prompt)
-
-    store = _store_with_block_size()
-    store.add_blocks("rep_a", [h1, h2, h3, h4])
-    store.add_blocks("rep_b", [h1, h2])
-    store.add_blocks("rep_c", [h1, h2, h3])
-
-    hash_strs = _hashes(prompt)
-    assert store.get_layer_prefix_hit_rate("rep_a", hash_strs, Layer.GPU) == 1.0  # 4/4
-    assert store.get_layer_prefix_hit_rate("rep_b", hash_strs, Layer.GPU) == 0.5  # 2/4
-    assert store.get_layer_prefix_hit_rate("rep_c", hash_strs, Layer.GPU) == 0.75  # 3/4
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_chain_break_stops_at_first_missing_block(layout, stored, removed, parse, install_metadata):
+    store = KVCacheStore()
+    install_metadata(store, "a", layout((("full_attention", 2),), unit=2))
+    install_metadata(store, "b", layout((("full_attention", 2),), unit=2))
+    for node in ("a", "b"):
+        store.apply_update(KVCacheUpdate(node, events=parse([stored(block=2, tokens=list(range(10)))])))
+    store.apply_update(KVCacheUpdate("a", events=parse([removed(0, ["r8"])])))
+    result = store.estimate_prefixes(["a", "b"], _hashes(list(range(11))), 11)
+    assert result["a"].estimated_hit_tokens == 6
+    assert result["b"].estimated_hit_tokens == 10
 
 
-# ── 3. Chain break stops at first missing block ─────────────────────────
+@pytest.mark.cpu
+@pytest.mark.level0
+def test_unrelated_prefix_is_not_credited(layout, stored, parse, install_metadata):
+    store = KVCacheStore()
+    install_metadata(store, "a", layout((("full_attention", 2),), unit=2))
+    events = parse([stored(block=2, tokens=[11, 22, 33, 44])])
+    store.apply_update(KVCacheUpdate("a", events=events))
+    assert store.estimate_prefixes(["a"], _hashes(list(range(9))), 9)["a"].estimated_hit_tokens == 0
 
 
-def test_chain_break_stops_at_first_missing_block() -> None:
-    """A replica with H1..H3 but not H4 stops at 3, even if H5 is cached.
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize("query_tokens,expected", [(8, 4), (9, 8)])
+def test_old_untagged_and_modern_group_events_share_full_estimates(query_tokens, expected, layout, install_metadata):
+    metadata = layout((("full_attention", 4),), unit=4)
+    metadata["groups"][0]["group_idx"] = 3
+    old = ["BlockStored", [11, 12], None, list(range(8)), 4, None, None]
+    modern = dict(
+        type="BlockStored",
+        block_hashes=[11, 12],
+        parent_block_hash=None,
+        token_ids=list(range(8)),
+        block_size=4,
+        medium="GPU",
+        group_idx=3,
+        kv_cache_spec_kind="full_attention",
+    )
+    stores = [KVCacheStore(), KVCacheStore()]
+    parser = VLLMKVParser()
+    for store in stores:
+        install_metadata(store, "a", metadata)
+    hashes = _hashes(list(range(query_tokens)), 4)
+    batches = [
+        ([old], [modern], expected),
+        ([["BlockRemoved", [12], None]], [dict(type="BlockRemoved", block_hashes=[12], medium="GPU", group_idx=3)], 4),
+        ([["AllBlocksCleared"]], [dict(type="AllBlocksCleared")], 0),
+    ]
+    for old_events, modern_events, hit in batches:
+        for store, events in zip(stores, [old_events, modern_events], strict=True):
+            store.apply_update(parser.parse(msgpack.packb([0, events]), "a"))
+        estimates = [store.estimate_prefixes(["a"], hashes, query_tokens)["a"] for store in stores]
+        assert estimates[0] == estimates[1]
+        assert estimates[0].estimated_hit_tokens == hit
+        assert stores[0].per_replica_block_counts() == stores[1].per_replica_block_counts()
 
-    rep_a caches H1..H3 and H5 (a *gap* at H4). The scan breaks at H4, so
-    rep_a is credited 5/5 = 100%, never the 5/5 = 100% that H5 would imply.
-    rep_b caches H1..H5 contiguously and gets 100%.
 
-    Note: rep_a's "H5 without H4" is synthetic (a real chained cache could
-    not produce H5 without H4). The point is that even if such a state were
-    injected, the simple scan still gets rep_a right.
-    """
-    prompt = list(range(1, 2 * 5 + 1))  # 10 tokens -> 5 blocks
-    h1, h2, h3, h4, h5 = _hashes(prompt)
+@pytest.mark.cpu
+@pytest.mark.level0
+@pytest.mark.parametrize("length", [1, 2])
+def test_lookahead_predictions_match_event_identity_and_require_the_complete_suffix(
+    layout, install_metadata, parse, stored, length
+):
+    raw = layout((("full_attention", 4),), unit=2, alignment=4)
+    raw["native_hash_config"]["lookahead_tokens"] = length
+    cache = KVCacheStore()
+    for node in ("reported", "predicted"):
+        install_metadata(cache, node, raw)
+    tokens = list(range(4 + length))
+    event = stored(block=4, tokens=tokens[:4], hashes=["block"], lookahead_token_ids=[tokens[4:]])
+    cache.apply_update(KVCacheUpdate("reported", parse([event], "reported")))
 
-    store = _store_with_block_size()
-    store.add_blocks("rep_a", [h1, h2, h3, h5])  # gap at H4
-    store.add_blocks("rep_b", [h1, h2, h3, h4, h5])  # full chain
+    def hashes(prompt):
+        return list(map(str, get_prefix_hashes_incremental(prompt, 2, 0, 0, lookahead=length)[0]))
 
-    # rep_a gaps H4 → contiguous chain breaks at H4 → 3/5 (the prefix it
-    # actually shares), not 5/5. A real chained cache cannot hold H5 without
-    # H4 (H5's hash embeds H4), so the contiguous scan is the correct hit.
-    hash_strs = _hashes(prompt)
-    assert store.get_layer_prefix_hit_rate("rep_a", hash_strs, Layer.GPU) == 0.6  # 3/5
-    assert store.get_layer_prefix_hit_rate("rep_b", hash_strs, Layer.GPU) == 1.0  # 5/5
-
-
-# ── 4. The "telemetry noise" failure mode is already prevented ──────────
-
-
-def test_isolated_later_block_is_not_credited() -> None:
-    """A replica injected with *only* H3 gets 0%, not H3's higher percent.
-
-    This is the exact scenario the running-intersection guard was added to
-    prevent: "a replica is temporarily reported as caching a later block
-    (H3) but missed earlier blocks (H1, H2) due to telemetry lag." The
-    simple chain-break scan hits the empty H1 slot first and stops, so the
-    replica is never credited the later-block percent. The intersection
-    guard is redundant.
-    """
-    prompt = list(range(1, 2 * 4 + 1))  # 8 tokens -> 4 blocks
-
-    token_id = [11, 22, 33, 44]
-    token_hash1, token_hash2 = _hashes(token_id)
-
-    store = _store_with_block_size()
-    # Inject ONLY H3 for rep_a — synthetic, but emulates a lagged/OoO report.
-    store.add_blocks("rep_a", [token_hash1, token_hash2])
-
-    # rep_a caches only unrelated hashes; prompt's H1 has no rep_a → chain
-    # breaks immediately → 0.0 hit.
-    assert store.get_layer_prefix_hit_rate("rep_a", _hashes(prompt), Layer.GPU) == 0.0
+    cache.record_dispatch_blocks("predicted", hashes(tokens))
+    for prompt, hit in ((tokens, 4), (tokens[:-1] + [99], 0), (tokens[:-1], 0)):
+        estimates = cache.estimate_prefixes(["reported", "predicted"], hashes(prompt), len(prompt))
+        assert [estimate.estimated_hit_tokens for estimate in estimates.values()] == [hit, hit]

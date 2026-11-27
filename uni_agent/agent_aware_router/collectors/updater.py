@@ -17,8 +17,6 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
-from typing import Any
 
 from ..insight.collector import CollectorObserver, UpdateObserver
 from ..store.data_store import DataStore
@@ -59,17 +57,7 @@ class StoreUpdater:
             logger.exception("failed to observe inflight %s", update.action)
 
     def apply_kv(self, update: KVCacheUpdate) -> None:
-        if update.block_size is not None:
-            self._kv.set_block_size(update.block_size)
-        if update.clear_all:
-            self._kv.clear_kv_resident_blocks(update.replica_id)
-        for layer, hashes in update.remove_blocks.items():
-            if hashes:
-                self._kv.remove_kv_blocks(update.replica_id, hashes, layer=layer)
-        for layer, hashes in update.add_blocks.items():
-            if hashes:
-                self._kv.add_kv_blocks(update.replica_id, hashes, layer=layer)
-
+        self._kv.apply_kv_update(update)
         self._observer.on_kv_applied(update)
 
     def apply_metrics(self, update: MetricsUpdate) -> None:
@@ -92,10 +80,10 @@ class StoreUpdater:
             logger.warning(f"unknown StickyUpdate action: {update.action}")
 
 
-def default_updater(parser_stats: Callable[[], Any] = lambda: None) -> StoreUpdater:
+def default_updater() -> StoreUpdater:
     """Compose singleton-backed capabilities at the application boundary."""
     store = DataStore()
     return StoreUpdater(
         store,
-        CollectorObserver(store.metrics, store.kv, parser_stats),
+        CollectorObserver(store.metrics, store.kv),
     )

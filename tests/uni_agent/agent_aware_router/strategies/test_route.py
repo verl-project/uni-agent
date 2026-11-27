@@ -127,7 +127,10 @@ class FakeRouteDataProvider:
     def get_metric(self, replica_id, key):
         return self._data.get(replica_id, {}).get(key, 0.0)
 
-    def get_layer_prefix_hit_rate(self, replica_id, prompt_ids, layer):
+    def hash_schema(self):
+        return 0, self.get_block_size(), 0
+
+    def get_layer_prefix_hit_rate(self, replica_id, prompt_ids, layer, *, query_tokens=None):
         entry = self._data.get(replica_id, {})
         return entry.get("gpu_hit_pct", 0) / 100 if layer == Layer.GPU else 0.0
 

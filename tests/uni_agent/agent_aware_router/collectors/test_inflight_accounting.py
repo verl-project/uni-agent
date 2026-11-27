@@ -28,7 +28,7 @@ from uni_agent.agent_aware_router.collectors.transport.callback import CallbackT
 from uni_agent.agent_aware_router.collectors.updater import default_updater
 from uni_agent.agent_aware_router.store.data_store import DataStore
 from uni_agent.agent_aware_router.store.per_request_store import PerRequestStore
-from uni_agent.agent_aware_router.types import Layer, MetricKey
+from uni_agent.agent_aware_router.types import MetricKey
 
 pytestmark = [pytest.mark.cpu, pytest.mark.level0]
 
@@ -194,17 +194,21 @@ def test_overlapping_acquires_are_serialized_through_booking_commit(running, mon
     assert_idle(store)
 
 
-def test_recorded_blocks_are_logged_by_inflight_observer_not_kv_observer(running, caplog, monkeypatch):
+def test_recorded_blocks_are_logged_by_inflight_observer_not_kv_observer(
+    running, caplog, monkeypatch, layout, install_metadata, stored, parse
+):
     from uni_agent.agent_aware_router.insight import collector as observer_module
 
     callbacks, store, _ = running
     store.set_block_size(2)
     monkeypatch.setattr(observer_module, "_KV_EVENT_LOG_INTERVAL_S", 1)
     caplog.set_level(logging.DEBUG, logger=observer_module.__name__)
+    install_metadata(store, "s0", layout((("full_attention", 2),), unit=2))
     callbacks.acquire()
     # Production constructs a separate updater/observer for KV events.
     kv_updater = default_updater()
-    kv_updater.apply_kv(KVCacheUpdate("s0", add_blocks={Layer.GPU: ["engine"]}))
+    event = stored(block=2, tokens=[1, 2], hashes=["engine"])
+    kv_updater.apply_kv(KVCacheUpdate("s0", parse([event], "s0")))
     assert any("router-dispatch blocks: router_recorded=2" in r.message for r in caplog.records)
     kv_logs = [r.message for r in caplog.records if "kv-events tally" in r.message]
     assert len(kv_logs) == 1

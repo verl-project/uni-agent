@@ -22,7 +22,6 @@ vLLM or ZMQ dependency.
 from __future__ import annotations
 
 import asyncio
-import struct
 
 import msgpack
 import pytest
@@ -107,13 +106,6 @@ class FakeZMQTransport(Transport):
 # ── KV event payload helpers ────────────────────────────────────────────
 
 
-def _convert_token_ids(raw_ids: list[int], block_size: int) -> bytes:
-    """Encode token IDs as uint32 big-endian bytes (one block)."""
-    if len(raw_ids) != block_size:
-        raise ValueError(f"Expected {block_size} tokens, got {len(raw_ids)}")
-    return struct.pack(f">{block_size}I", *raw_ids)
-
-
 def make_stored_event(
     block_hash: str,
     raw_ids: list[int],
@@ -136,8 +128,22 @@ def kv_payload(*events: list | dict) -> bytes:
 def mapping_event(event: list) -> dict:
     """Convert a positional vLLM event to named fields for mapping tests."""
     field_names = {
-        "BlockStored": ("block_hashes", "parent_block_hash", "token_ids", "block_size", "lora_id", "medium"),
-        "BlockRemoved": ("block_hashes", "medium", "group_idx"),
+        "BlockStored": (
+            "block_hashes",
+            "parent_block_hash",
+            "token_ids",
+            "block_size",
+            "lora_id",
+            "medium",
+            "lora_name",
+            "extra_keys",
+            "group_idx",
+            "kv_cache_spec_kind",
+            "kv_cache_spec_sliding_window",
+            "locality",
+            "ownership",
+        ),
+        "BlockRemoved": ("block_hashes", "medium", "group_idx", "locality", "ownership"),
         "AllBlocksCleared": (),
     }
     return {"type": event[0], **dict(zip(field_names[event[0]], event[1:], strict=False))}

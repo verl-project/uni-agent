@@ -39,6 +39,7 @@ from uni_agent.agent_aware_router.store import inflight as inflight_module
 from uni_agent.agent_aware_router.store.data_store import DataStore
 from uni_agent.agent_aware_router.strategies import route
 from uni_agent.agent_aware_router.types import InflightUpdate, MetricKey
+from uni_agent.agent_aware_router.types.kv_cache import KVCacheEvent
 
 pytestmark = [pytest.mark.level0, pytest.mark.cpu]
 
@@ -388,12 +389,18 @@ class TestInflightBlockPin:
         PerRequestStore._instance = None
         KVCacheStore._instance = None
 
-    @staticmethod
-    def _start(block_size: int = BLOCK_SIZE):
+    @pytest.fixture(autouse=True)
+    def _layout(self, layout, install_metadata):
+        self.layout = layout
+        self.install_metadata = install_metadata
+
+    def _start(self, block_size: int = BLOCK_SIZE, groups=None):
         from uni_agent.agent_aware_router.collectors.collector import Collector
 
         ds = DataStore()
         ds.set_block_size(block_size)
+        self.install_metadata(ds, "s0", self.layout(groups or (("full_attention", block_size),), unit=block_size))
+        self.install_metadata(ds, "s1", self.layout(groups or (("full_attention", block_size),), unit=block_size))
         balancer = _FakeBalancer()
         collector = Collector(CallbackTransport(balancer), InflightParser())
         collector.start()
@@ -461,7 +468,9 @@ class TestInflightBlockPin:
             marker = ds.get_marker("r1")
             assert marker is not None
 
-            collector._sink.apply_kv(KVCacheUpdate(replica_id="s0", clear_all=True))
+            collector._sink.apply_kv(
+                KVCacheUpdate(replica_id="s0", events=[KVCacheEvent("clear", "s0", [], None, None, None)])
+            )
             assert ds.inflight_block_count("s0") == 4
             assert ds.get_marker("r1") == marker
 
@@ -575,27 +584,33 @@ class TestInflightBlockPin:
         finally:
             collector.stop()
 
-    def test_acquire_records_the_prefix_as_resident_and_release_keeps_it(self):
-        """Acquire alone makes the prefix a gpu_hit; the resident record outlives release."""
+    @pytest.mark.cpu
+    @pytest.mark.level0
+    @pytest.mark.parametrize("hybrid", [False, True])
+    def test_acquire_predicts_group_prefix_without_native_residency(self, hybrid):
+        """All layouts retain dispatch predictions across release, without native residency."""
         from uni_agent.agent_aware_router.utils.prefix_cache import resolve_prefix_hashes
 
         prompt = list(range(4 * BLOCK_SIZE))
-        collector, balancer, ds = self._start()
+        groups = (("full_attention", BLOCK_SIZE), ("mamba", 2 * BLOCK_SIZE)) if hybrid else None
+        collector, balancer, ds = self._start(groups=groups)
+        predicted = 6 if hybrid else 4
         try:
             chain = resolve_prefix_hashes(prompt, None, ds)
-            assert ds.get_layer_prefix_hit_rate("s0", chain) == 0.0
+            assert ds.estimate_prefixes(["s0"], chain, len(prompt))["s0"].hit_rate == 0.0
 
             balancer.callbacks["on_acquire"][0]("r1", "s0", prompt)
-            assert ds.get_layer_prefix_hit_rate("s0", chain) == 1.0
-            assert ds.per_replica_block_counts() == {"s0": 4}
-            assert collector._sink._observer._dispatch_recorded_blocks == 4
+            estimate = ds.estimate_prefixes(["s0"], chain, len(prompt))["s0"]
+            assert estimate.estimated_hit_tokens == (2 if hybrid else 3) * BLOCK_SIZE
+            assert ds.per_replica_block_counts() == {"s0": 0}
+            assert collector._sink._observer._dispatch_recorded_blocks == predicted
 
             balancer.callbacks["on_release"][0]("s0", "r1")
             assert ds.inflight_block_count("s0") == 0  # held drops...
-            assert ds.per_replica_block_counts() == {"s0": 4}  # ...resident survives release
+            assert ds.per_replica_block_counts() == {"s0": 0}  # ...hints survive; no native residency counted
 
             balancer.callbacks["on_acquire"][0]("r2", "s0", prompt)
-            assert collector._sink._observer._dispatch_recorded_blocks == 4  # r2's record is a no-op
+            assert collector._sink._observer._dispatch_recorded_blocks == predicted  # r2's record is a no-op
         finally:
             collector.stop()
 
@@ -725,12 +740,28 @@ class TestCollectorEmitsToInsight:
         # kv_cache_load is 0.0 here (no retained blocks in the fresh store)
         assert self._by_name()["kv_cache_load"] == ("gauge", "kv_cache_load", 0.0, {"replica": "s0"})
 
-    def test_kv_removed_forwards_evictions(self):
+    @pytest.mark.cpu
+    @pytest.mark.level0
+    def test_kv_event_tally_counts_rows_and_evictions_count_local_gpu_hashes(self, stored, removed, parse):
         from uni_agent.agent_aware_router.collectors.collector import Collector
-        from uni_agent.agent_aware_router.collectors.parse import KVCacheUpdate
-        from uni_agent.agent_aware_router.types import Layer
+        from uni_agent.agent_aware_router.types.kv_cache import KVCacheUpdate
 
+        events = parse(
+            [
+                stored(hashes=["h1"]),
+                stored(hashes=["h2"]),
+                removed(0, ["h1", "h2"]),
+                {"type": "BlockRemoved", "block_hashes": ["cpu"], "medium": "CPU"},
+                removed(0, ["remote"], locality="REMOTE"),
+                removed(0, ["owned"], ownership="external"),
+                {"type": "AllBlocksCleared"},
+                {"type": "AllBlocksCleared"},
+            ],
+            node="s0",
+        )
         collector = Collector(CallbackTransport(_FakeBalancer()), InflightParser())
-        collector._sink.apply_kv(KVCacheUpdate(replica_id="s0", remove_blocks={Layer.GPU: ["h1", "h2", "h3"]}))
+        collector._sink.apply_kv(KVCacheUpdate(replica_id="s0", events=events))
 
-        assert self._rl.calls == [("counter", "kv_evictions", 3, {"replica": "s0"})]
+        assert collector._sink._observer._kv_event_counts == {"stored": 2, "removed": 4, "clear": 2}
+        assert collector._sink._observer._kv_block_counts == {"stored": 2, "removed": 5}
+        assert self._rl.calls == [("counter", "kv_evictions", 2, {"replica": "s0"})]

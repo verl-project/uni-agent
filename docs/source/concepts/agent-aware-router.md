@@ -65,8 +65,9 @@ facts to `DataStore.inflight`. DataStore composes four capabilities:
 `InflightParser` only decodes the callback into an `InflightUpdate` containing
 its action, replica, request ID and acquire prompt tokens. It receives no store
 context and emits no derived metric deltas or pin/booking commands. There is no
-contextual parser wrapper. DataStore resolves prefixes using its learned block
-size, allocates the next turn, reverses stale bookings and debits the acquire-time
+contextual parser wrapper. DataStore pins complete physical blocks and records
+dispatch predictions using the engine's hash unit and lookahead. It allocates
+the next turn, reverses stale bookings and debits the acquire-time
 turn/prompt length on release. Direct DataStore callers use the same logic.
 `StoreUpdater` translates the returned applied effects into observer calls; it
 does not decide accounting amounts.
@@ -110,8 +111,8 @@ names, labels and routing configuration are unchanged. Scoring likewise reads me
 
 Flat `DataStore` methods remain compatibility delegates. New production callers
 use the grouped capabilities and named request operations, rather than generic
-scratch keys. The underlying stores, shared singleton identity, request LRU
-lifetime for optional memos and cache algorithms are unchanged.
+scratch keys. The backing stores are shared across collectors in the same
+process, and optional request memos remain LRU-bounded.
 
 The balancer's drain counter follows the same one-active-dispatch rule for named
 requests: a replacement acquire moves the count from the previous replica to the
@@ -126,15 +127,21 @@ indistinguishable from the current release, so per-request ordering is required.
 
 ### Optional vLLM cache metadata
 
-Before creating the verl server manager, a custom inference entry point can call `register_vllm_metadata_replica()` from `uni_agent.agent_aware_router.server`. The registered replica exposes `get_kv_cache_metadata()` on its server actor. Entry points using the default replica continue to use verl's original server.
-
-Install uni-agent in the engine environment so vLLM can discover the `uni_agent_native_hash` general plugin. Include that name in any explicit `VLLM_PLUGINS` allowlist. Before engine startup, the metadata server adds its opt-in flag (`UNI_AGENT_ENABLE_NATIVE_HASH_METADATA`) to `VLLM_RAY_EXTRA_ENV_VARS_TO_COPY` so Ray EngineCore actors receive it alongside any user-specified variables. The server exposes group metadata and reports optional native hash or allocation profiles separately when the engine supports them.
+The vLLM inference example registers the metadata-enabled replica before creating the server manager. Custom launchers can call `register_vllm_metadata_replica()` from `uni_agent.agent_aware_router.server`. Install uni-agent in the engine environment and include `uni_agent_native_hash` in any explicit `VLLM_PLUGINS` allowlist. The metadata server includes its opt-in flag in `VLLM_RAY_EXTRA_ENV_VARS_TO_COPY` for Ray EngineCore actors.
 
 Group discovery requires `EngineCore.get_kv_cache_group_metadata()`, available in vLLM 0.23.0, 0.29.0 and 0.33.0. If the installed engine lacks this method, as in stock vLLM 0.30.0, `get_kv_cache_metadata()` returns `status="unsupported"` with reason `group_metadata_method_unavailable` before issuing any engine queries. Otherwise, all three queries run concurrently with individual four-second timeouts. The response includes the results of the queries that succeed.
 
 `cache_config.enable_prefix_caching` reports the effective setting from EngineCore, or `null` when the engine value is unavailable. For prefix matching, `native_hash_config.unit` gives the number of tokens per hash and `native_hash_config.hit_alignment` gives the token multiple the engine can reuse. For capacity scoring, `cache_reservation_profile.capacity_blocks` gives the allocatable blocks in the shared device pool. If any group uses a separate host pool, `cache_reservation_profile` is `null`.
 
 Changes to `cache_config.hash_block_size` or `cache_config.prefix_match_unit` can invalidate a cached profile. Before reusing a profile after a partial refresh, consumers must also verify that the cache layout still matches.
+
+### Hybrid prefix matching
+
+The router reads the cache group layout at startup and subscribes to incremental KV events (`--kv-events` in the example). For each replica it estimates how many prompt tokens are reusable across all required Full Attention, Sliding Window, Chunked Local and Mamba groups. Hit alignment and the number of tokens that need replay come from the engine. The existing scorer uses the resulting fraction of prefill work saved. Dispatch predictions and engine-reported residency are tracked separately.
+
+For lookahead hashing, the event, dispatch and query paths include the engine's required token suffix in each prefix identity. For EAGLE, the router applies the reported last-block policy during each group's lookup. A marked Full Attention group drops its trailing match unit. A marked Sliding Window group needs one extra consecutive block and drops it before returning the aligned window end. Mamba returns a saved checkpoint within the engine's lookup range. The reconciled prefix length feeds the existing prefill savings calculation.
+
+The parser skips an event with malformed fields, logs one warning per affected batch, and returns valid events in order. If the entire payload cannot be decoded, it logs a warning and skips that payload. The subscription continues with the next sequence number and keeps its existing cache records. A skipped removal can leave the router overestimating a replica's cache hits. Disconnects and sequence gaps still trigger the usual subscription recovery.
 
 ## Routing decision flow
 
@@ -161,7 +168,7 @@ pick         = soft-pick(max remaining among eligible)       # random within a s
 ```
 
 - `inflight_blocks[i]` is the router's own load account: a per-replica pin book of the KV blocks held by in-flight requests, ref-counted at acquire (pin the request's full-block prefix hashes) and at release (unpin the snapshotted set; a shared prefix block leaves the book when its last holder releases). kv-events carry no request identity, so engine-side residency alone cannot separate "cached and idle" from "held and about to grow" — the pin book is the occupancy signal the router owns synchronously on the acquire/release path. `avail` is deliberately not derived from the polled `kv_cache_usage_perc`: that is an async snapshot with cold-start blind spots, while the pin book is up to date at decision time.
-- `gpu_hit[i]` comes from the per-replica remote→local block-hash index built from kv-events (extended at dispatch time with the request's own prefix), so a returning session is ranked with its real hit rate.
+- `gpu_hit[i]` is the estimated fraction of this prompt’s prefill saved on replica `i`, accounting for its cache groups and any required replay.
 - Prefill hit rate participates via the `need` term: a replica with a higher hit rate needs fewer recomputed tokens, so `remaining` is larger and it wins among eligible replicas.
 - Load balancing first filters via the pure-capacity hard gate `eligible` — replicas that are full are filtered out and no longer assigned. If no replica passes (all under water), the pick switches to `min need`: deficit magnitudes would dominate a `remaining` ranking (`|avail| ≫ plen`) and drown the cache signal, so the saturated pick is the cheapest assignment instead — the replica where this request recomputes the fewest tokens.
 - Ranking participates via the `avail` term: among eligible replicas, one with higher `avail` has lower load and thus larger `remaining`.
