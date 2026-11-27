@@ -1,235 +1,106 @@
-# Develop on ARM Hosts
+# ARM64 Compatibility Notes
 
-This guide covers developing Uni-Agent on **aarch64 (ARM64)** Linux hosts —
-building agents, tools, and sandbox integrations, and running the CPU test
-suites — without a GPU. Verified on openEuler 24.03 (aarch64) with Docker
-25.0.3 and Python 3.11.
+Uni-Agent uses the same Python installation and sandbox workflows on x86_64 and
+ARM64. Follow [Installation](installation.md) and the [uv environment](uv.md)
+guides. For CPU-only development, select the `cpu` extra; agents can use an
+external OpenAI-compatible endpoint, so local model inference is not required.
 
-For RL training, use a GPU or NPU host instead; see
-[Run Agent RL Training](rl-training.md) and
-[Run Training on NPU](npu-training.md).
+This page covers architecture-specific Docker task and tool image issues.
+Native ARM64 builds are recommended when available; amd64 emulation is a
+compatibility fallback. Native ARM64 CPU workflows were verified on openEuler
+24.03 with Python 3.11 and Docker 25.0.3.
 
-## Requirements
+## Check Image and Binary Architectures
 
-- An aarch64 Linux host (openEuler 24.03 verified; other ARM64 distributions
-  work similarly)
-- Python 3.10–3.12 (`requires-python`)
-- Docker with a running daemon for sandbox workflows
-- No GPU is needed for development, sandbox workflows, or CPU tests
-
-!!! note "Model inference on ARM hosts"
-    The CPU-only workflows in this guide do not require a local inference
-    service; point agents at an external OpenAI-compatible endpoint or a remote
-    Gateway. On ARM hosts with a supported NVIDIA GPU, you can build vLLM from
-    source and serve models locally. Follow vLLM's source-build instructions
-    for your ARM64 platform, GPU, and CUDA environment.
-
-## Install Uni-Agent
+On an ARM64 host, `uname -m` returns `aarch64`. Check every task and sidecar
+image before starting a sandbox:
 
 ```bash
-git clone https://github.com/verl-project/uni-agent.git
-cd uni-agent
-git submodule update --init --recursive
-python3 -m venv .venv
-.venv/bin/pip install -e .
+docker image inspect <image>:<tag> --format '{{.Os}}/{{.Architecture}}'
 ```
 
-Install the lightweight packages used by the sandbox and tool flows:
+Use `linux/arm64` for native execution. A `linux/amd64` image requires emulation
+on an ARM64 host.
+
+Image metadata does not guarantee the architecture of binaries copied into the
+image. For example, a multi-stage sidecar can contain an x86_64 Python runtime
+even when the final image is labeled `linux/arm64`. Test the actual tool
+entrypoint, replacing the path and version flag with those for your tool:
 
 ```bash
-.venv/bin/pip install pydantic jsonschema
+docker run --rm --platform linux/arm64 \
+  --entrypoint /opt/my-tool/bin/my-tool \
+  my-tool:arm64 --version
 ```
 
-If you need the bundled `verl` source (for example for the framework tests),
-install it without its heavy dependencies:
+An `exec format error` usually means that the executable does not match the
+selected platform or that the required emulator is unavailable.
+
+## Build a Native ARM64 Sidecar
+
+Use ARM64 base images, runtimes, and tool artifacts throughout the build:
 
 ```bash
-.venv/bin/pip install --no-deps -e ./verl
+docker build --platform linux/arm64 \
+  -f Dockerfile.my-tool -t my-tool:arm64 .
+docker image inspect my-tool:arm64 --format '{{.Os}}/{{.Architecture}}'
 ```
 
-Do **not** run `pip install -r requirements-test.txt` for this CPU-only setup:
-it pins `vllm==0.23.0`, which is unnecessary for the vLLM-independent tests
-covered here and may require a source build on ARM. Install the test
-dependencies selectively instead (next section).
+If the recipe's build script hard-codes `--platform linux/amd64`, override or
+change that setting. Also check every downloaded archive and prebuilt runtime;
+changing the Docker platform alone does not make an x86_64 binary run natively.
 
-## Run CPU Tests
-
-Start with the core suites, which need only a small dependency set:
-
-```bash
-.venv/bin/pip install pytest pytest-asyncio
-.venv/bin/python -m pytest tests/uni_agent/sandbox tests/uni_agent/tools -q
-```
-
-The wider `cpu and level0` suite additionally uses these packages (versions
-aligned with the bundled `verl`):
-
-```bash
-.venv/bin/pip install \
-  fastapi uvicorn cachetools loguru pyzmq aiohttp orjson omegaconf \
-  'tensordict>=0.8.0,<=0.10.0' 'transformers>=5.5.3,<5.13' \
-  'ray==2.54.1' 'TransferQueue==0.1.11' 'swebench==4.1.0'
-.venv/bin/python -m pytest tests/uni_agent/ -m 'cpu and level0' -q
-```
-
-Tests that exercise vLLM parser integrations (under `tests/uni_agent/gateway/`
-and `tests/uni_agent/agent_aware_router/`) require vLLM. If it is not installed,
-they fail with `ModuleNotFoundError: No module named 'vllm'`; skip them
-explicitly when running the full directory:
-
-```bash
-.venv/bin/python -m pytest tests/uni_agent/ -m 'cpu and level0' -q \
-  --ignore=tests/uni_agent/gateway \
-  --ignore=tests/uni_agent/agent_aware_router
-```
-
-Before opening a pull request, run the same checks as CI:
-
-```bash
-.venv/bin/pre-commit run --all-files --show-diff-on-failure
-```
-
-## Run the Sandbox Quickstart
-
-```bash
-DEBUG_MODE=1 SANDBOX_PROVIDER=docker .venv/bin/python examples/quickstart/sandbox/demo.py
-```
-
-The demo finishes with `Demo done`. On a fresh `python:3.12` image,
-`stateful_shell` installs `tmux` through apt on first use; see the
-troubleshooting notes below if your network makes that slow.
-
-## Troubleshooting
-
-The default flows above use the official package sources. Use the options
-below only when you hit the corresponding problem.
-
-### PyPI is unreachable or slow
-
-Switch to a nearby mirror such as Tsinghua's:
-
-```bash
-pip config set global.index-url https://pypi.tuna.tsinghua.edu.cn/simple
-```
-
-Or set `PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple` per command
-instead of changing global config.
-
-### Docker Hub is unreachable or slow
-
-Configure a registry mirror in `/etc/docker/daemon.json` and restart Docker:
-
-```json
-{"registry-mirrors": ["https://docker.m.daocloud.io"]}
-```
-
-```bash
-systemctl restart docker
-docker pull python:3.12
-```
-
-### GitHub clone/fetch or pre-commit hooks fail
-
-pre-commit downloads its hook environments from GitHub on first use. On hosts
-with unstable GitHub access, retry the operation or route git/pip traffic
-through an HTTP proxy:
-
-```bash
-export http_proxy=http://<proxy-host>:<port>
-export https_proxy=http://<proxy-host>:<port>
-.venv/bin/pre-commit run --all-files --show-diff-on-failure
-```
-
-Once the hook environments are cached, pre-commit works offline.
-
-### apt is slow inside task images
-
-Sandbox tools may install packages inside task images (for example,
-`stateful_shell` installs `tmux` on first use). Debian-based images default to
-`deb.debian.org`; switch to a nearby mirror first:
-
-```bash
-# deb822 format (Debian trixie and newer)
-sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list.d/debian.sources
-# legacy format (bookworm and older)
-sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list
-```
-
-### stateful_shell startup is slow or times out on first use
-
-The first start installs `tmux` in the container. If an attempt times out,
-later retries wait for the in-flight installer and converge instead of
-failing on the apt lock. To avoid the install entirely, pre-install tmux into
-a base image and select it with `IMAGE=`:
+BuildKit provides `TARGETARCH` for selecting the correct artifact. Declare it in
+the build stage that downloads or installs the tool:
 
 ```dockerfile
-FROM python:3.12
-RUN sed -i 's|deb.debian.org|mirrors.tuna.tsinghua.edu.cn|g' /etc/apt/sources.list.d/debian.sources \
-    && apt-get update -qq \
-    && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq tmux \
-    && rm -rf /var/lib/apt/lists/*
+ARG TARGETARCH
+RUN case "$TARGETARCH" in \
+      amd64) TOOL_ARCH=x86_64 ;; \
+      arm64) TOOL_ARCH=aarch64 ;; \
+      *) echo "Unsupported architecture: $TARGETARCH" >&2; exit 1 ;; \
+    esac && \
+    echo "Download and install the ${TOOL_ARCH} artifact here"
 ```
+
+Replace the final `echo` with the tool's download and installation commands.
+If the tool publishes only amd64 binaries, use emulation or choose a version
+with ARM64 support.
+
+Keep the sidecar's root layout and configure `image_mounts` and
+`executable_paths` as described in
+[Build a Tool Image](launch-sandbox.md#build-a-tool-image-sidecar).
+
+## Use amd64 Emulation as a Fallback
+
+When a native ARM64 build is unavailable, register amd64 emulation through
+QEMU and binfmt:
 
 ```bash
-docker build -t uni-agent-arm-base:latest -f Dockerfile .
-DEBUG_MODE=1 SANDBOX_PROVIDER=docker IMAGE=uni-agent-arm-base:latest \
-  .venv/bin/python examples/quickstart/sandbox/demo.py
+docker run --privileged --rm tonistiigi/binfmt --install amd64
+docker run --rm --platform linux/amd64 alpine:3.22 uname -m
 ```
 
-### `image_mounts` fails on Docker < 26
+The second command should print `x86_64`. The installer modifies the host's
+binfmt handlers and requires privileged access.
 
-`image_mounts` (mounting sidecar tool images) requires **Docker >= 26** with
-the containerd image store enabled. On older Docker versions, build a combined
-task image instead and reference it as the sandbox `image`:
-
-```dockerfile
-FROM python:3.12
-COPY --from=<tool-image>:<tag> / /opt/<tool>
-```
-
-Keep the same `executable_paths` as the mount-based configuration.
-
-### Tests skip or behave differently when run as root
-
-Some sandbox tests exercise permission errors that do not occur for root
-(for example, writing to a read-only file). They skip with a message such as
-`root can write read-only files`; this is expected and not a failure. For
-closer parity with CI, run the suite as an unprivileged user.
-
-### `make` is missing for the docs build
-
-Minimal ARM images may not ship `make`. Either install it
-(`dnf install -y make`) or invoke MkDocs directly from the repository root:
+Build or pull the amd64 sidecar and confirm its platform:
 
 ```bash
-.venv/bin/pip install -r docs/requirements.txt
-.venv/bin/mkdocs build
+docker build --platform linux/amd64 \
+  -f Dockerfile.my-tool -t my-tool:amd64 .
+docker image inspect my-tool:amd64 --format '{{.Os}}/{{.Architecture}}'
 ```
 
-### Sidecar image builds need a proxy or pip mirror
+Use that image in `image_mounts`. An ARM64 task container mounting an amd64
+sidecar still needs working amd64 emulation to execute the mounted binaries.
+Keep the task image and sidecar on the same architecture when possible.
 
-Tool images based on `python-build-standalone` download a Python tarball from
-GitHub releases and packages from PyPI. Use the recipe's pip-index build
-argument and, when needed, Docker's built-in proxy build arguments:
+Emulation is slower than native execution, and tools that depend on
+architecture-specific instructions or unsupported system calls may still fail.
+Prefer native ARM64 images for repeated evaluations and production workflows.
 
-```bash
-docker build --network host \
-  --build-arg http_proxy=http://127.0.0.1:<port> \
-  --build-arg https_proxy=http://127.0.0.1:<port> \
-  --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
-  -f Dockerfile.<tool>-tool -t <tool-image>:<tag> .
-```
-
-`--network host` lets build steps reach a proxy listening on the host's
-loopback address.
-
-## Verify Your Setup
-
-- `.venv/bin/python -c 'import uni_agent'` succeeds
-- `pytest tests/uni_agent/sandbox tests/uni_agent/tools -q` passes
-- The sandbox demo prints `Demo done`
-
-You are ready to develop on ARM. Changes to agents, tools, sandboxes, and
-tasks can all be validated locally; see
-[Launch a Sandbox](launch-sandbox.md) and
-[Run Agent Inference](agent-inference.md) for the next steps.
+!!! note "Local model inference"
+    Local inference is not required for CPU-only development. vLLM can be built
+    from source on ARM64 hosts with supported NVIDIA GPUs; that setup depends
+    on the GPU and CUDA stack and is outside the verified environment above.
