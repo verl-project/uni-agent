@@ -18,6 +18,7 @@ import pytest
 
 from uni_agent.agent_aware_router.collectors.collector import Collector
 from uni_agent.agent_aware_router.collectors.parse import (
+    InflightUpdate,
     KVCacheUpdate,
     MetricsUpdate,
     Parser,
@@ -26,7 +27,7 @@ from uni_agent.agent_aware_router.collectors.parse import (
 from uni_agent.agent_aware_router.collectors.parse.basic.inflight import InflightParser
 from uni_agent.agent_aware_router.collectors.transport.base import Transport
 from uni_agent.agent_aware_router.collectors.transport.callback import StatisticEvent
-from uni_agent.agent_aware_router.types import InflightUpdate, MetricKey
+from uni_agent.agent_aware_router.types import MetricKey
 
 pytestmark = [pytest.mark.cpu, pytest.mark.level0]
 

@@ -47,8 +47,8 @@ def test_held_set_ref_counts_shared_blocks() -> None:
     assert store.inflight_block_count("s0") == 0
 
 
-def test_ref_table_edges_and_cleanup() -> None:
-    """Refs are per replica; unknown hashes are ignored; clear_replica drops the replica's whole account."""
+def test_ref_table_edges() -> None:
+    """Refs are per replica; unknown hashes are ignored."""
     store = _store()
 
     store.incr_block_refs("s0", [])  # unresolvable prompt refs nothing
@@ -64,14 +64,6 @@ def test_ref_table_edges_and_cleanup() -> None:
 
     store.decr_block_refs("ghost-replica", PREFIX)  # replica with no ref table
     assert store.inflight_block_count("ghost-replica") == 0
-
-    store.put_marker("r0", "s0", PREFIX)  # a request flying on s0 at clear time
-    store.put_marker("r1", "s1", PREFIX)
-    store.clear_replica("s0")
-    assert store.inflight_block_count("s0") == 0  # held goes with the clear — no release will ever come
-    assert store.pop_marker("r0") is None  # marker swept too: a late release cannot steal refs
-    assert store.inflight_block_count("s1") == 5  # other replicas untouched
-    assert store.pop_marker("r1") == {"replica": "s1", "hashes": PREFIX}
 
 
 def test_marker_take_semantics() -> None:

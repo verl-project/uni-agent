@@ -18,9 +18,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from ....types import InflightUpdate
 from ...transport.callback import StatisticEvent
-from .. import Parser
+from .. import InflightUpdate, Parser
 
 
 class InflightParser(Parser):

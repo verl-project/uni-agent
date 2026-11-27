@@ -12,12 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Typed application boundary; parsers never request store context."""
+"""Typed application boundary and its post-write observer; parsers never request store context."""
 
-from typing import Protocol
+from typing import Any, Protocol
 
-from ..types import InflightUpdate
-from .parse import KVCacheUpdate, MetricsUpdate, StickyUpdate
+from .parse import InflightUpdate, KVCacheUpdate, MetricsUpdate, StickyUpdate
 
 
 class UpdateSink(Protocol):
@@ -30,3 +29,13 @@ class UpdateSink(Protocol):
     def apply_sticky(self, update: StickyUpdate) -> None: ...
 
     def apply_inflight(self, update: InflightUpdate) -> None: ...
+
+
+class UpdateObserver(Protocol):
+    """Observe successfully applied updates without owning any store writes."""
+
+    def on_kv_applied(self, update: KVCacheUpdate) -> None: ...
+
+    def on_metrics_applied(self, update: MetricsUpdate, values: dict[str, Any]) -> None: ...
+
+    def on_blocks_recorded(self, count: int) -> None: ...
