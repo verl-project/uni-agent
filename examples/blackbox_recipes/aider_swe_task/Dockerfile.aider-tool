@@ -1,0 +1,47 @@
+# Aider sidecar tool image.
+#
+# Self-contained Python venv at /opt/aider with aider-chat installed.
+# When mounted into a sandbox at /opt/aider, the CLI is invoked as:
+#   /opt/aider/bin/aider --model openai/<model> --message-file ... --exit ...
+#
+# Uses python-build-standalone for portability across glibc versions.
+# Multi-arch: the base image architecture selects the matching PBS tarball
+# (x86_64 or aarch64), so `docker build --platform linux/arm64` produces a
+# native ARM64 tool image with no emulation.
+#
+# Build:
+#   docker build -f Dockerfile.aider-tool -t aider-tool:latest .
+
+FROM debian:bookworm-slim AS builder
+
+ARG PBS_RELEASE="20260602"
+ARG PBS_PYTHON="3.12.13"
+ARG AIDER_VERSION="0.86.2"
+ARG PIP_INDEX_URL=""
+
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates wget \
+    && rm -rf /var/lib/apt/lists/*
+
+# Download and extract python-build-standalone for the build architecture.
+RUN arch="$(dpkg --print-architecture)" \
+    && case "$arch" in \
+         amd64) pbs_arch="x86_64" ;; \
+         arm64) pbs_arch="aarch64" ;; \
+         *) echo "unsupported architecture: $arch" >&2; exit 1 ;; \
+       esac \
+    && wget -q \
+        "https://github.com/astral-sh/python-build-standalone/releases/download/${PBS_RELEASE}/cpython-${PBS_PYTHON}%2B${PBS_RELEASE}-${pbs_arch}-unknown-linux-gnu-install_only_stripped.tar.gz" \
+        -O /tmp/python.tar.gz \
+    && mkdir -p /opt/aider \
+    && tar -xzf /tmp/python.tar.gz -C /opt/aider --strip-components=1 \
+    && rm /tmp/python.tar.gz
+
+# Install the pinned Aider CLI (litellm is pulled in as a dependency).
+RUN /opt/aider/bin/pip install --no-cache-dir \
+    ${PIP_INDEX_URL:+-i ${PIP_INDEX_URL}} \
+    "aider-chat==${AIDER_VERSION}"
+
+# Final scratch image: files at the image root so the mount maps
+# /opt/aider/bin/aider and /opt/aider/bin/python into the task sandbox.
+FROM scratch
+COPY --from=builder /opt/aider /
