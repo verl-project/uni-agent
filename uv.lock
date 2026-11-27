@@ -432,6 +432,22 @@ wheels = [
 ]
 
 [[package]]
+name = "boxd"
+version = "0.3.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "grpcio" },
+    { name = "httpx" },
+    { name = "protobuf" },
+    { name = "pydantic" },
+    { name = "typing-extensions" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/a8/a3/1be874dd6d23942564d4e3d5db4b77cccac024445dc4587fd0522167fcce/boxd-0.3.3.tar.gz", hash = "sha256:d6cf9b84984c5de46f68198d773f882aaa12961f8212e733c079566a21b9450e", size = 309410, upload-time = "2026-11-18T16:28:25.452Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/94/53/49cce5900aa09d4ddcbd3bbbf09d90a1fca759977d91beab4b550d37e92f/boxd-0.3.3-py3-none-any.whl", hash = "sha256:fa4a98e64f17d80101b571419a2f220b785ea77bc4a8bd6bb85d5130c54447a5", size = 200050, upload-time = "2026-11-18T16:28:24.202Z" },
+]
+
+[[package]]
 name = "braceexpand"
 version = "0.1.7"
 source = { registry = "https://pypi.org/simple" }
@@ -5762,6 +5778,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+boxd = [
+    { name = "boxd" },
+]
 e2b = [
     { name = "e2b" },
 ]
@@ -5794,6 +5813,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "aiohttp" },
+    { name = "boxd", marker = "extra == 'boxd'", specifier = ">=0.3.2" },
     { name = "cachetools" },
     { name = "e2b", marker = "extra == 'e2b'" },
     { name = "fastapi" },
@@ -5818,7 +5838,7 @@ requires-dist = [
     { name = "volcengine-python-sdk", marker = "extra == 'vefaas'" },
     { name = "xxhash" },
 ]
-provides-extras = ["modal", "e2b", "vefaas", "gke", "swebench", "insight"]
+provides-extras = ["modal", "e2b", "boxd", "vefaas", "gke", "swebench", "insight"]
 
 [package.metadata.requires-dev]
 dev = [

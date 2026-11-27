@@ -33,6 +33,7 @@ dependencies = [
 [project.optional-dependencies]
 modal = ["modal"]
 e2b = ["e2b"]
+boxd = ["boxd>=0.3.2"]
 vefaas = ["volcengine-python-sdk", "swe-rex"]
 gke = ["kubernetes", "k8s-agent-sandbox"]
 swebench = ["swebench==4.1.0"]

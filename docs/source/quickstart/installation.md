@@ -67,6 +67,12 @@ Install the client package for the sandbox backend you plan to use, for example:
     pip install volcengine-python-sdk swe-rex
     ```
 
+=== "boxd"
+
+    ```bash
+    pip install "boxd>=0.3.2"
+    ```
+
 ## Ray Runtime Environments
 
 For distributed Ray workloads, you can use a Runtime Environment to inject the required task, sandbox, and `verl` dependencies into every worker node.

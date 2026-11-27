@@ -24,6 +24,7 @@ SANDBOX_MODULES: dict[str, str] = {
     "openyuanrong": "uni_agent.sandbox.openyuanrong",
     "agent_dx": "uni_agent.sandbox.agent_dx",
     "gke_agent_sandbox": "uni_agent.sandbox.gke",
+    "boxd": "uni_agent.sandbox.boxd",
 }
 
 
