@@ -16,9 +16,6 @@ on:
         description: 'artifact name'
         required: true
         type: string
-    secrets:
-      CODECOV_TOKEN:
-        required: true
 
 jobs:
   upload:
@@ -33,8 +30,8 @@ jobs:
 
       - name: Upload to Codecov
         uses: codecov/codecov-action@v4
+        continue-on-error: true
         with:
-          token: ${{ secrets.CODECOV_TOKEN }}
           file: ./coverage-artifact/${{ inputs.coverage-file }}
           flags: ${{ inputs.flags }}
           fail_ci_if_error: false

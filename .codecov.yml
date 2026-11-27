@@ -17,7 +17,13 @@ flags:
     carryforward: true
   gpu-tests:
     carryforward: true
-  npu-tests:
+  npu-tests-card-one:
+    carryforward: true
+  npu-tests-card-two:
+    carryforward: true
+  npu-tests-card-four:
+    carryforward: true
+  npu-tests-card-eight:
     carryforward: true
 
 comment:
