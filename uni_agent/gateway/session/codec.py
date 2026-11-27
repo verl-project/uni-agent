@@ -303,13 +303,26 @@ class MessageCodec:
         )
         if response_mask is None:
             return merge_result
-        response_mask, response_logprobs = self._continuous_token_builder.align_response_metadata(
+        response_mask, response_logprobs = self.align_response_metadata(
             merge_result,
             response_mask,
             response_logprobs,
             assistant_logprobs=assistant_logprobs,
         )
         return merge_result.token_ids, response_mask, response_logprobs
+
+    def align_response_metadata(
+        self,
+        merge_result: MergeResult,
+        response_mask: list[int],
+        response_logprobs: list[float] | None,
+        *,
+        assistant_logprobs: list[float] | None = None,
+    ) -> tuple[list[int], list[float] | None]:
+        """Apply the token merge's boundary edits to response-side metadata."""
+        return self._continuous_token_builder.align_response_metadata(
+            merge_result, response_mask, response_logprobs, assistant_logprobs=assistant_logprobs
+        )
 
     def validate_incremental_media(self, messages: list[dict[str, Any]]) -> None:
         """Reject appended media unsupported by the Gateway or selected builder."""

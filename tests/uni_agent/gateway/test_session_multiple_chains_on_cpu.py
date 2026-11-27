@@ -35,6 +35,18 @@ def _decode_response_ids(response_ids: list[int]) -> str:
     return FakeTokenizer().decode(response_ids)
 
 
+def _initial_generation_span(session, trajectory, text):
+    return {
+        "session_id": session.handle.session_id,
+        "chain_id": trajectory.chain_id,
+        "generation_index": 0,
+        "response_start": 0,
+        "response_end": len(text),
+        "tool_call_ids": [],
+        "agent_context": {},
+    }
+
+
 def _prompt_length(messages: list[dict]) -> int:
     return len(MessageCodec(FakeTokenizer()).build_initial_tokens(messages))
 
@@ -1319,6 +1331,7 @@ async def test_chain_observability_survives_continuation_and_capacity_rollback()
     assert len(backend.calls) == 1
     assert "SECOND" not in _decode_response_ids(trajectory.response_ids)
     assert trajectory.extra_fields == {
+        "generation_spans": [_initial_generation_span(session, trajectory, "FIRST")],
         "materialization_reason": "max_trajectory_length",
         "num_coalesced_requests": 1,
         "rollback_count": 1,
@@ -1380,8 +1393,13 @@ async def test_multiple_chains_length_exhaustion_orders_before_later_fresh_chain
     assert len(backend.calls) == 2
     assert backend.steps == []
     assert [_decode_response_ids(trajectory.response_ids) for trajectory in trajectories] == ["FULL", "NEW"]
-    assert trajectories[0].extra_fields == {"materialization_reason": "max_trajectory_length"}
-    assert trajectories[1].extra_fields == {}
+    assert trajectories[0].extra_fields == {
+        "generation_spans": [_initial_generation_span(session, trajectories[0], "FULL")],
+        "materialization_reason": "max_trajectory_length",
+    }
+    assert trajectories[1].extra_fields == {
+        "generation_spans": [_initial_generation_span(session, trajectories[1], "NEW")],
+    }
 
 
 @pytest.mark.cpu
@@ -1420,7 +1438,10 @@ async def test_multiple_chains_exactly_exhausted_chain_skips_new_media_extractio
     assert len(backend.calls) == 1
     assert backend.steps == ["SHOULD_NOT_RUN"]
     assert trajectories[0].multi_modal_data is None
-    assert trajectories[0].extra_fields == {"materialization_reason": "max_trajectory_length"}
+    assert trajectories[0].extra_fields == {
+        "generation_spans": [_initial_generation_span(session, trajectories[0], "FULL")],
+        "materialization_reason": "max_trajectory_length",
+    }
 
 
 @pytest.mark.cpu
@@ -1498,7 +1519,10 @@ async def test_multiple_chains_closes_when_continuation_fills_total_trajectory_c
     assert outcome.finish_reason == "length"
     assert len(backend.calls) == 1
     assert backend.steps == ["SHOULD_NOT_RUN"]
-    assert trajectories[0].extra_fields == {"materialization_reason": "max_trajectory_length"}
+    assert trajectories[0].extra_fields == {
+        "generation_spans": [_initial_generation_span(session, trajectories[0], "FIRST")],
+        "materialization_reason": "max_trajectory_length",
+    }
     assert "Trajectory capacity prevents generation" in caplog.text
     assert "session=total-capacity-exhausted" in caplog.text
     assert "backend_called=false" in caplog.text
@@ -1700,7 +1724,9 @@ async def test_multiple_chains_rejects_incremental_video_without_mutating_stored
     assert backend.calls[0]["video_data"] == expected_sent
     assert len(trajectories) == 1
     assert trajectories[0].multi_modal_data == {"videos": expected_sent}
-    assert trajectories[0].extra_fields == {}
+    assert trajectories[0].extra_fields == {
+        "generation_spans": [_initial_generation_span(session, trajectories[0], "FIRST")],
+    }
 
 
 @pytest.mark.cpu
@@ -2233,7 +2259,9 @@ async def test_weight_versions_absent_when_backend_omits_them():
     await _run(session, SequencedBackend(["ONLY"]), [{"role": "user", "content": "base"}])
     [trajectory] = await session.finalize()
 
-    assert trajectory.extra_fields == {}
+    assert trajectory.extra_fields == {
+        "generation_spans": [_initial_generation_span(session, trajectory, "ONLY")],
+    }
 
 
 @pytest.mark.cpu

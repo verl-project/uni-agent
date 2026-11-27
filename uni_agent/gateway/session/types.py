@@ -83,8 +83,9 @@ class Trajectory:
         routed_experts: Optional expert-routing data captured by the backend.
         multi_modal_data: Optional image/video data associated with the prompt.
         extra_fields: Gateway-owned extension fields, such as trajectory
-            materialization metadata consumed by training adapters and the
-            ``min_global_steps``/``max_global_steps`` weight-version span.
+            materialization metadata, per-generation ``generation_spans`` in
+            response token coordinates, and the ``min_global_steps``/
+            ``max_global_steps`` weight-version span.
     """
 
     prompt_ids: list[int]

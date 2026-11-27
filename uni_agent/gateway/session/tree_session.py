@@ -16,6 +16,12 @@ from typing import Any
 from fastapi import HTTPException
 
 from uni_agent.gateway.session.codec import MessageCodec
+from uni_agent.gateway.session.generation_spans import (
+    ResponseSpan,
+    decoded_tool_call_ids,
+    export_generation_spans,
+    trim_response_spans,
+)
 from uni_agent.gateway.session.session import GatewaySession, GenerationOutcome, InflightRequest, SessionPhase
 from uni_agent.gateway.session.types import (
     AgentContext,
@@ -56,6 +62,8 @@ class MessageNode:
     pre_assistant_prompt_ids: list[int] | None = None
     response_ids: list[int] = field(default_factory=list)
     response_logprobs: list[float] | None = None
+    # None means this node contains no committed assistant generation.
+    generated_tool_call_ids: tuple[str, ...] | None = None
     # Context merge trimming; prompt_ids already includes inserted boundary tokens.
     removed_prefix_token_count: int = 0
     image_data: list[Any] | None = None
@@ -265,6 +273,7 @@ class TreeGatewaySession(GatewaySession):
                     node.messages.append(dict(assistant_message))
                     node.response_ids = response_ids
                     node.response_logprobs = response_logprobs
+                    node.generated_tool_call_ids = decoded_tool_call_ids(assistant_message)
                     parent = node.parent
                     node.message_turn_count = (parent.message_turn_count if parent is not None else 0) + sum(
                         message.get("role") in ("user", "assistant") for message in node.messages
@@ -734,6 +743,7 @@ class TreeGatewaySession(GatewaySession):
                 messages=backup.messages[:-1],
                 response_ids=[],
                 response_logprobs=[] if backup.response_logprobs is not None else None,
+                generated_tool_call_ids=None,
                 min_global_steps=None,
                 max_global_steps=None,
                 message_turn_count=backup.message_turn_count - 1,
@@ -821,12 +831,14 @@ class TreeGatewaySession(GatewaySession):
         response_ids: list[int] = []
         response_mask: list[int] = []
         response_logprobs: list[float | None] | None = [] if leaf.response_logprobs is not None else None
+        generation_spans: list[ResponseSpan] = []
         for index, node in enumerate(path):
             if node.removed_prefix_token_count:
                 if node.removed_prefix_token_count > len(response_ids):
                     del prompt_ids[-(node.removed_prefix_token_count - len(response_ids)) :]
                 del response_ids[-node.removed_prefix_token_count :]
                 del response_mask[-node.removed_prefix_token_count :]
+                trim_response_spans(generation_spans, len(response_ids))
                 if response_logprobs is not None:
                     del response_logprobs[-node.removed_prefix_token_count :]
             if index:
@@ -841,6 +853,15 @@ class TreeGatewaySession(GatewaySession):
                 response_mask.clear()
                 if response_logprobs is not None:
                     response_logprobs.clear()
+            if index >= chain_start and node.generated_tool_call_ids is not None:
+                generation_spans.append(
+                    ResponseSpan(
+                        len(response_ids),
+                        len(response_ids) + len(node.response_ids),
+                        node.generated_tool_call_ids,
+                        node.agent_context,
+                    )
+                )
             response_ids.extend(node.response_ids)
             response_mask.extend(repeat(1, len(node.response_ids)))
             if response_logprobs is not None:
@@ -864,7 +885,9 @@ class TreeGatewaySession(GatewaySession):
             for node in path[chain_start:]
             if node.min_global_steps is not None
         ]
-        extra_fields: dict[str, Any] = {}
+        extra_fields: dict[str, Any] = {
+            "generation_spans": export_generation_spans(generation_spans, self.handle.session_id, leaf.chain_id),
+        }
         if marks:
             extra_fields["min_global_steps"] = min(mark[0] for mark in marks)
             extra_fields["max_global_steps"] = max(mark[1] for mark in marks)

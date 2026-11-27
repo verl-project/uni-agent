@@ -92,6 +92,10 @@ def crop_to_assistant_prefix(
     if response_end < len(trajectory.response_ids):
         for key in _STALE_AFTER_CROP:
             extra_fields.pop(key, None)
+        if "generation_spans" in extra_fields:
+            extra_fields["generation_spans"] = [
+                span for span in extra_fields["generation_spans"] if span["response_end"] <= response_end
+            ]
     kept_spans = sum(end <= response_end for _start, end in spans)
     extra_fields.update(
         {
