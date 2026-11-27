@@ -59,6 +59,7 @@ nav:
       - Run Agent RL Training: quickstart/rl-training.md
       - Run Training on NPU: quickstart/npu-training.md
       - Run Training on AMD GPUs: quickstart/amd-training.md
+      - ARM64 Compatibility Notes: quickstart/arm-development.md
   - Concepts:
       - Overview: concepts/index.md
       - Sandbox: concepts/sandbox.md
