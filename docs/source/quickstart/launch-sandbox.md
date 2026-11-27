@@ -209,6 +209,12 @@ Uni-Agent supports multiple sandbox backends. Choose the backend that matches yo
     Commands and file operations run as `root` by default. Set
     `sandbox_kwargs.user: null` to use the template's default user instead.
 
+    When a command times out or the task waiting for it is cancelled, the
+    provider kills the command's whole process group, including children
+    started by an `exec_shell` script. Killing the whole group needs `setsid`
+    in the image; without it, only the command itself is killed, not its
+    children.
+
     E2B does not provide OCI image mounts. Build a composite E2B template
     when the task needs a separate runtime image; configuring `image_mounts`
     is rejected explicitly. `executable_paths` remains available for binaries
